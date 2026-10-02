@@ -1,0 +1,4 @@
+# The devcontainer image bakes shell files into the container verbatim.
+# CRLF line endings survive the copy and a trailing \r ends up inside sourced
+# paths ("no such file or directory: ~/.aliases.zsh^M"), so keep everything LF.
+* text=auto eol=lf
