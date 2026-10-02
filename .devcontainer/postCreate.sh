@@ -32,11 +32,10 @@ else
   echo '{"theme": "kokomi-theme"}' > "$SETTINGS"
 fi
 
-# Link this repo's extensions and skills into the project's .pi directory, so
-# pi discovers them from the workspace without installing anything.
-mkdir -p "$REPO/.pi"
-ln -sfn "$REPO/extensions" "$REPO/.pi/extensions"
-ln -sfn "$REPO/skills" "$REPO/.pi/skills"
+# Note: extensions and skills live in "$REPO/.pi/" itself (that directory is
+# gitignored). Do not link them from "$REPO/extensions" and "$REPO/skills" —
+# those paths no longer exist, and "ln -sfn" would drop a dangling symlink
+# *inside* the real directories.
 
 # --- clipboard ---
 # The host injects WAYLAND_DISPLAY and DISPLAY into the container, but neither
