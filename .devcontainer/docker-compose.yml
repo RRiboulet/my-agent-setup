@@ -1,0 +1,19 @@
+services:
+  devcontainer:
+    build:
+      context: ..
+      dockerfile: .devcontainer/Dockerfile
+    volumes:
+      - ..:/workspace:cached
+      # Explicit name: without it Compose derives the volume name from the
+      # project directory, so renaming or moving the repo would silently point
+      # pi at an empty volume and appear to lose every past session.
+      - pi-config:/home/vscode/.pi
+    command: sleep infinity
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    user: vscode
+
+volumes:
+  pi-config:
+    name: pi-agent-config

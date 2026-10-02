@@ -1,0 +1,22 @@
+{
+    "name": "pi-coding-agent-devcontainer",
+    "dockerComposeFile": "docker-compose.yml",
+    "service": "devcontainer",
+    "workspaceFolder": "/workspace",
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "eamodio.gitlens",
+                "bierner.markdown-preview-github-styles"
+            ],
+            "settings": {
+                "terminal.integrated.defaultProfile.linux": "zsh",
+                "editor.formatOnSave": false,
+                "files.exclude": {
+                    "**/.git": true,
+                    "**/node_modules": true
+                }
+            }
+        }
+    }
+}

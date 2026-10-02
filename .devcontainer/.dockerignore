@@ -1,0 +1,8 @@
+# Keep the Docker build context lean and predictable.
+# (This file lives in .devcontainer, so it also governs the
+#  .devcontainer/ build context used by docker-compose.)
+.git
+.gitignore
+node_modules
+.pi
+*.log
