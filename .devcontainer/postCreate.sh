@@ -38,6 +38,16 @@ mkdir -p "$REPO/.pi"
 ln -sfn "$REPO/extensions" "$REPO/.pi/extensions"
 ln -sfn "$REPO/skills" "$REPO/.pi/skills"
 
+# --- clipboard ---
+# The host injects WAYLAND_DISPLAY and DISPLAY into the container, but neither
+# socket exists here. pi's clipboard helper then finds no wl-copy/xclip and
+# reports the clipboard as unavailable. Install the OSC 52 shim under all three
+# names so whichever it tries works, and the outer terminal owns the clipboard.
+sudo install -m 0755 "$REPO/.devcontainer/shell/osc52-clipboard" /usr/local/bin/osc52-clipboard
+for helper in wl-copy xclip xsel; do
+  sudo ln -sf /usr/local/bin/osc52-clipboard "/usr/local/bin/$helper"
+done
+
 sudo chown -R vscode:vscode /home/vscode/.pi "$REPO"
 
 echo "pi coding-agent ready. Sessions persist in the pi-agent-config volume."
