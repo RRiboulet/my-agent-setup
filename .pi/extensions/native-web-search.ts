@@ -1,0 +1,252 @@
+// Native web search extension.
+//
+// Exposes the `native-web-search` skill script as:
+//   - the `web_search` tool (callable by the model)
+//   - the `/web-search <query>` command (manual invocation)
+//
+// The script itself is the single source of truth for provider selection,
+// credential resolution and native web-search calls; this extension only
+// builds arguments and renders the result. That keeps the skill usable
+// standalone from the shell with identical behaviour.
+
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import { StringEnum } from "@earendil-works/pi-ai";
+
+const SCRIPT_ENV_VAR = "PI_NATIVE_WEB_SEARCH_SCRIPT";
+const PROVIDER_ENV_VAR = "PI_WEB_SEARCH_PROVIDER";
+const MODEL_ENV_VAR = "PI_WEB_SEARCH_MODEL";
+const DEFAULT_PROVIDER = "openrouter";
+const DEFAULT_TIMEOUT_MS = 120_000;
+const MAX_TIMEOUT_MS = 600_000;
+
+export interface WebSearchInput {
+	query: string;
+	purpose?: string;
+	provider?: "openrouter" | "openai-codex" | "anthropic";
+	model?: string;
+	timeout_ms?: number;
+}
+
+function resolveScriptPath(): string {
+	const configured = process.env[SCRIPT_ENV_VAR];
+	if (configured) {
+		return isAbsolute(configured) ? configured : resolve(process.cwd(), configured);
+	}
+
+	const here = dirname(fileURLToPath(import.meta.url));
+	const candidates = [
+		join(here, "search.mjs"),
+		join(here, "..", "..", "skills", "native-web-search", "search.mjs"),
+		join(process.cwd(), ".pi", "skills", "native-web-search", "search.mjs"),
+	];
+
+	for (const candidate of candidates) {
+		if (existsSync(candidate)) return candidate;
+	}
+
+	throw new Error(
+		`Could not locate search.mjs. Set ${SCRIPT_ENV_VAR} to its absolute path. Looked in:\n- ${candidates.join("\n- ")}`,
+	);
+}
+
+function clampTimeout(value: number | undefined): number {
+	if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_TIMEOUT_MS;
+	return Math.min(Math.max(Math.floor(value), 1_000), MAX_TIMEOUT_MS);
+}
+
+/** Provider precedence: explicit argument > env override > OpenRouter default. */
+function resolveProvider(requested: WebSearchInput["provider"]): string {
+	const override = process.env[PROVIDER_ENV_VAR]?.trim();
+	return requested?.trim() || override || DEFAULT_PROVIDER;
+}
+
+/** Model precedence: explicit argument > env override > script default for the provider. */
+function resolveModel(requested: string | undefined): string | undefined {
+	return requested?.trim() || process.env[MODEL_ENV_VAR]?.trim() || undefined;
+}
+
+interface SearchResult {
+	provider: string;
+	model: string;
+	query: string;
+	purpose: string;
+	result: string;
+}
+
+async function runSearch(input: WebSearchInput, signal?: AbortSignal): Promise<SearchResult> {
+	const query = input.query?.trim();
+	if (!query) {
+		throw new Error("web_search requires a non-empty query");
+	}
+
+	const script = resolveScriptPath();
+	const timeoutMs = clampTimeout(input.timeout_ms);
+
+	const args = [script, query, "--json", "--provider", resolveProvider(input.provider), "--timeout", String(timeoutMs)];
+	if (input.purpose?.trim()) args.push("--purpose", input.purpose.trim());
+	const model = resolveModel(input.model);
+	if (model) args.push("--model", model);
+
+	const { stdout, stderr, code } = await new Promise<{ stdout: string; stderr: string; code: number | null }>(
+		(resolvePromise, rejectPromise) => {
+			const child = spawn(process.execPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+
+			let out = "";
+			let err = "";
+			child.stdout.on("data", (chunk) => {
+				out += chunk.toString();
+			});
+			child.stderr.on("data", (chunk) => {
+				err += chunk.toString();
+			});
+
+			const onAbort = () => child.kill("SIGTERM");
+			signal?.addEventListener("abort", onAbort, { once: true });
+
+			child.on("error", (error) => {
+				signal?.removeEventListener("abort", onAbort);
+				rejectPromise(error);
+			});
+
+			child.on("close", (exitCode) => {
+				signal?.removeEventListener("abort", onAbort);
+				if (signal?.aborted) {
+					rejectPromise(new Error("web_search cancelled"));
+					return;
+				}
+				resolvePromise({ stdout: out, stderr: err, code: exitCode });
+			});
+		},
+	);
+
+	if (code !== 0) {
+		const detail = (stderr || stdout).trim();
+		throw new Error(`web_search failed (exit ${code}): ${detail || "no output"}`);
+	}
+
+	try {
+		const parsed = JSON.parse(stdout) as SearchResult;
+		if (typeof parsed.result !== "string" || parsed.result.trim() === "") {
+			throw new Error("empty result");
+		}
+		return parsed;
+	} catch (error) {
+		const detail = (stderr || stdout).trim();
+		throw new Error(
+			`Could not parse web_search output: ${(error as Error).message}${detail ? `\n${detail}` : ""}`,
+		);
+	}
+}
+
+function formatResult(search: SearchResult): string {
+	return [
+		`Provider: ${search.provider} (model: ${search.model})`,
+		`Query: ${search.query}`,
+		"",
+		search.result,
+	].join("\n");
+}
+
+/** Parse `/web-search "<query>" [--purpose "<text>"] [--provider <p>] [--model <id>]` */
+function parseCommandArgs(raw: string): WebSearchInput {
+	const positional: string[] = [];
+	const input: WebSearchInput = { query: "" };
+
+	const tokens = raw.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+	for (let i = 0; i < tokens.length; i++) {
+		const token = tokens[i];
+		const value = token.replace(/^["']|["']$/g, "");
+
+		if (value.startsWith("--purpose=")) input.purpose = value.slice("--purpose=".length);
+		else if (value === "--purpose") input.purpose = tokens[++i]?.replace(/^["']|["']$/g, "");
+		else if (value.startsWith("--provider=")) input.provider = value.slice("--provider=".length) as WebSearchInput["provider"];
+		else if (value === "--provider") input.provider = tokens[++i] as WebSearchInput["provider"];
+		else if (value.startsWith("--model=")) input.model = value.slice("--model=".length);
+		else if (value === "--model") input.model = tokens[++i];
+		else positional.push(value);
+	}
+
+	input.query = positional.join(" ").trim();
+	return input;
+}
+
+export default function (pi: ExtensionAPI) {
+	pi.registerTool({
+		name: "web_search",
+		label: "Web Search",
+		description:
+			"Search the internet with a fast, web-enabled model. Returns a concise research summary (3-7 findings) " +
+			"with full canonical source URLs, tailored to a stated purpose. Uses OpenRouter by default; pass provider " +
+			"to use openai-codex or anthropic instead. Use for current facts, documentation, release notes, and any " +
+			"question that needs external information.",
+		promptSnippet: "Search the internet and return a concise summary with full source URLs",
+		promptGuidelines: [
+			"Use web_search when the answer depends on information outside the repo, on current versions, or on external documentation.",
+			"Pass a concrete purpose to web_search so the summary is scoped to what you actually need.",
+		],
+		parameters: Type.Object({
+			query: Type.String({ description: "What to search the internet for" }),
+			purpose: Type.Optional(
+				Type.String({ description: "Why the information is needed, so the summary is scoped" }),
+			),
+			provider: Type.Optional(
+				StringEnum(["openrouter", "openai-codex", "anthropic"] as const, {
+					description: `Search provider; defaults to ${DEFAULT_PROVIDER} (override globally with ${PROVIDER_ENV_VAR})`,
+				}),
+			),
+			model: Type.Optional(
+				Type.String({ description: `Override the fast model used for the search (global default via ${MODEL_ENV_VAR})` }),
+			),
+			timeout_ms: Type.Optional(Type.Number({ description: "Timeout in milliseconds (default 120000)" })),
+		}),
+
+		async execute(_toolCallId, params, signal, onUpdate, _ctx) {
+			onUpdate?.({
+				content: [{ type: "text", text: `Searching: ${params.query}` }],
+				details: { query: params.query, status: "searching" },
+			});
+
+			const search = await runSearch(params, signal);
+
+			return {
+				content: [{ type: "text", text: formatResult(search) }],
+				details: {
+					query: search.query,
+					provider: search.provider,
+					model: search.model,
+					status: "done",
+				},
+			};
+		},
+	});
+
+	pi.registerCommand("web-search", {
+		description: 'Run a native web search (/web-search "<query>" [--purpose "<why>"])',
+		handler: async (args, ctx) => {
+			const input = parseCommandArgs(args ?? "");
+			if (!input.query) {
+				if (ctx.hasUI) {
+					ctx.ui.notify('Usage: /web-search "<query>" [--purpose "<why>"]', "info");
+				}
+				return;
+			}
+
+			if (ctx.hasUI) ctx.ui.setStatus("web-search", `searching: ${input.query}`);
+			try {
+				const search = await runSearch(input, ctx.signal);
+				pi.sendUserMessage(
+					`Native web search result for "${search.query}" (${search.provider}/${search.model}):\n\n${search.result}`,
+				);
+			} catch (error) {
+				if (ctx.hasUI) ctx.ui.notify(`web-search failed: ${(error as Error).message}`, "error");
+			} finally {
+				if (ctx.hasUI) ctx.ui.setStatus("web-search", undefined);
+			}
+		},
+	});
+}

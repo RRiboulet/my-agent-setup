@@ -2,4 +2,5 @@
 
 model="${1:?Usage: $0 <model>}"
 
-tmux new -A -s pi 'pi' --provider openrouter --model "openrouter/$model"
+# tmux new -A -s pi 'pi' --provider openrouter --model "openrouter/$model"
+pi --provider openrouter --model "openrouter/$model"
