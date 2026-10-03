@@ -26,6 +26,43 @@ Maintenance, no behaviour change:
 
 Features:
 
+- **Subagent turn-level interrupt.** New `subagent_interrupt({ id })` tool sends
+  Escape (pi's `app.interrupt` — never `C-c`, which quits the child) to the
+  child's pane, aborting the in-flight turn while leaving the child alive at its
+  prompt with its transcript and tmux session intact. Use it to redirect a run
+  that is going the wrong way where `subagent_cancel` would throw it away.
+  - The run becomes `interrupted`. It keeps its tmux session, its transcript and
+    its concurrency slot until it is cancelled; `subagent_cancel` releases it,
+    and `session_shutdown` reaps the idle child (the transcript survives, so the
+    run stays resumable).
+  - The child reports the abort by writing `<runDir>/interrupt.json` instead of
+    a failed `result.json`, and does not shut itself down. `result.json`
+    semantics are unchanged, so a run that is interrupted and then finished
+    still reports normally. A child launched without the marker path keeps the
+    old behaviour (report the abort as a failure) rather than going silent.
+  - `interrupted` is *terminal* for waiting (`subagent_wait` returns,
+    `subagent_clean` skips) but the child is still alive, so the new
+    `holdsChild` predicate guards everything that would destroy or free it:
+    auto-reap while the session lives, the concurrency slot, and the guards that
+    stop two processes writing one transcript.
+  - `subagent_resume` is refused while a run's child is still alive — including
+    an interrupted one — because it launches a second pi process on a transcript
+    the first one still holds. Attach and type the follow-up there instead, or
+    cancel the run first.
+  - `subagent_interrupt` never sends two Escapes inside pi's 500ms double-escape
+    window (which would open the child's tree selector) and waits up to
+    `PI_SUBAGENT_INTERRUPT_CONFIRM_MS` (default 3s, 0 to not wait) for the child
+    to confirm. It only accepts a marker newer than the request, so a leftover
+    `interrupt.json` from an earlier interrupt cannot confirm a second one.
+  - A run whose tmux session is killed by hand while `interrupted` is now failed
+    by the watcher instead of being polled forever against a target that cannot
+    exist. tmux failures it cannot classify (an unreachable socket, say) are
+    tolerated for two ticks and then fail the run as *unreachable* — distinct
+    from an exit, which is what the evidence supports.
+  - An Escape the child plainly ignored is forgotten once it publishes activity
+    newer than the request, so `subagent_status` stops advertising a pending
+    interrupt for a child that is simply working.
+
 - **Subagent context handoff.** New `handoff` parameter on the `subagent` tool:
   - `standalone` (default) — unchanged, a fresh session addressed by
     `--session-dir`/`--session-id`.
@@ -64,6 +101,48 @@ Fixes to the handoff work, from an adversarial review:
   This also drops a redundant full re-parse of the parent transcript per call.
 - `finalizeRun` no longer erases a recorded `sessionFile` when a child reports
   one that is `undefined`.
+
+Fixes found by reviewing that work, before it shipped:
+
+- **A stale `interrupt.json` could confirm an interrupt that never happened.**
+  The marker file is never deleted, so a second `subagent_interrupt` on a run
+  that was already interrupted read the *first* marker back within a
+  millisecond and reported "interrupted" while the child kept streaming. The
+  confirmation poll now captures a baseline before Escape is sent and only
+  accepts a marker that advances it; a valid-but-older marker is reported as
+  stale, which is what it is.
+- **Two Escapes inside pi's double-escape window.** On an idle child pi reads
+  two Escapes within 500ms as its double-escape action (the session tree by
+  default), which blocks the child's prompt without touching the turn.
+  `subagent_interrupt` now refuses a second Escape inside that window instead
+  of sending it.
+- **`subagent_resume` on an interrupted run would have opened a second pi
+  process on a transcript the live child still holds** — the interleaved-branch
+  corruption the extension's own guard exists to prevent. Resume now refuses
+  while a run's child is alive; an interrupted run is steered by attaching, or
+  cancelled first and then resumed.
+- **An interrupted child would have been orphaned at shutdown.** With
+  `PI_SUBAGENT_KILL_ON_SHUTDOWN` off (the default) nothing could reach an idle
+  interrupted child once the parent exited, and `subagent_clean` skips it.
+  Shutdown now reaps it; killing the tmux session keeps the transcript, so the
+  run stays resumable.
+- **A run whose tmux session was killed by hand polled forever.** `pane_dead`
+  needs a live pane to ask, so a missing target left the watcher re-arming
+  every 500ms for the rest of the session while reporting the run as alive. A
+  "can't find pane/session" failure now ends the run, and any other persistent
+  tmux failure does too after three consecutive ticks, so one hiccup cannot
+  fail a healthy child.
+- **An `interrupted` run reported itself as idle while it was working.** The
+  child can be driven again after an interrupt, so the status line now reads
+  the live activity phase instead of assuming, and a second interrupt is
+  recorded rather than ignored. An Escape the child plainly ignored (proved by
+  activity newer than the request) stops being advertised as pending.
+- `PI_SUBAGENT_INTERRUPT_CONFIRM_MS=0` meant 3s, because the positive-only env
+  reader rejected it. It is read as a non-negative value now, so 0 means "send
+  and do not wait".
+- `subagent_resume` no longer copies `interrupts`/`interruptedAt`/
+  `interruptRequestedAt` into the new attempt, so a fresh child is not reported
+  as interrupted before it has ever been sent a key.
 
 Fixes:
 

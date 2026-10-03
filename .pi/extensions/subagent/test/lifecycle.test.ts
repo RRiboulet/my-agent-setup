@@ -19,6 +19,7 @@ import { test } from "node:test";
 
 import subagentExtension, { type RunRecord } from "../index.ts";
 import { getActivityFilePath, readActivityFile } from "../activity.ts";
+import { getInterruptFilePath } from "../interrupt.ts";
 import { waitFor, withEnv, withTempAgentDir } from "./helpers.ts";
 
 const SESSION_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
@@ -29,19 +30,30 @@ interface Harness {
 	tools: Map<string, Record<string, unknown>>;
 	execCalls: { command: string; args: string[] }[];
 	messages: { message: Record<string, unknown>; options: Record<string, unknown> | undefined }[];
+	/** Make every tmux call against the run's pane fail as if the session were gone. */
+	removeTarget: () => void;
+	/** Fail pane calls once with an unclassifiable error, then behave normally. */
+	failPaneOnce: () => void;
+	/** Fail every pane call with an unclassifiable error (an unreachable socket). */
+	failPaneAlways: () => void;
 	shutdown: () => Promise<void>;
 	call: (tool: string, params: Record<string, unknown>) => Promise<{ text: string; details: Record<string, unknown> }>;
 	readRuns: () => Promise<RunRecord[]>;
 	writeResult: (run: RunRecord, result: Record<string, unknown>) => Promise<void>;
 	writeActivity: (run: RunRecord, activity: Record<string, unknown>) => Promise<void>;
+	writeInterrupt: (run: RunRecord, marker?: Record<string, unknown>) => Promise<void>;
 }
 
 interface HarnessOptions {
 	maxConcurrent?: string;
 	paneText?: string;
 	paneDead?: boolean;
+	/** Grace period subagent_interrupt waits for the child to confirm, in ms. */
+	interruptConfirmMs?: string;
 	/** Artificial delay (ms) added to every tmux call, so a shutdown can land while a watcher tick is mid-flight. */
 	execDelayMs?: number;
+	/** Start with the tmux target missing, as if the session had been killed by hand. */
+	missingTarget?: boolean;
 	/** Overrides ctx.sessionManager, so fork/lineage tests can present a real live branch. */
 	sessionManager?: Record<string, unknown>;
 }
@@ -51,6 +63,12 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 	const handlers = new Map<string, (...args: unknown[]) => unknown>();
 	const execCalls: { command: string; args: string[] }[] = [];
 	const messages: { message: Record<string, unknown>; options: Record<string, unknown> | undefined }[] = [];
+	// Flipped by removeTarget() to simulate the user killing the tmux session (or
+	// the server dying) out from under a run.
+	let targetMissing = options.missingTarget === true;
+	// Unclassifiable failures, counted down: `once` for a single blip.
+	let paneFailures = 0;
+	let paneFailureMode = "";
 
 	const pi = {
 		registerFlag: () => undefined,
@@ -72,6 +90,15 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 			if (options.execDelayMs) await new Promise((resolve) => setTimeout(resolve, options.execDelayMs));
 			const joined = args.join(" ");
 			if (joined.includes("-V")) return { code: 0, stdout: "tmux 3.3a", stderr: "" };
+			const paneCall = joined.includes("capture-pane") || joined.includes("display-message");
+			if (paneCall && targetMissing) {
+				return { code: 1, stdout: "", stderr: "can't find pane: pi-agent-gone" };
+			}
+			if (paneCall && paneFailures > 0) {
+				// "always" keeps failing; any finite count is a blip that recovers.
+				if (paneFailureMode !== "always") paneFailures -= 1;
+				return { code: 1, stdout: "", stderr: "error connecting to /tmp/tmux-subagents.sock (No such file or directory)" };
+			}
 			if (joined.includes("capture-pane")) {
 				return { code: 0, stdout: options.paneText ?? "child working\n", stderr: "" };
 			}
@@ -110,7 +137,9 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 			// exercise the child branch and register no parent tools at all.
 			PI_TMUX_SUBAGENT_CHILD: undefined,
 			PI_TMUX_SUBAGENT_RESULT: undefined,
+			PI_TMUX_SUBAGENT_INTERRUPT: undefined,
 			PI_SUBAGENT_MAX_CONCURRENT: options.maxConcurrent ?? "4",
+			PI_SUBAGENT_INTERRUPT_CONFIRM_MS: options.interruptConfirmMs,
 			PI_SUBAGENT_NOTIFY: "true",
 			PI_SUBAGENT_AUTO_REAP: "true",
 			PI_SUBAGENT_REAP_DELAY_MS: "0",
@@ -130,6 +159,17 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 		tools,
 		execCalls,
 		messages,
+		removeTarget: () => {
+			targetMissing = true;
+		},
+		failPaneOnce: () => {
+			paneFailureMode = "once";
+			paneFailures = 1;
+		},
+		failPaneAlways: () => {
+			paneFailureMode = "always";
+			paneFailures = Number.MAX_SAFE_INTEGER;
+		},
 		shutdown: async () => {
 			await handlers.get("session_shutdown")?.({}, ctx);
 		},
@@ -152,6 +192,21 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 		},
 		writeActivity: async (run, activity) => {
 			await writeFile(getActivityFilePath(run.runDir), `${JSON.stringify(activity)}\n`, "utf8");
+		},
+		writeInterrupt: async (run, overrides = {}) => {
+			await writeFile(
+				getInterruptFilePath(run.runDir),
+				`${JSON.stringify({
+					version: 1,
+					runId: run.id,
+					interruptedAt: Date.now(),
+					interrupts: 1,
+					turnIndex: 0,
+					stopReason: "aborted",
+					...overrides,
+				})}\n`,
+				"utf8",
+			);
 		},
 	};
 }
@@ -833,7 +888,7 @@ test("subagent_resume refuses to resume a run that is still going", async () => 
 	await withHarness(undefined, async (h) => {
 		const active = (await h.call("subagent", { task: "still going" })).details as unknown as RunRecord;
 		const result = await h.call("subagent_resume", { id: active.id, message: "are you there" });
-		assert.match(result.text, /still running; cancel it before resuming/);
+		assert.match(result.text, /still has a live child \(running\)/);
 	});
 });
 
@@ -905,5 +960,411 @@ test("subagent_clean counts only transcripts it actually deletes", async () => {
 		} finally {
 			await harness.shutdown();
 		}
+	});
+});
+
+// --- Turn-level interrupt (local patch 13): subagent_interrupt and the
+// "terminal but still alive" contract of the interrupted status. ---
+
+test("subagent_interrupt sends Escape to the child's pane and nothing else", async () => {
+	await withHarness({ interruptConfirmMs: "300" }, async (h) => {
+		const run = (await h.call("subagent", { task: "diverging" })).details as unknown as RunRecord;
+		h.execCalls.length = 0;
+
+		const interrupted = await h.call("subagent_interrupt", { id: run.id });
+		const sent = h.execCalls.filter((call) => call.args.includes("send-keys"));
+		assert.equal(sent.length, 1, "one key, one send: a second Enter would submit whatever the child had typed");
+		assert.deepEqual(sent[0].args.slice(-3), ["-t", run.tmuxTarget, "Escape"]);
+		assert.ok(!sent[0].args.includes("-l"), "Escape is a key, not a literal string");
+		assert.ok(!sent[0].args.includes("C-c"), "app.clear quits the child on the second press");
+		assert.match(interrupted.text, /did not confirm an interrupt/, "an idle child cannot confirm");
+
+		// The record says a request is outstanding, so subagent_status can explain
+		// a run whose child never answered.
+		const stored = (await h.readRuns())[0];
+		assert.ok(stored.interruptRequestedAt);
+		assert.equal(stored.status, "running");
+		const status = await h.call("subagent_status", { id: run.id });
+		assert.match(status.text, /interrupt: Escape sent .*not confirmed yet/s);
+	});
+});
+
+test("subagent_interrupt confirms once the child writes the marker", async () => {
+	await withHarness({ interruptConfirmMs: "5000" }, async (h) => {
+		const run = (await h.call("subagent", { task: "diverging" })).details as unknown as RunRecord;
+		// The child needs a moment to abort its provider stream, so the marker
+		// lands after Escape was sent.
+		setTimeout(() => {
+			void h.writeInterrupt(run).catch(() => undefined);
+		}, 300);
+
+		const interrupted = await h.call("subagent_interrupt", { id: run.id });
+		assert.match(interrupted.text, new RegExp(`Subagent ${run.id} interrupted\\.`));
+		assert.match(interrupted.text, /attach/);
+		assert.match(interrupted.text, /subagent_cancel/);
+
+		const stored = (await h.readRuns())[0];
+		assert.equal(stored.status, "interrupted");
+		assert.equal(stored.interrupts, 1);
+		assert.ok(stored.interruptedAt);
+		assert.equal(stored.interruptRequestedAt, undefined, "a confirmed request is no longer outstanding");
+		assert.equal(stored.finishedAt, undefined, "the child is still running, so elapsed time keeps counting");
+		assert.equal(h.messages.length, 0, "an interrupted turn is not a completion");
+
+		const status = await h.call("subagent_status", { id: run.id });
+		assert.match(status.text, /interrupt: turn aborted/);
+		assert.match(status.text, /idle at its prompt/);
+	});
+});
+
+test("a stale marker cannot confirm a second interrupt", async () => {
+	// Regression: the marker file is never deleted, so a second interrupt used to
+	// read the FIRST one back within a millisecond and report "interrupted" while
+	// the child kept streaming — the agent would then treat a live run as stopped.
+	await withHarness({ interruptConfirmMs: "400" }, async (h) => {
+		const run = (await h.call("subagent", { task: "steered twice" })).details as unknown as RunRecord;
+		await h.writeInterrupt(run, { interrupts: 1, interruptedAt: Date.now() });
+		await waitFor(async () => (await h.readRuns())[0].status === "interrupted");
+
+		const second = await h.call("subagent_interrupt", { id: run.id });
+		assert.doesNotMatch(second.text, new RegExp(`Subagent ${run.id} interrupted\\.`), second.text);
+		assert.match(second.text, /no new interrupt was reported/, second.text);
+		assert.match(second.text, /the previous interrupt/);
+		assert.equal((await h.readRuns())[0].interrupts, 1, "the old marker must not be counted again");
+
+		// Only a genuinely newer marker confirms. The double-escape guard blocks a
+		// request sent inside pi's 500ms window, so wait it out first. A third
+		// interrupt means the child's own counter reaches 3: rewriting the same
+		// value is, correctly, still the second interrupt.
+		await h.writeInterrupt(run, { interrupts: 2, interruptedAt: Date.now() });
+		await waitFor(async () => (await h.readRuns())[0].interrupts === 2);
+		const lastRequest = (await h.readRuns())[0].interruptRequestedAt ?? 0;
+		await new Promise((resolve) => setTimeout(resolve, Math.max(0, 600 - (Date.now() - lastRequest))));
+		await h.writeInterrupt(run, { interrupts: 3, interruptedAt: Date.now() });
+		const third = await h.call("subagent_interrupt", { id: run.id });
+		assert.match(third.text, new RegExp(`Subagent ${run.id} interrupted\\.`), third.text);
+		assert.equal((await h.readRuns())[0].interrupts, 3);
+	});
+});
+
+test("two Escapes are never sent inside pi's double-escape window", async () => {
+	// On an idle child pi reads two Escapes within 500ms as its double-escape
+	// action and opens the tree selector, which blocks the prompt without
+	// touching the turn. The second request must be refused instead of sent.
+	await withHarness({ interruptConfirmMs: "0" }, async (h) => {
+		const run = (await h.call("subagent", { task: "double escape" })).details as unknown as RunRecord;
+		h.execCalls.length = 0;
+
+		await h.call("subagent_interrupt", { id: run.id });
+		const sent = h.execCalls.filter((call) => call.args.includes("send-keys"));
+		assert.equal(sent.length, 1);
+		assert.match(sent[0].args.at(-1) as string, /Escape/);
+
+		const second = await h.call("subagent_interrupt", { id: run.id });
+		assert.equal(h.execCalls.filter((call) => call.args.includes("send-keys")).length, 1, "no second Escape");
+		assert.match(second.text, /double escape/);
+	});
+});
+
+test("two interrupts reported by the child are both recorded", async () => {
+	await withHarness(undefined, async (h) => {
+		const run = (await h.call("subagent", { task: "twice interrupted" })).details as unknown as RunRecord;
+		const firstAt = Date.now();
+		await h.writeInterrupt(run, { interrupts: 1, interruptedAt: firstAt });
+		await waitFor(async () => (await h.readRuns())[0].interrupts === 1);
+
+		await h.writeInterrupt(run, { interrupts: 2, interruptedAt: firstAt + 5_000 });
+		await waitFor(async () => (await h.readRuns())[0].interrupts === 2);
+		const status = await h.call("subagent_status", { id: run.id });
+		assert.match(status.text, /2 so far/);
+
+		// A marker that goes backwards must not rewind the count or the timestamp.
+		await h.writeInterrupt(run, { interrupts: 1, interruptedAt: firstAt });
+		await new Promise((resolve) => setTimeout(resolve, 1_200));
+		const stored = (await h.readRuns())[0];
+		assert.equal(stored.interrupts, 2);
+		assert.equal(stored.interruptedAt, firstAt + 5_000);
+	});
+});
+
+test("a working child stops being described as idle", async () => {
+	// The status stays interrupted, but the child can be driven again afterwards,
+	// so the summary must not keep claiming it is sitting at the prompt.
+	await withHarness({ paneText: "unchanging child output" }, async (h) => {
+		const run = (await h.call("subagent", { task: "driven again" })).details as unknown as RunRecord;
+		await h.writeInterrupt(run);
+		await waitFor(async () => (await h.readRuns())[0].status === "interrupted");
+		assert.match((await h.call("subagent_status", { id: run.id })).text, /idle at its prompt/);
+
+		await h.writeActivity(run, activitySnapshot(run));
+		await waitFor(async () => (await h.readRuns())[0].activity?.phase === "active");
+		const after = await h.call("subagent_status", { id: run.id });
+		assert.match(after.text, /has been driven again and is working/, after.text);
+		assert.doesNotMatch(after.text, /idle at its prompt/);
+	});
+});
+
+test("a later result still finalizes an interrupted run", async () => {
+	// The watcher must survive the status change: an interrupted child that is
+	// steered onwards reports normally, and the run completes exactly as an
+	// uninterrupted one would.
+	await withHarness(undefined, async (h) => {
+		const run = (await h.call("subagent", { task: "steer me" })).details as unknown as RunRecord;
+		await h.writeInterrupt(run);
+		await waitFor(async () => (await h.readRuns())[0].status === "interrupted");
+
+		await h.writeResult(run, {
+			version: 1,
+			status: "completed",
+			output: "corrected answer",
+			finishedAt: Date.now(),
+		});
+		await waitFor(async () => (await h.readRuns())[0].status === "completed");
+		const finalized = (await h.readRuns())[0];
+		assert.equal(finalized.output, "corrected answer");
+		assert.ok(finalized.finishedAt);
+		assert.equal(finalized.interrupts, 1, "the interrupt history survives into the result");
+		assert.equal(h.messages.length, 1, "and the run reports its completion normally");
+	});
+});
+
+test("an interrupted run survives a reload and still finalizes", async () => {
+	// loadPersistedRuns re-arms watchers for interrupted runs. Without that, a
+	// result.json written after a reload would never be noticed and the run would
+	// be stranded in `interrupted` forever.
+	await withTempAgentDir(async () => {
+		const firstHarness = await createHarness();
+		let run!: RunRecord;
+		try {
+			run = (await firstHarness.call("subagent", { task: "outlives a reload" })).details as unknown as RunRecord;
+			await firstHarness.writeInterrupt(run);
+			await waitFor(async () => (await firstHarness.readRuns())[0].status === "interrupted");
+		} finally {
+			await firstHarness.shutdown();
+		}
+
+		// A fresh extension load over the same agent dir: loadPersistedRuns must
+		// restore the interrupted run AND re-arm its watcher.
+		const second = await createHarness();
+		try {
+			await waitFor(async () => second.execCalls.some((call) => call.args.includes("capture-pane")));
+			assert.equal((await second.readRuns())[0].status, "interrupted", "the status is restored from disk");
+
+			await second.writeResult(run, {
+				version: 1,
+				status: "completed",
+				output: "finished after the reload",
+				finishedAt: Date.now(),
+			});
+			await waitFor(async () => (await second.readRuns())[0].status === "completed");
+			assert.equal((await second.readRuns())[0].output, "finished after the reload");
+		} finally {
+			await second.shutdown();
+		}
+	});
+});
+
+test("an interrupted run keeps its concurrency slot until it is cancelled", async () => {
+	await withHarness({ maxConcurrent: "1" }, async (h) => {
+		const first = (await h.call("subagent", { task: "interrupted" })).details as unknown as RunRecord;
+		const second = (await h.call("subagent", { task: "queued behind it" })).details as unknown as RunRecord;
+		await h.writeInterrupt(first);
+		await waitFor(async () => (await h.readRuns()).find((run) => run.id === first.id)?.status === "interrupted");
+
+		await new Promise((resolve) => setTimeout(resolve, 1_200));
+		assert.equal(
+			(await h.readRuns()).find((run) => run.id === second.id)?.status,
+			"queued",
+			"the interrupted child still holds a process, so it still holds its slot",
+		);
+
+		await h.call("subagent_cancel", { id: first.id });
+		await waitFor(async () => (await h.readRuns()).find((run) => run.id === second.id)?.status === "running");
+	});
+});
+
+test("an interrupted run is not cleaned away, and its transcript survives shutdown", async () => {
+	await withHarness(undefined, async (h) => {
+		const run = (await h.call("subagent", { task: "keep my session" })).details as unknown as RunRecord;
+		await h.writeInterrupt(run);
+		await waitFor(async () => (await h.readRuns())[0].status === "interrupted");
+		h.execCalls.length = 0;
+
+		// subagent_clean must leave it alone while this session is live: the tmux
+		// session is the only handle on a resumable transcript.
+		const cleaned = await h.call("subagent_clean", { delete_files: true });
+		assert.match(cleaned.text, /skipped 1/);
+		assert.ok(
+			!h.execCalls.some((call) => call.args.includes("kill-session") && call.args.includes(run.tmuxSession)),
+			"cleaning must not kill the interrupted child",
+		);
+		assert.ok(existsSync(run.runDir), "its run dir survives");
+
+		// Shutdown DOES release the child, because nothing could reach it afterwards
+		// and it is idle. Killing the tmux session keeps the transcript, so the run
+		// stays resumable — the same bargain auto-reap makes for a finished run.
+		await h.shutdown();
+		assert.ok(
+			h.execCalls.some((call) => call.args.includes("kill-session") && call.args.includes(run.tmuxSession)),
+			"shutdown releases the interrupted child instead of orphaning it",
+		);
+		assert.equal((await h.readRuns())[0].status, "interrupted");
+		assert.ok(existsSync(run.runDir), "the transcript is still there for subagent_resume");
+	});
+});
+
+test("subagent_cancel releases an interrupted child", async () => {
+	await withHarness(undefined, async (h) => {
+		const run = (await h.call("subagent", { task: "cancel an interrupted run" })).details as unknown as RunRecord;
+		await h.writeInterrupt(run);
+		await waitFor(async () => (await h.readRuns())[0].status === "interrupted");
+
+		const cancelled = await h.call("subagent_cancel", { id: run.id });
+		assert.match(cancelled.text, new RegExp(`Subagent ${run.id} cancelled`));
+		assert.ok(
+			h.execCalls.some((call) => call.args.includes("kill-session") && call.args.includes(run.tmuxSession)),
+			"cancelling an interrupted run must kill the child that is still alive",
+		);
+		// And it is now genuinely finished, so a second cancel is a no-op.
+		assert.match((await h.call("subagent_cancel", { id: run.id })).text, /already cancelled/);
+	});
+});
+
+test("kill-on-shutdown cancels an interrupted run", async () => {
+	await withTempAgentDir(async () => {
+		await withEnv({ PI_SUBAGENT_KILL_ON_SHUTDOWN: "true" }, async () => {
+			const harness = await createHarness();
+			try {
+				const run = (await harness.call("subagent", { task: "kill on exit" })).details as unknown as RunRecord;
+				await harness.writeInterrupt(run);
+				await waitFor(async () => (await harness.readRuns())[0].status === "interrupted");
+				await harness.shutdown();
+				assert.equal((await harness.readRuns())[0].status, "cancelled");
+				assert.ok(harness.execCalls.some((call) => call.args.includes("kill-session") && call.args.includes(run.tmuxSession)));
+			} finally {
+				await harness.shutdown();
+			}
+		});
+	});
+});
+
+test("subagent_interrupt refuses a queued run and a finished one", async () => {
+	await withHarness({ maxConcurrent: "1" }, async (h) => {
+		await h.call("subagent", { task: "occupies the only slot" });
+		const queued = (await h.call("subagent", { task: "never starts" })).details as unknown as RunRecord;
+		await assert.rejects(() => h.call("subagent_interrupt", { id: queued.id }), /has not started yet/);
+
+		const done = (await h.readRuns())[0];
+		await h.writeResult(done, { version: 1, status: "completed", output: "ok", finishedAt: Date.now() });
+		await waitFor(async () => (await h.readRuns())[0].status === "completed");
+		const finished = await h.call("subagent_interrupt", { id: done.id });
+		assert.match(finished.text, /already completed/);
+		await assert.rejects(() => h.call("subagent_interrupt", { id: "no-such-run" }), /Unknown subagent run/);
+	});
+});
+
+test("an interrupted run is refused a resume while its child is alive", async () => {
+	// Regression: resume opens a SECOND pi process on the transcript, and an
+	// interrupted child's pi is still holding that file open. Two appenders
+	// interleave branches and scramble usage baselines — the corruption the
+	// "already using this session file" guard exists to prevent. So the tool's own
+	// suggested next step (attach, or cancel first) must not include resuming.
+	await withTempAgentDir(async (agentDir) => {
+		const harness = await createHarness({ sessionManager: liveBranchSessionManager(agentDir) as never });
+		try {
+			const first = (await harness.call("subagent", { task: "forked work", handoff: "fork" })).details as unknown as RunRecord;
+			await harness.writeInterrupt(first);
+			await waitFor(async () => (await harness.readRuns())[0].status === "interrupted");
+
+			const refused = await harness.call("subagent_resume", { id: first.id, message: "different plan" });
+			assert.match(refused.text, /still has a live child \(interrupted\)/);
+			assert.match(refused.text, /subagent_cancel/);
+			assert.equal((await harness.readRuns()).length, 1, "no second attempt was started");
+
+			// Cancelling releases the child (the transcript stays on disk), and then
+			// resume works exactly as it does for any finished run.
+			await harness.call("subagent_cancel", { id: first.id });
+			const resumed = (await harness.call("subagent_resume", { id: first.id, message: "different plan" }))
+				.details as unknown as RunRecord;
+			assert.equal(resumed.sessionFile, first.sessionFile);
+			assert.equal(resumed.attempt, 2);
+			assert.equal(resumed.interrupts, undefined, "the new attempt does not inherit the interrupt history");
+		} finally {
+			await harness.shutdown();
+		}
+	});
+});
+
+test("an interrupted run fails when its tmux session disappears", async () => {
+	// Regression: `pane_dead` cannot report a missing target — it needs a live
+	// pane to ask. Without treating tmux's "can't find pane" as death, a run whose
+	// session was killed by hand polled a target that cannot exist every 500ms for
+	// the rest of the session while claiming its child was idle at its prompt.
+	await withHarness(undefined, async (h) => {
+		const run = (await h.call("subagent", { task: "session killed by hand" })).details as unknown as RunRecord;
+		await h.writeInterrupt(run);
+		await waitFor(async () => (await h.readRuns())[0].status === "interrupted");
+
+		h.removeTarget();
+		await waitFor(async () => (await h.readRuns())[0].status === "failed");
+		const failed = (await h.readRuns())[0];
+		assert.match(failed.error ?? "", /exited before reporting a result/);
+		assert.ok(failed.finishedAt);
+
+		// And the watcher stops, rather than polling a dead target forever.
+		h.execCalls.length = 0;
+		await new Promise((resolve) => setTimeout(resolve, 1_200));
+		assert.equal(
+			h.execCalls.filter((call) => call.args.includes("capture-pane")).length,
+			0,
+			`no further polls, got: ${JSON.stringify(h.execCalls.map((call) => call.args.join(" ")))}`,
+		);
+	});
+});
+
+test("a result written as the session disappears still wins", async () => {
+	// The late-result re-read must run on the missing-target path too, or a child
+	// that reported and exited in the same instant would be recorded as failed.
+	await withHarness(undefined, async (h) => {
+		const run = (await h.call("subagent", { task: "reports as it exits" })).details as unknown as RunRecord;
+		h.removeTarget();
+		await h.writeResult(run, { version: 1, status: "completed", output: "got out in time", finishedAt: Date.now() });
+
+		await waitFor(async () => (await h.readRuns())[0].status === "completed");
+		assert.equal((await h.readRuns())[0].output, "got out in time");
+	});
+});
+
+test("an unclassifiable tmux failure fails the run only after a run of them", async () => {
+	// A single hiccup must not fail a healthy child, but a persistently
+	// unreachable socket must not leave the watcher polling forever either. The
+	// failure is reported as "cannot be reached", not as "the child exited": the
+	// two claims need different evidence.
+	await withHarness(undefined, async (h) => {
+		const run = (await h.call("subagent", { task: "socket blips" })).details as unknown as RunRecord;
+		h.failPaneOnce();
+		await new Promise((resolve) => setTimeout(resolve, 700));
+		assert.equal((await h.readRuns())[0].status, "running", "one failure is tolerated");
+
+		h.failPaneAlways();
+		await waitFor(async () => (await h.readRuns())[0].status === "failed");
+		assert.match((await h.readRuns())[0].error ?? "", /could not be reached over tmux/);
+		assert.doesNotMatch((await h.readRuns())[0].error ?? "", /exited before reporting/);
+	});
+});
+
+test("an unconfirmed Escape is forgotten once the child is seen working again", async () => {
+	// Otherwise subagent_status keeps advertising "not confirmed yet" for an Escape
+	// from minutes ago, and the field feeds the double-escape guard.
+	await withHarness({ paneText: "unchanging child output" }, async (h) => {
+		const run = (await h.call("subagent", { task: "ignores escape" })).details as unknown as RunRecord;
+		await h.call("subagent_interrupt", { id: run.id });
+		assert.ok((await h.readRuns())[0].interruptRequestedAt);
+		assert.match((await h.call("subagent_status", { id: run.id })).text, /not confirmed yet/);
+
+		await h.writeActivity(run, activitySnapshot(run));
+		await waitFor(async () => (await h.readRuns())[0].interruptRequestedAt === undefined);
+		const status = await h.call("subagent_status", { id: run.id });
+		assert.doesNotMatch(status.text, /not confirmed yet/);
 	});
 });

@@ -59,9 +59,24 @@
 //     `usageFromLine` baseline so inherited turns are not billed to the child.
 //     `subagent_clean` retains a run dir that still owns a live run's session
 //     file, because a resumed run keeps its ancestor's transcript.
+// 13. Turn-level interrupt (see interrupt.ts): `subagent_interrupt({ id })`
+//     sends Escape (`app.interrupt`) to the child's pane, which aborts the
+//     in-flight turn but leaves the child alive at its prompt. The child then
+//     writes `<runDir>/interrupt.json` on `turn_end`/`agent_settled` instead of
+//     a failed `result.json`, and skips `ctx.shutdown()`, so the run can be
+//     steered instead of being destroyed. `RunStatus` gains `"interrupted"`,
+//     which is terminal for wait/clean/status but NOT for `holdsChild` — the
+//     child process, its tmux session and its transcript all survive, so the
+//     watcher keeps polling for a later `result.json`. Two rules follow from
+//     that and are easy to undo by accident: nothing may spawn a second pi
+//     process on a transcript a live child still holds (`subagent_resume`
+//     refuses while `holdsChild`), and nothing may leave an idle child
+//     unreferenced forever (shutdown reaps it; the transcript survives, so the
+//     run stays resumable).
 //
 // The child reporter (CHILD_ENV) still reports completion the same way; patch 11
-// only adds the activity snapshot to it.
+// only adds the activity snapshot to it, and patch 13 only diverts the aborted
+// settle onto the marker.
 
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -92,6 +107,12 @@ import {
 import { Key, matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
+	createInterruptMarkerWriter,
+	getInterruptFilePath,
+	readInterruptMarker,
+	type SubagentInterruptMarker,
+} from "./interrupt.ts";
+import {
 	createActivityRecorder,
 	getActivityFilePath,
 	readActivityFile,
@@ -103,19 +124,33 @@ import { formatUsage, readSessionUsage, type RunUsage } from "./usage.ts";
 const ATTACH_FLAG = "attach-subagent";
 const CHILD_ENV = "PI_TMUX_SUBAGENT_CHILD";
 const RESULT_ENV = "PI_TMUX_SUBAGENT_RESULT";
+/** Marker path the child writes when a turn was interrupted (local patch 13). */
+const INTERRUPT_ENV = "PI_TMUX_SUBAGENT_INTERRUPT";
 const RUNS_DIR = "tmux-subagents";
 const POLL_INTERVAL_MS = 500;
 const PANE_PREVIEW_LINES = 18;
 const DEFAULT_PROVIDER = "openrouter";
 const DEFAULT_MAX_CONCURRENT = 4;
 const GC_DAYS = 7;
+/** Default grace period for confirming an interrupt before reporting "requested". */
+const DEFAULT_INTERRUPT_CONFIRM_MS = 3_000;
+/** How many consecutive unclassifiable tmux failures mean the child is gone. */
+const MAX_TRANSIENT_TMUX_FAILURES = 3;
+/** Poll cadence while waiting for a child to confirm an interrupt. */
+const INTERRUPT_POLL_MS = 100;
+/**
+ * pi treats two Escapes within this window on an idle child as its
+ * "double escape action" (the session tree by default), so the extension must
+ * never send two of its own inside it.
+ */
+const DOUBLE_ESCAPE_WINDOW_MS = 500;
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 /** Selectable handoff modes for the `subagent` tool; `resume` is not selectable. */
 const HANDOFF_MODES = ["standalone", "lineage", "fork"] as const;
 const EXTENSION_PATH = fileURLToPath(import.meta.url);
 const RESULT_MESSAGE_TYPE = "subagent-result";
 
-type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
 
 interface ChildResult {
 	version: 1;
@@ -180,6 +215,15 @@ interface RunRecord {
 	usageFromLine?: number;
 	/** Latest child activity snapshot, reduced to what the parent needs. */
 	activity?: RunActivity;
+	/**
+	 * When Escape was last sent to this run's pane, before the child confirmed an
+	 * aborted turn. Cleared once the marker lands (local patch 13).
+	 */
+	interruptRequestedAt?: number;
+	/** When the child last settled an aborted turn. */
+	interruptedAt?: number;
+	/** Aborted turns this run has settled, taken from the child's marker. */
+	interrupts?: number;
 }
 
 function shellQuote(value: string): string {
@@ -351,7 +395,10 @@ function runDirOwnsLiveTranscript(run: RunRecord, runs: Map<string, RunRecord>):
 	if (!run.runDir) return false;
 	for (const other of runs.values()) {
 		if (other.id === run.id) continue;
-		if (isTerminal(other.status)) continue;
+		// holdsChild, not !isTerminal: an interrupted run's child is still alive
+		// and still holds its transcript open, so its run dir is just as load
+		// bearing as a running one's.
+		if (!holdsChild(other.status)) continue;
 		if (!other.sessionFile) continue;
 		if (isSameOrDescendant(run.runDir, other.sessionFile)) return true;
 	}
@@ -401,8 +448,12 @@ async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> 
 	await rename(temporaryPath, filePath);
 }
 
-function registerChildReporter(pi: ExtensionAPI, resultPath: string, runId: string): void {
+function registerChildReporter(pi: ExtensionAPI, resultPath: string, runId: string, interruptPath: string | undefined): void {
 	let reported = false;
+	// The aborted turn currently in flight, latched by `turn_end` and consumed by
+	// `agent_settled`. `agent_settled` carries no payload and fires for aborted
+	// runs too, so the outcome has to be remembered across the two events.
+	let abortedTurn: { turnIndex?: number; stopReason?: string } | undefined;
 
 	// Liveness snapshot (local patch 11). The path is derived from the result
 	// path the child was already given, so nothing new crosses the environment
@@ -416,6 +467,24 @@ function registerChildReporter(pi: ExtensionAPI, resultPath: string, runId: stri
 			console.error(`[tmux-subagent] activity write failed: ${error instanceof Error ? error.message : String(error)}`);
 		},
 	});
+
+	// Written only on an aborted settle, so a run that is never interrupted never
+	// has the file and the parent keeps seeing a plain running child. A child
+	// launched without the env var (an older parent, a stripped environment) keeps
+	// the previous behaviour of reporting an abort as a failed result, which is
+	// strictly better than writing a marker nobody will read.
+	const interruptWriter = interruptPath
+		? createInterruptMarkerWriter({
+				filePath: interruptPath,
+				runId,
+				write: writeJsonAtomic,
+				onError: (error) => {
+					console.error(
+						`[tmux-subagent] interrupt marker write failed: ${error instanceof Error ? error.message : String(error)}`,
+					);
+				},
+			})
+		: undefined;
 
 	const report = async (ctx: ExtensionContext, fallbackError?: string): Promise<void> => {
 		if (reported) return;
@@ -455,6 +524,22 @@ function registerChildReporter(pi: ExtensionAPI, resultPath: string, runId: stri
 	pi.on("tool_execution_update", (event) => recorder.toolUpdate(event.toolName));
 	pi.on("tool_execution_end", (event) => recorder.toolEnd(event.toolName));
 
+	// Turn-level interrupt (local patch 13). An aborted turn is not a failed run:
+	// the child survives at its prompt with its session file intact, so reporting
+	// a failure and shutting down — the behaviour below — would throw away a run
+	// the user only wanted to steer. Latch the outcome here because `turn_end`
+	// carries it and `agent_settled` does not.
+	pi.on("turn_end", (event) => {
+		if (event.outcome !== "aborted") return;
+		// `message` is an AgentMessage union; only the assistant member carries a
+		// stopReason, so it is read through a narrowing shape rather than a cast.
+		const stopReason = (event.message as { stopReason?: unknown } | undefined)?.stopReason;
+		abortedTurn = {
+			...(typeof event.turnIndex === "number" ? { turnIndex: event.turnIndex } : {}),
+			...(typeof stopReason === "string" ? { stopReason } : {}),
+		};
+	});
+
 	// agent_settled was added after older peer type declarations but is present
 	// in the Pi runtime this extension targets.
 	(
@@ -463,6 +548,24 @@ function registerChildReporter(pi: ExtensionAPI, resultPath: string, runId: stri
 			handler: (event: unknown, ctx: ExtensionContext) => void | Promise<void>,
 		) => void
 	)("agent_settled", async (_event, ctx) => {
+		if (abortedTurn && interruptWriter) {
+			const aborted = abortedTurn;
+			abortedTurn = undefined;
+			// The child lives on, so the snapshot must not claim a terminal "done"
+			// phase: "waiting" is what the parent should see while the prompt is
+			// idle. The recorder forces a write on a phase change, and the marker is
+			// only written after this await returns, so the parent cannot see the
+			// interrupt before the phase it belongs to. (It may still render the
+			// previous `active` phase for one tick, since the watcher reads
+			// activity.json first; that is a display detail, not a wrong status.)
+			await recorder.agentEnd().catch(() => undefined);
+			await interruptWriter?.mark(aborted);
+			// Deliberately no report and no ctx.shutdown(): the parent learns about
+			// the interrupt from the marker and keeps watching for a later result.
+			// A child with no marker path falls through to the report below, because
+			// it cannot be steered and must not go silent.
+			return;
+		}
 		// Flush the terminal snapshot first: the parent treats result.json as the
 		// completion signal, so the "done" phase must be on disk before it lands.
 		await recorder.settled().catch(() => undefined);
@@ -497,8 +600,43 @@ function truncateToolText(text: string): string {
 	return `${truncated.content}\n\n[Output truncated. Full output is available in the child session file.]`;
 }
 
+/** "3s" for a 3000ms window, "0s" when confirming is disabled, "not waiting" for a negative one. */
+function formatConfirmWindow(ms: number): string {
+	if (ms <= 0) return "time (confirmation is disabled)";
+	return `${Math.round(ms / 1000)}s`;
+}
+
+/**
+ * True when a tmux call failed because its target is gone, rather than for a
+ * transient reason. `pane_dead` cannot report this case: it needs a live pane to
+ * ask, so a session killed by hand (a natural response to a wedged subagent)
+ * otherwise leaves the watcher polling a target that cannot exist.
+ */
+function isMissingTmuxTarget(result: { code: number; stdout: string; stderr: string }): boolean {
+	if (result.code === 0) return false;
+	return /can't find|no such (?:pane|window|session|target)|unknown session|server (?:exited|not found|terminated)/i.test(
+		`${result.stderr}\n${result.stdout}`,
+	);
+}
+
 function isTerminal(status: RunStatus): boolean {
-	return status === "completed" || status === "failed" || status === "cancelled";
+	return status === "completed" || status === "failed" || status === "cancelled" || status === "interrupted";
+}
+
+/**
+ * True when a run's child process may still exist, and therefore owns a tmux
+ * session, a concurrency slot and an open session file.
+ *
+ * This is deliberately not `!isTerminal`. `interrupted` is terminal for every
+ * question of the form "should I keep waiting for this run" — subagent_wait
+ * returns, subagent_clean skips, subagent_resume is allowed — but the child it
+ * interrupted is still sitting at its prompt with its transcript intact, so
+ * anything that would destroy or free that child must consult this predicate
+ * instead: auto-reap, shutdown reaping, the concurrency gate and the
+ * "another process owns this transcript" guards.
+ */
+function holdsChild(status: RunStatus): boolean {
+	return status === "queued" || status === "running" || status === "interrupted";
 }
 
 async function abortableDelay(ms: number, signal: AbortSignal | undefined): Promise<void> {
@@ -573,9 +711,11 @@ function formatActivity(activity: RunActivity | undefined): string | undefined {
 function runSummary(run: RunRecord, options: { pane?: boolean; output?: boolean } = {}): string {
 	const duration = formatDuration(run.startedAt, run.finishedAt);
 	const usage = formatUsage(run.usage);
-	// Activity describes what the child is doing right now, so it is only
-	// meaningful while the run is live; a settled run has its own status.
-	const activity = isTerminal(run.status) ? undefined : formatActivity(run.activity);
+	// Activity describes what the child is doing right now. An interrupted run is
+	// terminal for waiting but its child is alive at its prompt, so it still has a
+	// live phase worth reporting. A queued run never has one (nothing has started),
+	// so this is false for it as well.
+	const activity = holdsChild(run.status) ? formatActivity(run.activity) : undefined;
 	const lines = [
 		`${run.id}  ${run.status}${duration ? ` · ${duration}` : ""}${usage ? ` · ${usage}` : ""}`,
 		`  task: ${run.task.split("\n", 1)[0]?.slice(0, 100) ?? run.task}`,
@@ -584,6 +724,24 @@ function runSummary(run: RunRecord, options: { pane?: boolean; output?: boolean 
 	if (activity) lines.push(`  activity: ${activity}`);
 	lines.push(`  tmux: ${run.tmuxSession}`, `  attach: ${run.attachCommand}`);
 	if (run.sessionFile) lines.push(`  child session: ${run.sessionFile}`);
+	if (run.status === "interrupted") {
+		// The child can be driven again after an interrupt, so "idle at its prompt"
+		// is a claim about now, not about the run: read it off the live activity
+		// phase rather than off the status, which stays interrupted either way.
+		const workingAgain = run.activity?.phase === "active";
+		lines.push(
+			`  interrupt: turn aborted${run.interruptedAt ? ` at ${new Date(run.interruptedAt).toISOString()}` : ""}` +
+				`${(run.interrupts ?? 0) > 1 ? ` (${run.interrupts} so far)` : ""}. ` +
+				(workingAgain
+					? `The child has been driven again and is working; interrupt it again or let it finish.`
+					: `The child is idle at its prompt with its transcript intact: attach to steer it, or cancel it to release its slot.`),
+		);
+	} else if (run.interruptRequestedAt) {
+		lines.push(
+			`  interrupt: Escape sent at ${new Date(run.interruptRequestedAt).toISOString()}, not confirmed yet. ` +
+				`The child may have been idle already; subagent_status will show it once the turn aborts.`,
+		);
+	}
 	if (run.mode && run.mode !== "standalone") lines.push(`  handoff: ${run.mode}`);
 	if (run.resumeOf) lines.push(`  resumed from: ${run.resumeOf}`);
 	if (run.attempt && run.attempt > 1) lines.push(`  attempt: ${run.attempt}`);
@@ -608,7 +766,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			return;
 		}
 		// The run id is the run directory name: <agentDir>/tmux-subagents/<session>/<run>/result.json.
-		registerChildReporter(pi, resultPath, path.basename(path.dirname(resultPath)));
+		registerChildReporter(pi, resultPath, path.basename(path.dirname(resultPath)), process.env[INTERRUPT_ENV]?.trim() || undefined);
 		return;
 	}
 
@@ -618,6 +776,9 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	const autoReap = readBooleanEnv("PI_SUBAGENT_AUTO_REAP", true);
 	const reapDelayMs = readNonNegativeIntEnv("PI_SUBAGENT_REAP_DELAY_MS", 0);
 	const gcDays = readNonNegativeIntEnv("PI_SUBAGENT_GC_DAYS", GC_DAYS);
+	// How long subagent_interrupt waits for the child to confirm the interrupt
+	// before reporting "requested" instead of "interrupted".
+	const interruptConfirmMs = readNonNegativeIntEnv("PI_SUBAGENT_INTERRUPT_CONFIRM_MS", DEFAULT_INTERRUPT_CONFIRM_MS);
 
 	const runs = new Map<string, RunRecord>();
 	const timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -625,6 +786,20 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	// rewrite the index when nothing visible changed.
 	const activitySignatures = new Map<string, string>();
 	const reapTimers = new Map<string, ReturnType<typeof setTimeout>>();
+	/**
+	 * Consecutive ticks on which tmux could not be reached at all. One success
+	 * clears it, so only a sustained outage ever counts.
+	 */
+	const tmuxFailures = new Map<string, number>();
+
+	const countTmuxFailure = (run: RunRecord): number => {
+		const next = (tmuxFailures.get(run.id) ?? 0) + 1;
+		tmuxFailures.set(run.id, next);
+		return next;
+	};
+	const clearTmuxFailures = (run: RunRecord): void => {
+		tmuxFailures.delete(run.id);
+	};
 	// Set by session_shutdown. The watcher deletes its own timer from the map at
 	// the start of a tick and re-arms one at the end, so a tick already in flight
 	// when shutdown clears the map would otherwise re-arm a timer nothing will
@@ -650,7 +825,9 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	const activeCount = (): number => {
 		let count = 0;
 		for (const run of runs.values()) {
-			if (run.status === "running") count++;
+			// An interrupted run still holds a child process, so it keeps its slot.
+			// `queued` is excluded because drainQueue gates on this number.
+			if (run.status === "running" || run.status === "interrupted") count++;
 		}
 		return count;
 	};
@@ -668,7 +845,10 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	const reapSession = async (run: RunRecord): Promise<void> => {
 		reapTimers.delete(run.id);
 		if (!autoReap) return;
-		if (run.status === "running" || run.status === "queued") return;
+		// holdsChild, not an isTerminal check: an interrupted run is terminal but
+		// its child is alive, and reaping it would destroy the only handle on a
+		// resumable session. It is released by subagent_cancel instead.
+		if (holdsChild(run.status)) return;
 		await killTmuxSession(run);
 	};
 
@@ -715,6 +895,10 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	const finalizeRun = async (run: RunRecord, result: ChildResult): Promise<void> => {
 		run.status = result.status === "completed" ? "completed" : "failed";
 		run.finishedAt = result.finishedAt || Date.now();
+		// The run is over one way or another, so an outstanding Escape is no longer
+		// news; leaving it would make subagent_status report a pending interrupt on
+		// a finished run.
+		run.interruptRequestedAt = undefined;
 		// The child reports the path it actually opened. Keep the one we already
 		// recorded when it does not: a result without sessionFile must not erase
 		// the pointer subagent_resume depends on.
@@ -738,6 +922,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	const markRunFailed = async (run: RunRecord, message: string): Promise<void> => {
 		clearTimer(run.id);
 		run.status = "failed";
+		run.interruptRequestedAt = undefined;
 		run.error = message;
 		run.finishedAt = Date.now();
 		await persist();
@@ -753,10 +938,112 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		}
 	};
 
+	/**
+	 * Fold a child-written interrupt marker into the run.
+	 *
+	 * Returns true when the record changed. Counters are raised monotonically and
+	 * the timestamp only moves forward, so a marker that was already recorded
+	 * (the watcher and the tool's confirmation poll both read the same file)
+	 * cannot rewind or double-count the run. `runId` validation is what makes a
+	 * leftover marker from an earlier attempt harmless, but it cannot make an
+	 * *older* marker for this same run harmless — that is the caller's job, via
+	 * the `since` baseline.
+	 */
+	const noteInterrupt = async (
+		run: RunRecord,
+		marker: SubagentInterruptMarker,
+		since?: { interrupts: number; at: number },
+	): Promise<boolean> => {
+		// A marker that lands after the run was finalized must not resurrect it as
+		// interrupted: the watcher has already stopped, so nothing would ever move
+		// it on from there.
+		if (isTerminal(run.status) && run.status !== "interrupted") return false;
+		// Stale by the caller's reckoning: this is the marker from an earlier
+		// interrupt that is still sitting in the run dir.
+		if (since && marker.interrupts <= since.interrupts && marker.interruptedAt <= since.at) return false;
+		const interrupts = Math.max(run.interrupts ?? 0, marker.interrupts);
+		const interruptedAt = Math.max(run.interruptedAt ?? 0, marker.interruptedAt);
+		if (run.status === "interrupted" && interrupts === run.interrupts && interruptedAt === run.interruptedAt) return false;
+		run.status = "interrupted";
+		run.interrupts = interrupts;
+		run.interruptedAt = interruptedAt;
+		// The request has been honoured; keeping it would make subagent_status
+		// report an unconfirmed interrupt for a run that is known to be stopped.
+		run.interruptRequestedAt = undefined;
+		// No finishedAt: the child is still running, so the elapsed time shown by
+		// formatDuration must keep counting rather than freezing.
+		await persist();
+		return true;
+	};
+
+	/** What the confirmation poll saw. */
+	type InterruptConfirmation =
+		| { state: "confirmed"; marker: SubagentInterruptMarker }
+		| { state: "stale"; marker: SubagentInterruptMarker }
+		| { state: "unconfirmed"; aborted: boolean };
+
+	/**
+	 * Poll for a marker NEWER than `since`, for at most `timeoutMs`.
+	 *
+	 * The marker file is never deleted, so it survives the whole run. Without the
+	 * baseline a second interrupt would be "confirmed" instantly by the first
+	 * interrupt's marker, while the child kept streaming — the tool would then
+	 * report a stop that never happened.
+	 */
+	const awaitInterruptMarker = async (
+		run: RunRecord,
+		since: { interrupts: number; at: number },
+		timeoutMs: number,
+		signal: AbortSignal | undefined,
+	): Promise<InterruptConfirmation> => {
+		const deadline = Date.now() + timeoutMs;
+		// A marker that is valid but not newer than the baseline is the previous
+		// interrupt's: it is worth reporting as stale rather than as silence.
+		let stale: SubagentInterruptMarker | undefined;
+		for (;;) {
+			const marker = await readInterruptMarker(getInterruptFilePath(run.runDir), run.id);
+			if (marker.ok) {
+				const folded = await noteInterrupt(run, marker.marker, since);
+				if (folded) return { state: "confirmed", marker: marker.marker };
+				stale = marker.marker;
+			}
+			if (Date.now() >= deadline) return stale ? { state: "stale", marker: stale } : { state: "unconfirmed", aborted: false };
+			if (signal?.aborted) return { state: "unconfirmed", aborted: true };
+			await abortableDelay(INTERRUPT_POLL_MS, signal).catch(() => undefined);
+		}
+	};
+
+	/**
+	 * The child is gone: either its pane died, the tmux target no longer exists,
+	 * or tmux cannot be reached at all. `unreachable` marks the last case, which
+	 * says nothing about the child, so it must not be reported as an exit.
+	 *
+	 * Gives a result that raced in a moment earlier the last word before failing.
+	 */
+	const finalizeMissingChild = async (run: RunRecord, unreachable = false): Promise<void> => {
+		tmuxFailures.delete(run.id);
+		await abortableDelay(100, undefined);
+		const late = await readChildResult(run);
+		if (late) {
+			await finalizeRun(run, late);
+			return;
+		}
+		const reason = unreachable
+			? `Child Pi could not be reached over tmux for ${MAX_TRANSIENT_TMUX_FAILURES} consecutive checks, so its state is unknown. Inspect: ${run.captureCommand}`
+			: run.pane
+				? `Child Pi exited before reporting a result.\n\n${run.pane}\n\nInspect: ${run.captureCommand}`
+				: `Child Pi exited before reporting a result. Inspect: ${run.captureCommand}`;
+		await markRunFailed(run, reason);
+		void drainQueue();
+	};
+
 	const watchTick = async (run: RunRecord): Promise<void> => {
 		timers.delete(run.id);
 		if (shuttingDown) return;
-		if (isTerminal(run.status)) return;
+		// An interrupted run is terminal for every consumer, but its child is alive
+		// and may still finish, so the watcher keeps polling for a result.json. Every
+		// other terminal status has nothing left to observe.
+		if (isTerminal(run.status) && !holdsChild(run.status)) return;
 
 		try {
 			const result = await readChildResult(run);
@@ -770,6 +1057,8 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			const activity = await readActivityFile(getActivityFilePath(run.runDir), run.id);
 			if (activity.ok) {
 				const observed = activity.activity;
+				const clearedRequest =
+					run.interruptRequestedAt !== undefined && observed.updatedAt > run.interruptRequestedAt;
 				// Never regress: a stale snapshot from an earlier write, or one
 				// that survived a reload, must not overwrite newer state.
 				if (observed.sequence > (run.activity?.sequence ?? -1)) {
@@ -780,45 +1069,74 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 						sequence: observed.sequence,
 						updatedAt: observed.updatedAt,
 					};
+					// A request the child plainly ignored: an activity snapshot newer
+					// than the Escape proves the child kept (or resumed) working after
+					// it. Otherwise the run advertises "not confirmed yet" for an Escape
+					// that is now ancient, and subagent_interrupt's double-escape guard
+					// reasons from a stale timestamp.
+					if (clearedRequest) run.interruptRequestedAt = undefined;
 					// Persist only what the summary actually renders, so a chatty
 					// child does not rewrite runs.json twice a second.
 					const signature = formatActivity(run.activity) ?? "";
-					if (signature !== activitySignatures.get(run.id)) {
+					if (signature !== activitySignatures.get(run.id) || clearedRequest) {
 						activitySignatures.set(run.id, signature);
 						await persist();
 					}
 				}
 			}
 
+			// Turn-level interrupt (local patch 13). The child writes this marker on
+			// an aborted settle instead of a result, so it is the only evidence that
+			// the run was steered rather than finished. It is read after result.json
+			// so a child that was interrupted and then completed still finalizes.
+			// Read on every tick, including for an already-interrupted run: a child
+			// that is driven again can be interrupted a second time, and noteInterrupt
+			// makes a repeat read of the same marker a no-op.
+			const marker = await readInterruptMarker(getInterruptFilePath(run.runDir), run.id);
+			if (marker.ok) await noteInterrupt(run, marker.marker);
+
 			const paneResult = await pi.exec("tmux", tmuxArgs("capture-pane", "-p", "-J", "-t", run.tmuxTarget), {
 				timeout: 5_000,
 			});
 			if (paneResult.code === 0) {
+				clearTmuxFailures(run);
 				const pane = trimPane(paneResult.stdout);
 				if (pane && pane !== run.pane) {
 					run.pane = pane;
 					await persist();
 				}
+			} else if (isMissingTmuxTarget(paneResult)) {
+				// The session or pane is gone (killed by hand, or the tmux server
+				// died). Treating that as "still running" re-armed this tick forever
+				// and reported a child that no longer exists as interrupted.
+				await finalizeMissingChild(run);
+				return;
 			}
 
 			const dead = await pi.exec("tmux", tmuxArgs("display-message", "-p", "-t", run.tmuxTarget, "#{pane_dead}"));
-			if (dead.code === 0 && dead.stdout.trim() === "1") {
-				await abortableDelay(100, undefined);
-				const late = await readChildResult(run);
-				if (late) {
-					await finalizeRun(run, late);
+			if (dead.code === 0) {
+				clearTmuxFailures(run);
+				if (dead.stdout.trim() === "1") {
+					await finalizeMissingChild(run);
 					return;
 				}
-				const reason = run.pane
-					? `Child Pi exited before reporting a result.\n\n${run.pane}\n\nInspect: ${run.captureCommand}`
-					: `Child Pi exited before reporting a result. Inspect: ${run.captureCommand}`;
-				await markRunFailed(run, reason);
-				void drainQueue();
+			} else if (isMissingTmuxTarget(dead)) {
+				await finalizeMissingChild(run);
+				return;
+			} else if (paneResult.code !== 0 && countTmuxFailure(run) >= MAX_TRANSIENT_TMUX_FAILURES) {
+				// Neither tmux call could reach the target and neither said why (an
+				// unreachable socket, a permission error, an unrecognised message).
+				// Polling that forever is what stranded runs before; failing a healthy
+				// child on the first hiccup would be worse. So it takes BOTH calls to
+				// fail, MAX_TRANSIENT_TMUX_FAILURES ticks running.
+				await finalizeMissingChild(run, true);
 				return;
 			}
 		} catch (error) {
 			// Transient tmux/exec errors are retried; only unexpected ones surface.
-			if (isTerminal(run.status)) return;
+			// An interrupted run must not bail here: its child is still alive and
+			// the watcher is the only thing that can still finalize it.
+			if (isTerminal(run.status) && !holdsChild(run.status)) return;
 			console.error(`[tmux-subagent] watch error for ${run.id}: ${error instanceof Error ? error.message : String(error)}`);
 		}
 
@@ -874,6 +1192,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 				"exec env",
 				`${CHILD_ENV}=1`,
 				`${RESULT_ENV}=${shellQuote(run.resultPath)}`,
+				`${INTERRUPT_ENV}=${shellQuote(getInterruptFilePath(run.runDir))}`,
 				piArgs.map(shellQuote).join(" "),
 			].join(" ");
 
@@ -922,7 +1241,9 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			if (!run?.id) continue;
 			updateTmuxCommands(run);
 			runs.set(run.id, run);
-			if (run.status === "running") scheduleWatch(run);
+			// An interrupted run keeps its watcher across a reload, otherwise a
+			// result.json written after the reload could never finalize it.
+			if (run.status === "running" || run.status === "interrupted") scheduleWatch(run);
 		}
 		await drainQueue();
 	};
@@ -970,12 +1291,17 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		for (const timer of reapTimers.values()) clearTimeout(timer);
 		reapTimers.clear();
 		for (const run of runs.values()) {
-			if (killOnShutdown && (run.status === "running" || run.status === "queued")) {
+			if (killOnShutdown && holdsChild(run.status)) {
 				run.status = "cancelled";
 				run.finishedAt = Date.now();
 				await killTmuxSession(run);
 				continue;
 			}
+			// An interrupted child is reaped here even though holdsChild says it is
+			// alive: an idle child at an abandoned prompt would otherwise outlive the
+			// parent with no tool left that can reach it. Killing the tmux session
+			// keeps the transcript, so the run stays resumable — exactly like the
+			// auto-reap of a completed run.
 			if (autoReap && isTerminal(run.status)) await killTmuxSession(run);
 		}
 		await persist();
@@ -992,11 +1318,13 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		name: "subagent",
 		label: "Subagent",
 		description:
-			"Start a delegated task in a separate interactive Pi process inside a detached tmux session and return immediately. The main agent is not blocked and may start more subagents or keep working. Runs execute concurrently (bounded by PI_SUBAGENT_MAX_CONCURRENT, default 4); extra runs are queued. Children inherit the current provider/model/thinking, defaulting the provider to OpenRouter. Use subagent_status to inspect progress and results, subagent_wait to block for completion, and subagent_cancel to stop a run. Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.",
+			"Start a delegated task in a separate interactive Pi process inside a detached tmux session and return immediately. The main agent is not blocked and may start more subagents or keep working. Runs execute concurrently (bounded by PI_SUBAGENT_MAX_CONCURRENT, default 4); extra runs are queued. Children inherit the current provider/model/thinking, defaulting the provider to OpenRouter. Use subagent_status to inspect progress and results, subagent_wait to block for completion, subagent_interrupt to abort a run's current turn while keeping its child alive, and subagent_cancel to stop a run outright. Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.",
 		promptSnippet: "Start a delegated, non-blocking, tmux-backed Pi subagent",
 		promptGuidelines: [
 			"Use subagent to delegate an isolated task without blocking: it returns immediately, so start several when useful and keep working.",
 			"Call subagent_status with the printed id to read a subagent's output; call subagent_wait only when you deliberately need to block until runs finish.",
+			"To stop a run that is going the wrong way, prefer subagent_interrupt (keeps the child and its transcript, then attach to steer it) over subagent_cancel (throws the run away). An interrupted run still occupies a concurrency slot until it is cancelled, so cancel the ones you are done with.",
+			"subagent_resume needs a run whose child is really gone: cancel or finish it first, or attach to an interrupted run and type the follow-up there.",
 		],
 		parameters: Type.Object({
 			task: Type.String({ description: "The complete task for the child Pi process" }),
@@ -1073,7 +1401,9 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 
 			const queued = run.status === "queued";
 			const text = [
-				queued ? `Subagent ${id} queued (${activeCount()}/${maxConcurrent} running).` : `Subagent ${id} started.`,
+				queued
+					? `Subagent ${id} queued (${activeCount()}/${maxConcurrent} active; an interrupted run counts as active until it is cancelled).`
+					: `Subagent ${id} started.`,
 				`Model: ${run.provider}/${run.model} (${run.thinking})`,
 				`tmux: ${run.tmuxSession}`,
 				`Attach: ${run.attachCommand}`,
@@ -1134,9 +1464,12 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 				return { content: [{ type: "text", text: "No subagent runs in this session." }], details: { runs: [] } };
 			}
 			const text = runsArray
-				.map((run) =>
-					runSummary(run, { pane: run.status === "running", output: includeOutput || !isTerminal(run.status) }),
-				)
+				.map((run) => {
+					// An interrupted run has no final output yet but its pane is the
+					// only view of the child's prompt, so it is shown like a live run.
+					const live = run.status === "running" || run.status === "interrupted";
+					return runSummary(run, { pane: live, output: includeOutput || live });
+				})
 				.join("\n\n");
 			return { content: [{ type: "text", text }], details: { runs: runsArray } };
 		},
@@ -1156,10 +1489,14 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			const id = params.id.trim();
 			const run = runs.get(id);
 			if (!run) throw new Error(`Unknown subagent run: ${id}`);
-			if (isTerminal(run.status)) {
+			// An interrupted run is terminal but still owns a live child, so cancel
+			// must keep working for it: cancelling is how an interrupted child is
+			// finally released.
+			if (isTerminal(run.status) && !holdsChild(run.status)) {
 				return { content: [{ type: "text", text: `Subagent ${id} is already ${run.status}.` }], details: run };
 			}
 			clearTimer(run.id);
+			run.interruptRequestedAt = undefined;
 			await pi.exec("tmux", tmuxArgs("kill-session", "-t", run.tmuxSession)).catch(() => undefined);
 			run.status = "cancelled";
 			run.finishedAt = Date.now();
@@ -1170,10 +1507,105 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerTool({
+		name: "subagent_interrupt",
+		label: "Subagent Interrupt",
+		description:
+			"Abort a subagent's current turn without killing it: sends Escape (pi's app.interrupt) to the child's pane, so the in-flight provider call and tool loop stop and the child sits idle at its prompt with its transcript and tmux session intact. The run becomes `interrupted` — still holding its concurrency slot and its tmux session until you subagent_cancel it. Use this to stop a run that is going the wrong way, then attach to steer it; use subagent_cancel when the run is simply unwanted. Note that subagent_resume is refused while the child is alive, because a second pi process would append to a transcript the child still holds. Returns as soon as the child confirms the aborted turn (default 3s), otherwise reports the request as sent but unconfirmed.",
+		promptSnippet: "Abort a running subagent's turn while keeping the child alive",
+		parameters: Type.Object({
+			id: Type.String({ description: "Run id to interrupt." }),
+		}),
+
+		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+			await ensureSessionPaths(ctx);
+			const id = params.id.trim();
+			const run = runs.get(id);
+			if (!run) throw new Error(`Unknown subagent run: ${id}`);
+			if (run.status === "queued") {
+				throw new Error(
+					`Subagent ${id} has not started yet, so there is no turn to interrupt. ` +
+						`Use subagent_cancel to drop it from the queue.`,
+				);
+			}
+			// isTerminal && !holdsChild: a completed, failed or cancelled run has no
+			// child left to steer. An interrupted one does, so Escape is sent again
+			// (the child may have been typed into and started working again).
+			if (isTerminal(run.status) && !holdsChild(run.status)) {
+				return { content: [{ type: "text", text: `Subagent ${id} is already ${run.status}.` }], details: run };
+			}
+
+			// A second Escape within the double-escape window is not a second abort:
+			// on an idle child pi treats two Escapes inside 500ms as the "double
+			// escape action" and opens the tree selector (settings-manager.js
+			// getDoubleEscapeAction defaults to "tree"), which blocks the child's
+			// prompt without touching the turn.
+			const lastRequest = run.interruptRequestedAt ?? 0;
+			if (Date.now() - lastRequest < DOUBLE_ESCAPE_WINDOW_MS) {
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								`An interrupt for subagent ${id} was sent ${Math.round((Date.now() - lastRequest) / 100) * 100}ms ago and has not been confirmed yet; ` +
+								`sending another Escape now would be read by the child as a double escape and open its tree selector. ` +
+								`Check subagent_status first.`,
+						},
+					],
+					details: run,
+				};
+			}
+
+			// The marker file is never deleted, so the confirmation poll must ignore
+			// anything already accounted for before this Escape.
+			const baseline = { interrupts: run.interrupts ?? 0, at: run.interruptedAt ?? 0 };
+
+			run.interruptRequestedAt = Date.now();
+			await persist();
+
+			// Escape, never C-c: `app.clear` is C-c and pressing it twice within
+			// 500ms quits the child, which would throw the transcript away. `-l`
+			// would send the literal word instead of the key, and a second
+			// `send-keys Enter` would submit whatever the child had typed.
+			const sent = await pi.exec("tmux", tmuxArgs("send-keys", "-t", run.tmuxTarget, "Escape"));
+			if (sent.code !== 0) {
+				run.interruptRequestedAt = undefined;
+				await persist();
+				throw new Error(sent.stderr.trim() || `Failed to send Escape to subagent ${id}.`);
+			}
+
+			// Escape is asynchronous: the child has to abort its provider stream and
+			// settle before it can write the marker. Give it a moment to confirm so
+			// the caller gets a definitive answer, then fall back to "requested" and
+			// let subagent_status observe the marker later. A cancelled tool call is
+			// reported the same way rather than thrown: the key was already sent, and
+			// the tool's own cancellation says nothing about whether it landed.
+			const outcome = await awaitInterruptMarker(run, baseline, interruptConfirmMs, signal);
+
+			const lines =
+				outcome.state === "confirmed"
+					? [
+							`Subagent ${id} interrupted.`,
+							"The child aborted its current turn and is idle at its prompt; its session file is intact.",
+							`Next: attach (${run.attachCommand}) to steer it, or subagent_cancel to stop it. It still holds its concurrency slot until then.`,
+						]
+					: outcome.state === "stale"
+						? [
+								`Escape sent to subagent ${id}, but no new interrupt was reported: the only marker present is the one from the previous interrupt${outcome.marker.interruptedAt ? ` at ${new Date(outcome.marker.interruptedAt).toISOString()}` : ""}.`,
+								"The child either was idle (Escape does nothing then) or has not aborted yet. Attach to see, and use subagent_cancel to stop it.",
+							]
+						: [
+								`Escape sent to subagent ${id}, but it did not confirm an interrupt within ${formatConfirmWindow(interruptConfirmMs)} (status is still ${run.status})${outcome.aborted ? ", and this tool call was cancelled" : ""}.`,
+								"The child was probably already idle — Escape does nothing while it waits at its prompt — or it is stuck somewhere Escape does not reach. Attach with ${run.attachCommand} to look, and use subagent_cancel to stop it.",
+							];
+			return { content: [{ type: "text", text: lines.join("\n") }], details: run };
+		},
+	});
+
+	pi.registerTool({
 		name: "subagent_resume",
 		label: "Subagent Resume",
 		description:
-			"Continue a finished subagent conversation by id with a follow-up message. The child's existing session file is reopened and appended to, so it keeps its full prior context and the run is tracked as a new attempt with a fresh tmux session. Unlike a fork, no context is copied: this is the same child session, continued.",
+			"Continue a finished subagent conversation by id with a follow-up message. The child's existing session file is reopened and appended to, so it keeps its full prior context and the run is tracked as a new attempt with a fresh tmux session. Unlike a fork, no context is copied: this is the same child session, continued. Refused while the original child is still alive (running, queued or interrupted), because a second pi process appending to the same transcript would interleave branches — cancel the live run first, or attach to it and type the follow-up there.",
 		promptSnippet: "Continue a finished subagent conversation with a follow-up message",
 		parameters: Type.Object({
 			id: Type.String({ description: "Run id to resume." }),
@@ -1186,9 +1618,22 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			if (!message) throw new Error("Resume message must not be empty.");
 			const previous = runs.get(params.id.trim());
 			if (!previous) throw new Error(`Unknown subagent run: ${params.id.trim()}`);
-			if (!isTerminal(previous.status)) {
+			// holdsChild, not !isTerminal. Resume opens a SECOND pi process on the
+			// transcript, so it is only safe once the first one is gone: an
+			// interrupted run still has a live child holding that file open, and two
+			// appenders interleave branches and scramble usage baselines. That is
+			// exactly the trap the guard below protects against for two resumes, and
+			// it is why an interrupted run is steered by attaching, not by resuming.
+			if (holdsChild(previous.status)) {
 				return {
-					content: [{ type: "text", text: `Subagent ${previous.id} is still ${previous.status}; cancel it before resuming.` }],
+					content: [
+						{
+							type: "text",
+							text:
+								`Subagent ${previous.id} still has a live child (${previous.status}); a second pi process would append to the same transcript. ` +
+								`Attach (${previous.attachCommand}) and type the follow-up there, or subagent_cancel the run first and then resume it.`,
+						},
+					],
 					details: previous,
 				};
 			}
@@ -1203,7 +1648,8 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			// processes appending to one JSONL produce interleaved branches and
 			// scrambled usage baselines, so refuse while one is still in flight.
 			const concurrent = [...runs.values()].find(
-				(candidate) => candidate.id !== previous.id && !isTerminal(candidate.status) && candidate.sessionFile === sessionFile,
+				(candidate) =>
+					candidate.id !== previous.id && holdsChild(candidate.status) && candidate.sessionFile === sessionFile,
 			);
 			if (concurrent) {
 				throw new Error(
@@ -1238,6 +1684,12 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 				error: undefined,
 				usage: undefined,
 				activity: undefined,
+				// Interrupt history belongs to the run that owns it: a fresh child was
+				// never sent an Escape, and inheriting the counters would make
+				// subagent_status report an interrupt for an attempt that had none.
+				interrupts: undefined,
+				interruptedAt: undefined,
+				interruptRequestedAt: undefined,
 				mode: "resume",
 				resumeOf: previous.id,
 				attempt: (previous.attempt ?? 1) + 1,
@@ -1270,7 +1722,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		name: "subagent_wait",
 		label: "Subagent Wait",
 		description:
-			"Block until the given subagent runs finish (or all incomplete runs when no ids are given), then return their outputs. Use only when you deliberately need to wait; otherwise use subagent_status.",
+			"Block until the given subagent runs finish (or all incomplete runs when no ids are given), then return their outputs. An `interrupted` run counts as settled and returns immediately, because its child is idle at its prompt and nothing further will arrive on its own. Use only when you deliberately need to wait; otherwise use subagent_status.",
 		promptSnippet: "Block until selected non-blocking subagents finish",
 		parameters: Type.Object({
 			ids: Type.Optional(Type.Array(Type.String(), { description: "Run ids to wait for. Defaults to all incomplete runs." })),
@@ -1357,7 +1809,9 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			let deletedTranscripts = 0;
 			const retained: string[] = [];
 			for (const run of targets) {
-				if (!isTerminal(run.status)) {
+				// holdsChild, not !isTerminal: cleaning up must never kill an
+				// interrupted run's child, which still holds the resumable session.
+				if (holdsChild(run.status)) {
 					skipped++;
 					continue;
 				}
@@ -1426,6 +1880,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			const iconFor = (run: RunRecord, theme: { fg: (color: string, text: string) => string }): string => {
 				if (run.status === "completed") return theme.fg("success", "✓");
 				if (run.status === "failed") return theme.fg("error", "✗");
+				if (run.status === "interrupted") return theme.fg("warning", "‖");
 				if (run.status === "cancelled") return theme.fg("muted", "⊘");
 				if (run.status === "queued") return theme.fg("warning", "◦");
 				return theme.fg("warning", "●");
@@ -1435,8 +1890,11 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 				const list = getRuns();
 				if (selected >= list.length) selected = Math.max(0, list.length - 1);
 				const active = list.filter((run) => !isTerminal(run.status)).length;
+				const interrupted = list.filter((run) => run.status === "interrupted").length;
 				const lines: string[] = [
-					`${theme.bold(theme.fg("accent", "Subagents"))}${theme.fg("dim", `  ${active} active / ${list.length} total`)}`,
+					`${theme.bold(theme.fg("accent", "Subagents"))}${theme.fg("dim", `  ${active} active / ${list.length} total`)}${
+						interrupted > 0 ? theme.fg("dim", ` · ${interrupted} interrupted`) : ""
+					}`,
 					"",
 				];
 
@@ -1505,10 +1963,14 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 								}
 								if (data === "c") {
 									const run = list[selected];
-									if (run && !isTerminal(run.status)) {
+									// holdsChild so an interrupted run can be killed from
+									// here too: it is listed as finished but still owns a
+									// live tmux session.
+									if (run && holdsChild(run.status)) {
 										clearTimer(run.id);
 										void killTmuxSession(run);
 										run.status = "cancelled";
+										run.interruptRequestedAt = undefined;
 										run.finishedAt = Date.now();
 										void persist().then(() => drainQueue());
 										ctx.ui.notify(`Cancelled ${run.id}`, "info");
@@ -1540,6 +2002,7 @@ export const __test__ = {
 	attachFlagValue,
 	findLastAssistant,
 	formatDuration,
+	holdsChild,
 	isSameOrDescendant,
 	isTerminal,
 	readBooleanEnv,

@@ -14,6 +14,7 @@ const REQUIRED_HELPERS = [
 	"attachFlagValue",
 	"findLastAssistant",
 	"formatDuration",
+	"holdsChild",
 	"isSameOrDescendant",
 	"isTerminal",
 	"readBooleanEnv",

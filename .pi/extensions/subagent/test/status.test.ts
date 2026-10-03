@@ -10,7 +10,16 @@ import { test } from "node:test";
 
 import { __test__, type RunRecord } from "../index.ts";
 
-const { formatDuration, isTerminal, runSummary, textFromAssistant, trimPane, truncateToolText } = __test__;
+const {
+	formatDuration,
+	holdsChild,
+	isTerminal,
+	runDirOwnsLiveTranscript,
+	runSummary,
+	textFromAssistant,
+	trimPane,
+	truncateToolText,
+} = __test__;
 
 function makeRun(overrides: Partial<RunRecord> = {}): RunRecord {
 	return {
@@ -38,8 +47,44 @@ test("isTerminal covers exactly the settled statuses", () => {
 	assert.equal(isTerminal("completed"), true);
 	assert.equal(isTerminal("failed"), true);
 	assert.equal(isTerminal("cancelled"), true);
+	// Interrupted is terminal: nothing more will arrive on its own, so wait must
+	// stop, clean must skip and resume must be allowed.
+	assert.equal(isTerminal("interrupted"), true);
 	assert.equal(isTerminal("running"), false);
 	assert.equal(isTerminal("queued"), false);
+});
+
+test("holdsChild separates terminal from still-alive", () => {
+	// The pair is the whole contract of the interrupted status: terminal for
+	// waiting, alive for anything that would destroy or free the child.
+	assert.equal(holdsChild("queued"), true);
+	assert.equal(holdsChild("running"), true);
+	assert.equal(holdsChild("interrupted"), true);
+	assert.equal(holdsChild("completed"), false);
+	assert.equal(holdsChild("failed"), false);
+	assert.equal(holdsChild("cancelled"), false);
+});
+
+test("runDirOwnsLiveTranscript counts an interrupted run as a live holder", () => {
+	// Regression: with isTerminal here, cleaning an ancestor's run dir would
+	// unlink a transcript an interrupted child still has open.
+	const ancestor = makeRun({ id: "ancestor", runDir: "/tmp/runs/ancestor", status: "completed" });
+	const interrupted = makeRun({
+		id: "interrupted",
+		runDir: "/tmp/runs/interrupted",
+		status: "interrupted",
+		sessionFile: "/tmp/runs/ancestor/session/standalone.jsonl",
+	});
+	const runs = new Map([
+		[ancestor.id, ancestor],
+		[interrupted.id, interrupted],
+	]);
+	assert.equal(runDirOwnsLiveTranscript(ancestor, runs), true);
+	assert.equal(runDirOwnsLiveTranscript(interrupted, runs), false);
+
+	// Once the interrupted run is cancelled the dir is free again.
+	interrupted.status = "cancelled";
+	assert.equal(runDirOwnsLiveTranscript(ancestor, runs), false);
 });
 
 test("formatDuration omits unset start and formats minutes and seconds", () => {
