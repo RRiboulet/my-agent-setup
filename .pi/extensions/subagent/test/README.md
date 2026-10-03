@@ -34,6 +34,7 @@ test.
 | `tmux.test.ts` | tmux session/socket naming, command construction, `--attach-subagent` parsing |
 | `status.test.ts` | `runSummary`, `isTerminal`, `formatDuration`, `trimPane`, `truncateToolText`, `textFromAssistant` |
 | `usage.test.ts` | child session usage/cost accounting |
+| `handoff.test.ts` | child launch argv per mode, lineage/fork session seeding, live-branch fork ordering, and the usage baseline |
 | `lifecycle.test.ts` | launch, concurrency queueing, finalisation, failure detection, cancel, wait, status, clean, shutdown stops the watcher |
 | `helpers.ts` | env/temp-dir isolation and polling helpers |
 

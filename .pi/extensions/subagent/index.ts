@@ -62,9 +62,20 @@ import { fileURLToPath } from "node:url";
 
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
+	buildChildPiArgs,
+	countSessionLines,
+	forkLiveBranch,
+	requireExistingSession,
+	seedLineageSession,
+	usesSessionFile,
+	type LaunchMode,
+	type ParentBranchEntry,
+} from "./handoff.ts";
+import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	getAgentDir,
+	SessionManager,
 	truncateHead,
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -90,6 +101,8 @@ const DEFAULT_PROVIDER = "openrouter";
 const DEFAULT_MAX_CONCURRENT = 4;
 const GC_DAYS = 7;
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+/** Selectable handoff modes for the `subagent` tool; `resume` is not selectable. */
+const HANDOFF_MODES = ["standalone", "lineage", "fork"] as const;
 const EXTENSION_PATH = fileURLToPath(import.meta.url);
 const RESULT_MESSAGE_TYPE = "subagent-result";
 
@@ -140,6 +153,24 @@ interface RunRecord {
 	error?: string;
 	sessionFile?: string;
 	usage?: RunUsage;
+	/**
+	 * How this run was launched. `standalone` is the default and the only mode
+	 * that predates context handoff; the others address an existing session
+	 * file. Persisted, so a reload can still resume a run.
+	 */
+	mode?: LaunchMode;
+	/** Run whose session this one continues (`fork` lineage or `resume`). */
+	parentRunId?: string;
+	/** For a resumed run, the run id this attempt continues directly. */
+	resumeOf?: string;
+	/** 1 for a fresh run; incremented on each resume. */
+	attempt?: number;
+	/**
+	 * Leading lines of `sessionFile` inherited from the parent run rather than
+	 * produced by this run. Used as the usage baseline so a fork or a resume
+	 * is not charged for context it did not generate.
+	 */
+	usageFromLine?: number;
 	/** Latest child activity snapshot, reduced to what the parent needs. */
 	activity?: RunActivity;
 }
@@ -254,6 +285,56 @@ function attachToSubagentAndExit(rawTarget: string): never {
 	const result = spawnSync("tmux", args, { stdio: "inherit", env });
 	if (result.error) console.error(`Failed to run tmux: ${result.error.message}`);
 	process.exit(result.status ?? 1);
+}
+
+/**
+ * Materialise the child's session file for a handoff mode and record how many
+ * leading lines the run inherited.
+ *
+ * Called at tool-call time rather than at launch: a queued run's parent keeps
+ * talking while it waits, so snapshotting on dequeue would hand over a branch
+ * that has already moved on. `usageFromLine` becomes the usage baseline, so
+ * inherited turns are never charged to the child.
+ */
+async function prepareHandoffSession(
+	run: RunRecord,
+	ctx: ExtensionContext,
+	options: { forkLeafId?: string | null } = {},
+): Promise<void> {
+	const mode = run.mode ?? "standalone";
+	if (!usesSessionFile(mode)) return;
+
+	if (mode === "resume") {
+		// Refuse a missing transcript rather than handing pi a path it would
+		// silently turn into a fresh, empty session.
+		const existing = requireExistingSession(run.sessionFile, run.id);
+		run.sessionFile = existing;
+		run.usageFromLine = await countSessionLines(existing);
+		return;
+	}
+
+	const parentFile = ctx.sessionManager.getSessionFile();
+	if (!parentFile) throw new Error("The parent session has no session file to hand off from.");
+	const target = path.join(run.runDir, "session", `${mode}.jsonl`);
+
+	if (mode === "lineage") {
+		await seedLineageSession({ sessionFile: target, id: run.id, cwd: run.cwd, parentSession: parentFile });
+		run.sessionFile = target;
+		run.usageFromLine = 1; // header only
+		return;
+	}
+
+	// `fork`: snapshot the parent's live branch. getBranch() returns
+	// ancestors-first with the leaf last, which is exactly the order pi adopts
+	// as the active branch on load. See handoff.ts for why forkFrom is not
+	// used here.
+	const parent = SessionManager.open(parentFile);
+	const leafId = options.forkLeafId ?? parent.getLeafId();
+	const branch = parent.getBranch(leafId ?? undefined) as unknown as ParentBranchEntry[];
+	if (branch.length === 0) throw new Error("The parent session has no conversation to fork.");
+	const forked = await forkLiveBranch({ sessionFile: target, branch, id: run.id, cwd: run.cwd, parentSession: parentFile });
+	run.sessionFile = forked.sessionFile;
+	run.usageFromLine = 1 + forked.inheritedEntries; // header + inherited entries
 }
 
 function getPiInvocationParts(): string[] {
@@ -482,6 +563,9 @@ function runSummary(run: RunRecord, options: { pane?: boolean; output?: boolean 
 	if (activity) lines.push(`  activity: ${activity}`);
 	lines.push(`  tmux: ${run.tmuxSession}`, `  attach: ${run.attachCommand}`);
 	if (run.sessionFile) lines.push(`  child session: ${run.sessionFile}`);
+	if (run.mode && run.mode !== "standalone") lines.push(`  handoff: ${run.mode}`);
+	if (run.resumeOf) lines.push(`  resumed from: ${run.resumeOf}`);
+	if (run.attempt && run.attempt > 1) lines.push(`  attempt: ${run.attempt}`);
 	if (options.pane && run.pane) lines.push("", run.pane);
 	if (options.output && run.output) lines.push("", run.output);
 	if (run.error && !(options.output && run.output?.includes(run.error))) lines.push("", `Error: ${run.error}`);
@@ -620,7 +704,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			run.error = result.error.trim();
 		}
 		run.output = truncateToolText(output || "(no text output)");
-		run.usage = (await readSessionUsage(run.sessionFile)) ?? run.usage;
+		run.usage = (await readSessionUsage(run.sessionFile, { fromLine: run.usageFromLine ?? 0 })) ?? run.usage;
 		await persist();
 		await notifyCompletion(run);
 		scheduleReap(run);
@@ -748,26 +832,20 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			if (remain.code !== 0) throw new Error(remain.stderr.trim() || "Failed to set remain-on-exit.");
 
 			const promptPath = path.join(run.runDir, "task.md");
-			const sessionDir = path.join(run.runDir, "session");
-			const piArgs = [
-				...getPiInvocationParts(),
-				"--provider",
-				run.provider,
-				"--model",
-				run.model,
-				"--thinking",
-				run.thinking,
-				"--session-dir",
-				sessionDir,
-				"--session-id",
-				run.id,
-				"--name",
-				run.tmuxSession,
-				run.trusted ? "--approve" : "--no-approve",
-				"--extension",
-				EXTENSION_PATH,
-				`@${promptPath}`,
-			];
+			const piArgs = buildChildPiArgs({
+				mode: run.mode ?? "standalone",
+				invocation: getPiInvocationParts(),
+				provider: run.provider,
+				model: run.model,
+				thinking: run.thinking,
+				sessionDir: path.join(run.runDir, "session"),
+				sessionFile: run.sessionFile,
+				sessionId: run.id,
+				tmuxSession: run.tmuxSession,
+				trusted: run.trusted,
+				extensionPath: EXTENSION_PATH,
+				promptPath,
+			});
 			const childCommand = [
 				"exec env",
 				`${CHILD_ENV}=1`,
@@ -908,6 +986,12 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 					description: "Thinking level override. Defaults to the current thinking level.",
 				}),
 			),
+			handoff: Type.Optional(
+				StringEnum(HANDOFF_MODES, {
+					description:
+						"Context handoff for the child. 'standalone' (default) starts with no context. 'lineage' links the child to this session via its header but shares no context. 'fork' seeds the child with this conversation's live branch, so it already knows the task's background; the child's own usage is then counted separately from the inherited turns.",
+				}),
+			),
 		}),
 
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
@@ -920,6 +1004,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 
 			const selectedModel = resolveModel(ctx, params.provider, params.model);
 			const thinking = params.thinking ?? pi.getThinkingLevel();
+			const mode = (params.handoff ?? "standalone") as LaunchMode;
 			const id = randomUUID();
 			const runDir = path.join(sessionRunsDir, id);
 			const resultPath = path.join(runDir, "result.json");
@@ -941,6 +1026,8 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 				trusted: false,
 				status: "queued",
 				createdAt: Date.now(),
+				mode,
+				attempt: 1,
 			};
 			run.trusted = isSameOrDescendant(path.resolve(ctx.cwd), cwd) && ctx.isProjectTrusted();
 			updateTmuxCommands(run);
@@ -951,6 +1038,13 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 				encoding: "utf8",
 				mode: 0o600,
 			});
+
+			// Snapshot the handoff now, while the parent's branch is the one the
+			// user just asked about, rather than at launch once the run is dequeued.
+			if (usesSessionFile(mode)) {
+				const leafId = ctx.sessionManager.getLeafId();
+				await prepareHandoffSession(run, ctx, { forkLeafId: leafId });
+			}
 
 			await startRun(run);
 
@@ -1053,6 +1147,87 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	});
 
 	pi.registerTool({
+		name: "subagent_resume",
+		label: "Subagent Resume",
+		description:
+			"Continue a finished subagent conversation by id with a follow-up message. The child's existing session file is reopened and appended to, so it keeps its full prior context and the run is tracked as a new attempt with a fresh tmux session. Unlike a fork, no context is copied: this is the same child session, continued.",
+		promptSnippet: "Continue a finished subagent conversation with a follow-up message",
+		parameters: Type.Object({
+			id: Type.String({ description: "Run id to resume." }),
+			message: Type.String({ description: "Follow-up instructions for the child." }),
+		}),
+
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			await ensureSessionPaths(ctx);
+			const message = params.message.trim();
+			if (!message) throw new Error("Resume message must not be empty.");
+			const previous = runs.get(params.id.trim());
+			if (!previous) throw new Error(`Unknown subagent run: ${params.id.trim()}`);
+			if (!isTerminal(previous.status)) {
+				return {
+					content: [{ type: "text", text: `Subagent ${previous.id} is still ${previous.status}; cancel it before resuming.` }],
+					details: previous,
+				};
+			}
+
+			// The transcript outlives the tmux session, so the conversation is
+			// still there. If it is not, fail loudly instead of letting pi
+			// silently open an empty session.
+			const sessionFile = requireExistingSession(previous.sessionFile, previous.id);
+
+			const id = randomUUID();
+			const runDir = path.join(sessionRunsDir, id);
+			const tmuxSession = tmuxSessionName(id);
+			const run: RunRecord = {
+				...previous,
+				id,
+				task: `${previous.task}\n\n[resume ${new Date().toISOString()}] ${message}`,
+				tmuxSession,
+				tmuxTarget: `${tmuxSession}:0.0`,
+				attachCommand: "",
+				captureCommand: "",
+				killCommand: "",
+				runDir,
+				resultPath: path.join(runDir, "result.json"),
+				status: "queued",
+				createdAt: Date.now(),
+				startedAt: undefined,
+				finishedAt: undefined,
+				pane: undefined,
+				output: undefined,
+				error: undefined,
+				usage: undefined,
+				activity: undefined,
+				mode: "resume",
+				resumeOf: previous.id,
+				parentRunId: previous.resumeOf ?? previous.id,
+				attempt: (previous.attempt ?? 1) + 1,
+				sessionFile,
+			};
+			updateTmuxCommands(run);
+
+			await mkdir(runDir, { recursive: true, mode: 0o700 });
+			await mkdir(path.join(runDir, "session"), { recursive: true, mode: 0o700 });
+			await writeFile(path.join(runDir, "task.md"), `# Delegated task\n\n${message}\n`, {
+				encoding: "utf8",
+				mode: 0o600,
+			});
+			// Only the child's new turns are charged to this attempt.
+			run.usageFromLine = await countSessionLines(sessionFile);
+
+			await startRun(run);
+
+			const lines = [
+				`Resumed subagent ${previous.id} as ${id} (attempt ${run.attempt}).`,
+				`Follow-up: ${message.split("\n", 1)[0] ?? message}`,
+				`Session: ${sessionFile}`,
+				`Attach: ${run.attachCommand}`,
+			];
+			return { content: [{ type: "text", text: lines.join("\n") }], details: run };
+		},
+	});
+
+	pi.registerTool({
 		name: "subagent_wait",
 		label: "Subagent Wait",
 		description:
@@ -1140,6 +1315,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			let killed = 0;
 			let deleted = 0;
 			let skipped = 0;
+			let deletedTranscripts = 0;
 			for (const run of targets) {
 				if (!isTerminal(run.status)) {
 					skipped++;
@@ -1153,15 +1329,26 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 				await killTmuxSession(run);
 				killed++;
 				if (deleteFiles && run.runDir) {
+					// Auto-reap only kills tmux, so the transcript normally
+					// outlives the run and stays resumable. Deleting the run dir
+					// destroys it, so say so rather than losing a conversation
+					// the user may still want to resume.
+					if (run.sessionFile && existsSync(run.sessionFile)) deletedTranscripts++;
 					await rm(run.runDir, { recursive: true, force: true }).catch(() => undefined);
 					deleted++;
 					if (runs.get(run.id) === run) runs.delete(run.id);
 				}
 			}
 			if (deleteFiles) await persist();
+			const summary = [`Cleaned ${killed} tmux session(s), deleted ${deleted} run dir(s), skipped ${skipped}.`];
+			if (deleteFiles && deletedTranscripts > 0) {
+				summary.push(
+					`Also deleted ${deletedTranscripts} child session transcript(s); those runs can no longer be resumed.`,
+				);
+			}
 			return {
-				content: [{ type: "text", text: `Cleaned ${killed} tmux session(s), deleted ${deleted} run dir(s), skipped ${skipped}.` }],
-				details: { killed, deleted, skipped },
+				content: [{ type: "text", text: summary.join("\n") }],
+				details: { killed, deleted, skipped, deletedTranscripts },
 			};
 		},
 	});
@@ -1294,10 +1481,12 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 export const __test__ = {
 	abortableDelay,
 	attachFlagValue,
+	buildChildPiArgs,
 	findLastAssistant,
 	formatDuration,
 	isSameOrDescendant,
 	isTerminal,
+	prepareHandoffSession,
 	readBooleanEnv,
 	readIntEnv,
 	readNonNegativeIntEnv,
@@ -1315,3 +1504,4 @@ export const __test__ = {
 };
 
 export type { ChildResult, RunRecord, RunStatus };
+export type { LaunchMode } from "./handoff.ts";

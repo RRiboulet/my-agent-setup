@@ -4,6 +4,13 @@
 // directory. We sum the usage reported on assistant messages (and any nested
 // LLM work recorded on tool results) so `subagent_status` and the `/subagents`
 // overlay can show tokens and cost per run.
+//
+// A forked child inherits its parent's transcript verbatim, and a resumed run
+// keeps the entries written by its earlier attempts. Summing the whole file
+// would report that inherited context as work this run did, double-counting
+// every token across parent and child. Callers therefore pass `fromLine`, the
+// number of leading lines the run inherited, and only the remainder is
+// attributed to the run.
 
 import { readFile } from "node:fs/promises";
 
@@ -40,7 +47,10 @@ function accumulate(target: RunUsage, usage: RawUsage, countTurn: boolean): void
 	if (countTurn) target.turns += 1;
 }
 
-export async function readSessionUsage(sessionFile: string | undefined): Promise<RunUsage | undefined> {
+export async function readSessionUsage(
+	sessionFile: string | undefined,
+	options: { fromLine?: number } = {},
+): Promise<RunUsage | undefined> {
 	if (!sessionFile) return undefined;
 
 	let content: string;
@@ -60,7 +70,10 @@ export async function readSessionUsage(sessionFile: string | undefined): Promise
 		turns: 0,
 	};
 
-	for (const line of content.split("\n")) {
+	const fromLine = Math.max(0, options.fromLine ?? 0);
+	const lines = content.split("\n");
+	for (const [index, line] of lines.entries()) {
+		if (index < fromLine) continue;
 		if (!line.trim()) continue;
 		let entry: { type?: string; message?: { role?: string; usage?: RawUsage } };
 		try {
