@@ -21,7 +21,7 @@ inactive.
 
 | Path | What it is |
 |---|---|
-| `extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent`, `subagent_status`, `subagent_wait`, `subagent_cancel`, `subagent_clean`, and a live child-activity phase |
+| `extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent`, `subagent_status`, `subagent_wait`, `subagent_resume`, `subagent_cancel`, `subagent_clean`, and a live child-activity phase |
 | `extensions/todos.ts` | `/todos` TUI and the `todo` tool |
 | `extensions/answer.ts` | `/answer`: extract questions from the last response and answer them in a focused TUI |
 | `extensions/native-web-search.ts` | Native web search tool (ships with `skills/native-web-search/`) |

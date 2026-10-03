@@ -35,9 +35,10 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
+import { CURRENT_SESSION_VERSION } from "@earendil-works/pi-coding-agent";
 
-/** Mirrors `CURRENT_SESSION_VERSION` in pi's session-manager. */
-export const SESSION_VERSION = 3;
+/** Mirrors pi's `CURRENT_SESSION_VERSION`, which is exported from its entry point. */
+export const SESSION_VERSION = CURRENT_SESSION_VERSION;
 
 export type LaunchMode = "standalone" | "lineage" | "fork" | "resume";
 
@@ -70,21 +71,18 @@ export interface ChildLaunchSpec {
  * anything. Throws rather than emitting a combination pi would reject at exit.
  */
 export function buildChildPiArgs(spec: ChildLaunchSpec): string[] {
-	const usesSessionFile = SESSION_FILE_MODES.has(spec.mode);
+	const fileMode = usesSessionFile(spec.mode);
 
-	if (usesSessionFile && !spec.sessionFile) {
+	if (fileMode && !spec.sessionFile) {
 		throw new Error(`launch mode ${spec.mode} requires a sessionFile`);
 	}
-	if (!usesSessionFile && !spec.sessionDir) {
-		throw new Error(`launch mode ${spec.mode} requires a sessionDir`);
-	}
-	if (!usesSessionFile && !spec.sessionId) {
-		throw new Error(`launch mode ${spec.mode} requires a sessionId`);
+	if (!fileMode && (!spec.sessionDir || !spec.sessionId)) {
+		throw new Error(`launch mode ${spec.mode} requires a sessionDir and a sessionId`);
 	}
 
 	// pi rejects --session together with --session-id, so exactly one form of
 	// session addressing may appear.
-	const sessionArgs = usesSessionFile
+	const sessionArgs = fileMode
 		? ["--session", spec.sessionFile as string]
 		: ["--session-dir", spec.sessionDir as string, "--session-id", spec.sessionId as string];
 

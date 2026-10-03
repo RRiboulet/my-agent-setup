@@ -20,6 +20,7 @@ const REQUIRED_HELPERS = [
 	"readIntEnv",
 	"readNonNegativeIntEnv",
 	"resolveModel",
+	"runDirOwnsLiveTranscript",
 	"runSummary",
 	"shellQuote",
 	"textFromAssistant",

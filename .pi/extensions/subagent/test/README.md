@@ -56,8 +56,13 @@ size:
   result writing and the shutdown fallback still need a real child pi process.
 - **`attachToSubagentAndExit`** (~214-270) — ends in `process.exit`, so it needs
   a real terminal; the legacy `v1.` target decode is untested.
-- **`subagent_clean` `all_sessions` / `delete_files`** (~1119-1135) — only the
-  in-session path is covered.
+- **`subagent_clean` `all_sessions`** — only the in-session path is covered;
+  `delete_files` in-session is now covered, including the transcript accounting
+  and the retention of a run dir that still owns a live run's session file.
+- **Context handoff against a real child.** `handoff.test.ts` and the lifecycle
+  tests cover the argv, the seeded session files and the usage baseline without
+  launching pi, but the end-to-end path — a real `pi` opening a forked or
+  resumed transcript — needs credentials and is not part of the suite.
 - **long-poll behaviour** — the fake always reports `pane_dead = "1"`, so
   "pane still alive, keep waiting" is untested; `pi.exec`'s `timeout` option is
   ignored by the fake, so no timeout or abort path runs.

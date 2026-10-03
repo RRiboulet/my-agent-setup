@@ -49,6 +49,16 @@
 //     snapshot path is derived from the result path the child already receives,
 //     so no extra environment variable is needed. It is diagnostic only:
 //     completion, cancellation and failure never depend on it.
+// 12. Context handoff (see handoff.ts): the `subagent` tool gains a `handoff`
+//     parameter (`standalone` | `lineage` | `fork`) and a `subagent_resume`
+//     tool. The child argv is built by `buildChildPiArgs`, which never emits
+//     `--session` together with `--session-id` because pi hard-exits on the
+//     combination. `fork` writes the parent's LIVE branch rather than using
+//     `SessionManager.forkFrom`, which copies every entry and would therefore
+//     adopt the source file's last line as the active branch. Runs carry a
+//     `usageFromLine` baseline so inherited turns are not billed to the child.
+//     `subagent_clean` retains a run dir that still owns a live run's session
+//     file, because a resumed run keeps its ancestor's transcript.
 //
 // The child reporter (CHILD_ENV) still reports completion the same way; patch 11
 // only adds the activity snapshot to it.
@@ -158,8 +168,6 @@ interface RunRecord {
 	 * file. Persisted, so a reload can still resume a run.
 	 */
 	mode?: LaunchMode;
-	/** Run whose session this one continues (`fork` lineage or `resume`). */
-	parentRunId?: string;
 	/** For a resumed run, the run id this attempt continues directly. */
 	resumeOf?: string;
 	/** 1 for a fresh run; incremented on each resume. */
@@ -296,17 +304,10 @@ function attachToSubagentAndExit(rawTarget: string): never {
  * inherited turns are never charged to the child.
  */
 async function prepareHandoffSession(run: RunRecord, ctx: ExtensionContext): Promise<void> {
+	// `resume` never reaches here: the `subagent` tool's enum excludes it and
+	// `subagent_resume` handles its own baseline. See subagent_resume.
 	const mode = run.mode ?? "standalone";
 	if (!usesSessionFile(mode)) return;
-
-	if (mode === "resume") {
-		// Refuse a missing transcript rather than handing pi a path it would
-		// silently turn into a fresh, empty session.
-		const existing = requireExistingSession(run.sessionFile, run.id);
-		run.sessionFile = existing;
-		run.usageFromLine = await countSessionLines(existing);
-		return;
-	}
 
 	const parentFile = ctx.sessionManager.getSessionFile();
 	if (!parentFile) throw new Error("The parent session has no session file to hand off from.");
@@ -1217,7 +1218,10 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			const run: RunRecord = {
 				...previous,
 				id,
-				task: `${previous.task}\n\n[resume ${new Date().toISOString()}] ${message}`,
+				// The follow-up becomes this attempt's task; the original stays on the
+				// ancestor record, which `resumeOf` points at. Appending instead
+				// would grow the field without bound across attempts.
+				task: message,
 				tmuxSession,
 				tmuxTarget: `${tmuxSession}:0.0`,
 				attachCommand: "",
@@ -1236,7 +1240,6 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 				activity: undefined,
 				mode: "resume",
 				resumeOf: previous.id,
-				parentRunId: previous.resumeOf ?? previous.id,
 				attempt: (previous.attempt ?? 1) + 1,
 				sessionFile,
 			};
@@ -1535,16 +1538,15 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 export const __test__ = {
 	abortableDelay,
 	attachFlagValue,
-	buildChildPiArgs,
 	findLastAssistant,
 	formatDuration,
 	isSameOrDescendant,
 	isTerminal,
-	prepareHandoffSession,
 	readBooleanEnv,
 	readIntEnv,
 	readNonNegativeIntEnv,
 	resolveModel,
+	runDirOwnsLiveTranscript,
 	runSummary,
 	shellQuote,
 	textFromAssistant,
@@ -1558,4 +1560,3 @@ export const __test__ = {
 };
 
 export type { ChildResult, RunRecord, RunStatus };
-export type { LaunchMode } from "./handoff.ts";

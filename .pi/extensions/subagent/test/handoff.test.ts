@@ -25,7 +25,7 @@ import {
 	type ChildLaunchSpec,
 } from "../handoff.ts";
 import { readSessionUsage } from "../usage.ts";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { CURRENT_SESSION_VERSION, SessionManager } from "@earendil-works/pi-coding-agent";
 
 const BASE: ChildLaunchSpec = {
 	mode: "standalone",
@@ -96,8 +96,8 @@ test("session-file modes refuse to launch without a file", () => {
 });
 
 test("standalone refuses to launch without a dir or id", () => {
-	assert.throws(() => buildChildPiArgs(specFor({ sessionDir: undefined })), /requires a sessionDir/);
-	assert.throws(() => buildChildPiArgs(specFor({ sessionId: undefined })), /requires a sessionId/);
+	assert.throws(() => buildChildPiArgs(specFor({ sessionDir: undefined })), /requires a sessionDir and a sessionId/);
+	assert.throws(() => buildChildPiArgs(specFor({ sessionId: undefined })), /requires a sessionDir and a sessionId/);
 });
 
 test("usesSessionFile distinguishes addressed modes", () => {
@@ -110,8 +110,10 @@ test("usesSessionFile distinguishes addressed modes", () => {
 test("the session header is v3 and records the parent session", () => {
 	const header = buildSessionHeader({ id: "abc", cwd: "/w", parentSession: "/p.jsonl" });
 	assert.equal(header.type, "session");
-	assert.equal(header.version, SESSION_VERSION);
-	assert.equal(SESSION_VERSION, 3);
+	// Asserted against pi's own export, not a hardcoded literal, so this fails
+	// when pi moves to a new session version instead of silently drifting.
+	assert.equal(SESSION_VERSION, CURRENT_SESSION_VERSION);
+	assert.equal(header.version, CURRENT_SESSION_VERSION);
 	assert.equal(header.id, "abc");
 	assert.equal(header.cwd, "/w");
 	assert.equal(header.parentSession, "/p.jsonl");
