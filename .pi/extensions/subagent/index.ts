@@ -96,6 +96,17 @@
 //     that would duplicate notifyCompletion. The classifier is display-only — it
 //     cannot finish, fail or interrupt anything — and `interrupted` is
 //     authoritative over it.
+// 15. Lazy tool exposure (see resolveManagementExposure and
+//     registerManagementTools): the five management tools — status, cancel,
+//     interrupt, resume, clean — are registered at `session_start` with pi's
+//     `exposure: "codemode"` when `codemode` or `tool_search` is active, so their
+//     descriptions, schemas, snippets and guidelines stop riding along on requests
+//     that never use them. `subagent` itself stays declared: it is the entry point,
+//     and a model that cannot start a run has no reason to search for the tools
+//     that manage one. Registration is deferred because pi's getActiveTools() and
+//     getSettings() throw during extension load, so the question cannot be asked
+//     earlier — and re-registering later would NOT work, because pi declares the
+//     ACTIVE set and a tool activated on registration stays active.
 //
 // The child reporter (CHILD_ENV) still reports completion the same way; patch 11
 // only adds the activity snapshot to it, and patch 13 only diverts the aborted
@@ -126,6 +137,8 @@ import {
 	truncateHead,
 	type ExtensionAPI,
 	type ExtensionContext,
+	type ToolDefinition,
+	type ToolExposure,
 } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -181,6 +194,7 @@ const DEFAULT_TOOL_STALL_SECONDS = DEFAULT_TOOL_STALL_AFTER_MS / 1000;
 const WIDGET_TICK_MS = 1_000;
 /** Widget key, so pi can replace and clear our widget without touching others. */
 const WIDGET_KEY = "subagent-status";
+
 /** How many consecutive unclassifiable tmux failures mean the child is gone. */
 const MAX_TRANSIENT_TMUX_FAILURES = 3;
 /** Poll cadence while waiting for a child to confirm an interrupt. */
@@ -744,11 +758,26 @@ function observationFromRead(read: ActivityReadResult): StatusObservation {
 }
 
 /**
+ * The exposure to register the management tools with, or undefined for `direct`.
+ *
+ * `undefined` means "declare them as usual", which is always correct — a tool the
+ * model cannot find is worse than one it pays for — so this can only ever lose the
+ * saving, never a capability.
+ */
+function resolveManagementExposure(activeTools: readonly string[]): ToolExposure | undefined {
+	// `getActiveTools()` is the RESOLVED set: settings layers, `--tools` and
+	// `/tools` have all been applied by the time this runs, and only a genuinely
+	// active tool can reach the model on demand. Reading the settings layer as well
+	// would hide the tools in exactly the case where `--tools` switched codemode off.
+	return activeTools.some((name) => name === "codemode" || name === "tool_search") ? "codemode" : undefined;
+}
+
+/**
  * Run `callback` every `intervalMs`, returning the function that stops it.
  *
- * `unref` matters: a widget ticker must never be the reason a session's event
- * loop stays alive (local patch 10). Module level and dependency-free so the
- * mechanism can be tested without a terminal, a tmux server or a run.
+ * `unref` matters: a widget ticker must never be the reason a session's event loop
+ * stays alive (local patch 10). Module level and dependency-free so the mechanism
+ * can be tested without a terminal, a tmux server or a run.
  */
 function startRepeatingRefresh(callback: () => void, intervalMs: number): () => void {
 	const timer = setInterval(callback, intervalMs);
@@ -1113,6 +1142,40 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			return undefined;
 		}
 	};
+
+// --- Lazy tool exposure (local patch 15) -------------------------------------
+//
+// The management tools (status, cancel, interrupt, resume, clean) cost a request
+// nothing when they are not used: their descriptions, parameter schemas, prompt
+// snippets and guidelines are declared to the model on every call. pi already has
+// a mechanism for that — a tool with `exposure: "codemode"` is never activated
+// (`_isActivatedOnRegistration` requires a declarable exposure), so it is never
+// declared, while remaining callable from a codemode script or after
+// `tool_search` loads it.
+//
+// Registration is therefore DEFERRED to `session_start`, and that is forced, not
+// chosen: pi's `getActiveTools()` and `getSettings()` throw during extension load
+// ("Extension runtime not initialized"), so "is codemode available?" cannot be
+// asked until the runtime binds. Registering at load and re-registering with a
+// different exposure does NOT work — the declared set is built from the ACTIVE
+// set (`_applyToolLoadout`), and a tool activated on registration stays active.
+//
+// Nothing can call a tool before the session starts, so deferring costs nothing.
+
+/** Register the management tools, hidden if pi can reach them another way. */
+const registerManagementTools = (): void => {
+	let exposure: ToolExposure | undefined;
+	try {
+		exposure = resolveManagementExposure(pi.getActiveTools());
+	} catch (error) {
+		// Not worth failing a session over: without an answer the tools are simply
+		// declared, which is always correct.
+		console.error(`[tmux-subagent] could not resolve tool exposure: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	for (const tool of managementToolDefinitions) {
+		pi.registerTool(exposure ? { ...tool, exposure } : tool);
+	}
+};;
 
 // --- Live widget (local patch 14) ---------------------------------------------
 //
@@ -1616,6 +1679,7 @@ const noteInterrupt = async (
 
 	pi.on("session_start", async (_event, ctx) => {
 		await ensureSessionPaths(ctx);
+		registerManagementTools();
 		// Remember where the widget would live, but do not install it yet: pi
 		// re-arms this extension on reload, and an idle session must not leave an
 		// empty strip above the editor. The first live run installs it.
@@ -1663,11 +1727,12 @@ const noteInterrupt = async (
 		name: "subagent",
 		label: "Subagent",
 		description:
-			"Start a delegated task in a separate interactive Pi process inside a detached tmux session and return immediately. The main agent is not blocked and may start more subagents or keep working. Runs execute concurrently (bounded by PI_SUBAGENT_MAX_CONCURRENT, default 4); extra runs are queued. Children inherit the current provider/model/thinking, defaulting the provider to OpenRouter. Use subagent_status to inspect progress and collect results (subagent_status({ id }) returns that run's output once it finishes), subagent_interrupt to abort a run's current turn while keeping its child alive, and subagent_cancel to stop a run outright. There is no blocking wait: poll subagent_status. Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.",
+			"Start a delegated task in a separate interactive Pi process inside a detached tmux session and return immediately. The main agent is not blocked and may start more subagents or keep working. Runs execute concurrently (bounded by PI_SUBAGENT_MAX_CONCURRENT, default 4); extra runs are queued. Children inherit the current provider/model/thinking, defaulting the provider to OpenRouter. Use subagent_status to inspect progress and collect results (subagent_status({ id }) returns that run's output once it finishes), subagent_interrupt to abort a run's current turn while keeping its child alive, and subagent_cancel to stop a run outright. There is no blocking wait: poll subagent_status. The other subagent tools (cancel, interrupt, resume, clean) are not declared while `codemode` or `tool_search` is active — call `tool_search` (or `tools.<name>(...)` in codemode) to reach them. Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.",
 		promptSnippet: "Start a delegated, non-blocking, tmux-backed Pi subagent",
 		promptGuidelines: [
 			"Use subagent to delegate an isolated task without blocking: it returns immediately, so start several when useful and keep working.",
 			"Collect a finished run's output with subagent_status({ id }); there is no blocking wait, so poll it rather than blocking the turn.",
+			"cancel, interrupt, resume and clean are not declared while codemode or tool_search is active: reach them with tool_search, or tools.<name>(...) in a codemode script.",
 			"To stop a run that is going the wrong way, prefer subagent_interrupt (keeps the child and its transcript, then attach to steer it) over subagent_cancel (throws the run away). An interrupted run still occupies a concurrency slot until it is cancelled, so cancel the ones you are done with.",
 			"subagent_resume needs a run whose child is really gone: cancel or finish it first, or attach to an interrupted run and type the follow-up there.",
 		],
@@ -1782,7 +1847,11 @@ const noteInterrupt = async (
 		},
 	});
 
-	pi.registerTool({
+	// The management tools, registered by `registerManagementTools` once the
+	// runtime is bound and their exposure is known. `subagent` above is not: it is
+	// the entry point, and it stays declared.
+	const managementToolDefinitions: ToolDefinition[] = [
+	{
 		name: "subagent_status",
 		label: "Subagent Status",
 		description:
@@ -1831,9 +1900,9 @@ const noteInterrupt = async (
 				.join("\n\n");
 			return { content: [{ type: "text", text }], details: { runs: runsArray } };
 		},
-	});
+	},
 
-	pi.registerTool({
+	{
 		name: "subagent_cancel",
 		label: "Subagent Cancel",
 		description: "Cancel a subagent run by id: kill its tmux session and mark it cancelled.",
@@ -1863,9 +1932,9 @@ const noteInterrupt = async (
 			void drainQueue();
 			return { content: [{ type: "text", text: `Subagent ${id} cancelled.` }], details: run };
 		},
-	});
+	},
 
-	pi.registerTool({
+	{
 		name: "subagent_interrupt",
 		label: "Subagent Interrupt",
 		description:
@@ -1958,9 +2027,9 @@ const noteInterrupt = async (
 							];
 			return { content: [{ type: "text", text: lines.join("\n") }], details: run };
 		},
-	});
+	},
 
-	pi.registerTool({
+	{
 		name: "subagent_resume",
 		label: "Subagent Resume",
 		description:
@@ -2075,9 +2144,9 @@ const noteInterrupt = async (
 			];
 			return { content: [{ type: "text", text: lines.join("\n") }], details: run };
 		},
-	});
+	},
 
-	pi.registerTool({
+	{
 		name: "subagent_clean",
 		label: "Subagent Clean",
 		description:
@@ -2181,8 +2250,8 @@ const noteInterrupt = async (
 				details: { killed, deleted, skipped, deletedTranscripts },
 			};
 		},
-	});
-
+	},
+	];
 }
 
 // Internals exposed for unit tests. See local patch 9 in the header comment.
@@ -2199,6 +2268,7 @@ export const __test__ = {
 	readBooleanEnv,
 	readIntEnv,
 	readNonNegativeIntEnv,
+	resolveManagementExposure,
 	resolveModel,
 	runDirOwnsLiveTranscript,
 	runSummary,

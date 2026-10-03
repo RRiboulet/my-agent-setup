@@ -17,6 +17,7 @@ const {
 	isSameOrDescendant,
 	isTerminal,
 	runDirOwnsLiveTranscript,
+	resolveManagementExposure,
 	runSummary,
 	startRepeatingRefresh,
 	statusDetail,
@@ -104,6 +105,20 @@ test("startRepeatingRefresh fires and, crucially, can be stopped", async () => {
 	assert.equal(ticks, settled, "stop() must end the timer, not merely ignore its callback");
 	// Stopping twice is harmless: session_shutdown can run after a run leaves.
 	stop();
+});
+
+test("resolveManagementExposure hides the tools only when pi can reach them on demand", () => {
+	// Nothing to reach them with: they must stay declared. A tool the model cannot
+	// find is worse than one it pays for, so this is the only safe default.
+	assert.equal(resolveManagementExposure(["read", "bash", "edit", "write"]), undefined);
+	assert.equal(resolveManagementExposure([]), undefined);
+	// An unrelated tool must not trigger it, and a similarly named one must not
+	// either — the test is not "any extra tool".
+	assert.equal(resolveManagementExposure(["read", "bash", "subagent", "mcp__thing__codemode"]), undefined);
+
+	// Either mechanism is enough.
+	assert.equal(resolveManagementExposure(["read", "codemode"]), "codemode");
+	assert.equal(resolveManagementExposure(["tool_search"]), "codemode");
 });
 
 test("statusDetail renders one qualifier per kind", () => {

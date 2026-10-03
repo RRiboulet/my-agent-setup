@@ -105,13 +105,25 @@ Integers are parsed strictly: `"3m"`, `"1e9"` and `"3.9"` are ignored in favour 
 the default, because a threshold silently shortened by a typo is worse than one
 that was never set.
 
+## Tool exposure
+
+`lifecycle.test.ts` covers local patch 15: the five management tools are
+registered once at `session_start` with `exposure: "codemode"` when the harness
+reports `codemode`/`tool_search` active, and plain otherwise; `subagent` is never
+hidden; a settings layer that names codemode while the active set does not is
+correctly ignored (the active set is pi's resolved truth); and an unbound `pi`
+(which throws from `getActiveTools`, exactly as pi does before the runtime binds)
+leaves everything declared.
+
 ## Flakiness
 
-The watcher-driven assertions (a result appearing, a run failing because its tmux
-target vanished) poll with a 20s bound rather than `waitFor`'s 5s default. They
-take ~2s in isolation, and node runs test files in parallel, so the headroom is
-for a loaded machine — not a licence for a multi-minute stall. A failure at that
-bound is a real failure, not a slow test.
+`waitFor` polls with a 30s bound, because `node --test` runs test FILES in
+parallel and a 500ms watcher timer on a loaded machine can slip by seconds — a
+tight default turned "the machine was busy" into a red suite several times.
+These waits take well under a second in practice, so the bound only fires for a
+real break. `waitForRunStatus` goes further for run transitions: when it gives up
+it reports the last persisted run record and the tmux poll counts, so a failure
+says whether the watcher died or the machine was slow.
 
 ## Manual check for turn-level interrupt
 

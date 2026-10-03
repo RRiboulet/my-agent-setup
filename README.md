@@ -55,6 +55,20 @@ The subagent extension reads `PI_SUBAGENT_*` environment variables —
 `PI_SUBAGENT_TOOL_STALL_SECONDS`. The test README documents what each one does;
 the header comment in `.pi/extensions/subagent/index.ts` lists the local patches.
 
+The subagent management tools (`subagent_status`, `subagent_cancel`,
+`subagent_interrupt`, `subagent_resume`, `subagent_clean`) are hidden from the
+model's tool declarations when pi can reach them another way — that is, when
+`codemode` or `tool_search` is in your tool set:
+
+```jsonc
+// ~/.pi/agent/settings.json
+{ "defaultTools": ["read", "bash", "edit", "write", "+codemode", "+tool_search"] }
+```
+
+`tool_search` then loads one when the model asks for it, and a codemode script
+can call it as `tools.subagent_status({ id })`. Without either tool they stay
+declared exactly as before, so nothing depends on this being switched on.
+
 Subagent delegation is non-blocking: start independent tasks together and poll
 with `subagent_status`. There is no blocking wait, and a finishing run never
 takes the turn — its notification is appended to the transcript and the model

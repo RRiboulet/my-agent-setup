@@ -38,6 +38,10 @@ interface Harness {
 	failPaneAlways: () => void;
 	/** setWidget calls, in order. An `undefined` content is a clear. */
 	widgetCalls: { key: string; hasContent: boolean; placement: string | undefined }[];
+	/** Every registerTool call, in order, with the exposure it was given. */
+	toolRegistrations: { name: string; exposure: string | undefined }[];
+	/** The exposure a tool's CURRENT definition carries. */
+	toolExposure: (name: string) => string | undefined;
 	/** Render the installed widget with the given width and return its lines. */
 	renderWidget: (width?: number) => string[] | undefined;
 	/** How many times the widget asked the TUI to re-render. */
@@ -80,6 +84,9 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 	let paneFailureMode = "";
 	// Widget plumbing (local patch 14).
 	const widgetCalls: { key: string; hasContent: boolean; placement: string | undefined }[] = [];
+	// Every registration, in order, so a test can see the load-time one and the
+	// corrected one separately.
+	const toolRegistrations: { name: string; exposure: string | undefined }[] = [];
 	const widgetComponents = new Map<string, (tui: unknown, theme: unknown) => { render: (width: number) => string[] }>();
 	let renderRequests = 0;
 	const fakeTheme = { fg: (_color: string, text: string) => text };
@@ -87,7 +94,10 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 	const pi = {
 		registerFlag: () => undefined,
 		getFlag: () => undefined,
-		registerTool: (tool: Record<string, unknown>) => tools.set(tool.name as string, tool),
+		registerTool: (tool: Record<string, unknown>) => {
+			tools.set(tool.name as string, tool);
+			toolRegistrations.push({ name: tool.name as string, exposure: (tool as { exposure?: string }).exposure });
+		},
 		registerMessageRenderer: () => undefined,
 		registerEntryRenderer: () => undefined,
 		on: (event: string, handler: (...args: unknown[]) => unknown) => {
@@ -95,6 +105,15 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 			return () => handlers.delete(event);
 		},
 		getThinkingLevel: () => "medium",
+		// Local patch 15 asks pi what is active before it decides a tool's exposure.
+		getActiveTools: () => {
+			if (options.unbound) throw new Error("Extension runtime not initialized.");
+			return options.activeTools ?? ["read", "bash", "edit", "write", "subagent"];
+		},
+		getSettings: () => {
+			if (options.unbound) throw new Error("Extension runtime not initialized.");
+			return { defaultTools: options.defaultTools };
+		},
 		sendMessage: (message: Record<string, unknown>, opts?: Record<string, unknown>) => {
 			messages.push({ message, options: opts });
 		},
@@ -190,6 +209,11 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 			paneFailures = Number.MAX_SAFE_INTEGER;
 		},
 		widgetCalls,
+		toolRegistrations,
+		toolExposure: (name: string) => {
+			const definition = tools.get(name) as { exposure?: string } | undefined;
+			return definition?.exposure;
+		},
 		renderWidget: (width = 200) => {
 			const component = [...widgetComponents.values()].at(-1);
 			if (!component) return undefined;
@@ -237,6 +261,28 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 			);
 		},
 	};
+}
+
+/**
+ * Wait for a run to reach `status`, reporting WHY it did not if it never does.
+ *
+ * A plain timeout on a watcher-driven assertion cannot distinguish "the watcher
+ * stopped" from "the machine was slow", and those are completely different bugs.
+ */
+async function waitForRunStatus(h: Harness, status: string, note = ""): Promise<RunRecord> {
+	const deadline = Date.now() + 30_000;
+	let last: RunRecord | undefined;
+	while (Date.now() < deadline) {
+		last = (await h.readRuns())[0];
+		if (last?.status === status) return last;
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
+	const panes = h.execCalls.filter((call) => call.args.includes("capture-pane")).length;
+	const displays = h.execCalls.filter((call) => call.args.includes("display-message")).length;
+	assert.fail(
+		`run never reached "${status}"${note ? ` (${note})` : ""}; last record=${JSON.stringify(last)}; ` +
+			`since the target was broken: ${panes} capture-pane, ${displays} display-message, ${h.execCalls.length} exec calls total`,
+	);
 }
 
 async function withHarness<T>(
@@ -1342,10 +1388,13 @@ test("an interrupted run fails when its tmux session disappears", async () => {
 		await waitFor(async () => (await h.readRuns())[0].status === "interrupted");
 
 		h.removeTarget();
+		h.execCalls.length = 0;
 		// Generous: this needs the watcher's next pass, and the suite runs test files
 		// in parallel, so timer resolution is not in our hands. Observed at ~2.3s
-		// alone; the bound absorbs a loaded machine, not a stall.
-		await waitFor(async () => (await h.readRuns())[0].status === "failed", 20_000);
+		// alone; the bound absorbs a loaded machine, not a stall. The poll count is
+		// asserted alongside so a timeout says WHICH thing broke — a dead watcher
+		// and a slow machine are very different failures.
+		await waitForRunStatus(h, "failed", "tmux target removed");
 		const failed = (await h.readRuns())[0];
 		assert.match(failed.error ?? "", /exited before reporting a result/);
 		assert.ok(failed.finishedAt);
@@ -1386,7 +1435,8 @@ test("an unclassifiable tmux failure fails the run only after a run of them", as
 		assert.equal((await h.readRuns())[0].status, "running", "one failure is tolerated");
 
 		h.failPaneAlways();
-		await waitFor(async () => (await h.readRuns())[0].status === "failed", 20_000);
+		h.execCalls.length = 0;
+		await waitForRunStatus(h, "failed", "unclassifiable tmux failure");
 		assert.match((await h.readRuns())[0].error ?? "", /could not be reached over tmux/);
 		assert.doesNotMatch((await h.readRuns())[0].error ?? "", /exited before reporting/);
 	});
@@ -1654,5 +1704,78 @@ test("session_shutdown clears the widget and stops its ticker", async () => {
 		const afterShutdown = h.renderRequests();
 		await new Promise((resolve) => setTimeout(resolve, 2_500));
 		assert.equal(h.renderRequests(), afterShutdown, "no render can happen after shutdown: no ticker, no watcher, no live run");
+	});
+});
+
+// --- Lazy tool exposure (local patch 15) ---
+//
+// The management tools stop being declared on every request once pi has a way to
+// reach them on demand. What matters is not losing them: a tool the model cannot
+// find is worse than one it pays for, so every path that cannot answer the
+// question must leave them declared.
+
+test("the management tools are declared when pi has no way to reach them on demand", async () => {
+	await withHarness(undefined, async (h) => {
+		for (const name of ["subagent", "subagent_status", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
+			assert.equal(h.toolExposure(name), undefined, `${name} must stay declared without codemode or tool_search`);
+		}
+		// And the fallback is not a degraded extension: they still work.
+		const run = (await h.call("subagent", { task: "still works" })).details as unknown as RunRecord;
+		assert.match((await h.call("subagent_status", { id: run.id })).text, /still works/);
+		await h.call("subagent_cancel", { id: run.id });
+	});
+});
+
+test("codemode or tool_search hides the management tools but never `subagent`", async () => {
+	// `subagent` stays declared: it is the entry point, and a model that cannot
+	// start a run has no reason to search for the tools that manage one.
+	for (const activeTools of [["read", "bash", "edit", "write", "codemode"], ["read", "tool_search"]]) {
+		await withHarness({ activeTools }, async (h) => {
+			assert.equal(h.toolExposure("subagent"), undefined, "the launch tool is always declared");
+			for (const name of ["subagent_status", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
+				assert.equal(h.toolExposure(name), "codemode", `${name} should be hidden from every request`);
+				assert.equal(
+					h.toolRegistrations.filter((entry) => entry.name === name).length,
+					1,
+					`${name} is registered exactly once: re-registering cannot un-declare a tool that was activated on registration`,
+				);
+			}
+			// Hidden from the model, not gone: still registered and still callable.
+			await h.call("subagent", { task: "reachable" });
+			assert.match((await h.call("subagent_status", {})).text, /reachable/);
+		});
+	}
+});
+
+test("a settings layer that excludes codemode leaves the tools declared", async () => {
+	// pi's declared set is built from the ACTIVE set, so `getActiveTools()` is the
+	// resolved truth. Reading the settings layer as well would have HIDDEN the
+	// tools in exactly the case where `--tools` had switched codemode off.
+	await withHarness({ activeTools: ["read", "bash"], defaultTools: ["read", "bash", "+codemode"] }, async (h) => {
+		assert.equal(h.toolExposure("subagent_status"), undefined, "the active set wins over the settings layer");
+		await h.call("subagent", { task: "still declared" });
+		assert.match((await h.call("subagent_status", {})).text, /still declared/);
+	});
+});
+
+test("an unbound tool API leaves every tool declared instead of throwing", async () => {
+	// pi.getActiveTools() throws before the runtime binds. Asking anyway must not
+	// take the session down, and must not leave a half-applied exposure.
+	await withHarness({ unbound: true }, async (h) => {
+		for (const name of ["subagent", "subagent_status", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
+			assert.equal(h.toolExposure(name), undefined, `${name} must stay declared`);
+		}
+		const run = (await h.call("subagent", { task: "unbound is survivable" })).details as unknown as RunRecord;
+		assert.match((await h.call("subagent_status", { id: run.id })).text, /unbound is survivable/);
+	});
+});
+
+test("the management tools are registered once, not on every tick", async () => {
+	await withHarness({ activeTools: ["read", "tool_search"] }, async (h) => {
+		await h.call("subagent", { task: "counts registrations" });
+		await new Promise((resolve) => setTimeout(resolve, 1_200));
+		for (const name of ["subagent_status", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
+			assert.equal(h.toolRegistrations.filter((entry) => entry.name === name).length, 1, `${name} must not churn the tool registry`);
+		}
 	});
 });

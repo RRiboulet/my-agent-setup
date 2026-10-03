@@ -61,6 +61,28 @@ result — and always returned the full output plus 18 lines of pane.
 
 Features:
 
+- **The management tools stop costing every request.** `subagent_status`,
+  `subagent_cancel`, `subagent_interrupt`, `subagent_resume` and `subagent_clean`
+  are registered with pi's `exposure: "codemode"` when — and only when — the
+  session has a way to reach a tool that is not declared. Their descriptions,
+  parameter schemas, prompt snippets and guidelines stop riding along on requests
+  that never use them (pi filters all four by the declared set), while
+  `tool_search` loads one on demand or a codemode script calls it directly.
+  `subagent` itself stays declared: it is the entry point, and a model that
+  cannot start a run has no reason to search for the tools that manage one.
+  - Registration is deferred to `session_start`: pi's `getActiveTools()` and
+    `getSettings()` throw during extension loading, so the question cannot be
+    asked earlier. Registering at load and re-registering later does **not** work —
+    pi declares the ACTIVE set, and a tool activated on registration stays active —
+    so a single late registration is the only shape that removes the
+    declarations.
+  - **Fails safe.** Any path that cannot answer the question — no `codemode`, no
+    `tool_search`, an unbound runtime — leaves every tool declared. A tool the
+    model cannot find is worse than one it pays for.
+  - To switch it on, add either to your tool set, e.g.
+    `"defaultTools": ["read", "bash", "edit", "write", "+codemode", "+tool_search"]`
+    in `~/.pi/agent/settings.json`. Nothing is enabled silently.
+
 - **Live subagent status widget.** A strip above the editor lists every live
   run with what it is doing (`active (bash 45s)`, `waiting 12s`, `stalled 3m`)
   and how long it has been at it, so progress is visible without polling
