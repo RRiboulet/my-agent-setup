@@ -1,3 +1,7 @@
+// The numbered list below records the patches applied on top of the vendored
+// upstream. Items marked "Pruned" are HISTORY, not current behaviour: the code
+// they describe is gone and nothing below should reintroduce it.
+//
 // Vendored from https://github.com/mitsuhiko/agent-stuff (extensions/subagent.ts)
 // Upstream: mitsupi v1.6.0, commit 0865c84.
 //
@@ -11,9 +15,11 @@
 //     `result.json` and pane output, persists run state, and (optionally) pushes
 //     a follow-up custom message into the main session so the main agent learns
 //     that a subagent finished without ever having been blocked by it.
-//  3. Status tooling: `subagent_status` (list/inspect runs), `subagent_cancel`
-//     (kill a run), and `subagent_wait` (explicitly block until selected runs
-//     finish) let the main agent collect results on demand.
+//  3. Status tooling: `subagent_status` (list/inspect runs) and
+//     `subagent_cancel` (kill a run) let the main agent collect results on
+//     demand. There is deliberately no blocking `wait`: the widget shows a human
+//     the same thing, and a tool the model polls is cheaper than one that blocks
+//     a turn open. Pruned for the first iteration.
 //  4. OpenRouter default: the child provider defaults to OpenRouter (with parent
 //     inheritance and explicit overrides preserved), so children work in the
 //     same provider setup as the parent session. Model defaults to the parent model id.
@@ -26,7 +32,9 @@
 //  7. Cost/usage: child session JSONL is parsed to report tokens, turns, and
 //     cost per run in `subagent_status`, notifications, and the dashboard.
 //  8. `/subagents` dashboard: live overlay listing runs with pane/output
-//     preview, cancel, and attach-command copy.
+//     preview, cancel, and attach-command copy. Pruned for the first iteration:
+//     it was never covered by a test (the harness stubs `registerCommand`) and
+//     patch 14's widget covers the same ground live.
 //  9. Testability: a `__test__` export block at the end of this file exposes
 //     the module-private helpers so test/*.test.ts can cover them. It is not
 //     used by the extension at runtime, but it IS load-bearing for the test
@@ -119,7 +127,7 @@ import {
 	type ExtensionAPI,
 	type ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { Key, matchesKey, Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
 	createInterruptMarkerWriter,
@@ -756,20 +764,27 @@ function isTerminal(status: RunStatus): boolean {
  * True when a run's child process may still exist, and therefore owns a tmux
  * session, a concurrency slot and an open session file.
  *
- * This is deliberately not `!isTerminal`. `interrupted` is terminal for every
- * question of the form "should I keep waiting for this run" — subagent_wait
- * returns, subagent_clean skips, subagent_resume is allowed — but the child it
- * interrupted is still sitting at its prompt with its transcript intact, so
+ * This is deliberately not `!isTerminal`. `interrupted` is terminal — the run
+ * will produce no further result of its own accord, and `subagent_clean` skips
+ * it — but its child is still sitting at a prompt with its transcript intact, so
  * anything that would destroy or free that child must consult this predicate
- * instead: auto-reap, shutdown reaping, the concurrency gate and the
- * "another process owns this transcript" guards.
+ * instead: auto-reap, shutdown reaping, the concurrency gate,
+ * `subagent_resume` (which refuses while a child is alive, and would otherwise
+ * open a second writer on the same file), and `subagent_cancel`.
  */
 function holdsChild(status: RunStatus): boolean {
 	return status === "queued" || status === "running" || status === "interrupted";
 }
 
+/**
+ * A delay that gives up when its tool call is cancelled.
+ *
+ * The only cancellable caller left is the interrupt confirmation poll; the
+ * removed blocking wait was the other one. Callers that do not care pass no
+ * signal and simply get a sleep.
+ */
 async function abortableDelay(ms: number, signal: AbortSignal | undefined): Promise<void> {
-	if (signal?.aborted) throw new Error("Subagent wait aborted.");
+	if (signal?.aborted) throw new Error("Subagent polling aborted.");
 	await new Promise<void>((resolve, reject) => {
 		const cleanup = () => signal?.removeEventListener("abort", onAbort);
 		const timer = setTimeout(() => {
@@ -779,7 +794,7 @@ async function abortableDelay(ms: number, signal: AbortSignal | undefined): Prom
 		const onAbort = () => {
 			clearTimeout(timer);
 			cleanup();
-			reject(new Error("Subagent wait aborted."));
+			reject(new Error("Subagent polling aborted."));
 		};
 		signal?.addEventListener("abort", onAbort, { once: true });
 	});
@@ -1022,18 +1037,25 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			`Subagent ${run.id} ${label}.`,
 			`Task: ${run.task.split("\n", 1)[0]?.slice(0, 140) ?? run.task}`,
 			`Status: ${run.status}${usage ? ` · ${usage}` : ""}${run.error ? ` — ${run.error}` : ""}`,
-			`Inspect the result with subagent_status (id ${run.id}).`,
+			`Collect the result with subagent_status({ id: "${run.id}" }).`,
 		].join("\n");
 		try {
-			await pi.sendMessage(
-				{
-					customType: RESULT_MESSAGE_TYPE,
-					content: text,
-					display: true,
-					details: { id: run.id, status: run.status, error: run.error },
-				},
-				{ deliverAs: "followUp", triggerTurn: true },
-			);
+			// Deliberately no `triggerTurn` and no `deliverAs`. Both make pi take the
+			// turn: `triggerTurn` starts one outright, and while the session is
+			// streaming `deliverAs: "followUp"` queues ANOTHER one via agent.followUp.
+			// Either way a finishing subagent interrupts whatever the main agent was
+			// doing and re-sends the whole conversation to say "done".
+			//
+			// With neither, pi appends the message to the transcript (idle) or queues
+			// it as a pending custom message flushed at the end of the current turn
+			// (streaming). It still lands in context, so the model learns of it the
+			// next time it acts, and the live widget is what tells the human meanwhile.
+			await pi.sendMessage({
+				customType: RESULT_MESSAGE_TYPE,
+				content: text,
+				display: true,
+				details: { id: run.id, status: run.status, error: run.error },
+			});
 		} catch (error) {
 			// The session may be shutting down; state is still on disk.
 			console.error(`[tmux-subagent] Failed to notify about ${run.id}: ${error instanceof Error ? error.message : String(error)}`);
@@ -1125,7 +1147,7 @@ const statusStateFor = (run: RunRecord): SubagentStatusState => {
 		// for: the widget then shows how long it has been waiting for a slot.
 		return createStatusState({ runStatus, startTimeMs: run.startedAt ?? run.createdAt, stallAfterMs, toolStallAfterMs });
 	}
-	// A run's elapsed time means what subagent_status and /subagents say it means:
+	// A run's elapsed time means what subagent_status says it means:
 	// time since it STARTED. While it was queued there was nothing to time, so the
 	// clock is re-based when it finally starts — otherwise the widget would count
 	// the queue wait forever and two surfaces would disagree on one number.
@@ -1641,11 +1663,11 @@ const noteInterrupt = async (
 		name: "subagent",
 		label: "Subagent",
 		description:
-			"Start a delegated task in a separate interactive Pi process inside a detached tmux session and return immediately. The main agent is not blocked and may start more subagents or keep working. Runs execute concurrently (bounded by PI_SUBAGENT_MAX_CONCURRENT, default 4); extra runs are queued. Children inherit the current provider/model/thinking, defaulting the provider to OpenRouter. Use subagent_status to inspect progress and results, subagent_wait to block for completion, subagent_interrupt to abort a run's current turn while keeping its child alive, and subagent_cancel to stop a run outright. Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.",
+			"Start a delegated task in a separate interactive Pi process inside a detached tmux session and return immediately. The main agent is not blocked and may start more subagents or keep working. Runs execute concurrently (bounded by PI_SUBAGENT_MAX_CONCURRENT, default 4); extra runs are queued. Children inherit the current provider/model/thinking, defaulting the provider to OpenRouter. Use subagent_status to inspect progress and collect results (subagent_status({ id }) returns that run's output once it finishes), subagent_interrupt to abort a run's current turn while keeping its child alive, and subagent_cancel to stop a run outright. There is no blocking wait: poll subagent_status. Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.",
 		promptSnippet: "Start a delegated, non-blocking, tmux-backed Pi subagent",
 		promptGuidelines: [
 			"Use subagent to delegate an isolated task without blocking: it returns immediately, so start several when useful and keep working.",
-			"Call subagent_status with the printed id to read a subagent's output; call subagent_wait only when you deliberately need to block until runs finish.",
+			"Collect a finished run's output with subagent_status({ id }); there is no blocking wait, so poll it rather than blocking the turn.",
 			"To stop a run that is going the wrong way, prefer subagent_interrupt (keeps the child and its transcript, then attach to steer it) over subagent_cancel (throws the run away). An interrupted run still occupies a concurrency slot until it is cancelled, so cancel the ones you are done with.",
 			"subagent_resume needs a run whose child is really gone: cancel or finish it first, or attach to an interrupted run and type the follow-up there.",
 		],
@@ -1731,7 +1753,7 @@ const noteInterrupt = async (
 				`tmux: ${run.tmuxSession}`,
 				`Attach: ${run.attachCommand}`,
 				`Capture: ${run.captureCommand}`,
-				`Status: call subagent_status with id ${id}`,
+				`Status: call subagent_status({ id: "${id}" }) to collect the result`,
 			].join("\n");
 			return { content: [{ type: "text", text }], details: run };
 		},
@@ -1764,11 +1786,16 @@ const noteInterrupt = async (
 		name: "subagent_status",
 		label: "Subagent Status",
 		description:
-			"List subagent runs started in this session or inspect one by id. Returns status, model, tmux attach command, the child's live activity phase (starting/active/waiting/done) with its current scope and tool while running, latest pane output while running, and the final output once finished. Non-blocking.",
+			"Collect a subagent result, or list this session's runs. With an id: that run's status, model, tmux attach command, its final output once finished and its latest pane output while running. Without an id: every run's status, duration and usage. There is no blocking wait, so poll this instead. Non-blocking.",
 		promptSnippet: "Inspect non-blocking subagent runs and their output",
 		parameters: Type.Object({
 			id: Type.Optional(Type.String({ description: "Run id to inspect. Omit to list all runs in this session." })),
-			include_output: Type.Optional(Type.Boolean({ description: "Include full stored output for finished runs. Defaults to false." })),
+			include_output: Type.Optional(
+				Type.Boolean({
+					description:
+						"List view only. Include each finished run's full output. Defaults to false, because a list of many runs would otherwise carry every answer at once; inspecting a single id always returns its output.",
+				}),
+			),
 		}),
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1778,6 +1805,14 @@ const noteInterrupt = async (
 			if (params.id) {
 				const run = runs.get(params.id.trim());
 				if (!run) throw new Error(`Unknown subagent run: ${params.id}`);
+				// This is the ONLY way to collect a result now that there is no blocking
+				// wait, so the obvious call has to be the right one: `include_output`
+				// is a LIST-view control and never suppresses the output here.
+				//
+				// The pane is included either way. For a live run it is the only view of
+				// the child there is, and for a finished one it is usually the answer —
+				// so gating it behind the flag would make `include_output: true` return
+				// strictly less than the default call.
 				return {
 					content: [{ type: "text", text: runSummary(run, { pane: true, output: true }) }],
 					details: { runs: [run] },
@@ -2043,46 +2078,6 @@ const noteInterrupt = async (
 	});
 
 	pi.registerTool({
-		name: "subagent_wait",
-		label: "Subagent Wait",
-		description:
-			"Block until the given subagent runs finish (or all incomplete runs when no ids are given), then return their outputs. An `interrupted` run counts as settled and returns immediately, because its child is idle at its prompt and nothing further will arrive on its own. Use only when you deliberately need to wait; otherwise use subagent_status.",
-		promptSnippet: "Block until selected non-blocking subagents finish",
-		parameters: Type.Object({
-			ids: Type.Optional(Type.Array(Type.String(), { description: "Run ids to wait for. Defaults to all incomplete runs." })),
-			timeout_seconds: Type.Optional(Type.Number({ description: "Maximum seconds to wait. Defaults to 1800." })),
-		}),
-
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			await ensureSessionPaths(ctx);
-			const timeoutMs = (params.timeout_seconds ?? 1800) * 1000;
-			const targets = params.ids?.length
-				? params.ids.map((id) => {
-						const run = runs.get(id.trim());
-						if (!run) throw new Error(`Unknown subagent run: ${id}`);
-						return run;
-					})
-				: [...runs.values()].filter((run) => !isTerminal(run.status));
-			if (targets.length === 0) {
-				return { content: [{ type: "text", text: "No incomplete subagent runs to wait for." }], details: { runs: [] } };
-			}
-
-			const deadline = Date.now() + timeoutMs;
-			while (targets.some((run) => !isTerminal(run.status))) {
-				if (signal?.aborted) throw new Error("Subagent wait aborted.");
-				if (Date.now() >= deadline) {
-					const pending = targets.filter((run) => !isTerminal(run.status)).map((run) => run.id);
-					throw new Error(`Timed out waiting for: ${pending.join(", ")}`);
-				}
-				await abortableDelay(POLL_INTERVAL_MS, signal);
-			}
-
-			const text = targets.map((run) => runSummary(run, { output: true })).join("\n\n");
-			return { content: [{ type: "text", text }], details: { runs: targets } };
-		},
-	});
-
-	pi.registerTool({
 		name: "subagent_clean",
 		label: "Subagent Clean",
 		description:
@@ -2188,136 +2183,6 @@ const noteInterrupt = async (
 		},
 	});
 
-	pi.registerCommand("subagents", {
-		description: "Live subagent dashboard: view panes/output, cancel runs, copy attach commands",
-		handler: async (_args, ctx) => {
-			if (!ctx.hasUI) {
-				ctx.ui.notify("The /subagents dashboard requires the interactive TUI.", "warning");
-				return;
-			}
-
-			const getRuns = (): RunRecord[] => [...runs.values()].sort((a, b) => a.createdAt - b.createdAt);
-			let selected = 0;
-			let detail = false;
-			let handle: { requestRender: () => void } | undefined;
-
-			const iconFor = (run: RunRecord, theme: { fg: (color: string, text: string) => string }): string => {
-				if (run.status === "completed") return theme.fg("success", "✓");
-				if (run.status === "failed") return theme.fg("error", "✗");
-				if (run.status === "interrupted") return theme.fg("warning", "‖");
-				if (run.status === "cancelled") return theme.fg("muted", "⊘");
-				if (run.status === "queued") return theme.fg("warning", "◦");
-				return theme.fg("warning", "●");
-			};
-
-			const render = (width: number, theme: any): string[] => {
-				const list = getRuns();
-				if (selected >= list.length) selected = Math.max(0, list.length - 1);
-				const active = list.filter((run) => !isTerminal(run.status)).length;
-				const interrupted = list.filter((run) => run.status === "interrupted").length;
-				const lines: string[] = [
-					`${theme.bold(theme.fg("accent", "Subagents"))}${theme.fg("dim", `  ${active} active / ${list.length} total`)}${
-						interrupted > 0 ? theme.fg("dim", ` · ${interrupted} interrupted`) : ""
-					}`,
-					"",
-				];
-
-				if (list.length === 0) {
-					lines.push(theme.fg("dim", "No subagent runs in this session."));
-				} else {
-					list.forEach((run, index) => {
-						const marker = index === selected ? theme.fg("accent", "▶ ") : "  ";
-						const duration = formatDuration(run.startedAt, run.finishedAt);
-						const meta = [run.status, duration, formatUsage(run.usage)].filter(Boolean).join(" · ");
-						lines.push(`${marker}${iconFor(run, theme)} ${run.id.slice(0, 8)}  ${meta}`);
-						lines.push(`    ${theme.fg("dim", run.task.split("\n", 1)[0] ?? run.task)}`);
-					});
-				}
-
-				const current = list[selected];
-				if (current) {
-					lines.push("");
-					lines.push(
-						theme.fg(
-							"muted",
-							`─ ${current.id} ${current.provider}/${current.model}`,
-						),
-					);
-					const body = detail
-						? (current.output ?? current.pane ?? "(no output yet)")
-						: (current.pane ?? current.output ?? "(no output yet)");
-					for (const line of body.split("\n").slice(-(detail ? 30 : 10))) {
-						lines.push(theme.fg("dim", line));
-					}
-				}
-
-				lines.push("");
-				lines.push(theme.fg("dim", "↑/↓ select · enter detail · c cancel · a attach · esc close"));
-				return lines.map((line) => truncateToWidth(line, width));
-			};
-
-			const interval = setInterval(() => handle?.requestRender(), 500);
-			try {
-				await ctx.ui.custom<null>(
-					(tui, theme, _keybindings, done) => {
-						handle = tui;
-						return {
-							render: (width: number) => render(width, theme),
-							invalidate: () => undefined,
-							handleInput: (data: string) => {
-								const list = getRuns();
-								if (matchesKey(data, Key.escape)) {
-									done(null);
-									return;
-								}
-								if (matchesKey(data, Key.up)) {
-									selected = Math.max(0, selected - 1);
-									tui.requestRender();
-									return;
-								}
-								if (matchesKey(data, Key.down)) {
-									selected = Math.min(Math.max(0, list.length - 1), selected + 1);
-									tui.requestRender();
-									return;
-								}
-								if (matchesKey(data, Key.enter)) {
-									detail = !detail;
-									tui.requestRender();
-									return;
-								}
-								if (data === "c") {
-									const run = list[selected];
-									// holdsChild so an interrupted run can be killed from
-									// here too: it is listed as finished but still owns a
-									// live tmux session.
-									if (run && holdsChild(run.status)) {
-										clearTimer(run.id);
-										void killTmuxSession(run);
-										run.status = "cancelled";
-										run.interruptRequestedAt = undefined;
-										run.finishedAt = Date.now();
-										refreshStatusWidget();
-										void persist().then(() => drainQueue());
-										ctx.ui.notify(`Cancelled ${run.id}`, "info");
-									}
-									tui.requestRender();
-									return;
-								}
-								if (data === "a") {
-									const run = list[selected];
-									if (run) ctx.ui.notify(`Attach: ${run.attachCommand}`, "info");
-									tui.requestRender();
-								}
-							},
-						};
-					},
-					{ overlay: true, overlayOptions: { anchor: "center", width: "80%" } },
-				);
-			} finally {
-				clearInterval(interval);
-			}
-		},
-	});
 }
 
 // Internals exposed for unit tests. See local patch 9 in the header comment.

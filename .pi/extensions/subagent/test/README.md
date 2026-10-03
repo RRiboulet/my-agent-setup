@@ -37,7 +37,7 @@ test.
 | `widget.test.ts` | `renderStatusRows` and the widget component: icons, capping, task trimming, width fitting |
 | `usage.test.ts` | child session usage/cost accounting |
 | `handoff.test.ts` | child launch argv per mode, lineage/fork session seeding, live-branch fork ordering, and the usage baseline |
-| `lifecycle.test.ts` | launch, concurrency queueing, finalisation, failure detection, cancel, wait, status, clean, shutdown stops the watcher, turn-level interrupt, the live widget (install/refresh/clear) |
+| `lifecycle.test.ts` | launch, concurrency queueing, finalisation, failure detection, cancel, status, clean, shutdown stops the watcher, turn-level interrupt, the live widget (install/refresh/clear) |
 | `interrupt.test.ts` | the `interrupt.json` marker (validation, reading, writing), the child reporter's abort path, and the parent lifecycle of an interrupted run |
 | `helpers.ts` | env/temp-dir isolation and polling helpers |
 
@@ -51,9 +51,6 @@ directory, so the tests never touch the real `~/.pi/agent` tree.
 About 20% of `index.ts` lines are still untested. The gaps, in rough order of
 size:
 
-- **the `/subagents` dashboard** (`index.ts` ~2136-2297) — the handler is never
-  invoked, because the harness stubs `registerCommand`. Layout, selection and
-  the refresh interval are not covered.
 - **the widget's placement in a real terminal.** The tests render the component
   directly with a fake TUI and theme, so `setWidget` is called with the right
   key and placement but nothing proves the strip looks right in a live TUI.
@@ -62,7 +59,7 @@ size:
   (the harness fires the events and reads the snapshot back), as is the
   interrupted settle, but the atomic result writing and the shutdown fallback
   still need a real child pi process.
-- **`attachToSubagentAndExit`** (~214-270) — ends in `process.exit`, so it needs
+- **`attachToSubagentAndExit`** (~351-400) — ends in `process.exit`, so it needs
   a real terminal; the legacy `v1.` target decode is untested.
 - **`subagent_clean` `all_sessions`** — only the in-session path is covered;
   `delete_files` in-session is now covered, including the transcript accounting
@@ -74,6 +71,11 @@ size:
 - **long-poll behaviour** — the fake always reports `pane_dead = "1"`, so
   "pane still alive, keep waiting" is untested; `pi.exec`'s `timeout` option is
   ignored by the fake, so no timeout or abort path runs.
+
+- **the widget's placement in a real terminal.** The tests render the component
+  directly with a fake TUI and theme, so `setWidget` is called with the right key
+  and placement, but nothing proves the strip looks right in a live TUI. See
+  "Manual check" below.
 
 Anything requiring a live child pi process — real context handoff on resume, key
 delivery for `subagent_interrupt` against a real TUI, and liveness when a child
@@ -103,6 +105,14 @@ Integers are parsed strictly: `"3m"`, `"1e9"` and `"3.9"` are ignored in favour 
 the default, because a threshold silently shortened by a typo is worse than one
 that was never set.
 
+## Flakiness
+
+The watcher-driven assertions (a result appearing, a run failing because its tmux
+target vanished) poll with a 20s bound rather than `waitFor`'s 5s default. They
+take ~2s in isolation, and node runs test files in parallel, so the headroom is
+for a loaded machine — not a licence for a multi-minute stall. A failure at that
+bound is a real failure, not a slow test.
+
 ## Manual check for turn-level interrupt
 
 With credentials available, the one thing the suite cannot prove is that pi
@@ -131,7 +141,7 @@ really aborts a turn on Escape and settles without exiting:
    for `PI_SUBAGENT_TOOL_STALL_SECONDS` (default 900), not 180. A quiet tool is
    working, not hung.
 4. Start a second run and check the cap: at most four rows, then `+N more`.
-   `/subagents` still lists every run. After `subagent_interrupt`, the interrupted
-   row sorts last so it cannot push a live run out of view.
+   After `subagent_interrupt`, the interrupted row sorts last so it cannot push a
+   live run out of view.
 5. `subagent_cancel` the last run: the strip disappears.
 6. Run in `--mode rpc` and confirm no widget appears (RPC cannot render one).

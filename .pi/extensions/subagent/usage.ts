@@ -2,7 +2,7 @@
 //
 // Child Pi processes persist their transcript as JSONL under their session
 // directory. We sum the usage reported on assistant messages (and any nested
-// LLM work recorded on tool results) so `subagent_status` and the `/subagents`
+// LLM work recorded on tool results) so `subagent_status`
 // overlay can show tokens and cost per run.
 //
 // A forked child inherits its parent's transcript verbatim, and a resumed run

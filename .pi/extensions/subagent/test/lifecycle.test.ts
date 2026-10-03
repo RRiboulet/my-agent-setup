@@ -1,5 +1,5 @@
 // Behaviour tests for the subagent lifecycle: launch, concurrency queueing,
-// result finalisation, failure detection, cancel, wait, status and clean.
+// result finalisation, failure detection, cancel, status and clean.
 //
 // The extension talks to tmux exclusively through `pi.exec`, so a fake
 // ExtensionAPI that scripts `exec` is enough to drive the whole state machine
@@ -88,7 +88,6 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 		registerFlag: () => undefined,
 		getFlag: () => undefined,
 		registerTool: (tool: Record<string, unknown>) => tools.set(tool.name as string, tool),
-		registerCommand: () => undefined,
 		registerMessageRenderer: () => undefined,
 		registerEntryRenderer: () => undefined,
 		on: (event: string, handler: (...args: unknown[]) => unknown) => {
@@ -346,11 +345,14 @@ test("a child result finalizes the run and notifies the main session", async () 
 
 		const notification = h.messages.at(-1);
 		assert.equal(notification?.message.customType, "subagent-result");
-		assert.deepEqual(notification?.options, { deliverAs: "followUp", triggerTurn: true });
-		// The notification points at the run rather than inlining its output; the
-		// agent collects the text with subagent_status.
+		// No options at all: neither `triggerTurn` nor `deliverAs`, so pi appends the
+		// message rather than starting or queueing a turn. See the dedicated test
+		// below and the comment in notifyCompletion for why.
+		assert.equal(notification?.options, undefined);
+		// The notification points at the run rather than inlining its output, and says
+		// how to collect it: subagent_status({ id }) is now the only route.
 		assert.ok(!String(notification?.message.content).includes("the answer is 42"));
-		assert.ok(String(notification?.message.content).includes(finalized.id));
+		assert.ok(String(notification?.message.content).includes(`subagent_status({ id: "${finalized.id}" })`));
 	});
 });
 
@@ -421,43 +423,6 @@ test("subagent_status lists runs and inspects one", async () => {
 		const inspected = await h.call("subagent_status", { id: run.id });
 		assert.ok(inspected.text.includes(`model: openrouter/parent/model (medium)`));
 		await assert.rejects(() => h.call("subagent_status", { id: "nope" }), /Unknown subagent run/);
-	});
-});
-
-test("subagent_wait blocks until the run finishes and returns its output", async () => {
-	await withHarness(undefined, async (h) => {
-		const run = (await h.call("subagent", { task: "wait for me" })).details as unknown as RunRecord;
-		setTimeout(() => {
-			void h.writeResult(run, {
-				version: 1,
-				status: "completed",
-				output: "finished output",
-				finishedAt: Date.now(),
-			});
-		}, 300);
-
-		const waited = await h.call("subagent_wait", { ids: [run.id], timeout_seconds: 10 });
-		assert.ok(waited.text.includes("finished output"));
-	});
-});
-
-test("subagent_wait returns immediately when nothing is outstanding", async () => {
-	await withHarness(undefined, async (h) => {
-		const waited = await h.call("subagent_wait", {});
-		assert.match(waited.text, /No incomplete subagent runs/);
-		await assert.rejects(() => h.call("subagent_wait", { ids: ["ghost"] }), /Unknown subagent run/);
-	});
-});
-
-test("subagent_wait aborts when the tool call is cancelled", async () => {
-	await withHarness(undefined, async (h) => {
-		await h.call("subagent", { task: "hangs forever" });
-		const controller = new AbortController();
-		const tool = h.tools.get("subagent_wait");
-		const execute = tool?.execute as (...args: unknown[]) => Promise<unknown>;
-		const promise = execute("call-1", {}, controller.signal, undefined, h.ctx);
-		controller.abort();
-		await assert.rejects(() => promise, /aborted/);
 	});
 });
 
@@ -677,8 +642,7 @@ test("the child branch writes an activity snapshot and a terminal done phase", a
 			registerTool: () => {
 				throw new Error("the child must not register parent tools");
 			},
-			registerCommand: () => undefined,
-			registerMessageRenderer: () => undefined,
+				registerMessageRenderer: () => undefined,
 			on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
 				handlers.set(event, handler);
 				return () => handlers.delete(event);
@@ -910,6 +874,49 @@ test("subagent_resume refuses a second concurrent resume of the same transcript"
 		} finally {
 			await harness.shutdown();
 		}
+	});
+});
+
+test("the single-run status path always returns the output, finished or not", async () => {
+	// With no blocking wait this is the only way to collect a result, so the
+	// obvious call — subagent_status({ id }) — has to be the right one, with
+	// include_output reserved for the list view where many answers would otherwise
+	// arrive at once.
+	await withHarness({ paneText: "LIVE-PANE-CONTENT" }, async (h) => {
+		const live = (await h.call("subagent", { task: "collect me" })).details as unknown as RunRecord;
+		await waitFor(async () => (await h.readRuns())[0].pane !== undefined);
+		for (const flag of [undefined, false, true]) {
+			const inspected = await h.call("subagent_status", { id: live.id, ...(flag === undefined ? {} : { include_output: flag }) });
+			assert.ok(inspected.text.includes("LIVE-PANE-CONTENT"), `a live run's pane is the only view of it (include_output: ${flag}): ${inspected.text}`);
+		}
+
+		await h.writeResult(live, {
+			version: 1,
+			status: "completed",
+			output: "THE-ACTUAL-OUTPUT",
+			finishedAt: Date.now(),
+		});
+		await waitFor(async () => (await h.readRuns())[0].status === "completed");
+
+		const withoutOutput = await h.call("subagent_status", { id: live.id, include_output: false });
+		assert.ok(withoutOutput.text.includes("THE-ACTUAL-OUTPUT"), `the default call must return the answer: ${withoutOutput.text}`);
+		assert.match(withoutOutput.text, /completed/);
+	});
+});
+
+test("a run that finishes no longer wakes the main agent", async () => {
+	// The notification used to be { deliverAs: "followUp", triggerTurn: true },
+	// which pi turns into a full extra turn with the conversation re-sent. It is
+	// now inert: sent, and recorded as a message, but with no options that let pi
+	// take the turn.
+	await withHarness(undefined, async (h) => {
+		const run = (await h.call("subagent", { task: "quiet finish" })).details as unknown as RunRecord;
+		await h.writeResult(run, { version: 1, status: "completed", output: "ok", finishedAt: Date.now() });
+		await waitFor(async () => (await h.readRuns())[0].status === "completed");
+
+		assert.equal(h.messages.length, 1, "the model still learns of the completion");
+		assert.deepEqual(h.messages[0]?.options, undefined, "no deliverAs and no triggerTurn: pi must not start or queue a turn");
+		assert.match(String(h.messages[0]?.message.content), new RegExp(`subagent_status\\({ id: "${run.id}" }\\)`), "and it is told how to collect the result");
 	});
 });
 
@@ -1335,9 +1342,10 @@ test("an interrupted run fails when its tmux session disappears", async () => {
 		await waitFor(async () => (await h.readRuns())[0].status === "interrupted");
 
 		h.removeTarget();
-		// Generous: this needs the watcher's next pass, and the suite runs test
-		// files in parallel, so timer resolution is not in our hands.
-		await waitFor(async () => (await h.readRuns())[0].status === "failed", 15_000);
+		// Generous: this needs the watcher's next pass, and the suite runs test files
+		// in parallel, so timer resolution is not in our hands. Observed at ~2.3s
+		// alone; the bound absorbs a loaded machine, not a stall.
+		await waitFor(async () => (await h.readRuns())[0].status === "failed", 20_000);
 		const failed = (await h.readRuns())[0];
 		assert.match(failed.error ?? "", /exited before reporting a result/);
 		assert.ok(failed.finishedAt);
@@ -1378,7 +1386,7 @@ test("an unclassifiable tmux failure fails the run only after a run of them", as
 		assert.equal((await h.readRuns())[0].status, "running", "one failure is tolerated");
 
 		h.failPaneAlways();
-		await waitFor(async () => (await h.readRuns())[0].status === "failed", 15_000);
+		await waitFor(async () => (await h.readRuns())[0].status === "failed", 20_000);
 		assert.match((await h.readRuns())[0].error ?? "", /could not be reached over tmux/);
 		assert.doesNotMatch((await h.readRuns())[0].error ?? "", /exited before reporting/);
 	});

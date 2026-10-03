@@ -16,12 +16,12 @@ import { truncateToWidth, type Component, type TUI } from "@earendil-works/pi-tu
 
 import type { SubagentStatusKind } from "./status.ts";
 
-/** Most runs shown at once; the widget is a glance, not a dashboard (`/subagents`). */
+/** Most runs shown at once: the widget is a glance, not a listing. */
 export const MAX_WIDGET_ROWS = 4;
 export const MAX_TASK_LENGTH = 60;
 
 export interface StatusRow {
-	/** Short run id, as the dashboard shows it. */
+	/** Short run id — the widget is a glance, so the first four bytes identify the row. */
 	id: string;
 	/** First line of the task, already truncated by the caller or trimmed here. */
 	task: string;
@@ -32,11 +32,11 @@ export interface StatusRow {
 	detail: string;
 }
 
-// Glyphs and colours match the `/subagents` dashboard where they overlap, and
-// differ where the states differ: the dashboard has no notion of a phase, so its
-// "running" is the widget's "active" while its "queued" is a distinct state the
-// widget also has. Two surfaces on screen at once must not use one glyph for two
-// different meanings, hence `starting`'s own ◔.
+// Every kind gets its own glyph. The `queued` and `starting` pair is the reason:
+// they are different states that both read as "not really going yet", and one
+// glyph for both would make a run waiting for a concurrency slot look like a
+// child that has booted but not begun work. Colour carries the same distinction
+// the way the rest of pi's chrome does.
 const ICONS: Record<SubagentStatusKind, { icon: string; color: ThemeColor }> = {
 	queued: { icon: "◦", color: "warning" },
 	starting: { icon: "◔", color: "warning" },

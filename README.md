@@ -21,11 +21,11 @@ inactive.
 
 | Path | What it is |
 |---|---|
-| `extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent`, `subagent_status`, `subagent_wait`, `subagent_resume`, `subagent_cancel`, `subagent_clean`, and a live child-activity phase |
-| `extensions/todos.ts` | `/todos` TUI and the `todo` tool |
-| `extensions/answer.ts` | `/answer`: extract questions from the last response and answer them in a focused TUI |
-| `extensions/native-web-search.ts` | Native web search tool (ships with `skills/native-web-search/`) |
-| `skills/native-web-search/` | Skill for the above — the two must travel together |
+| `.pi/extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent`, `subagent_status`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel`, `subagent_clean`, a live child-activity phase and a status widget above the editor |
+| `.pi/extensions/todos.ts` | `/todos` TUI and the `todo` tool |
+| `.pi/extensions/answer.ts` | `/answer`: extract questions from the last response and answer them in a focused TUI |
+| `.pi/extensions/native-web-search.ts` | Native web search tool (ships with `.pi/skills/native-web-search/`) |
+| `.pi/skills/native-web-search/` | Skill for the above — the two must travel together |
 | `pi-session.sh` | Launch pi under tmux with an OpenRouter model |
 | `MODELS.txt` | Model ids this workspace runs with |
 
@@ -41,8 +41,8 @@ The `.devcontainer/` provides all of these.
 ## Tests
 
 ```bash
-./extensions/subagent/test/setup-deps.sh      # symlinks pi's packages into node_modules
-node --test extensions/subagent/test/*.test.ts
+bash .pi/extensions/subagent/test/setup-deps.sh      # symlinks pi's packages into node_modules
+node --test .pi/extensions/subagent/test/*.test.ts
 ```
 
 ## Configuration
@@ -50,9 +50,12 @@ node --test extensions/subagent/test/*.test.ts
 The subagent extension reads `PI_SUBAGENT_*` environment variables —
 `PI_SUBAGENT_MAX_CONCURRENT` (default 4), `PI_SUBAGENT_NOTIFY`,
 `PI_SUBAGENT_AUTO_REAP`, `PI_SUBAGENT_REAP_DELAY_MS`, `PI_SUBAGENT_GC_DAYS`,
-`PI_SUBAGENT_PROVIDER`, `PI_SUBAGENT_MODEL`. See the header comment in
-`extensions/subagent/index.ts` for the full list of local patches.
+`PI_SUBAGENT_KILL_ON_SHUTDOWN`, `PI_SUBAGENT_PROVIDER`, `PI_SUBAGENT_MODEL`,
+`PI_SUBAGENT_INTERRUPT_CONFIRM_MS`, `PI_SUBAGENT_STALL_SECONDS`,
+`PI_SUBAGENT_TOOL_STALL_SECONDS`. The test README documents what each one does;
+the header comment in `.pi/extensions/subagent/index.ts` lists the local patches.
 
 Subagent delegation is non-blocking: start independent tasks together and poll
-with `subagent_status`. Only call `subagent_wait` when you actually need a
-result before continuing.
+with `subagent_status`. There is no blocking wait, and a finishing run never
+takes the turn — its notification is appended to the transcript and the model
+reads it next time it acts, while the widget shows the same thing live.

@@ -165,7 +165,6 @@ async function withChildReporter(
 			registerTool: () => {
 				throw new Error("the child must not register parent tools");
 			},
-			registerCommand: () => undefined,
 			registerMessageRenderer: () => undefined,
 			on: (event: string, handler: (event: unknown, ctx: unknown) => unknown) => {
 				handlers.set(event, handler);

@@ -29,6 +29,36 @@ Maintenance:
   files were left stale-CRLF in the working tree, invisible to `git status`).
 - Added this `CHANGELOG.md`; `AGENTS.md` mandated it but it did not exist.
 
+Pruned for a first iteration, deliberately (all removed, not deprecated):
+
+- **`subagent_wait`.** With the live widget showing a human the same thing, and
+  completion notifications still waking the parent, a blocking wait mostly bought
+  a turn held open. Models poll `subagent_status` instead. This was also the
+  prerequisite for making notifications quiet, and it is what the (now dropped)
+  `caller_ping` work depended on.
+- **The `/subagents` dashboard.** 163 lines, never covered by a test — the
+  harness stubs `registerCommand`, so no test could reach it — and superseded by
+  the live status widget, which covers the same ground for every run rather than
+  behind a keypress.
+- **The completion notification taking the main agent's turn.** Every finished
+  run sent `{ deliverAs: "followUp", triggerTurn: true }`, which pi turns into a
+  full extra turn with the whole conversation re-sent. Both options are now gone:
+  the message is appended to the transcript (idle) or queued as a pending custom
+  message (streaming), so a finishing subagent never interrupts what the main
+  agent was doing. It still lands in context.
+- **`caller_ping`** (never implemented): a child-to-parent help request was
+  explicitly gated on a resume channel *and* on `subagent_wait`, and its own
+  notes called the child's willingness to call an unmentioned tool the main
+  behavioural unknown.
+
+`subagent`, `subagent_status`, `subagent_cancel`, `subagent_clean`,
+`subagent_interrupt` and `subagent_resume` all stay: each is either the core
+loop or has no other way to happen.
+
+One defect fixed while removing `wait`: `subagent_status` ignored
+`include_output` on the single-run path — the path a model now uses to collect a
+result — and always returned the full output plus 18 lines of pane.
+
 Features:
 
 - **Live subagent status widget.** A strip above the editor lists every live
@@ -74,8 +104,8 @@ Features:
     semantics are unchanged, so a run that is interrupted and then finished
     still reports normally. A child launched without the marker path keeps the
     old behaviour (report the abort as a failure) rather than going silent.
-  - `interrupted` is *terminal* for waiting (`subagent_wait` returns,
-    `subagent_clean` skips) but the child is still alive, so the new
+  - `interrupted` is *terminal* (`subagent_clean` skips it, a cancelled run never
+    revives it) but the child is still alive, so the new
     `holdsChild` predicate guards everything that would destroy or free it:
     auto-reap while the session lives, the concurrency slot, and the guards that
     stop two processes writing one transcript.
