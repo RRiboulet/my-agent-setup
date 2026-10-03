@@ -13,9 +13,13 @@ import { __test__, type RunRecord } from "../index.ts";
 const {
 	formatDuration,
 	holdsChild,
+	isMissingTmuxTarget,
+	isSameOrDescendant,
 	isTerminal,
 	runDirOwnsLiveTranscript,
 	runSummary,
+	startRepeatingRefresh,
+	statusDetail,
 	textFromAssistant,
 	trimPane,
 	truncateToolText,
@@ -85,6 +89,113 @@ test("runDirOwnsLiveTranscript counts an interrupted run as a live holder", () =
 	// Once the interrupted run is cancelled the dir is free again.
 	interrupted.status = "cancelled";
 	assert.equal(runDirOwnsLiveTranscript(ancestor, runs), false);
+});
+
+test("startRepeatingRefresh fires and, crucially, can be stopped", async () => {
+	// The widget ticker is the only refresher when a watcher's tmux calls are slow.
+	// Pinned here on its own so the mechanism cannot rot behind the integration.
+	let ticks = 0;
+	const stop = startRepeatingRefresh(() => (ticks += 1), 20);
+	await new Promise((resolve) => setTimeout(resolve, 120));
+	assert.ok(ticks >= 2, `expected repeated ticks, got ${ticks}`);
+	stop();
+	const settled = ticks;
+	await new Promise((resolve) => setTimeout(resolve, 120));
+	assert.equal(ticks, settled, "stop() must end the timer, not merely ignore its callback");
+	// Stopping twice is harmless: session_shutdown can run after a run leaves.
+	stop();
+});
+
+test("statusDetail renders one qualifier per kind", () => {
+	// The widget row is `${detail} · ${elapsed}`, so a detail that repeats the kind
+	// and a detail that omits it entirely are both wrong. The duration leads,
+	// because it measures the phase while a tool name measures what is happening
+	// inside it — pairing them the other way round implies the tool has been
+	// running for the whole phase.
+	const snapshot = (overrides: Record<string, unknown> = {}) =>
+		({
+			kind: "active",
+			elapsedMs: 0,
+			elapsedText: "0s",
+			activeSinceMs: null,
+			activeDurationText: null,
+			activeScope: null,
+			toolName: null,
+			waitingSinceMs: null,
+			waitingDurationText: null,
+			snapshotState: "present",
+			snapshotError: null,
+			snapshotProblemText: null,
+			quietDurationText: null,
+			statusLabel: null,
+			...overrides,
+		}) as never;
+
+	assert.equal(statusDetail(snapshot({ activeScope: "provider" })), "active (provider)", "no duration yet");
+	assert.equal(statusDetail(snapshot({ toolName: "bash", activeDurationText: "45s" })), "active 45s (bash)");
+	assert.equal(statusDetail(snapshot({ toolName: "bash" })), "active (bash)", "the tool outranks the scope");
+	assert.equal(statusDetail(snapshot({ activeDurationText: "2m" })), "active 2m", "no label, but still a duration");
+	assert.equal(statusDetail(snapshot({ kind: "waiting", waitingDurationText: "12s" })), "waiting 12s");
+	assert.equal(statusDetail(snapshot({ kind: "waiting", statusLabel: "done" })), "done", "a settled child is labelled");
+	assert.equal(statusDetail(snapshot({ kind: "stalled", snapshotProblemText: "3m 0s" })), "stalled 3m 0s");
+	assert.equal(
+		statusDetail(snapshot({ kind: "stalled", snapshotProblemText: "3m 0s", statusLabel: "wrong activity id" })),
+		"stalled 3m 0s (wrong activity id)",
+		"the reason is shown: it calls for a different response than a bare stall",
+	);
+	// A valid-but-silent snapshot has no problem clock, so the row falls back to
+	// the run's own age rather than showing a stall with no duration at all.
+	// A valid-but-silent snapshot has no problem clock, so its own silence is
+	// reported. Never the run's age: a child that worked for an hour and then
+	// wedged has been silent for seconds, and saying "stalled 1h 3m" would be a
+	// different (and much worse) claim than the one the evidence supports.
+	assert.equal(
+		statusDetail(snapshot({ kind: "stalled", statusLabel: "no activity", quietDurationText: "3m 20s", elapsedMs: 3_780_000, elapsedText: "1h 3m" })),
+		"stalled 3m 20s (no activity)",
+	);
+	assert.equal(statusDetail(snapshot({ kind: "stalled", statusLabel: "no activity" })), "stalled (no activity)", "no duration is better than a wrong one");
+	// An unreadable file is a different problem from a wedged child, so the parse
+	// error is surfaced (and bounded) rather than thrown away.
+	assert.equal(
+		statusDetail(snapshot({ kind: "stalled", snapshotState: "invalid", snapshotError: "activity is not valid JSON: Unexpected token h in JSON at position 2", snapshotProblemText: "3m 0s" })),
+		// The detail is bounded: a parse error can be arbitrarily long.
+		"stalled 3m 0s (invalid snapshot: Unexpected token h in JSON at position 2)",
+	);
+	assert.equal(
+		statusDetail(snapshot({ kind: "stalled", snapshotState: "invalid", snapshotError: "   " })),
+		"stalled (invalid snapshot)",
+	);
+	const long = `activity is not valid JSON: ${"x".repeat(120)}`;
+	const rendered = statusDetail(snapshot({ kind: "stalled", snapshotState: "invalid", snapshotError: long }));
+	assert.equal(rendered.length < 80, true, `a parse error must not take over the row: ${rendered}`);
+	assert.equal(statusDetail(snapshot({ kind: "queued" })), "queued for a slot");
+	assert.equal(statusDetail(snapshot({ kind: "interrupted" })), "interrupted");
+	assert.equal(statusDetail(snapshot({ kind: "starting" })), "starting");
+});
+
+test("isMissingTmuxTarget only claims a missing target for tmux's own wording", () => {
+	// A false positive fails a healthy child, so the patterns are deliberately
+	// narrow; a false negative re-arms the watcher against a target that cannot
+	// exist, so the canonical messages must all be covered.
+	for (const stderr of [
+		"can't find pane: pi-agent-x",
+		"can't find session: pi-agent-x",
+		"no such session",
+		"unknown session: pi-agent-x",
+		"server exited unexpectedly",
+		// tmux is not consistent about which stream carries the error, so both
+		// are searched; a different wording is not enough on its own.
+		"",
+	]) {
+		const stdout = stderr ? "" : "no such pane in session 3";
+		assert.equal(isMissingTmuxTarget({ code: 1, stdout, stderr }), true, `${stderr}${stdout}`);
+	}
+	// A success is never a missing target, and neither is a transient failure the
+	// watcher must keep retrying.
+	assert.equal(isMissingTmuxTarget({ code: 0, stdout: "1", stderr: "can't find pane" }), false);
+	assert.equal(isMissingTmuxTarget({ code: 1, stdout: "", stderr: "error connecting to sock (No such file or directory)" }), false);
+	assert.equal(isMissingTmuxTarget({ code: 1, stdout: "", stderr: "permission denied" }), false);
+	assert.equal(isMissingTmuxTarget({ code: 1, stdout: "error: no session found on this server", stderr: "" }), false);
 });
 
 test("formatDuration omits unset start and formats minutes and seconds", () => {

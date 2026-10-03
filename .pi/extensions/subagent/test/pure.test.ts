@@ -42,12 +42,21 @@ test("readIntEnv falls back for missing, blank and non-positive values", async (
 	await withEnv({ PI_TEST_INT: "-3" }, () => {
 		assert.equal(readIntEnv("PI_TEST_INT", 7), 7, "negative is rejected by readIntEnv");
 	});
-	await withEnv({ PI_TEST_INT: "3.9" }, () => {
-		assert.equal(readIntEnv("PI_TEST_INT", 7), 3, "parses the leading integer");
-	});
 	await withEnv({ PI_TEST_INT: "12" }, () => {
 		assert.equal(readIntEnv("PI_TEST_INT", 7), 12);
 	});
+	// Unit suffixes and exponent notation are rejected rather than truncated.
+	// `parseInt` would read "3" out of "3m" and "1" out of "1e9", so a threshold
+	// (PI_SUBAGENT_STALL_SECONDS) could be silently turned into seconds instead of
+	// minutes — or into "stall immediately". The default is the safe answer.
+	await withEnv({ PI_TEST_INT: "  12  " }, () => {
+		assert.equal(readIntEnv("PI_TEST_INT", 7), 12, "surrounding whitespace is still a number");
+	});
+	for (const bad of ["3.9", "3m", "1e9", "12x", "+12", "0x10", "1_000"]) {
+		await withEnv({ PI_TEST_INT: bad }, () => {
+			assert.equal(readIntEnv("PI_TEST_INT", 7), 7, `"${bad}" must be rejected, not truncated`);
+		});
+	}
 });
 
 test("readIntEnv rejects zero while readNonNegativeIntEnv accepts it", async () => {

@@ -23,6 +23,7 @@ const REQUIRED_HELPERS = [
 	"resolveModel",
 	"runDirOwnsLiveTranscript",
 	"runSummary",
+	"startRepeatingRefresh",
 	"shellQuote",
 	"textFromAssistant",
 	"tmuxSessionName",

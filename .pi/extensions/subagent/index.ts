@@ -73,6 +73,21 @@
 //     refuses while `holdsChild`), and nothing may leave an idle child
 //     unreferenced forever (shutdown reaps it; the transcript survives, so the
 //     run stays resumable).
+// 14. Status classifier and live widget (see status.ts and widget.ts):
+//     `observeStatus`/`classifyStatus`/`advanceStatusState` turn the activity
+//     snapshot the parent already reads into a display status — starting,
+//     active, waiting, stalled — with the monotonicity guard that makes an
+//     out-of-order or clock-skewed snapshot harmless. The widget itself is pi's
+//     native `ctx.ui.setWidget(..., { placement: "aboveEditor" })`, installed
+//     lazily while a run is live and cleared when the last one finishes, and
+//     guarded on `ctx.mode === "tui"` because RPC forwards only string arrays.
+//     Two policies are deliberately NOT the reference's: the stall threshold is
+//     ours and generous (PI_SUBAGENT_STALL_SECONDS, default 180) because our
+//     children shut themselves down at `agent_settled` and a long silent tool is
+//     not a hung child; and a stall or recovery never wakes the parent, because
+//     that would duplicate notifyCompletion. The classifier is display-only — it
+//     cannot finish, fail or interrupt anything — and `interrupted` is
+//     authoritative over it.
 //
 // The child reporter (CHILD_ENV) still reports completion the same way; patch 11
 // only adds the activity snapshot to it, and patch 13 only diverts the aborted
@@ -113,9 +128,25 @@ import {
 	type SubagentInterruptMarker,
 } from "./interrupt.ts";
 import {
+	advanceStatusState,
+	classifyStatus,
+	createStatusState,
+	DEFAULT_STALL_AFTER_MS,
+	DEFAULT_TOOL_STALL_AFTER_MS,
+	observationFromActivity,
+	observeStatus,
+	withRunStatus,
+	type LiveRunStatus,
+	type StatusObservation,
+	type StatusSnapshot,
+	type SubagentStatusState,
+} from "./status.ts";
+import { createStatusWidget, type StatusRow } from "./widget.ts";
+import {
 	createActivityRecorder,
 	getActivityFilePath,
 	readActivityFile,
+	type ActivityReadResult,
 	type SubagentActivityPhase,
 	type SubagentActivityScope,
 } from "./activity.ts";
@@ -134,6 +165,14 @@ const DEFAULT_MAX_CONCURRENT = 4;
 const GC_DAYS = 7;
 /** Default grace period for confirming an interrupt before reporting "requested". */
 const DEFAULT_INTERRUPT_CONFIRM_MS = 3_000;
+/** Default silence, in seconds, before a run is called stalled (local patch 14). */
+const DEFAULT_STALL_SECONDS = DEFAULT_STALL_AFTER_MS / 1000;
+/** Same, for a run inside a tool call, which is silent by construction. */
+const DEFAULT_TOOL_STALL_SECONDS = DEFAULT_TOOL_STALL_AFTER_MS / 1000;
+/** How often the live widget re-renders when nothing else asks it to. */
+const WIDGET_TICK_MS = 1_000;
+/** Widget key, so pi can replace and clear our widget without touching others. */
+const WIDGET_KEY = "subagent-status";
 /** How many consecutive unclassifiable tmux failures mean the child is gone. */
 const MAX_TRANSIENT_TMUX_FAILURES = 3;
 /** Poll cadence while waiting for a child to confirm an interrupt. */
@@ -231,11 +270,23 @@ function shellQuote(value: string): string {
 	return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
+/**
+ * Read a positive integer from the environment.
+ *
+ * Strict on purpose: `parseInt` would happily read the "3" out of "3m" and the "1"
+ * out of "1e9", and a threshold silently shortened by a typo is worse than one
+ * that was ignored (the default is the documented behaviour).
+ */
 function readIntEnv(name: string, fallback: number): number {
 	const raw = process.env[name]?.trim();
 	if (!raw) return fallback;
-	const parsed = Number.parseInt(raw, 10);
-	return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+	if (!/^\d+$/.test(raw) || Number.parseInt(raw, 10) <= 0) {
+		// Say so rather than silently running on the default: a typo in a
+		// threshold is exactly the case where silence is expensive.
+		console.error(`[tmux-subagent] ${name}="${raw}" is not a positive whole number; using ${fallback}.`);
+		return fallback;
+	}
+	return Number.parseInt(raw, 10);
 }
 
 function readBooleanEnv(name: string, fallback: boolean): boolean {
@@ -619,6 +670,84 @@ function isMissingTmuxTarget(result: { code: number; stdout: string; stderr: str
 	);
 }
 
+/** The parse error behind an unusable snapshot, if it has one worth showing. */
+function describeSnapshotError(snapshot: StatusSnapshot): string | null {
+	if (snapshot.snapshotState !== "invalid" || !snapshot.snapshotError) return null;
+	const detail = snapshot.snapshotError.replace(/^activity is not valid JSON: /, "").replace(/\s+/g, " ").trim();
+	if (!detail) return "invalid snapshot";
+	return detail.length <= 40 ? `invalid snapshot: ${detail}` : `invalid snapshot: ${detail.slice(0, 39)}…`;
+}
+
+/**
+ * The kind-specific qualifier on a widget row.
+ *
+ * Durations come first and the label second ("active 45s (bash)") because the
+ * duration describes the PHASE while a tool name describes what is happening
+ * inside it — they are not the same span, and pairing them the other way round
+ * implies the tool has been running for the whole phase.
+ */
+function statusDetail(snapshot: StatusSnapshot): string {
+	switch (snapshot.kind) {
+		case "active": {
+			const duration = snapshot.activeDurationText ? ` ${snapshot.activeDurationText}` : "";
+			const label = snapshot.toolName ?? snapshot.activeScope;
+			return label ? `active${duration} (${label})` : `active${duration}`;
+		}
+		case "waiting": {
+			const duration = snapshot.waitingDurationText ? ` ${snapshot.waitingDurationText}` : "";
+			return `${snapshot.statusLabel ?? "waiting"}${duration}`;
+		}
+		case "stalled": {
+			// Whichever clock applies, it measures the SILENCE: an unreadable file
+			// has been a problem for snapshotProblemText, a valid-but-frozen one for
+			// quietDurationText. Falling back to the run's age would overstate the
+			// stall by everything the run did before it wedged.
+			const duration = snapshot.quietDurationText ?? snapshot.snapshotProblemText;
+			// The reason is worth showing, because the responses differ: "no
+			// activity" means a wedged child, "wrong activity id" means a mismatched
+			// snapshot, and an unreadable file is usually a corrupt or truncated one.
+			const reason = snapshot.statusLabel ?? describeSnapshotError(snapshot);
+			return `stalled${duration ? ` ${duration}` : ""}${reason ? ` (${reason})` : ""}`;
+		}
+		case "queued":
+			return "queued for a slot";
+		case "interrupted":
+			return "interrupted";
+		default:
+			return "starting";
+	}
+}
+
+/** Feed the classifier from the activity read: the snapshot, or why there is none. */
+// Feed the classifier from the activity read: the snapshot, or why there is none.
+function observationFromRead(read: ActivityReadResult): StatusObservation {
+	if (!read.ok) return { snapshot: read.reason, snapshotError: read.error };
+	const snapshot = read.activity;
+	return observationFromActivity({
+		phase: snapshot.phase,
+		updatedAt: snapshot.updatedAt,
+		sequence: snapshot.sequence,
+		scope: snapshot.activeScope,
+		toolName: snapshot.toolName,
+		activeSince: snapshot.activeSince,
+		waitingSince: snapshot.waitingSince,
+		latestEvent: snapshot.latestEvent,
+	});
+}
+
+/**
+ * Run `callback` every `intervalMs`, returning the function that stops it.
+ *
+ * `unref` matters: a widget ticker must never be the reason a session's event
+ * loop stays alive (local patch 10). Module level and dependency-free so the
+ * mechanism can be tested without a terminal, a tmux server or a run.
+ */
+function startRepeatingRefresh(callback: () => void, intervalMs: number): () => void {
+	const timer = setInterval(callback, intervalMs);
+	timer.unref?.();
+	return () => clearInterval(timer);
+}
+
 function isTerminal(status: RunStatus): boolean {
 	return status === "completed" || status === "failed" || status === "cancelled" || status === "interrupted";
 }
@@ -779,6 +908,13 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	// How long subagent_interrupt waits for the child to confirm the interrupt
 	// before reporting "requested" instead of "interrupted".
 	const interruptConfirmMs = readNonNegativeIntEnv("PI_SUBAGENT_INTERRUPT_CONFIRM_MS", DEFAULT_INTERRUPT_CONFIRM_MS);
+	// How long a run may go without a usable activity snapshot before the widget
+	// calls it stalled. Deliberately generous: our children shut down at
+	// `agent_settled`, so silence is usually a long tool, not a hung child.
+	const stallAfterMs = readIntEnv("PI_SUBAGENT_STALL_SECONDS", DEFAULT_STALL_SECONDS) * 1000;
+	// A tool call produces no events while it prints nothing, so it needs a much
+	// longer leash than a streaming or waiting child.
+	const toolStallAfterMs = readIntEnv("PI_SUBAGENT_TOOL_STALL_SECONDS", DEFAULT_TOOL_STALL_SECONDS) * 1000;
 
 	const runs = new Map<string, RunRecord>();
 	const timers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -791,6 +927,18 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	 * clears it, so only a sustained outage ever counts.
 	 */
 	const tmuxFailures = new Map<string, number>();
+	// Per-run classifier state (local patch 14). Pure state, kept here because it
+	// is derived from run.activity and thrown away with the run.
+	const statusStates = new Map<string, SubagentStatusState>();
+	// The TUI driving our widget, captured when pi installs it. Only ever set in
+	// TUI mode: RPC drops component factories, so there is no TUI to poke there.
+	let widgetTui: { requestRender: () => void } | undefined;
+	// Stopping the ticker, not the timer handle: see startRepeatingRefresh.
+	let widgetTimer: (() => void) | undefined;
+	// The context that owns the widget. Held so the ticker can clear the widget
+	// when the last run finishes; TUI-only, and dropped at shutdown.
+	let statusUi: ExtensionContext | undefined;
+	let widgetInstalled = false;
 
 	const countTmuxFailure = (run: RunRecord): number => {
 		const next = (tmuxFailures.get(run.id) ?? 0) + 1;
@@ -914,7 +1062,10 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		run.output = truncateToolText(output || "(no text output)");
 		run.usage = (await readSessionUsage(run.sessionFile, { fromLine: run.usageFromLine ?? 0 })) ?? run.usage;
 		await persist();
+		// After the notification: a display problem must never be able to swallow
+		// the completion message, which is how the main agent learns the run ended.
 		await notifyCompletion(run);
+		refreshStatusWidget();
 		scheduleReap(run);
 		void drainQueue();
 	};
@@ -926,7 +1077,10 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		run.error = message;
 		run.finishedAt = Date.now();
 		await persist();
+		// After the notification: a display problem must never be able to swallow
+		// the completion message, which is how the main agent learns the run ended.
 		await notifyCompletion(run);
+		refreshStatusWidget();
 		scheduleReap(run);
 	};
 
@@ -937,6 +1091,150 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			return undefined;
 		}
 	};
+
+// --- Live widget (local patch 14) ---------------------------------------------
+//
+// The classifier is display-only, so none of this decides anything about a run:
+// `advanceStatusState`'s transition is deliberately ignored here. A caller that
+// must REACT to a stall would use it; this one must not, because waking the
+// parent would duplicate notifyCompletion and spam the main session with
+// something the user is already watching below the editor.
+
+/**
+ * Runs with liveness worth showing: anything whose child may still exist.
+ *
+ * Interrupted runs sort last. They are long-lived by design — one holds its slot
+ * until it is cancelled — so ordering purely by age lets a few of them occupy
+ * every row and pushes a run the user just started into the "+N more" line.
+ * Otherwise oldest first, which is creation order.
+ */
+const liveRuns = (): RunRecord[] =>
+	[...runs.values()]
+		.filter((run) => holdsChild(run.status))
+		.sort((a, b) => {
+			// Interrupted last: a positive value puts `a` after `b`.
+			const settled = Number(a.status === "interrupted") - Number(b.status === "interrupted");
+			return settled !== 0 ? settled : a.createdAt - b.createdAt;
+		});
+
+const statusStateFor = (run: RunRecord): SubagentStatusState => {
+	const runStatus = run.status as LiveRunStatus;
+	const existing = statusStates.get(run.id);
+	if (!existing) {
+		// A queued run has no startedAt yet, so its clock starts when it was asked
+		// for: the widget then shows how long it has been waiting for a slot.
+		return createStatusState({ runStatus, startTimeMs: run.startedAt ?? run.createdAt, stallAfterMs, toolStallAfterMs });
+	}
+	// A run's elapsed time means what subagent_status and /subagents say it means:
+	// time since it STARTED. While it was queued there was nothing to time, so the
+	// clock is re-based when it finally starts — otherwise the widget would count
+	// the queue wait forever and two surfaces would disagree on one number.
+	if (existing.runStatus === "queued" && runStatus !== "queued" && run.startedAt !== undefined) {
+		return withRunStatus({ ...existing, startTimeMs: run.startedAt }, runStatus);
+	}
+	return withRunStatus(existing, runStatus);
+};
+
+const statusRows = (now: number): StatusRow[] =>
+	liveRuns().map((run) => {
+		// classifyStatus, not advanceStatusState: the stored state is already
+		// advanced by refreshStatusWidget, and rendering must not move it.
+		const snapshot = classifyStatus(statusStates.get(run.id) ?? statusStateFor(run), now);
+		return {
+			id: run.id.slice(0, 8),
+			task: run.task,
+			kind: snapshot.kind,
+			elapsedText: snapshot.elapsedText,
+			detail: statusDetail(snapshot),
+		};
+	});
+
+/** Fold one observation into a run's classifier state and refresh the widget. */
+const observeRunStatus = (run: RunRecord, observation: StatusObservation): void => {
+	statusStates.set(run.id, observeStatus(statusStateFor(run), observation, Date.now()));
+	refreshStatusWidget();
+};
+
+const clearWidget = (): void => {
+	widgetTui = undefined;
+	if (!widgetInstalled) return;
+	widgetInstalled = false;
+	statusUi?.ui.setWidget(WIDGET_KEY, undefined);
+};
+
+/**
+ * Start the render ticker, once there is something to show.
+ *
+ * The 500ms watcher already re-renders for a running child, but a watcher's tmux
+ * calls can take seconds when tmux is slow, a QUEUED run has no watcher at all,
+ * and elapsed times keep moving when nothing else happens — so the widget needs a
+ * tick of its own. It is stopped as soon as no run is live, which keeps an idle
+ * session's event loop empty (local patch 10).
+ */
+const startWidgetTimer = (): void => {
+	// Only TUI can render this, and installWidget is a no-op elsewhere, so a
+	// ticker in RPC or print would be a timer that re-renders nothing.
+	if (widgetTimer || shuttingDown || statusUi?.mode !== "tui") return;
+	widgetTimer = startRepeatingRefresh(() => refreshStatusWidget(), WIDGET_TICK_MS);
+};
+
+const stopWidgetTimer = (): void => {
+	widgetTimer?.();
+	widgetTimer = undefined;
+};
+
+/** Advance every live run's classifier and re-render the widget. */
+const refreshStatusWidget = (now = Date.now()): void => {
+	// Nothing below this line can be seen in RPC, print or json, and the classifier
+	// state it maintains would be dead weight there.
+	if (shuttingDown || statusUi?.mode !== "tui") return;
+
+	for (const [runId] of statusStates) {
+		const run = runs.get(runId);
+		if (run && holdsChild(run.status)) continue;
+		// A finished run has no liveness left to classify, and keeping its state
+		// would let a future run inherit its history.
+		statusStates.delete(runId);
+	}
+	const live = liveRuns();
+	for (const run of live) {
+		statusStates.set(run.id, advanceStatusState(statusStateFor(run), now).nextState);
+	}
+
+	// Nothing to show: take the widget down rather than leaving an empty strip
+	// above the editor. Installed lazily, so an idle session never calls
+	// setWidget at all.
+	if (live.length === 0) {
+		stopWidgetTimer();
+		clearWidget();
+		return;
+	}
+	if (!widgetInstalled) installWidget();
+	startWidgetTimer();
+	widgetTui?.requestRender();
+};
+
+/**
+ * Install the widget component.
+ *
+ * Guarded on `ctx.mode`, not `ctx.hasUI`: RPC reports hasUI too but forwards only
+ * string arrays and silently drops a component factory, so installing one there
+ * would show a widget that can never update. print and json no-op the UI anyway.
+ */
+const installWidget = (): void => {
+	if (!statusUi || statusUi.mode !== "tui" || widgetInstalled) return;
+	statusUi.ui.setWidget(
+		WIDGET_KEY,
+		createStatusWidget({
+			getRows: () => statusRows(Date.now()),
+			onCreate: (tui) => {
+				widgetTui = tui;
+			},
+		}),
+		{ placement: "aboveEditor" },
+	);
+	widgetInstalled = true;
+};
 
 	/**
 	 * Fold a child-written interrupt marker into the run.
@@ -949,7 +1247,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	 * *older* marker for this same run harmless — that is the caller's job, via
 	 * the `since` baseline.
 	 */
-	const noteInterrupt = async (
+const noteInterrupt = async (
 		run: RunRecord,
 		marker: SubagentInterruptMarker,
 		since?: { interrupts: number; at: number },
@@ -973,6 +1271,10 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		// No finishedAt: the child is still running, so the elapsed time shown by
 		// formatDuration must keep counting rather than freezing.
 		await persist();
+		// `interrupted` is a status the widget renders, and noteInterrupt is the
+		// only writer of it — without this the strip keeps claiming the run is
+		// active for up to a tick after the tool reported it stopped.
+		refreshStatusWidget();
 		return true;
 	};
 
@@ -1083,6 +1385,13 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 						await persist();
 					}
 				}
+			}
+			// Its own try: a display problem must not be able to skip the interrupt
+			// marker or the liveness checks that follow.
+			try {
+				observeRunStatus(run, observationFromRead(activity));
+			} catch (error) {
+				console.error(`[tmux-subagent] status update failed for ${run.id}: ${error instanceof Error ? error.message : String(error)}`);
 			}
 
 			// Turn-level interrupt (local patch 13). The child writes this marker on
@@ -1227,6 +1536,9 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		runs.set(run.id, run);
 		await persist();
 		await drainQueue();
+		// Show the run in the widget now rather than up to 500ms later on the first
+		// watcher tick: "I started something" deserves an immediate answer.
+		refreshStatusWidget();
 	};
 
 	const loadPersistedRuns = async (): Promise<void> => {
@@ -1282,6 +1594,11 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 
 	pi.on("session_start", async (_event, ctx) => {
 		await ensureSessionPaths(ctx);
+		// Remember where the widget would live, but do not install it yet: pi
+		// re-arms this extension on reload, and an idle session must not leave an
+		// empty strip above the editor. The first live run installs it.
+		if (ctx.mode === "tui") statusUi = ctx;
+		refreshStatusWidget();
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -1290,6 +1607,12 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		timers.clear();
 		for (const timer of reapTimers.values()) clearTimeout(timer);
 		reapTimers.clear();
+		// The widget and its ticker are parent-session furniture: both must go when
+		// the session does, or the ticker keeps the event loop alive (local patch 10).
+		stopWidgetTimer();
+		clearWidget();
+		statusStates.clear();
+		statusUi = undefined;
 		for (const run of runs.values()) {
 			if (killOnShutdown && holdsChild(run.status)) {
 				run.status = "cancelled";
@@ -1501,6 +1824,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			run.status = "cancelled";
 			run.finishedAt = Date.now();
 			await persist();
+			refreshStatusWidget();
 			void drainQueue();
 			return { content: [{ type: "text", text: `Subagent ${id} cancelled.` }], details: run };
 		},
@@ -1972,6 +2296,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 										run.status = "cancelled";
 										run.interruptRequestedAt = undefined;
 										run.finishedAt = Date.now();
+										refreshStatusWidget();
 										void persist().then(() => drainQueue());
 										ctx.ui.notify(`Cancelled ${run.id}`, "info");
 									}
@@ -2003,6 +2328,7 @@ export const __test__ = {
 	findLastAssistant,
 	formatDuration,
 	holdsChild,
+	isMissingTmuxTarget,
 	isSameOrDescendant,
 	isTerminal,
 	readBooleanEnv,
@@ -2012,6 +2338,8 @@ export const __test__ = {
 	runDirOwnsLiveTranscript,
 	runSummary,
 	shellQuote,
+	startRepeatingRefresh,
+	statusDetail,
 	textFromAssistant,
 	tmuxSessionName,
 	tmuxSocketPath,

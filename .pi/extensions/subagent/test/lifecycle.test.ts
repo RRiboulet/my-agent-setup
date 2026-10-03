@@ -12,7 +12,7 @@
 // `session_shutdown` has cleared the timer map.
 
 import assert from "node:assert/strict";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { existsSync, watch } from "node:fs";
 import * as path from "node:path";
 import { test } from "node:test";
@@ -36,6 +36,12 @@ interface Harness {
 	failPaneOnce: () => void;
 	/** Fail every pane call with an unclassifiable error (an unreachable socket). */
 	failPaneAlways: () => void;
+	/** setWidget calls, in order. An `undefined` content is a clear. */
+	widgetCalls: { key: string; hasContent: boolean; placement: string | undefined }[];
+	/** Render the installed widget with the given width and return its lines. */
+	renderWidget: (width?: number) => string[] | undefined;
+	/** How many times the widget asked the TUI to re-render. */
+	renderRequests: () => number;
 	shutdown: () => Promise<void>;
 	call: (tool: string, params: Record<string, unknown>) => Promise<{ text: string; details: Record<string, unknown> }>;
 	readRuns: () => Promise<RunRecord[]>;
@@ -54,6 +60,9 @@ interface HarnessOptions {
 	execDelayMs?: number;
 	/** Start with the tmux target missing, as if the session had been killed by hand. */
 	missingTarget?: boolean;
+	stallSeconds?: string;
+	/** Override ctx.mode, so the TUI-only widget guard can be exercised. */
+	mode?: string;
 	/** Overrides ctx.sessionManager, so fork/lineage tests can present a real live branch. */
 	sessionManager?: Record<string, unknown>;
 }
@@ -69,6 +78,11 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 	// Unclassifiable failures, counted down: `once` for a single blip.
 	let paneFailures = 0;
 	let paneFailureMode = "";
+	// Widget plumbing (local patch 14).
+	const widgetCalls: { key: string; hasContent: boolean; placement: string | undefined }[] = [];
+	const widgetComponents = new Map<string, (tui: unknown, theme: unknown) => { render: (width: number) => string[] }>();
+	let renderRequests = 0;
+	const fakeTheme = { fg: (_color: string, text: string) => text };
 
 	const pi = {
 		registerFlag: () => undefined,
@@ -111,7 +125,7 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 
 	const ctx = {
 		cwd: process.cwd(),
-		mode: "tui",
+		mode: options.mode ?? "tui",
 		hasUI: true,
 		isProjectTrusted: () => true,
 		sessionManager: options.sessionManager ?? {
@@ -123,7 +137,11 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 		ui: {
 			notify: () => undefined,
 			custom: async () => undefined,
-			setWidget: () => undefined,
+			setWidget: (key: string, content: unknown, opts?: { placement?: string }) => {
+				widgetCalls.push({ key, hasContent: content !== undefined, placement: opts?.placement });
+				if (typeof content === "function") widgetComponents.set(key, content as never);
+				else widgetComponents.delete(key);
+			},
 		},
 		shutdown: () => undefined,
 	};
@@ -144,6 +162,8 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 			PI_SUBAGENT_AUTO_REAP: "true",
 			PI_SUBAGENT_REAP_DELAY_MS: "0",
 			PI_SUBAGENT_GC_DAYS: "7",
+			PI_SUBAGENT_STALL_SECONDS: options.stallSeconds,
+			PI_SUBAGENT_TOOL_STALL_SECONDS: options.toolStallSeconds,
 		},
 		async () => {
 			subagentExtension(pi as never);
@@ -170,6 +190,15 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 			paneFailureMode = "always";
 			paneFailures = Number.MAX_SAFE_INTEGER;
 		},
+		widgetCalls,
+		renderWidget: (width = 200) => {
+			const component = [...widgetComponents.values()].at(-1);
+			if (!component) return undefined;
+			// Calling the factory is how the extension gets its TUI, the object it
+			// pokes to re-render; observing that request needs the same call.
+			return component({ requestRender: () => (renderRequests += 1) }, fakeTheme).render(width);
+		},
+		renderRequests: () => renderRequests,
 		shutdown: async () => {
 			await handlers.get("session_shutdown")?.({}, ctx);
 		},
@@ -1306,7 +1335,9 @@ test("an interrupted run fails when its tmux session disappears", async () => {
 		await waitFor(async () => (await h.readRuns())[0].status === "interrupted");
 
 		h.removeTarget();
-		await waitFor(async () => (await h.readRuns())[0].status === "failed");
+		// Generous: this needs the watcher's next pass, and the suite runs test
+		// files in parallel, so timer resolution is not in our hands.
+		await waitFor(async () => (await h.readRuns())[0].status === "failed", 15_000);
 		const failed = (await h.readRuns())[0];
 		assert.match(failed.error ?? "", /exited before reporting a result/);
 		assert.ok(failed.finishedAt);
@@ -1347,7 +1378,7 @@ test("an unclassifiable tmux failure fails the run only after a run of them", as
 		assert.equal((await h.readRuns())[0].status, "running", "one failure is tolerated");
 
 		h.failPaneAlways();
-		await waitFor(async () => (await h.readRuns())[0].status === "failed");
+		await waitFor(async () => (await h.readRuns())[0].status === "failed", 15_000);
 		assert.match((await h.readRuns())[0].error ?? "", /could not be reached over tmux/);
 		assert.doesNotMatch((await h.readRuns())[0].error ?? "", /exited before reporting/);
 	});
@@ -1366,5 +1397,254 @@ test("an unconfirmed Escape is forgotten once the child is seen working again", 
 		await waitFor(async () => (await h.readRuns())[0].interruptRequestedAt === undefined);
 		const status = await h.call("subagent_status", { id: run.id });
 		assert.doesNotMatch(status.text, /not confirmed yet/);
+	});
+});
+
+// --- Live widget (local patch 14): install, refresh, clear. ---
+
+test("the widget is installed above the editor, only while a run is live, and only in TUI mode", async () => {
+	await withHarness(undefined, async (h) => {
+		assert.deepEqual(h.widgetCalls, [], "an idle session never touches the widget");
+
+		await h.call("subagent", { task: "show a row" });
+		assert.deepEqual(
+			h.widgetCalls.at(-1),
+			{ key: "subagent-status", hasContent: true, placement: "aboveEditor" },
+			"installed lazily, when the first run goes live",
+		);
+		// A component factory, not a frozen string array: RPC ignores factories, so
+		// the guard on ctx.mode is what keeps a dead widget out of RPC sessions.
+		assert.equal(typeof h.renderWidget(), "object");
+	});
+
+	// RPC reports hasUI but forwards only string arrays, so a factory would be
+	// dropped and the widget would never update.
+	await withTempAgentDir(async () => {
+		const harness = await createHarness({ mode: "rpc" });
+		try {
+			await harness.call("subagent", { task: "no widget here" });
+			await new Promise((resolve) => setTimeout(resolve, 1_500));
+			assert.deepEqual(harness.widgetCalls, [], "no widget in a mode that cannot render one");
+		} finally {
+			await harness.shutdown();
+		}
+	});
+});
+
+test("a live run shows a row, and it follows the child's activity", async () => {
+	await withHarness({ paneText: "unchanging child output" }, async (h) => {
+		await h.call("subagent", { task: "investigate the flaky test" });
+		await waitFor(() => (h.renderWidget() ?? []).length === 1);
+		const [first] = h.renderWidget() as string[];
+		assert.match(first, /starting · /, first);
+		assert.match(first, /investigate the flaky test/, "the task tells the user which run this is");
+
+		await h.writeActivity((await h.readRuns())[0], activitySnapshot((await h.readRuns())[0]));
+		await waitFor(() => (h.renderWidget() ?? [])[0]?.includes("active "));
+		assert.match((h.renderWidget() as string[])[0], /active \d+s \(bash\) · /, h.renderWidget()?.join("\n"));
+	});
+});
+
+test("confirming an interrupt updates the widget within one watcher tick", async () => {
+	// noteInterrupt is the only writer of the interrupted status, so it is the
+	// only thing that can refresh the widget at that moment. Asserted inside a
+	// single 500ms watcher window: waiting longer would let the 1s ticker paper
+	// over the omission.
+	await withHarness({ interruptConfirmMs: "5000" }, async (h) => {
+		const run = (await h.call("subagent", { task: "steer me" })).details as unknown as RunRecord;
+		await waitFor(() => (h.renderWidget() ?? []).length === 1);
+		h.renderWidget();
+		setTimeout(() => {
+			void h.writeInterrupt(run).catch(() => undefined);
+		}, 50);
+
+		await h.call("subagent_interrupt", { id: run.id });
+		const row = (h.renderWidget() as string[])[0] as string;
+		assert.match(row, /interrupted/, `the widget must not keep claiming the run is active: ${row}`);
+	});
+});
+
+test("an interrupted run reads as interrupted even while the child works again", async () => {
+	// The authoritative state beats the inference. If the widget said "active"
+	// here, the user would see a contradiction with subagent_status, and the agent
+	// reading it could believe the run is progressing when it is not.
+	await withHarness({ paneText: "unchanging child output" }, async (h) => {
+		const run = (await h.call("subagent", { task: "steer me" })).details as unknown as RunRecord;
+		await h.writeInterrupt(run);
+		await waitFor(() => (h.renderWidget() ?? [])[0]?.includes("interrupted"));
+		assert.match((h.renderWidget() as string[])[0], /‖ .*interrupted · /);
+
+		// Even a fresh, actively-working snapshot must not flip the row.
+		await h.writeActivity(run, activitySnapshot(run));
+		await new Promise((resolve) => setTimeout(resolve, 1_200));
+		assert.match((h.renderWidget() as string[])[0], /interrupted/);
+	});
+});
+
+test("a silent child is called stalled only after the configured threshold", async () => {
+	await withHarness({ stallSeconds: "1", paneText: "unchanging child output" }, async (h) => {
+		const run = (await h.call("subagent", { task: "silent child" })).details as unknown as RunRecord;
+		await h.writeActivity(run, activitySnapshot(run));
+		await waitFor(() => (h.renderWidget() ?? [])[0]?.includes("active"));
+		assert.doesNotMatch((h.renderWidget() as string[])[0], /stalled/, "one second of quiet is not a stall");
+
+		// The snapshot goes away and stays away.
+		await rm(getActivityFilePath(run.runDir), { force: true });
+		await waitFor(() => (h.renderWidget() ?? [])[0]?.includes("stalled"), 6_000);
+		assert.match((h.renderWidget() as string[])[0], /stalled \d+s/);
+	});
+});
+
+test("a queued run waits for a slot and is never called stalled", async () => {
+	// Regression: a queued run has no watcher and so no snapshot by definition, so
+	// a stall rule keyed on snapshot silence called it stalled after the threshold
+	// — a hung child invented for something merely queueing, contradicting
+	// subagent_status. The stall threshold is 1s here so the old bug shows up.
+	await withHarness({ maxConcurrent: "1", stallSeconds: "1" }, async (h) => {
+		await h.call("subagent", { task: "occupies the only slot" });
+		await h.call("subagent", { task: "queued behind it" });
+		await waitFor(() => (h.renderWidget() ?? []).length === 2);
+		await new Promise((resolve) => setTimeout(resolve, 2_500));
+
+		const rows = h.renderWidget() as string[];
+		assert.match(rows[1] as string, /queued for a slot · /, rows.join("\n"));
+		assert.doesNotMatch(rows[1] as string, /stalled/, rows.join("\n"));
+
+		// And subagent_status agrees with the widget about this run.
+		const queued = (await h.readRuns()).find((run) => run.status === "queued");
+		assert.match((await h.call("subagent_status", { id: queued?.id as string })).text, /^\S+\s+queued/m);
+	});
+});
+
+test("a valid but silent snapshot is called stalled, with a reason", async () => {
+	// The case the feature exists for: the child is alive in tmux but has stopped
+	// writing. Its last snapshot still says "active", so reading the file alone
+	// reports the run as working forever.
+	// The child is inside a tool, so the tool threshold applies — hence
+	// toolStallSeconds rather than stallSeconds.
+	await withHarness({ toolStallSeconds: "1", paneText: "unchanging child output" }, async (h) => {
+		const run = (await h.call("subagent", { task: "wedged child" })).details as unknown as RunRecord;
+		await h.writeActivity(run, activitySnapshot(run));
+		await waitFor(() => (h.renderWidget() ?? [])[0]?.includes("active"));
+		assert.doesNotMatch((h.renderWidget() as string[])[0], /stalled/);
+
+		// Freeze the snapshot: stop updating the file, exactly as a wedged child
+		// would. The tmux pane is still alive, so nothing else fails the run.
+		await new Promise((resolve) => setTimeout(resolve, 2_500));
+		const row = (h.renderWidget() as string[])[0] as string;
+		assert.match(row, /stalled/, `a silent child must not look active: ${row}`);
+		assert.match(row, /no activity/, row);
+		assert.equal((await h.readRuns())[0].status, "running", "a stall is a display claim, not a failure");
+	});
+});
+
+test("the ticker keeps the widget alive when the watcher cannot", async () => {
+	// The 500ms watcher is not a reliable ticker: each of its tmux calls can take
+	// seconds when tmux is slow, so between passes nothing would move the elapsed
+	// times or notice a stall. execDelayMs makes every watcher pass slow enough
+	// that the 1s ticker is the only thing that can refresh within the window
+	// asserted here — the previous version of this test passed with the ticker
+	// removed, because the watcher was refreshing anyway.
+	await withHarness({ execDelayMs: 2_000 }, async (h) => {
+		await h.call("subagent", { task: "slow tmux, live widget" });
+		await waitFor(() => (h.renderWidget() ?? []).length === 1);
+		h.renderWidget(); // install the component so requestRender is observable
+		const before = h.renderRequests();
+
+		// A watcher pass takes 4s+ here, so three refreshes inside 2.5s can only
+		// have come from the ticker.
+		await waitFor(() => h.renderRequests() >= before + 3, 2_500);
+	});
+});
+
+test("the widget is cleared when the last run finishes", async () => {
+	await withHarness(undefined, async (h) => {
+		const run = (await h.call("subagent", { task: "finish and clear" })).details as unknown as RunRecord;
+		await h.writeResult(run, { version: 1, status: "completed", output: "ok", finishedAt: Date.now() });
+		await waitFor(async () => (await h.readRuns())[0].status === "completed");
+		assert.deepEqual(
+			h.widgetCalls.at(-1),
+			{ key: "subagent-status", hasContent: false, placement: undefined },
+			"a finished run must not leave a row behind the editor",
+		);
+		assert.equal(h.renderWidget(), undefined, "nothing left to render");
+	});
+});
+
+test("interrupted rows sort last, so they cannot push a live run out of view", async () => {
+	// Interrupted runs are long-lived by design (one holds its slot until it is
+	// cancelled), so ordering purely by age lets four of them fill every row and
+	// hide a run the user just started.
+	await withHarness({ maxConcurrent: "4" }, async (h) => {
+		const kept = [];
+		for (const name of ["first", "second", "third", "fourth"]) {
+			const run = (await h.call("subagent", { task: `${name} interrupted run` })).details as unknown as RunRecord;
+			await h.writeInterrupt(run);
+			await waitFor(async () => (await h.readRuns()).find((entry) => entry.id === run.id)?.status === "interrupted");
+			kept.push(run.id);
+		}
+		assert.equal((await h.readRuns()).filter((run) => run.status === "interrupted").length, 4);
+
+		const started = (await h.call("subagent", { task: "the run I just launched" })).details as unknown as RunRecord;
+		await waitFor(() => (h.renderWidget() ?? []).length === 5, 8_000);
+		const rows = h.renderWidget() as string[];
+		assert.equal(rows.length, 5, "four rows plus the overflow line");
+		assert.match(rows[0] as string, new RegExp(started.id.slice(0, 8)), `the newest live run must be visible: ${rows.join(" | ")}`);
+		assert.match(rows[1] as string, new RegExp(kept[0]?.slice(0, 8) as string), `interrupted runs are shown, just after the live one: ${rows.join(" | ")}`);
+	});
+});
+
+test("a run's elapsed time starts when it starts, not when it was queued", async () => {
+	// subagent_status and /subagents both measure from run.startedAt. If the
+	// widget measured from createdAt it would count the queue wait forever, and two
+	// surfaces on screen would disagree about one number.
+	await withHarness({ maxConcurrent: "1" }, async (h) => {
+		const first = (await h.call("subagent", { task: "holds the slot" })).details as unknown as RunRecord;
+		const queued = (await h.call("subagent", { task: "waits in the queue" })).details as unknown as RunRecord;
+		await waitFor(() => (h.renderWidget() ?? []).some((line) => line.includes(queued.id.slice(0, 8)) && /queued for a slot/.test(line)));
+
+		// Free the slot so the queued run actually starts.
+		await h.call("subagent_cancel", { id: first.id });
+		await waitFor(async () => (await h.readRuns()).find((run) => run.id === queued.id)?.status === "running");
+
+		const row = (h.renderWidget() as string[]).find((line) => line.includes(queued.id.slice(0, 8))) as string;
+		const elapsed = row?.match(/· (\d+s|[0-9]+m[^·]*) · /)?.[1];
+		assert.equal(elapsed, "0s", `a run that just started must not report its queue wait as elapsed time: ${row}`);
+
+		// And the widget agrees with subagent_status, which measures the same thing.
+		const status = await h.call("subagent_status", { id: queued.id });
+		assert.match(status.text, new RegExp(`${queued.id}\\s+running · \\d+s`), status.text);
+	});
+});
+
+test("session_shutdown clears the widget and stops its ticker", async () => {
+	// Regression coverage for the timer-leak shape of local patch 10: a widget
+	// ticker that outlives the session would keep the event loop alive.
+	await withHarness(undefined, async (h) => {
+		const run = (await h.call("subagent", { task: "outlives nothing" })).details as unknown as RunRecord;
+		await waitFor(() => (h.renderWidget() ?? []).length === 1);
+		// Install the component so the TUI handle exists and requestRender counts.
+		h.renderWidget();
+
+		// Finish the run BEFORE shutting down, so no watcher survives to refresh the
+		// widget: with a live run, renderRequests keeps growing through its 500ms
+		// ticks and "the ticker stopped" is indistinguishable from "the ticker was
+		// still firing but its work was ignored".
+		await h.writeResult(run, { version: 1, status: "completed", output: "ok", finishedAt: Date.now() });
+		await waitFor(async () => (await h.readRuns())[0].status === "completed");
+		await h.call("subagent", { task: "second run keeps a row alive" });
+		await waitFor(() => (h.renderWidget() ?? []).length === 1);
+		h.renderWidget();
+
+		const before = h.renderRequests();
+		await new Promise((resolve) => setTimeout(resolve, 1_200));
+		assert.ok(h.renderRequests() > before, "precondition: the ticker is live while a run is");
+
+		await h.shutdown();
+		assert.deepEqual(h.widgetCalls.at(-1), { key: "subagent-status", hasContent: false, placement: undefined });
+
+		const afterShutdown = h.renderRequests();
+		await new Promise((resolve) => setTimeout(resolve, 2_500));
+		assert.equal(h.renderRequests(), afterShutdown, "no render can happen after shutdown: no ticker, no watcher, no live run");
 	});
 });

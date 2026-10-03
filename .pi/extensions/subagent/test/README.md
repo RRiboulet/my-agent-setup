@@ -32,10 +32,12 @@ test.
 | `export.test.ts` | the `__test__` block in `index.ts` still exists (guards a future re-vendor) |
 | `pure.test.ts` | `shellQuote`, `PI_SUBAGENT_*` env parsing, `isSameOrDescendant`, `resolveModel`, `validateCwd` |
 | `tmux.test.ts` | tmux session/socket naming, command construction, `--attach-subagent` parsing |
-| `status.test.ts` | `runSummary`, `isTerminal`, `holdsChild`, `runDirOwnsLiveTranscript`, `formatDuration`, `trimPane`, `truncateToolText`, `textFromAssistant` |
+| `status.test.ts` | `runSummary`, `isTerminal`, `holdsChild`, `runDirOwnsLiveTranscript`, `isMissingTmuxTarget`, `statusDetail`, `formatDuration`, `trimPane`, `truncateToolText`, `textFromAssistant` |
+| `classifier.test.ts` | the status classifier: phase classification, stall/recovery transitions, monotonicity against stale snapshots, `interrupted` authority |
+| `widget.test.ts` | `renderStatusRows` and the widget component: icons, capping, task trimming, width fitting |
 | `usage.test.ts` | child session usage/cost accounting |
 | `handoff.test.ts` | child launch argv per mode, lineage/fork session seeding, live-branch fork ordering, and the usage baseline |
-| `lifecycle.test.ts` | launch, concurrency queueing, finalisation, failure detection, cancel, wait, status, clean, shutdown stops the watcher, turn-level interrupt |
+| `lifecycle.test.ts` | launch, concurrency queueing, finalisation, failure detection, cancel, wait, status, clean, shutdown stops the watcher, turn-level interrupt, the live widget (install/refresh/clear) |
 | `interrupt.test.ts` | the `interrupt.json` marker (validation, reading, writing), the child reporter's abort path, and the parent lifecycle of an interrupted run |
 | `helpers.ts` | env/temp-dir isolation and polling helpers |
 
@@ -49,9 +51,13 @@ directory, so the tests never touch the real `~/.pi/agent` tree.
 About 20% of `index.ts` lines are still untested. The gaps, in rough order of
 size:
 
-- **the `/subagents` dashboard** (`index.ts` ~1680-1800) — the handler is never
+- **the `/subagents` dashboard** (`index.ts` ~2136-2297) — the handler is never
   invoked, because the harness stubs `registerCommand`. Layout, selection and
   the refresh interval are not covered.
+- **the widget's placement in a real terminal.** The tests render the component
+  directly with a fake TUI and theme, so `setWidget` is called with the right
+  key and placement but nothing proves the strip looks right in a live TUI.
+  See "Manual check" below.
 - **`registerChildReporter`** (~438-560) — its activity wiring is exercised
   (the harness fires the events and reads the snapshot back), as is the
   interrupted settle, but the atomic result writing and the shutdown fallback
@@ -74,6 +80,29 @@ delivery for `subagent_interrupt` against a real TUI, and liveness when a child
 hangs — needs an opt-in integration harness with model credentials, which this
 devcontainer does not have.
 
+## Environment
+
+Read once, when the extension factory runs:
+
+| Variable | Default | Effect |
+|---|---|---|
+| `PI_SUBAGENT_MAX_CONCURRENT` | `4` | children running at once; the rest queue |
+| `PI_SUBAGENT_NOTIFY` | `true` | push a message into the main session when a run ends |
+| `PI_SUBAGENT_AUTO_REAP` | `true` | kill a finished run's tmux session |
+| `PI_SUBAGENT_REAP_DELAY_MS` | `0` | wait this long before reaping |
+| `PI_SUBAGENT_GC_DAYS` | `7` | delete run dirs older than this |
+| `PI_SUBAGENT_KILL_ON_SHUTDOWN` | `false` | kill live children when the parent exits |
+| `PI_SUBAGENT_INTERRUPT_CONFIRM_MS` | `3000` | how long `subagent_interrupt` waits for confirmation; `0` returns immediately |
+| `PI_SUBAGENT_STALL_SECONDS` | `180` | silence, in whole seconds, before the widget calls a run stalled |
+| `PI_SUBAGENT_TOOL_STALL_SECONDS` | `900` | the same, for a run inside a tool call, which is silent by construction |
+
+A value that is set but is not a positive whole number is reported on stderr and
+ignored, in favour of the default.
+
+Integers are parsed strictly: `"3m"`, `"1e9"` and `"3.9"` are ignored in favour of
+the default, because a threshold silently shortened by a typo is worse than one
+that was never set.
+
 ## Manual check for turn-level interrupt
 
 With credentials available, the one thing the suite cannot prove is that pi
@@ -90,3 +119,19 @@ really aborts a turn on Escape and settles without exiting:
 5. `subagent_cancel({ id })` and check the tmux session is gone. Resuming the
    transcript afterwards must go through `subagent_cancel` first —
    `subagent_resume` refuses while the interrupted child still holds the file.
+
+## Manual check for the live widget
+
+1. In a TUI session, start a run with a long task. A strip appears above the
+   editor within a second: `◔ <id>  starting · 0s · <task>`.
+2. Watch it follow the child: `● <id>  active 45s (bash) · 2m 0s · <task>` while
+   it works, `◌ <id>  waiting 12s · 4m 3s · <task>` when the child goes quiet.
+   Elapsed times must tick on their own, with nothing else happening.
+3. Give the child a silent long tool (`sleep 600`): the row must stay `active`
+   for `PI_SUBAGENT_TOOL_STALL_SECONDS` (default 900), not 180. A quiet tool is
+   working, not hung.
+4. Start a second run and check the cap: at most four rows, then `+N more`.
+   `/subagents` still lists every run. After `subagent_interrupt`, the interrupted
+   row sorts last so it cannot push a live run out of view.
+5. `subagent_cancel` the last run: the strip disappears.
+6. Run in `--mode rpc` and confirm no widget appears (RPC cannot render one).

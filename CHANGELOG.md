@@ -14,8 +14,13 @@ Initial tagged release, tracking pi 1.0.0. Contents:
 
 ### Unreleased
 
-Maintenance, no behaviour change:
+Maintenance:
 
+- `PI_SUBAGENT_*` integers are now parsed strictly: `"3m"`, `"1e9"` and `"3.9"`
+  are reported on stderr and ignored rather than truncated by `parseInt`, which
+  would have turned a mistyped stall threshold into seconds. A behavioural change
+  to configuration parsing, deliberately called out here rather than filed under
+  "no behaviour change".
 - Fixed `AGENTS.md`, which still documented `./extensions` and `./skills`
   after they moved to `.pi/` in `3b554e9`, and gave a test command that no
   longer existed. Documented the CRLF trap and how to repair it.
@@ -26,6 +31,35 @@ Maintenance, no behaviour change:
 
 Features:
 
+- **Live subagent status widget.** A strip above the editor lists every live
+  run with what it is doing (`active (bash 45s)`, `waiting 12s`, `stalled 3m`)
+  and how long it has been at it, so progress is visible without polling
+  `subagent_status`.
+  - New pure classifier (`status.ts`): `observeStatus` / `classifyStatus` /
+    `advanceStatusState`. Order comes from the child's `sequence`, the monotonic
+    counter it stamps on every write, so a replayed or out-of-order snapshot from
+    another process cannot rewind a phase — the same rule `subagent_status` already
+    applied to the activity snapshot, so the two surfaces cannot disagree.
+  - A snapshot that is valid but has stopped being written is a stall. That is
+    the case a wedged child actually produces: it keeps reporting its last phase
+    forever, so silence is measured from the last write, not from a missing file.
+  - Ported from HazAT/pi-interactive-subagents, minus the `source: "pi" |
+    "claude"` split (every child here is pi), the config file, the statusline
+    formatters, and the interrupt inference.
+  - Three policies deliberately differ from the reference. The stall threshold is
+    ours (`PI_SUBAGENT_STALL_SECONDS`, default 180). A run inside a tool call gets
+    a much longer one (`PI_SUBAGENT_TOOL_STALL_SECONDS`, default 900), because pi
+    fires `tool_execution_update` only when a tool produces output — `npm ci` is
+    silent for minutes while working perfectly well, and calling it hung is the
+    one mistake a status display must not make. And a stall or recovery never
+    wakes the parent, which would duplicate the completion notification.
+  - Built on pi's native `ctx.ui.setWidget(..., { placement: "aboveEditor" })`,
+    installed lazily while a run is live and cleared when the last one finishes,
+    with its own 1s ticker so elapsed times move and queued runs (which have no
+    watcher of their own) still update. Guarded on `ctx.mode === "tui"`: RPC
+    forwards only string arrays and would drop a component factory.
+  - Display only: the classifier cannot finish, fail or interrupt a run, and an
+    `interrupted` run is reported as such regardless of what its snapshot says.
 - **Subagent turn-level interrupt.** New `subagent_interrupt({ id })` tool sends
   Escape (pi's `app.interrupt` — never `C-c`, which quits the child) to the
   child's pane, aborting the in-flight turn while leaving the child alive at its
