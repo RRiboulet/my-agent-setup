@@ -108,12 +108,18 @@ that was never set.
 ## Tool exposure
 
 `lifecycle.test.ts` covers local patch 15: the five management tools are
-registered once at `session_start` with `exposure: "codemode"` when the harness
-reports `codemode`/`tool_search` active, and plain otherwise; `subagent` is never
-hidden; a settings layer that names codemode while the active set does not is
-correctly ignored (the active set is pi's resolved truth); and an unbound `pi`
-(which throws from `getActiveTools`, exactly as pi does before the runtime binds)
-leaves everything declared.
+registered with `exposure: "codemode"` when the harness reports
+`codemode`/`tool_search` in the ACTIVE set, and plain otherwise; `subagent` is
+never hidden; `/tools` switching discovery off mid-session re-registers them direct
+on the next turn; the "these tools are hidden" note is added through
+`prepareLoadout` only when they are; and an unbound `pi` (which throws from
+`getActiveTools`, exactly as pi does before the runtime binds) leaves everything
+declared.
+
+The harness models pi's **declared set**, not just the definitions: a tool is
+declared iff it is in the active set and its exposure is not `hidden`. Asserting
+on `definition.exposure` instead is what let the first version of this feature —
+which changed the exposure and removed nothing — pass 200 green tests.
 
 ## Flakiness
 
@@ -121,7 +127,11 @@ leaves everything declared.
 parallel and a 500ms watcher timer on a loaded machine can slip by seconds — a
 tight default turned "the machine was busy" into a red suite several times.
 These waits take well under a second in practice, so the bound only fires for a
-real break. `waitForRunStatus` goes further for run transitions: when it gives up
+real break.
+
+Driving the extension from a subagent shell needs `env -u PI_TMUX_SUBAGENT_CHILD`:
+the factory checks that variable first and takes the child branch, registering
+only the reporter. `waitForRunStatus` goes further for run transitions: when it gives up
 it reports the last persisted run record and the tmux poll counts, so a failure
 says whether the watcher died or the machine was slow.
 

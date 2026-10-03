@@ -17,7 +17,7 @@
 set -euo pipefail
 
 PI_ROOT="${PI_GLOBAL_ROOT:-$(npm root -g)}/@earendil-works/pi-coding-agent"
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
 
 if [[ ! -d "$PI_ROOT" ]]; then
 	echo "error: pi-coding-agent not found at $PI_ROOT" >&2

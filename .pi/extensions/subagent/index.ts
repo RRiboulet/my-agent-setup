@@ -103,10 +103,12 @@
 //     descriptions, schemas, snippets and guidelines stop riding along on requests
 //     that never use them. `subagent` itself stays declared: it is the entry point,
 //     and a model that cannot start a run has no reason to search for the tools
-//     that manage one. Registration is deferred because pi's getActiveTools() and
-//     getSettings() throw during extension load, so the question cannot be asked
-//     earlier — and re-registering later would NOT work, because pi declares the
-//     ACTIVE set and a tool activated on registration stays active.
+//     that manage one. Registration is deferred because pi's getActiveTools()
+//     throws during extension load, so the question cannot be asked earlier — and
+//     re-registering later would NOT work, because pi declares the ACTIVE set and a
+//     tool activated on registration stays active. Re-checked before every agent
+//     turn, because `/tools` can switch discovery off and strand tools that were
+//     registered hidden.
 //
 // The child reporter (CHILD_ENV) still reports completion the same way; patch 11
 // only adds the activity snapshot to it, and patch 13 only diverts the aborted
@@ -212,6 +214,13 @@ const EXTENSION_PATH = fileURLToPath(import.meta.url);
 const RESULT_MESSAGE_TYPE = "subagent-result";
 
 type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+
+/**
+ * The `subagent` tool's description, as a value because `prepareLoadout` appends
+ * to it when — and only when — the management tools are hidden from the model.
+ */
+const SUBAGENT_DESCRIPTION =
+	"Start a delegated task in a separate interactive Pi process inside a detached tmux session and return immediately. The main agent is not blocked and may start more subagents or keep working. Runs execute concurrently (bounded by PI_SUBAGENT_MAX_CONCURRENT, default 4); extra runs are queued. Children inherit the current provider/model/thinking, defaulting the provider to OpenRouter. Use subagent_status to inspect progress and collect results (subagent_status({ id }) returns that run's output once it finishes), subagent_interrupt to abort a run's current turn while keeping its child alive, and subagent_cancel to stop a run outright. There is no blocking wait: poll subagent_status. Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.";
 
 interface ChildResult {
 	version: 1;
@@ -1162,7 +1171,20 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 //
 // Nothing can call a tool before the session starts, so deferring costs nothing.
 
-/** Register the management tools, hidden if pi can reach them another way. */
+/**
+ * Register the management tools, hidden if pi can reach them another way.
+ *
+ * Called at `session_start` and again before every agent turn, because the tool
+ * set can change underneath us: `/tools` switching `codemode` off would otherwise
+ * strand all five at once — declared-as-codemode, no longer declared, and no
+ * longer reachable. Re-registering `direct` re-activates them, since pi activates
+ * a tool whose exposure BECOMES declarable and was not activated on registration.
+ *
+ * The memo is what makes that cheap: the common case is a no-op.
+ */
+let appliedManagementExposure: ToolExposure | undefined;
+let managementToolsRegistered = false;
+
 const registerManagementTools = (): void => {
 	let exposure: ToolExposure | undefined;
 	try {
@@ -1172,6 +1194,10 @@ const registerManagementTools = (): void => {
 		// declared, which is always correct.
 		console.error(`[tmux-subagent] could not resolve tool exposure: ${error instanceof Error ? error.message : String(error)}`);
 	}
+	// The first call registers; after that only a changed answer does.
+	if (managementToolsRegistered && appliedManagementExposure === exposure) return;
+	managementToolsRegistered = true;
+	appliedManagementExposure = exposure;
 	for (const tool of managementToolDefinitions) {
 		pi.registerTool(exposure ? { ...tool, exposure } : tool);
 	}
@@ -1677,9 +1703,15 @@ const noteInterrupt = async (
 		void gcRunDirectories();
 	};
 
-	pi.on("session_start", async (_event, ctx) => {
-		await ensureSessionPaths(ctx);
+	// Registered before the first await: `ensureSessionPaths` does filesystem I/O
+	// and can reject, and the tools must not disappear with it.
+	pi.on("before_agent_start", () => {
 		registerManagementTools();
+	});
+
+	pi.on("session_start", async (_event, ctx) => {
+		registerManagementTools();
+		await ensureSessionPaths(ctx);
 		// Remember where the widget would live, but do not install it yet: pi
 		// re-arms this extension on reload, and an idle session must not leave an
 		// empty strip above the editor. The first live run installs it.
@@ -1726,13 +1758,11 @@ const noteInterrupt = async (
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
-		description:
-			"Start a delegated task in a separate interactive Pi process inside a detached tmux session and return immediately. The main agent is not blocked and may start more subagents or keep working. Runs execute concurrently (bounded by PI_SUBAGENT_MAX_CONCURRENT, default 4); extra runs are queued. Children inherit the current provider/model/thinking, defaulting the provider to OpenRouter. Use subagent_status to inspect progress and collect results (subagent_status({ id }) returns that run's output once it finishes), subagent_interrupt to abort a run's current turn while keeping its child alive, and subagent_cancel to stop a run outright. There is no blocking wait: poll subagent_status. The other subagent tools (cancel, interrupt, resume, clean) are not declared while `codemode` or `tool_search` is active — call `tool_search` (or `tools.<name>(...)` in codemode) to reach them. Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.",
+		description: SUBAGENT_DESCRIPTION,
 		promptSnippet: "Start a delegated, non-blocking, tmux-backed Pi subagent",
 		promptGuidelines: [
 			"Use subagent to delegate an isolated task without blocking: it returns immediately, so start several when useful and keep working.",
 			"Collect a finished run's output with subagent_status({ id }); there is no blocking wait, so poll it rather than blocking the turn.",
-			"cancel, interrupt, resume and clean are not declared while codemode or tool_search is active: reach them with tool_search, or tools.<name>(...) in a codemode script.",
 			"To stop a run that is going the wrong way, prefer subagent_interrupt (keeps the child and its transcript, then attach to steer it) over subagent_cancel (throws the run away). An interrupted run still occupies a concurrency slot until it is cancelled, so cancel the ones you are done with.",
 			"subagent_resume needs a run whose child is really gone: cancel or finish it first, or attach to an interrupted run and type the follow-up there.",
 		],
@@ -1823,6 +1853,25 @@ const noteInterrupt = async (
 			return { content: [{ type: "text", text }], details: run };
 		},
 
+		/**
+		 * Add the "the other subagent tools are hidden" note only when they are.
+		 *
+		 * It is 360 bytes of system prompt per request, and it is a lie in a session
+		 * that never enabled codemode or tool_search — where those tools are declared
+		 * like any other. pi calls this whenever the active tool set changes, so it
+		 * also keeps itself correct if `/tools` turns discovery on mid-session.
+		 */
+		prepareLoadout(loadout) {
+			if (loadout.getExposure("subagent_status") !== "codemode") return undefined;
+			const tool = loadout.declared.find((entry) => entry.name === "subagent");
+			const description = tool?.description ?? subagentDescription;
+			return {
+				descriptions: {
+					subagent: `${description} The other subagent tools (subagent_status, subagent_cancel, subagent_interrupt, subagent_resume, subagent_clean) are not declared while \`codemode\` or \`tool_search\` is active: reach them with tool_search, or tools.<name>(...) in a codemode script.`,
+				},
+			};
+		},
+
 		renderCall(args, theme) {
 			const task = args.task?.trim() || "...";
 			const firstLine = task.split("\n", 1)[0] ?? task;
@@ -1851,406 +1900,406 @@ const noteInterrupt = async (
 	// runtime is bound and their exposure is known. `subagent` above is not: it is
 	// the entry point, and it stays declared.
 	const managementToolDefinitions: ToolDefinition[] = [
-	{
-		name: "subagent_status",
-		label: "Subagent Status",
-		description:
-			"Collect a subagent result, or list this session's runs. With an id: that run's status, model, tmux attach command, its final output once finished and its latest pane output while running. Without an id: every run's status, duration and usage. There is no blocking wait, so poll this instead. Non-blocking.",
-		promptSnippet: "Inspect non-blocking subagent runs and their output",
-		parameters: Type.Object({
-			id: Type.Optional(Type.String({ description: "Run id to inspect. Omit to list all runs in this session." })),
-			include_output: Type.Optional(
-				Type.Boolean({
-					description:
-						"List view only. Include each finished run's full output. Defaults to false, because a list of many runs would otherwise carry every answer at once; inspecting a single id always returns its output.",
-				}),
-			),
-		}),
+		{
+			name: "subagent_status",
+			label: "Subagent Status",
+			description:
+				"Collect a subagent result, or list this session's runs. With an id: that run's status, model, tmux attach command, its final output once finished and its latest pane output while running. Without an id: every run's status, duration and usage. There is no blocking wait, so poll this instead. Non-blocking.",
+			promptSnippet: "Inspect non-blocking subagent runs and their output",
+			parameters: Type.Object({
+				id: Type.Optional(Type.String({ description: "Run id to inspect. Omit to list all runs in this session." })),
+				include_output: Type.Optional(
+					Type.Boolean({
+						description:
+							"List view only. Include each finished run's full output. Defaults to false, because a list of many runs would otherwise carry every answer at once; inspecting a single id always returns its output.",
+					}),
+				),
+			}),
 
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			await ensureSessionPaths(ctx);
-			const includeOutput = params.include_output ?? false;
-			const runsArray = [...runs.values()].sort((a, b) => a.createdAt - b.createdAt);
-			if (params.id) {
-				const run = runs.get(params.id.trim());
-				if (!run) throw new Error(`Unknown subagent run: ${params.id}`);
-				// This is the ONLY way to collect a result now that there is no blocking
-				// wait, so the obvious call has to be the right one: `include_output`
-				// is a LIST-view control and never suppresses the output here.
-				//
-				// The pane is included either way. For a live run it is the only view of
-				// the child there is, and for a finished one it is usually the answer —
-				// so gating it behind the flag would make `include_output: true` return
-				// strictly less than the default call.
-				return {
-					content: [{ type: "text", text: runSummary(run, { pane: true, output: true }) }],
-					details: { runs: [run] },
-				};
-			}
-			if (runsArray.length === 0) {
-				return { content: [{ type: "text", text: "No subagent runs in this session." }], details: { runs: [] } };
-			}
-			const text = runsArray
-				.map((run) => {
-					// An interrupted run has no final output yet but its pane is the
-					// only view of the child's prompt, so it is shown like a live run.
-					const live = run.status === "running" || run.status === "interrupted";
-					return runSummary(run, { pane: live, output: includeOutput || live });
-				})
-				.join("\n\n");
-			return { content: [{ type: "text", text }], details: { runs: runsArray } };
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+				await ensureSessionPaths(ctx);
+				const includeOutput = params.include_output ?? false;
+				const runsArray = [...runs.values()].sort((a, b) => a.createdAt - b.createdAt);
+				if (params.id) {
+					const run = runs.get(params.id.trim());
+					if (!run) throw new Error(`Unknown subagent run: ${params.id}`);
+					// This is the ONLY way to collect a result now that there is no blocking
+					// wait, so the obvious call has to be the right one: `include_output`
+					// is a LIST-view control and never suppresses the output here.
+					//
+					// The pane is included either way. For a live run it is the only view of
+					// the child there is, and for a finished one it is usually the answer —
+					// so gating it behind the flag would make `include_output: true` return
+					// strictly less than the default call.
+					return {
+						content: [{ type: "text", text: runSummary(run, { pane: true, output: true }) }],
+						details: { runs: [run] },
+					};
+				}
+				if (runsArray.length === 0) {
+					return { content: [{ type: "text", text: "No subagent runs in this session." }], details: { runs: [] } };
+				}
+				const text = runsArray
+					.map((run) => {
+						// An interrupted run has no final output yet but its pane is the
+						// only view of the child's prompt, so it is shown like a live run.
+						const live = run.status === "running" || run.status === "interrupted";
+						return runSummary(run, { pane: live, output: includeOutput || live });
+					})
+					.join("\n\n");
+				return { content: [{ type: "text", text }], details: { runs: runsArray } };
+			},
 		},
-	},
 
-	{
-		name: "subagent_cancel",
-		label: "Subagent Cancel",
-		description: "Cancel a subagent run by id: kill its tmux session and mark it cancelled.",
-		promptSnippet: "Cancel a running non-blocking subagent",
-		parameters: Type.Object({
-			id: Type.String({ description: "Run id to cancel." }),
-		}),
+		{
+			name: "subagent_cancel",
+			label: "Subagent Cancel",
+			description: "Cancel a subagent run by id: kill its tmux session and mark it cancelled.",
+			promptSnippet: "Cancel a running non-blocking subagent",
+			parameters: Type.Object({
+				id: Type.String({ description: "Run id to cancel." }),
+			}),
 
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			await ensureSessionPaths(ctx);
-			const id = params.id.trim();
-			const run = runs.get(id);
-			if (!run) throw new Error(`Unknown subagent run: ${id}`);
-			// An interrupted run is terminal but still owns a live child, so cancel
-			// must keep working for it: cancelling is how an interrupted child is
-			// finally released.
-			if (isTerminal(run.status) && !holdsChild(run.status)) {
-				return { content: [{ type: "text", text: `Subagent ${id} is already ${run.status}.` }], details: run };
-			}
-			clearTimer(run.id);
-			run.interruptRequestedAt = undefined;
-			await pi.exec("tmux", tmuxArgs("kill-session", "-t", run.tmuxSession)).catch(() => undefined);
-			run.status = "cancelled";
-			run.finishedAt = Date.now();
-			await persist();
-			refreshStatusWidget();
-			void drainQueue();
-			return { content: [{ type: "text", text: `Subagent ${id} cancelled.` }], details: run };
-		},
-	},
-
-	{
-		name: "subagent_interrupt",
-		label: "Subagent Interrupt",
-		description:
-			"Abort a subagent's current turn without killing it: sends Escape (pi's app.interrupt) to the child's pane, so the in-flight provider call and tool loop stop and the child sits idle at its prompt with its transcript and tmux session intact. The run becomes `interrupted` — still holding its concurrency slot and its tmux session until you subagent_cancel it. Use this to stop a run that is going the wrong way, then attach to steer it; use subagent_cancel when the run is simply unwanted. Note that subagent_resume is refused while the child is alive, because a second pi process would append to a transcript the child still holds. Returns as soon as the child confirms the aborted turn (default 3s), otherwise reports the request as sent but unconfirmed.",
-		promptSnippet: "Abort a running subagent's turn while keeping the child alive",
-		parameters: Type.Object({
-			id: Type.String({ description: "Run id to interrupt." }),
-		}),
-
-		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			await ensureSessionPaths(ctx);
-			const id = params.id.trim();
-			const run = runs.get(id);
-			if (!run) throw new Error(`Unknown subagent run: ${id}`);
-			if (run.status === "queued") {
-				throw new Error(
-					`Subagent ${id} has not started yet, so there is no turn to interrupt. ` +
-						`Use subagent_cancel to drop it from the queue.`,
-				);
-			}
-			// isTerminal && !holdsChild: a completed, failed or cancelled run has no
-			// child left to steer. An interrupted one does, so Escape is sent again
-			// (the child may have been typed into and started working again).
-			if (isTerminal(run.status) && !holdsChild(run.status)) {
-				return { content: [{ type: "text", text: `Subagent ${id} is already ${run.status}.` }], details: run };
-			}
-
-			// A second Escape within the double-escape window is not a second abort:
-			// on an idle child pi treats two Escapes inside 500ms as the "double
-			// escape action" and opens the tree selector (settings-manager.js
-			// getDoubleEscapeAction defaults to "tree"), which blocks the child's
-			// prompt without touching the turn.
-			const lastRequest = run.interruptRequestedAt ?? 0;
-			if (Date.now() - lastRequest < DOUBLE_ESCAPE_WINDOW_MS) {
-				return {
-					content: [
-						{
-							type: "text",
-							text:
-								`An interrupt for subagent ${id} was sent ${Math.round((Date.now() - lastRequest) / 100) * 100}ms ago and has not been confirmed yet; ` +
-								`sending another Escape now would be read by the child as a double escape and open its tree selector. ` +
-								`Check subagent_status first.`,
-						},
-					],
-					details: run,
-				};
-			}
-
-			// The marker file is never deleted, so the confirmation poll must ignore
-			// anything already accounted for before this Escape.
-			const baseline = { interrupts: run.interrupts ?? 0, at: run.interruptedAt ?? 0 };
-
-			run.interruptRequestedAt = Date.now();
-			await persist();
-
-			// Escape, never C-c: `app.clear` is C-c and pressing it twice within
-			// 500ms quits the child, which would throw the transcript away. `-l`
-			// would send the literal word instead of the key, and a second
-			// `send-keys Enter` would submit whatever the child had typed.
-			const sent = await pi.exec("tmux", tmuxArgs("send-keys", "-t", run.tmuxTarget, "Escape"));
-			if (sent.code !== 0) {
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+				await ensureSessionPaths(ctx);
+				const id = params.id.trim();
+				const run = runs.get(id);
+				if (!run) throw new Error(`Unknown subagent run: ${id}`);
+				// An interrupted run is terminal but still owns a live child, so cancel
+				// must keep working for it: cancelling is how an interrupted child is
+				// finally released.
+				if (isTerminal(run.status) && !holdsChild(run.status)) {
+					return { content: [{ type: "text", text: `Subagent ${id} is already ${run.status}.` }], details: run };
+				}
+				clearTimer(run.id);
 				run.interruptRequestedAt = undefined;
+				await pi.exec("tmux", tmuxArgs("kill-session", "-t", run.tmuxSession)).catch(() => undefined);
+				run.status = "cancelled";
+				run.finishedAt = Date.now();
 				await persist();
-				throw new Error(sent.stderr.trim() || `Failed to send Escape to subagent ${id}.`);
-			}
+				refreshStatusWidget();
+				void drainQueue();
+				return { content: [{ type: "text", text: `Subagent ${id} cancelled.` }], details: run };
+			},
+		},
 
-			// Escape is asynchronous: the child has to abort its provider stream and
-			// settle before it can write the marker. Give it a moment to confirm so
-			// the caller gets a definitive answer, then fall back to "requested" and
-			// let subagent_status observe the marker later. A cancelled tool call is
-			// reported the same way rather than thrown: the key was already sent, and
-			// the tool's own cancellation says nothing about whether it landed.
-			const outcome = await awaitInterruptMarker(run, baseline, interruptConfirmMs, signal);
+		{
+			name: "subagent_interrupt",
+			label: "Subagent Interrupt",
+			description:
+				"Abort a subagent's current turn without killing it: sends Escape (pi's app.interrupt) to the child's pane, so the in-flight provider call and tool loop stop and the child sits idle at its prompt with its transcript and tmux session intact. The run becomes `interrupted` — still holding its concurrency slot and its tmux session until you subagent_cancel it. Use this to stop a run that is going the wrong way, then attach to steer it; use subagent_cancel when the run is simply unwanted. Note that subagent_resume is refused while the child is alive, because a second pi process would append to a transcript the child still holds. Returns as soon as the child confirms the aborted turn (default 3s), otherwise reports the request as sent but unconfirmed.",
+			promptSnippet: "Abort a running subagent's turn while keeping the child alive",
+			parameters: Type.Object({
+				id: Type.String({ description: "Run id to interrupt." }),
+			}),
 
-			const lines =
-				outcome.state === "confirmed"
-					? [
-							`Subagent ${id} interrupted.`,
-							"The child aborted its current turn and is idle at its prompt; its session file is intact.",
-							`Next: attach (${run.attachCommand}) to steer it, or subagent_cancel to stop it. It still holds its concurrency slot until then.`,
-						]
-					: outcome.state === "stale"
+			async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+				await ensureSessionPaths(ctx);
+				const id = params.id.trim();
+				const run = runs.get(id);
+				if (!run) throw new Error(`Unknown subagent run: ${id}`);
+				if (run.status === "queued") {
+					throw new Error(
+						`Subagent ${id} has not started yet, so there is no turn to interrupt. ` +
+							`Use subagent_cancel to drop it from the queue.`,
+					);
+				}
+				// isTerminal && !holdsChild: a completed, failed or cancelled run has no
+				// child left to steer. An interrupted one does, so Escape is sent again
+				// (the child may have been typed into and started working again).
+				if (isTerminal(run.status) && !holdsChild(run.status)) {
+					return { content: [{ type: "text", text: `Subagent ${id} is already ${run.status}.` }], details: run };
+				}
+
+				// A second Escape within the double-escape window is not a second abort:
+				// on an idle child pi treats two Escapes inside 500ms as the "double
+				// escape action" and opens the tree selector (settings-manager.js
+				// getDoubleEscapeAction defaults to "tree"), which blocks the child's
+				// prompt without touching the turn.
+				const lastRequest = run.interruptRequestedAt ?? 0;
+				if (Date.now() - lastRequest < DOUBLE_ESCAPE_WINDOW_MS) {
+					return {
+						content: [
+							{
+								type: "text",
+								text:
+									`An interrupt for subagent ${id} was sent ${Math.round((Date.now() - lastRequest) / 100) * 100}ms ago and has not been confirmed yet; ` +
+									`sending another Escape now would be read by the child as a double escape and open its tree selector. ` +
+									`Check subagent_status first.`,
+							},
+						],
+						details: run,
+					};
+				}
+
+				// The marker file is never deleted, so the confirmation poll must ignore
+				// anything already accounted for before this Escape.
+				const baseline = { interrupts: run.interrupts ?? 0, at: run.interruptedAt ?? 0 };
+
+				run.interruptRequestedAt = Date.now();
+				await persist();
+
+				// Escape, never C-c: `app.clear` is C-c and pressing it twice within
+				// 500ms quits the child, which would throw the transcript away. `-l`
+				// would send the literal word instead of the key, and a second
+				// `send-keys Enter` would submit whatever the child had typed.
+				const sent = await pi.exec("tmux", tmuxArgs("send-keys", "-t", run.tmuxTarget, "Escape"));
+				if (sent.code !== 0) {
+					run.interruptRequestedAt = undefined;
+					await persist();
+					throw new Error(sent.stderr.trim() || `Failed to send Escape to subagent ${id}.`);
+				}
+
+				// Escape is asynchronous: the child has to abort its provider stream and
+				// settle before it can write the marker. Give it a moment to confirm so
+				// the caller gets a definitive answer, then fall back to "requested" and
+				// let subagent_status observe the marker later. A cancelled tool call is
+				// reported the same way rather than thrown: the key was already sent, and
+				// the tool's own cancellation says nothing about whether it landed.
+				const outcome = await awaitInterruptMarker(run, baseline, interruptConfirmMs, signal);
+
+				const lines =
+					outcome.state === "confirmed"
 						? [
-								`Escape sent to subagent ${id}, but no new interrupt was reported: the only marker present is the one from the previous interrupt${outcome.marker.interruptedAt ? ` at ${new Date(outcome.marker.interruptedAt).toISOString()}` : ""}.`,
-								"The child either was idle (Escape does nothing then) or has not aborted yet. Attach to see, and use subagent_cancel to stop it.",
+								`Subagent ${id} interrupted.`,
+								"The child aborted its current turn and is idle at its prompt; its session file is intact.",
+								`Next: attach (${run.attachCommand}) to steer it, or subagent_cancel to stop it. It still holds its concurrency slot until then.`,
 							]
-						: [
-								`Escape sent to subagent ${id}, but it did not confirm an interrupt within ${formatConfirmWindow(interruptConfirmMs)} (status is still ${run.status})${outcome.aborted ? ", and this tool call was cancelled" : ""}.`,
-								"The child was probably already idle — Escape does nothing while it waits at its prompt — or it is stuck somewhere Escape does not reach. Attach with ${run.attachCommand} to look, and use subagent_cancel to stop it.",
-							];
-			return { content: [{ type: "text", text: lines.join("\n") }], details: run };
+						: outcome.state === "stale"
+							? [
+									`Escape sent to subagent ${id}, but no new interrupt was reported: the only marker present is the one from the previous interrupt${outcome.marker.interruptedAt ? ` at ${new Date(outcome.marker.interruptedAt).toISOString()}` : ""}.`,
+									"The child either was idle (Escape does nothing then) or has not aborted yet. Attach to see, and use subagent_cancel to stop it.",
+								]
+							: [
+									`Escape sent to subagent ${id}, but it did not confirm an interrupt within ${formatConfirmWindow(interruptConfirmMs)} (status is still ${run.status})${outcome.aborted ? ", and this tool call was cancelled" : ""}.`,
+									"The child was probably already idle — Escape does nothing while it waits at its prompt — or it is stuck somewhere Escape does not reach. Attach with ${run.attachCommand} to look, and use subagent_cancel to stop it.",
+								];
+				return { content: [{ type: "text", text: lines.join("\n") }], details: run };
+			},
 		},
-	},
 
-	{
-		name: "subagent_resume",
-		label: "Subagent Resume",
-		description:
-			"Continue a finished subagent conversation by id with a follow-up message. The child's existing session file is reopened and appended to, so it keeps its full prior context and the run is tracked as a new attempt with a fresh tmux session. Unlike a fork, no context is copied: this is the same child session, continued. Refused while the original child is still alive (running, queued or interrupted), because a second pi process appending to the same transcript would interleave branches — cancel the live run first, or attach to it and type the follow-up there.",
-		promptSnippet: "Continue a finished subagent conversation with a follow-up message",
-		parameters: Type.Object({
-			id: Type.String({ description: "Run id to resume." }),
-			message: Type.String({ description: "Follow-up instructions for the child." }),
-		}),
+		{
+			name: "subagent_resume",
+			label: "Subagent Resume",
+			description:
+				"Continue a finished subagent conversation by id with a follow-up message. The child's existing session file is reopened and appended to, so it keeps its full prior context and the run is tracked as a new attempt with a fresh tmux session. Unlike a fork, no context is copied: this is the same child session, continued. Refused while the original child is still alive (running, queued or interrupted), because a second pi process appending to the same transcript would interleave branches — cancel the live run first, or attach to it and type the follow-up there.",
+			promptSnippet: "Continue a finished subagent conversation with a follow-up message",
+			parameters: Type.Object({
+				id: Type.String({ description: "Run id to resume." }),
+				message: Type.String({ description: "Follow-up instructions for the child." }),
+			}),
 
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			await ensureSessionPaths(ctx);
-			const message = params.message.trim();
-			if (!message) throw new Error("Resume message must not be empty.");
-			const previous = runs.get(params.id.trim());
-			if (!previous) throw new Error(`Unknown subagent run: ${params.id.trim()}`);
-			// holdsChild, not !isTerminal. Resume opens a SECOND pi process on the
-			// transcript, so it is only safe once the first one is gone: an
-			// interrupted run still has a live child holding that file open, and two
-			// appenders interleave branches and scramble usage baselines. That is
-			// exactly the trap the guard below protects against for two resumes, and
-			// it is why an interrupted run is steered by attaching, not by resuming.
-			if (holdsChild(previous.status)) {
-				return {
-					content: [
-						{
-							type: "text",
-							text:
-								`Subagent ${previous.id} still has a live child (${previous.status}); a second pi process would append to the same transcript. ` +
-								`Attach (${previous.attachCommand}) and type the follow-up there, or subagent_cancel the run first and then resume it.`,
-						},
-					],
-					details: previous,
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+				await ensureSessionPaths(ctx);
+				const message = params.message.trim();
+				if (!message) throw new Error("Resume message must not be empty.");
+				const previous = runs.get(params.id.trim());
+				if (!previous) throw new Error(`Unknown subagent run: ${params.id.trim()}`);
+				// holdsChild, not !isTerminal. Resume opens a SECOND pi process on the
+				// transcript, so it is only safe once the first one is gone: an
+				// interrupted run still has a live child holding that file open, and two
+				// appenders interleave branches and scramble usage baselines. That is
+				// exactly the trap the guard below protects against for two resumes, and
+				// it is why an interrupted run is steered by attaching, not by resuming.
+				if (holdsChild(previous.status)) {
+					return {
+						content: [
+							{
+								type: "text",
+								text:
+									`Subagent ${previous.id} still has a live child (${previous.status}); a second pi process would append to the same transcript. ` +
+									`Attach (${previous.attachCommand}) and type the follow-up there, or subagent_cancel the run first and then resume it.`,
+							},
+						],
+						details: previous,
+					};
+				}
+
+				// The transcript outlives the tmux session, so the conversation is
+				// still there. If it is not, fail loudly instead of letting pi
+				// silently open an empty session.
+				const sessionFile = requireExistingSession(previous.sessionFile, previous.id);
+
+				// A finished run stays terminal forever, so nothing stops two resumes
+				// of the same transcript from both passing the guard above. Two pi
+				// processes appending to one JSONL produce interleaved branches and
+				// scrambled usage baselines, so refuse while one is still in flight.
+				const concurrent = [...runs.values()].find(
+					(candidate) =>
+						candidate.id !== previous.id && holdsChild(candidate.status) && candidate.sessionFile === sessionFile,
+				);
+				if (concurrent) {
+					throw new Error(
+						`Run ${concurrent.id} is already using this session file (${concurrent.status}). ` +
+							`Wait for it to finish, or resume it instead of ${previous.id}.`,
+					);
+				}
+
+				const id = randomUUID();
+				const runDir = path.join(sessionRunsDir, id);
+				const tmuxSession = tmuxSessionName(id);
+				const run: RunRecord = {
+					...previous,
+					id,
+					// The follow-up becomes this attempt's task; the original stays on the
+					// ancestor record, which `resumeOf` points at. Appending instead
+					// would grow the field without bound across attempts.
+					task: message,
+					tmuxSession,
+					tmuxTarget: `${tmuxSession}:0.0`,
+					attachCommand: "",
+					captureCommand: "",
+					killCommand: "",
+					runDir,
+					resultPath: path.join(runDir, "result.json"),
+					status: "queued",
+					createdAt: Date.now(),
+					startedAt: undefined,
+					finishedAt: undefined,
+					pane: undefined,
+					output: undefined,
+					error: undefined,
+					usage: undefined,
+					activity: undefined,
+					// Interrupt history belongs to the run that owns it: a fresh child was
+					// never sent an Escape, and inheriting the counters would make
+					// subagent_status report an interrupt for an attempt that had none.
+					interrupts: undefined,
+					interruptedAt: undefined,
+					interruptRequestedAt: undefined,
+					mode: "resume",
+					resumeOf: previous.id,
+					attempt: (previous.attempt ?? 1) + 1,
+					sessionFile,
 				};
-			}
-
-			// The transcript outlives the tmux session, so the conversation is
-			// still there. If it is not, fail loudly instead of letting pi
-			// silently open an empty session.
-			const sessionFile = requireExistingSession(previous.sessionFile, previous.id);
-
-			// A finished run stays terminal forever, so nothing stops two resumes
-			// of the same transcript from both passing the guard above. Two pi
-			// processes appending to one JSONL produce interleaved branches and
-			// scrambled usage baselines, so refuse while one is still in flight.
-			const concurrent = [...runs.values()].find(
-				(candidate) =>
-					candidate.id !== previous.id && holdsChild(candidate.status) && candidate.sessionFile === sessionFile,
-			);
-			if (concurrent) {
-				throw new Error(
-					`Run ${concurrent.id} is already using this session file (${concurrent.status}). ` +
-						`Wait for it to finish, or resume it instead of ${previous.id}.`,
-				);
-			}
-
-			const id = randomUUID();
-			const runDir = path.join(sessionRunsDir, id);
-			const tmuxSession = tmuxSessionName(id);
-			const run: RunRecord = {
-				...previous,
-				id,
-				// The follow-up becomes this attempt's task; the original stays on the
-				// ancestor record, which `resumeOf` points at. Appending instead
-				// would grow the field without bound across attempts.
-				task: message,
-				tmuxSession,
-				tmuxTarget: `${tmuxSession}:0.0`,
-				attachCommand: "",
-				captureCommand: "",
-				killCommand: "",
-				runDir,
-				resultPath: path.join(runDir, "result.json"),
-				status: "queued",
-				createdAt: Date.now(),
-				startedAt: undefined,
-				finishedAt: undefined,
-				pane: undefined,
-				output: undefined,
-				error: undefined,
-				usage: undefined,
-				activity: undefined,
-				// Interrupt history belongs to the run that owns it: a fresh child was
-				// never sent an Escape, and inheriting the counters would make
-				// subagent_status report an interrupt for an attempt that had none.
-				interrupts: undefined,
-				interruptedAt: undefined,
-				interruptRequestedAt: undefined,
-				mode: "resume",
-				resumeOf: previous.id,
-				attempt: (previous.attempt ?? 1) + 1,
-				sessionFile,
-			};
-			updateTmuxCommands(run);
-
-			await mkdir(runDir, { recursive: true, mode: 0o700 });
-			await mkdir(path.join(runDir, "session"), { recursive: true, mode: 0o700 });
-			await writeFile(path.join(runDir, "task.md"), `# Delegated task\n\n${message}\n`, {
-				encoding: "utf8",
-				mode: 0o600,
-			});
-			// Only the child's new turns are charged to this attempt.
-			run.usageFromLine = await countSessionLines(sessionFile);
-
-			await startRun(run);
-
-			const lines = [
-				`Resumed subagent ${previous.id} as ${id} (attempt ${run.attempt}).`,
-				`Follow-up: ${message.split("\n", 1)[0] ?? message}`,
-				`Session: ${sessionFile}`,
-				`Attach: ${run.attachCommand}`,
-			];
-			return { content: [{ type: "text", text: lines.join("\n") }], details: run };
-		},
-	},
-
-	{
-		name: "subagent_clean",
-		label: "Subagent Clean",
-		description:
-			"Reap finished subagent artifacts: kill leftover tmux sessions and optionally delete persisted run directories. Use when completed runs accumulate.",
-		promptSnippet: "Clean up finished subagent tmux sessions and run directories",
-		parameters: Type.Object({
-			all_sessions: Type.Optional(
-				Type.Boolean({ description: "Also scan runs persisted by other sessions on disk. Defaults to false." }),
-			),
-			delete_files: Type.Optional(
-				Type.Boolean({ description: "Delete persisted run directories for cleaned runs. Defaults to false." }),
-			),
-			older_than_hours: Type.Optional(
-				Type.Number({ description: "Only clean runs finished longer ago than this. Defaults to 0 (all finished runs)." }),
-			),
-		}),
-
-		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
-			await ensureSessionPaths(ctx);
-			const deleteFiles = params.delete_files ?? false;
-			const cutoff = Date.now() - (params.older_than_hours ?? 0) * 3_600_000;
-
-			const targets: RunRecord[] = [];
-			if (params.all_sessions) {
-				const root = path.join(getAgentDir(), RUNS_DIR);
-				let dirs: Dirent[] = [];
-				try {
-					dirs = await readdir(root, { withFileTypes: true });
-				} catch {
-					dirs = [];
-				}
-				for (const entry of dirs) {
-					if (!entry.isDirectory()) continue;
-					try {
-						const parsed = JSON.parse(await readFile(path.join(root, entry.name, "runs.json"), "utf8")) as RunRecord[];
-						targets.push(...parsed.filter((run) => run?.id));
-					} catch {
-						// No index for this directory.
-					}
-				}
-			} else {
-				targets.push(...runs.values());
-			}
-
-			let killed = 0;
-			let deleted = 0;
-			let skipped = 0;
-			let deletedTranscripts = 0;
-			const retained: string[] = [];
-			for (const run of targets) {
-				// holdsChild, not !isTerminal: cleaning up must never kill an
-				// interrupted run's child, which still holds the resumable session.
-				if (holdsChild(run.status)) {
-					skipped++;
-					continue;
-				}
-				if (run.finishedAt && run.finishedAt > cutoff) {
-					skipped++;
-					continue;
-				}
-				// A resumed run keeps its transcript in its ANCESTOR's run dir, so
-				// deleting that dir would pull the file out from under a run that
-				// may still be running. pi holds the descriptor open, so the child
-				// would keep writing to an unlinked inode and lose every entry
-				// silently. Leave the dir alone and say so.
-				if (deleteFiles && run.runDir && runDirOwnsLiveTranscript(run, runs)) {
-					retained.push(run.id);
-					skipped++;
-					continue;
-				}
 				updateTmuxCommands(run);
-				await killTmuxSession(run);
-				killed++;
-				if (deleteFiles && run.runDir) {
-					// Auto-reap only kills tmux, so the transcript normally
-					// outlives the run and stays resumable. Deleting the run dir
-					// destroys it, so say so rather than losing a conversation
-					// the user may still want to resume.
-					if (run.sessionFile && existsSync(run.sessionFile) && isSameOrDescendant(run.runDir, run.sessionFile)) {
-						deletedTranscripts++;
-					}
-					await rm(run.runDir, { recursive: true, force: true }).catch(() => undefined);
-					deleted++;
-					if (runs.get(run.id) === run) runs.delete(run.id);
-				}
-			}
-			if (deleteFiles) await persist();
-			const summary = [`Cleaned ${killed} tmux session(s), deleted ${deleted} run dir(s), skipped ${skipped}.`];
-			if (deleteFiles && deletedTranscripts > 0) {
-				summary.push(
-					`Also deleted ${deletedTranscripts} child session transcript(s); those runs can no longer be resumed.`,
-				);
-			}
-			if (retained.length > 0) {
-				summary.push(
-					`Kept ${retained.length} run dir(s) that still hold the session file of a live run: ${retained.join(", ")}.`,
-				);
-			}
-			return {
-				content: [{ type: "text", text: summary.join("\n") }],
-				details: { killed, deleted, skipped, deletedTranscripts },
-			};
+
+				await mkdir(runDir, { recursive: true, mode: 0o700 });
+				await mkdir(path.join(runDir, "session"), { recursive: true, mode: 0o700 });
+				await writeFile(path.join(runDir, "task.md"), `# Delegated task\n\n${message}\n`, {
+					encoding: "utf8",
+					mode: 0o600,
+				});
+				// Only the child's new turns are charged to this attempt.
+				run.usageFromLine = await countSessionLines(sessionFile);
+
+				await startRun(run);
+
+				const lines = [
+					`Resumed subagent ${previous.id} as ${id} (attempt ${run.attempt}).`,
+					`Follow-up: ${message.split("\n", 1)[0] ?? message}`,
+					`Session: ${sessionFile}`,
+					`Attach: ${run.attachCommand}`,
+				];
+				return { content: [{ type: "text", text: lines.join("\n") }], details: run };
+			},
 		},
-	},
+
+		{
+			name: "subagent_clean",
+			label: "Subagent Clean",
+			description:
+				"Reap finished subagent artifacts: kill leftover tmux sessions and optionally delete persisted run directories. Use when completed runs accumulate.",
+			promptSnippet: "Clean up finished subagent tmux sessions and run directories",
+			parameters: Type.Object({
+				all_sessions: Type.Optional(
+					Type.Boolean({ description: "Also scan runs persisted by other sessions on disk. Defaults to false." }),
+				),
+				delete_files: Type.Optional(
+					Type.Boolean({ description: "Delete persisted run directories for cleaned runs. Defaults to false." }),
+				),
+				older_than_hours: Type.Optional(
+					Type.Number({ description: "Only clean runs finished longer ago than this. Defaults to 0 (all finished runs)." }),
+				),
+			}),
+
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+				await ensureSessionPaths(ctx);
+				const deleteFiles = params.delete_files ?? false;
+				const cutoff = Date.now() - (params.older_than_hours ?? 0) * 3_600_000;
+
+				const targets: RunRecord[] = [];
+				if (params.all_sessions) {
+					const root = path.join(getAgentDir(), RUNS_DIR);
+					let dirs: Dirent[] = [];
+					try {
+						dirs = await readdir(root, { withFileTypes: true });
+					} catch {
+						dirs = [];
+					}
+					for (const entry of dirs) {
+						if (!entry.isDirectory()) continue;
+						try {
+							const parsed = JSON.parse(await readFile(path.join(root, entry.name, "runs.json"), "utf8")) as RunRecord[];
+							targets.push(...parsed.filter((run) => run?.id));
+						} catch {
+							// No index for this directory.
+						}
+					}
+				} else {
+					targets.push(...runs.values());
+				}
+
+				let killed = 0;
+				let deleted = 0;
+				let skipped = 0;
+				let deletedTranscripts = 0;
+				const retained: string[] = [];
+				for (const run of targets) {
+					// holdsChild, not !isTerminal: cleaning up must never kill an
+					// interrupted run's child, which still holds the resumable session.
+					if (holdsChild(run.status)) {
+						skipped++;
+						continue;
+					}
+					if (run.finishedAt && run.finishedAt > cutoff) {
+						skipped++;
+						continue;
+					}
+					// A resumed run keeps its transcript in its ANCESTOR's run dir, so
+					// deleting that dir would pull the file out from under a run that
+					// may still be running. pi holds the descriptor open, so the child
+					// would keep writing to an unlinked inode and lose every entry
+					// silently. Leave the dir alone and say so.
+					if (deleteFiles && run.runDir && runDirOwnsLiveTranscript(run, runs)) {
+						retained.push(run.id);
+						skipped++;
+						continue;
+					}
+					updateTmuxCommands(run);
+					await killTmuxSession(run);
+					killed++;
+					if (deleteFiles && run.runDir) {
+						// Auto-reap only kills tmux, so the transcript normally
+						// outlives the run and stays resumable. Deleting the run dir
+						// destroys it, so say so rather than losing a conversation
+						// the user may still want to resume.
+						if (run.sessionFile && existsSync(run.sessionFile) && isSameOrDescendant(run.runDir, run.sessionFile)) {
+							deletedTranscripts++;
+						}
+						await rm(run.runDir, { recursive: true, force: true }).catch(() => undefined);
+						deleted++;
+						if (runs.get(run.id) === run) runs.delete(run.id);
+					}
+				}
+				if (deleteFiles) await persist();
+				const summary = [`Cleaned ${killed} tmux session(s), deleted ${deleted} run dir(s), skipped ${skipped}.`];
+				if (deleteFiles && deletedTranscripts > 0) {
+					summary.push(
+						`Also deleted ${deletedTranscripts} child session transcript(s); those runs can no longer be resumed.`,
+					);
+				}
+				if (retained.length > 0) {
+					summary.push(
+						`Kept ${retained.length} run dir(s) that still hold the session file of a live run: ${retained.join(", ")}.`,
+					);
+				}
+				return {
+					content: [{ type: "text", text: summary.join("\n") }],
+					details: { killed, deleted, skipped, deletedTranscripts },
+				};
+			},
+		},
 	];
 }
 

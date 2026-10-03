@@ -70,15 +70,20 @@ Features:
   `tool_search` loads one on demand or a codemode script calls it directly.
   `subagent` itself stays declared: it is the entry point, and a model that
   cannot start a run has no reason to search for the tools that manage one.
-  - Registration is deferred to `session_start`: pi's `getActiveTools()` and
-    `getSettings()` throw during extension loading, so the question cannot be
-    asked earlier. Registering at load and re-registering later does **not** work —
+  - Registration is deferred to `session_start`: pi's `getActiveTools()` throws
+    during extension loading, so the question cannot be asked earlier. Registering at load and re-registering later does **not** work —
     pi declares the ACTIVE set, and a tool activated on registration stays active —
     so a single late registration is the only shape that removes the
     declarations.
-  - **Fails safe.** Any path that cannot answer the question — no `codemode`, no
-    `tool_search`, an unbound runtime — leaves every tool declared. A tool the
-    model cannot find is worse than one it pays for.
+  - **Fails safe, including after `/tools`.** Any path that cannot answer the
+    question — no `codemode`, no `tool_search`, an unbound runtime — leaves every
+    tool declared, and the answer is re-checked before every agent turn, because a
+    host can switch discovery off mid-session and would otherwise leave all five
+    registered as hidden, undeclared and unreachable while `subagent` stayed
+    declared. A tool the model cannot find is worse than one it pays for.
+  - The "the other tools are hidden" note is added through `prepareLoadout` rather
+    than baked into the description, so it costs nothing in the sessions where it
+    would be false.
   - To switch it on, add either to your tool set, e.g.
     `"defaultTools": ["read", "bash", "edit", "write", "+codemode", "+tool_search"]`
     in `~/.pi/agent/settings.json`. Nothing is enabled silently.

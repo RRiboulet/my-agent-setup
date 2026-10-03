@@ -42,6 +42,12 @@ interface Harness {
 	toolRegistrations: { name: string; exposure: string | undefined }[];
 	/** The exposure a tool's CURRENT definition carries. */
 	toolExposure: (name: string) => string | undefined;
+	/** Whether pi would declare this tool to the model — the thing the saving is about. */
+	declared: (name: string) => boolean;
+	/** Simulate a host changing the tool set mid-session, as `/tools` does. */
+	setActiveTools: (names: string[]) => void;
+	/** Fire pi's before_agent_start, which the extension re-checks exposure on. */
+	fireBeforeAgentStart: () => Promise<void>;
 	/** Render the installed widget with the given width and return its lines. */
 	renderWidget: (width?: number) => string[] | undefined;
 	/** How many times the widget asked the TUI to re-render. */
@@ -87,6 +93,9 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 	// Every registration, in order, so a test can see the load-time one and the
 	// corrected one separately.
 	const toolRegistrations: { name: string; exposure: string | undefined }[] = [];
+	// The set pi would declare to the model, and the subset a host named by hand.
+	const activeToolNames: string[] = [...(options.activeTools ?? ["read", "bash", "edit", "write"])];
+	const requestedToolNames: string[] = options.requestedTools ?? [];
 	const widgetComponents = new Map<string, (tui: unknown, theme: unknown) => { render: (width: number) => string[] }>();
 	let renderRequests = 0;
 	const fakeTheme = { fg: (_color: string, text: string) => text };
@@ -95,8 +104,20 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 		registerFlag: () => undefined,
 		getFlag: () => undefined,
 		registerTool: (tool: Record<string, unknown>) => {
-			tools.set(tool.name as string, tool);
-			toolRegistrations.push({ name: tool.name as string, exposure: (tool as { exposure?: string }).exposure });
+			const name = tool.name as string;
+			tools.set(name, tool);
+			const exposure = (tool as { exposure?: string }).exposure ?? "direct";
+			toolRegistrations.push({ name, exposure });
+			// pi activates a tool on registration only when its exposure is declarable
+			// (`direct` | `model-only`) and `defaultActive` is not false. Everything
+			// else has to be named explicitly. This is the rule that decides what the
+			// model actually SEES, so the harness models it rather than trusting a
+			// test's read of `definition.exposure`.
+			if (exposure === "direct" || exposure === "model-only") {
+				if (!activeToolNames.includes(name)) activeToolNames.push(name);
+			} else if (!activeToolNames.includes(name) && requestedToolNames.includes(name)) {
+				activeToolNames.push(name);
+			}
 		},
 		registerMessageRenderer: () => undefined,
 		registerEntryRenderer: () => undefined,
@@ -108,11 +129,7 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 		// Local patch 15 asks pi what is active before it decides a tool's exposure.
 		getActiveTools: () => {
 			if (options.unbound) throw new Error("Extension runtime not initialized.");
-			return options.activeTools ?? ["read", "bash", "edit", "write", "subagent"];
-		},
-		getSettings: () => {
-			if (options.unbound) throw new Error("Extension runtime not initialized.");
-			return { defaultTools: options.defaultTools };
+			return [...activeToolNames];
 		},
 		sendMessage: (message: Record<string, unknown>, opts?: Record<string, unknown>) => {
 			messages.push({ message, options: opts });
@@ -213,6 +230,14 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 		toolExposure: (name: string) => {
 			const definition = tools.get(name) as { exposure?: string } | undefined;
 			return definition?.exposure;
+		},
+		declared: (name: string) => activeToolNames.includes(name) && tools.get(name)?.exposure !== "hidden",
+		setActiveTools: (names: string[]) => {
+			activeToolNames.length = 0;
+			activeToolNames.push(...names);
+		},
+		fireBeforeAgentStart: async () => {
+			await handlers.get("before_agent_start")?.({}, ctx);
 		},
 		renderWidget: (width = 200) => {
 			const component = [...widgetComponents.values()].at(-1);
@@ -1717,7 +1742,8 @@ test("session_shutdown clears the widget and stops its ticker", async () => {
 test("the management tools are declared when pi has no way to reach them on demand", async () => {
 	await withHarness(undefined, async (h) => {
 		for (const name of ["subagent", "subagent_status", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
-			assert.equal(h.toolExposure(name), undefined, `${name} must stay declared without codemode or tool_search`);
+			assert.equal(h.toolExposure(name), undefined, `${name} is registered direct without codemode or tool_search`);
+			assert.equal(h.declared(name), true, `${name} must stay declared`);
 		}
 		// And the fallback is not a degraded extension: they still work.
 		const run = (await h.call("subagent", { task: "still works" })).details as unknown as RunRecord;
@@ -1747,14 +1773,62 @@ test("codemode or tool_search hides the management tools but never `subagent`", 
 	}
 });
 
-test("a settings layer that excludes codemode leaves the tools declared", async () => {
-	// pi's declared set is built from the ACTIVE set, so `getActiveTools()` is the
-	// resolved truth. Reading the settings layer as well would have HIDDEN the
-	// tools in exactly the case where `--tools` had switched codemode off.
-	await withHarness({ activeTools: ["read", "bash"], defaultTools: ["read", "bash", "+codemode"] }, async (h) => {
-		assert.equal(h.toolExposure("subagent_status"), undefined, "the active set wins over the settings layer");
-		await h.call("subagent", { task: "still declared" });
-		assert.match((await h.call("subagent_status", {})).text, /still declared/);
+test("/tools switching discovery off mid-session does not strand the tools", async () => {
+	// The regression that made "fails safe" untrue: registration happens once, and a
+	// host can change the tool set afterwards. Without the before_agent_start
+	// re-check, all five would be registered as codemode, no longer declared, and
+	// no longer reachable — with `subagent` still declared, so the model could
+	// start a run it then could not poll or cancel.
+	await withHarness({ activeTools: ["read", "codemode", "tool_search"] }, async (h) => {
+		for (const name of ["subagent_status", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
+			assert.equal(h.declared(name), false, `${name} starts hidden`);
+		}
+
+		// The host switches both discovery tools off, as /tools does.
+		h.setActiveTools(["read", "bash", "edit", "write"]);
+		await h.fireBeforeAgentStart();
+
+		for (const name of ["subagent_status", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
+			assert.equal(h.toolExposure(name), undefined, `${name} must be re-registered direct`);
+			assert.equal(h.declared(name), true, `${name} must be declared again, or the model cannot reach it at all`);
+		}
+		await h.call("subagent", { task: "still manageable" });
+		assert.match((await h.call("subagent_status", {})).text, /still manageable/);
+	});
+});
+
+test("the note about hidden tools only ships when they are hidden", async () => {
+	// ~360 bytes of system prompt per request, and it is a lie in a session that
+	// never enabled discovery — so it lives in prepareLoadout, not in the tool.
+	await withHarness(undefined, async (h) => {
+		await h.call("subagent", { task: "no discovery" });
+		assert.doesNotMatch(h.tools.get("subagent")?.description as string, /not declared while/);
+	});
+
+	await withHarness({ activeTools: ["read", "codemode"] }, async (h) => {
+		await h.call("subagent", { task: "with discovery" });
+		// The hook is pi's, so exercise it the way pi does: with a loadout.
+		const loadout = {
+			declared: [{ name: "subagent", description: h.tools.get("subagent")?.description }],
+			getExposure: (name: string) => h.toolExposure(name),
+		};
+		const changes = (h.tools.get("subagent") as { prepareLoadout?: (l: unknown) => { descriptions?: Record<string, string> } }).prepareLoadout?.(loadout);
+		const note = changes?.descriptions?.subagent;
+		assert.ok(note?.includes("not declared while"), `the note must be added when the tools are hidden: ${note}`);
+		assert.ok(note.startsWith(h.tools.get("subagent")?.description as string), "it extends the description rather than replacing it");
+	});
+});
+
+test("the exposure is re-checked without churning the tool registry", async () => {
+	// The memo is what makes the per-turn re-check free; this is the case that
+	// would catch it being removed (and the registry churn that follows).
+	await withHarness({ activeTools: ["read", "codemode"] }, async (h) => {
+		await h.call("subagent", { task: "one turn" });
+		await h.fireBeforeAgentStart();
+		await h.fireBeforeAgentStart();
+		for (const name of ["subagent_status", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
+			assert.equal(h.toolRegistrations.filter((entry) => entry.name === name).length, 1, `${name} registered once`);
+		}
 	});
 });
 
@@ -1763,7 +1837,8 @@ test("an unbound tool API leaves every tool declared instead of throwing", async
 	// take the session down, and must not leave a half-applied exposure.
 	await withHarness({ unbound: true }, async (h) => {
 		for (const name of ["subagent", "subagent_status", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
-			assert.equal(h.toolExposure(name), undefined, `${name} must stay declared`);
+			assert.equal(h.toolExposure(name), undefined, `${name} must stay direct`);
+			assert.equal(h.declared(name), true, `${name} must stay declared`);
 		}
 		const run = (await h.call("subagent", { task: "unbound is survivable" })).details as unknown as RunRecord;
 		assert.match((await h.call("subagent_status", { id: run.id })).text, /unbound is survivable/);
