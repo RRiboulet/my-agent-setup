@@ -533,9 +533,9 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 
 	const persist = (): Promise<void> => {
 		if (!runsIndexPath) return Promise.resolve();
-		const snapshot = `${JSON.stringify([...runs.values()], null, 2)}\n`;
+		const snapshot = [...runs.values()];
 		persistChain = persistChain
-			.then(() => writeFile(runsIndexPath, snapshot, { encoding: "utf8", mode: 0o600 }))
+			.then(() => writeJsonAtomic(runsIndexPath, snapshot))
 			.catch((error) => {
 				console.error(`[tmux-subagent] Failed to persist runs: ${error instanceof Error ? error.message : String(error)}`);
 			});
