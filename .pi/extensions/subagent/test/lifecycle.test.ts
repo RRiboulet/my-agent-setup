@@ -13,7 +13,7 @@
 
 import assert from "node:assert/strict";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { watch } from "node:fs";
+import { existsSync, watch } from "node:fs";
 import * as path from "node:path";
 import { test } from "node:test";
 
@@ -42,6 +42,8 @@ interface HarnessOptions {
 	paneDead?: boolean;
 	/** Artificial delay (ms) added to every tmux call, so a shutdown can land while a watcher tick is mid-flight. */
 	execDelayMs?: number;
+	/** Overrides ctx.sessionManager, so fork/lineage tests can present a real live branch. */
+	sessionManager?: Record<string, unknown>;
 }
 
 async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -85,7 +87,7 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 		mode: "tui",
 		hasUI: true,
 		isProjectTrusted: () => true,
-		sessionManager: {
+		sessionManager: options.sessionManager ?? {
 			getSessionId: () => SESSION_ID,
 			getSessionFile: () => path.join(process.env.PI_CODING_AGENT_DIR ?? "/tmp", `${SESSION_ID}.jsonl`),
 			getBranch: () => [],
@@ -679,5 +681,229 @@ test("a settled run reports its status, not a stale activity phase", async () =>
 		const status = await h.call("subagent_status", { id: run.id });
 		assert.ok(!status.text.includes("activity:"), "activity is a live signal, not a final result");
 		assert.ok(status.text.includes("completed"));
+	});
+});
+
+// --- Context handoff (subagent `handoff` parameter and subagent_resume) ---
+//
+// Risk covered: a resumed run keeps its transcript in its ANCESTOR's run dir,
+// so the run dir and the transcript have different lifetimes. That mismatch is
+// where silent data loss lives, and none of it is reachable from the
+// standalone tests above.
+
+/** A parent session manager presenting a live branch whose last-written entry is a different branch. */
+function liveBranchSessionManager(agentDir: string) {
+	const parentFile = path.join(agentDir, "parent.jsonl");
+	const entries = [
+		{ type: "message", id: "e1", parentId: null, message: { role: "user", content: [{ type: "text", text: "live question" }] } },
+		{ type: "message", id: "e2", parentId: "e1", message: { role: "assistant", content: [{ type: "text", text: "live answer" }] } },
+		{ type: "message", id: "e3", parentId: "e1", message: { role: "assistant", content: [{ type: "text", text: "ABANDONED SIBLING" }] } },
+	];
+	// The live leaf is e2; the file's last line is e3. getLeafId() must be
+	// consulted, never "the last entry".
+	return {
+		getSessionId: () => SESSION_ID,
+		getSessionFile: () => parentFile,
+		getLeafId: () => "e2",
+		getBranch: (leafId?: string) => entries.filter((entry) => entry.id === "e1" || entry.id === (leafId ?? "e2")),
+	};
+}
+
+test("handoff=fork seeds the child with the parent's LIVE branch", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		const harness = await createHarness({ sessionManager: liveBranchSessionManager(agentDir) as never });
+		try {
+			const run = (await harness.call("subagent", { task: "forked work", handoff: "fork" })).details as unknown as RunRecord;
+			assert.equal(run.mode, "fork");
+
+			const lines = (await readFile(run.sessionFile as string, "utf8")).trim().split("\n");
+			assert.equal(JSON.parse(lines[0]).type, "session");
+			assert.equal(JSON.parse(lines[0]).parentSession, path.join(agentDir, "parent.jsonl"));
+			const body = lines.slice(1).map((line) => JSON.parse(line));
+			assert.deepEqual(
+				body.map((entry) => entry.id),
+				["e1", "e2"],
+				"only the live branch is inherited",
+			);
+			assert.ok(!lines.join("\n").includes("ABANDONED SIBLING"), "the abandoned sibling must not leak");
+			// The live leaf must be the last line, because pi derives the active
+			// branch from file order.
+			assert.equal(body.at(-1)?.id, "e2");
+			assert.equal(run.usageFromLine, 3, "header + two inherited entries");
+
+			// fork mode addresses the child with --session, never --session-id:
+			// pi hard-exits on the combination.
+			const childCommand = harness.execCalls
+				.filter((call) => call.args.includes("send-keys"))
+				.flatMap((call) => call.args)
+				.find((arg) => arg.includes("--provider"));
+			assert.ok(childCommand?.includes("'--session'"), childCommand);
+			assert.ok(!childCommand?.includes("--session-id"), childCommand);
+		} finally {
+			await harness.shutdown();
+		}
+	});
+});
+
+test("handoff=lineage links the child to the parent without sharing context", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		const harness = await createHarness({ sessionManager: liveBranchSessionManager(agentDir) as never });
+		try {
+			const run = (await harness.call("subagent", { task: "lineage work", handoff: "lineage" })).details as unknown as RunRecord;
+			assert.equal(run.mode, "lineage");
+			const lines = (await readFile(run.sessionFile as string, "utf8")).trim().split("\n");
+			assert.equal(lines.length, 1, "header only: no inherited conversation");
+			assert.equal(JSON.parse(lines[0]).parentSession, path.join(agentDir, "parent.jsonl"));
+			assert.equal(run.usageFromLine, 1);
+		} finally {
+			await harness.shutdown();
+		}
+	});
+});
+
+/** Complete a run the way the child would, so it is eligible for resume. */
+async function completeRun(h: Harness, run: RunRecord): Promise<void> {
+	await h.writeResult(run, {
+		version: 1,
+		status: "completed",
+		output: "ok",
+		finishedAt: Date.now(),
+		sessionFile: run.sessionFile,
+	});
+	await waitFor(async () => (await h.readRuns()).find((candidate) => candidate.id === run.id)?.status === "completed");
+}
+
+test("subagent_resume continues the same transcript and counts only its own turns", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		const harness = await createHarness({ sessionManager: liveBranchSessionManager(agentDir) as never });
+		try {
+			const first = (await harness.call("subagent", { task: "forked work", handoff: "fork" })).details as unknown as RunRecord;
+			await completeRun(harness, first);
+			const beforeResume = (await readFile(first.sessionFile as string, "utf8")).trim().split("\n").length;
+
+			const resumed = (await harness.call("subagent_resume", {
+				id: first.id,
+				message: "carry on",
+			})).details as unknown as RunRecord;
+
+			assert.equal(resumed.sessionFile, first.sessionFile, "the same transcript is continued");
+			assert.notEqual(resumed.id, first.id);
+			assert.equal(resumed.mode, "resume");
+			assert.equal(resumed.attempt, 2);
+			assert.equal(resumed.usageFromLine, beforeResume, "the baseline is the transcript as it stood");
+			assert.notEqual(resumed.runDir, first.runDir, "the attempt gets its own run dir");
+
+			const childCommand = harness.execCalls
+				.filter((call) => call.args.includes("send-keys"))
+				.flatMap((call) => call.args)
+				.filter((arg) => arg.includes("'--session'"))
+				.at(-1);
+			assert.ok(childCommand?.includes("'--session'"));
+			assert.ok(!childCommand?.includes("--session-id"), childCommand);
+		} finally {
+			await harness.shutdown();
+		}
+	});
+});
+
+test("subagent_resume refuses a second concurrent resume of the same transcript", async () => {
+	// Regression test: a finished run stays terminal forever, so the "is it
+	// still running" guard passed for both resumes and two pi processes
+	// appended to one JSONL, forking branches and scrambling baselines.
+	await withTempAgentDir(async (agentDir) => {
+		const harness = await createHarness({ sessionManager: liveBranchSessionManager(agentDir) as never });
+		try {
+			const first = (await harness.call("subagent", { task: "forked work", handoff: "fork" })).details as unknown as RunRecord;
+			await completeRun(harness, first);
+			const a = (await harness.call("subagent_resume", { id: first.id, message: "one" })).details as unknown as RunRecord;
+			await assert.rejects(
+				() => harness.call("subagent_resume", { id: first.id, message: "two" }),
+				/already using this session file/,
+			);
+			const runs = await harness.readRuns();
+			assert.equal(runs.filter((run) => run.sessionFile === first.sessionFile && run.status !== "cancelled").length >= 1, true);
+			assert.equal(a.attempt, 2);
+		} finally {
+			await harness.shutdown();
+		}
+	});
+});
+
+test("subagent_resume refuses to resume a run that is still going", async () => {
+	await withHarness(undefined, async (h) => {
+		const active = (await h.call("subagent", { task: "still going" })).details as unknown as RunRecord;
+		const result = await h.call("subagent_resume", { id: active.id, message: "are you there" });
+		assert.match(result.text, /still running; cancel it before resuming/);
+	});
+});
+
+test("subagent_clean does not delete a run dir that still owns a live run's transcript", async () => {
+	// Regression test: subagent_resume keeps the ANCESTOR's transcript, so
+	// deleting the ancestor's run dir pulled the file out from under a run that
+	// was still running. pi holds the descriptor open, so the child kept
+	// writing to an unlinked inode and lost every entry silently.
+	await withTempAgentDir(async (agentDir) => {
+		const harness = await createHarness({ sessionManager: liveBranchSessionManager(agentDir) as never });
+		try {
+			const first = (await harness.call("subagent", { task: "forked work", handoff: "fork" })).details as unknown as RunRecord;
+			await harness.writeResult(first, {
+				version: 1,
+				status: "completed",
+				output: "ok",
+				finishedAt: Date.now(),
+				sessionFile: first.sessionFile,
+			});
+			await waitFor(async () => (await harness.readRuns()).find((run) => run.id === first.id)?.status === "completed");
+
+			// Resume it: the new run points at the old run's transcript and is running.
+			const resumed = (await harness.call("subagent_resume", { id: first.id, message: "more" })).details as unknown as RunRecord;
+
+			const cleaned = await harness.call("subagent_clean", { delete_files: true });
+			assert.match(cleaned.text, /still hold the session file of a live run/);
+			assert.match(cleaned.text, new RegExp(first.id));
+
+			// The ancestor's transcript must still be on disk for the live run.
+			assert.ok(existsSync(resumed.sessionFile as string), "live run's transcript survives the clean");
+			assert.ok(existsSync(first.runDir), "the owning run dir is retained");
+		} finally {
+			await harness.shutdown();
+		}
+	});
+});
+
+test("subagent_clean counts only transcripts it actually deletes", async () => {
+	// A resumed record's sessionFile lives in its ancestor's run dir, so
+	// counting "has a sessionFile" over-reports: here the ancestor is skipped
+	// as too recent while the resumed record is deleted, and the resumed
+	// record's own dir contains no transcript at all. Deleting it destroys
+	// nothing resumable, so the count must stay at 0.
+	await withTempAgentDir(async (agentDir) => {
+		const harness = await createHarness({ sessionManager: liveBranchSessionManager(agentDir) as never });
+		try {
+			const first = (await harness.call("subagent", { task: "forked work", handoff: "fork" })).details as unknown as RunRecord;
+			await completeRun(harness, first);
+			const resumed = (await harness.call("subagent_resume", { id: first.id, message: "more" })).details as unknown as RunRecord;
+			await harness.writeResult(resumed, {
+				version: 1,
+				status: "completed",
+				output: "ok",
+				// Old enough to be cleaned; the ancestor stays recent.
+				finishedAt: Date.now() - 7_200_000,
+				sessionFile: resumed.sessionFile,
+			});
+			await waitFor(async () => (await harness.readRuns()).find((run) => run.id === resumed.id)?.status === "completed");
+
+			const cleaned = await harness.call("subagent_clean", { delete_files: true, older_than_hours: 1 });
+			assert.match(cleaned.text, /deleted 1 run dir\(s\)/, cleaned.text);
+			assert.doesNotMatch(
+				cleaned.text,
+				/child session transcript/,
+				`deleting the resumed run's empty dir must not be reported as a lost transcript: ${cleaned.text}`,
+			);
+			// The ancestor's transcript is untouched, because it was skipped.
+			assert.ok(existsSync(resumed.sessionFile as string));
+		} finally {
+			await harness.shutdown();
+		}
 	});
 });

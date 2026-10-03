@@ -75,7 +75,6 @@ import {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	getAgentDir,
-	SessionManager,
 	truncateHead,
 	type ExtensionAPI,
 	type ExtensionContext,
@@ -296,11 +295,7 @@ function attachToSubagentAndExit(rawTarget: string): never {
  * that has already moved on. `usageFromLine` becomes the usage baseline, so
  * inherited turns are never charged to the child.
  */
-async function prepareHandoffSession(
-	run: RunRecord,
-	ctx: ExtensionContext,
-	options: { forkLeafId?: string | null } = {},
-): Promise<void> {
+async function prepareHandoffSession(run: RunRecord, ctx: ExtensionContext): Promise<void> {
 	const mode = run.mode ?? "standalone";
 	if (!usesSessionFile(mode)) return;
 
@@ -328,13 +323,38 @@ async function prepareHandoffSession(
 	// ancestors-first with the leaf last, which is exactly the order pi adopts
 	// as the active branch on load. See handoff.ts for why forkFrom is not
 	// used here.
-	const parent = SessionManager.open(parentFile);
-	const leafId = options.forkLeafId ?? parent.getLeafId();
-	const branch = parent.getBranch(leafId ?? undefined) as unknown as ParentBranchEntry[];
+	//
+	// The live manager is used rather than re-opening the file: its leaf is the
+	// pointer the user is actually on, and pi appends synchronously, so there is
+	// nothing on disk that ctx does not already have. Falling back to the
+	// reopened manager's leaf would silently reintroduce the wrong-branch trap,
+	// because that value is just the file's last line.
+	const leafId = ctx.sessionManager.getLeafId();
+	if (!leafId) throw new Error("The parent session has no active branch to fork.");
+	const branch = ctx.sessionManager.getBranch(leafId) as unknown as ParentBranchEntry[];
 	if (branch.length === 0) throw new Error("The parent session has no conversation to fork.");
 	const forked = await forkLiveBranch({ sessionFile: target, branch, id: run.id, cwd: run.cwd, parentSession: parentFile });
 	run.sessionFile = forked.sessionFile;
 	run.usageFromLine = 1 + forked.inheritedEntries; // header + inherited entries
+}
+
+/**
+ * True when `run`'s run directory still contains the session file of some other
+ * run that is still in flight.
+ *
+ * `subagent_resume` allocates a fresh run dir but keeps the ancestor's
+ * transcript, so the file outliving its own directory is normal, and deleting
+ * that directory is destructive to whoever still holds it.
+ */
+function runDirOwnsLiveTranscript(run: RunRecord, runs: Map<string, RunRecord>): boolean {
+	if (!run.runDir) return false;
+	for (const other of runs.values()) {
+		if (other.id === run.id) continue;
+		if (isTerminal(other.status)) continue;
+		if (!other.sessionFile) continue;
+		if (isSameOrDescendant(run.runDir, other.sessionFile)) return true;
+	}
+	return false;
 }
 
 function getPiInvocationParts(): string[] {
@@ -694,7 +714,10 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	const finalizeRun = async (run: RunRecord, result: ChildResult): Promise<void> => {
 		run.status = result.status === "completed" ? "completed" : "failed";
 		run.finishedAt = result.finishedAt || Date.now();
-		run.sessionFile = result.sessionFile;
+		// The child reports the path it actually opened. Keep the one we already
+		// recorded when it does not: a result without sessionFile must not erase
+		// the pointer subagent_resume depends on.
+		run.sessionFile = result.sessionFile ?? run.sessionFile;
 		run.provider = result.provider ?? run.provider;
 		run.model = result.model ?? run.model;
 		run.thinking = result.thinking ?? run.thinking;
@@ -1042,8 +1065,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			// Snapshot the handoff now, while the parent's branch is the one the
 			// user just asked about, rather than at launch once the run is dequeued.
 			if (usesSessionFile(mode)) {
-				const leafId = ctx.sessionManager.getLeafId();
-				await prepareHandoffSession(run, ctx, { forkLeafId: leafId });
+				await prepareHandoffSession(run, ctx);
 			}
 
 			await startRun(run);
@@ -1174,6 +1196,20 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			// still there. If it is not, fail loudly instead of letting pi
 			// silently open an empty session.
 			const sessionFile = requireExistingSession(previous.sessionFile, previous.id);
+
+			// A finished run stays terminal forever, so nothing stops two resumes
+			// of the same transcript from both passing the guard above. Two pi
+			// processes appending to one JSONL produce interleaved branches and
+			// scrambled usage baselines, so refuse while one is still in flight.
+			const concurrent = [...runs.values()].find(
+				(candidate) => candidate.id !== previous.id && !isTerminal(candidate.status) && candidate.sessionFile === sessionFile,
+			);
+			if (concurrent) {
+				throw new Error(
+					`Run ${concurrent.id} is already using this session file (${concurrent.status}). ` +
+						`Wait for it to finish, or resume it instead of ${previous.id}.`,
+				);
+			}
 
 			const id = randomUUID();
 			const runDir = path.join(sessionRunsDir, id);
@@ -1316,12 +1352,23 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			let deleted = 0;
 			let skipped = 0;
 			let deletedTranscripts = 0;
+			const retained: string[] = [];
 			for (const run of targets) {
 				if (!isTerminal(run.status)) {
 					skipped++;
 					continue;
 				}
 				if (run.finishedAt && run.finishedAt > cutoff) {
+					skipped++;
+					continue;
+				}
+				// A resumed run keeps its transcript in its ANCESTOR's run dir, so
+				// deleting that dir would pull the file out from under a run that
+				// may still be running. pi holds the descriptor open, so the child
+				// would keep writing to an unlinked inode and lose every entry
+				// silently. Leave the dir alone and say so.
+				if (deleteFiles && run.runDir && runDirOwnsLiveTranscript(run, runs)) {
+					retained.push(run.id);
 					skipped++;
 					continue;
 				}
@@ -1333,7 +1380,9 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 					// outlives the run and stays resumable. Deleting the run dir
 					// destroys it, so say so rather than losing a conversation
 					// the user may still want to resume.
-					if (run.sessionFile && existsSync(run.sessionFile)) deletedTranscripts++;
+					if (run.sessionFile && existsSync(run.sessionFile) && isSameOrDescendant(run.runDir, run.sessionFile)) {
+						deletedTranscripts++;
+					}
 					await rm(run.runDir, { recursive: true, force: true }).catch(() => undefined);
 					deleted++;
 					if (runs.get(run.id) === run) runs.delete(run.id);
@@ -1344,6 +1393,11 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			if (deleteFiles && deletedTranscripts > 0) {
 				summary.push(
 					`Also deleted ${deletedTranscripts} child session transcript(s); those runs can no longer be resumed.`,
+				);
+			}
+			if (retained.length > 0) {
+				summary.push(
+					`Kept ${retained.length} run dir(s) that still hold the session file of a live run: ${retained.join(", ")}.`,
 				);
 			}
 			return {

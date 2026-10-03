@@ -43,6 +43,28 @@ Features:
 - `subagent_clean --delete_files` now reports how many child transcripts it
   destroyed, since those runs can no longer be resumed.
 
+Fixes to the handoff work, from an adversarial review:
+
+- **`subagent_clean` could destroy a live resumed run's transcript.** A resumed
+  run keeps its ancestor's transcript, so deleting the ancestor's run dir pulled
+  the file out from under a run that was still going. pi holds the descriptor
+  open, so the child kept writing to an unlinked inode and lost every entry
+  silently. `subagent_clean` now retains a run dir that still owns a live run's
+  session file and names it in its output.
+- **Two concurrent resumes could append to one transcript.** A finished run
+  stays terminal forever, so nothing stopped both resumes from passing the
+  "still running" guard; two pi processes then wrote interleaved branches to one
+  JSONL. `subagent_resume` now refuses while another non-terminal run shares the
+  session file.
+- **`subagent_clean` over-reported destroyed transcripts**, counting any record
+  with a `sessionFile` rather than one inside the dir being deleted.
+- **A fallback reintroduced the wrong-branch trap**: `fork` mode fell back to
+  the reopened parent's `getLeafId()`, which is the file's last entry. Fork now
+  takes the leaf from the live `ctx.sessionManager` and fails if there is none.
+  This also drops a redundant full re-parse of the parent transcript per call.
+- `finalizeRun` no longer erases a recorded `sessionFile` when a child reports
+  one that is `undefined`.
+
 Fixes:
 
 - `persist()` wrote `runs.json` with a plain `writeFile`, so a reader could
