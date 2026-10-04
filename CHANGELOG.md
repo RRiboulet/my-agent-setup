@@ -27,29 +27,33 @@ Added:
   are listed in the file header and in the README. Two of them fix numbers that
   were wrong on this machine:
   - Upstream hardcodes `<homedir>/.pi/agent/sessions`, so a relocated agent dir
-    (`PI_CODING_AGENT_DIR`) was invisible — upstream PR #24 asked for this and
-    was closed unmerged — and so were the subagent extension's child sessions,
-    which live in sibling trees (`tmux-subagents/`, legacy `subagents/`).
-    Measured: **$0.067741 of $1.708118 (4.1% of cost) and ~3.3M tokens were
-    missing** from the view.
+    (`PI_CODING_AGENT_DIR`) was invisible — upstream PR #24 asked for exactly
+    this and was closed unmerged — and so were the subagent extension's child
+    sessions, which live in sibling trees (`tmux-subagents/`, legacy
+    `subagents/`). Measured 2026-10-04 on this machine: **$0.067741 of
+    $1.708118 (4.0% of cost) was missing from the view**, plus 35 child
+    transcripts.
   - A forked session file carries a verbatim copy of its parent's tail, ids
     included, so summing whole files counts those requests twice. This is not
     hypothetical and not only ours: pi's own `/fork`, `/clone` and `--fork` copy
-    entries into the session dir, and **2,989,693 tokens (0.96% of the reported
+    entries into the session dir, and **2,989,693 tokens (~1% of the reported
     total) were already duplicated inside `sessions/`** before the subagent
-    extension was involved. A real `handoff: "fork"` child reported **1.79x** its
-    own cost. Inherited entries are now excluded from messages, tokens and cost,
-    resolved through the `parentSession` path in the v3 header — which pi,
-    upstream's `split-fork.ts` and our `handoff.ts` all write and no analytics
-    code read. A file still counts as one session; a file whose parent cannot be
-    read is counted in full rather than guessed at.
+    extension was involved. A real `handoff: "fork"` child held 1,473,545 tokens
+    in its transcript against the 527,566 its own turns added — 64% of the file
+    was somebody else's requests. Inherited entries are now excluded from
+    messages, tokens and cost, resolved through the `parentSession` path in the
+    v3 header, which pi, upstream's `split-fork.ts` and our `handoff.ts` all
+    write and no analytics code read. A file still counts as one session; a file
+    whose header or parent chain cannot be read is counted in full rather than
+    guessed at, and reported.
   - Because a total that silently drops context looks exactly like one that is
-    simply wrong, a dimmed footer line reports what was excluded:
-    `incl. child sessions · N forked/child sessions · M inherited entries
-    excluded ($X counted once, in the parent) · K with unreadable parent,
-    counted in full`. Delegation is not free — a forked child really is billed
-    for re-sending the prefix, mostly as cache reads — so this is about counting
-    each request once, not about pretending otherwise.
+    simply wrong, a dimmed footer line reports what the scan did — e.g.
+    `last 90 days · 35 child transcripts · 6 forked sessions, 290 inherited
+    entries excluded (3.0M tokens, counted in the parent when it is in range) · 1
+    with unreadable header or parent, counted in full`. Delegation is not free —
+    a forked child really is billed for re-sending the prefix, mostly as cache
+    reads — so this is about counting each request once, not about pretending
+    otherwise. Both clauses only appear when they have something to report.
 
 Maintenance:
 

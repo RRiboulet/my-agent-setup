@@ -80,12 +80,18 @@ upstream on purpose, so a later refresh is a readable diff. Our changes are four
 4. **A `__test__` export**, so the aggregation is testable over fixtures instead
    of a developer's real transcripts.
 
-Measured effect on this machine, before and after: child sessions that were
-invisible ($0.067741 of $1.708118, and ~3.3M tokens) are now counted, and
-3,003,013 duplicated tokens across 7 forked files are no longer counted twice.
-A forked child's *own* turns still cost real money — its re-send of the parent's
-prefix is billed, mostly as cache reads — so this is about counting each request
-once, not about pretending delegation is free.
+Measured on this machine (2026-10-04; reproduce with
+`node tools/measure-session-usage.mjs`, read-only): child transcripts that were
+invisible — **$0.067741 of $1.708118, 4.0% of the cost, across 35 files** — are
+now counted, and **3,003,013 duplicated tokens across 6 forked files** are no
+longer counted twice. One more file carries a `parentSession` that cannot be
+resolved (its source transcript is gone); it is counted in full, and the footer
+says so rather than leaving it to be discovered.
+
+A forked child's *own* turns still cost real money: its re-send of the parent's
+prefix is billed, mostly as cache reads. This is about counting each request
+once, not about pretending delegation is free. The footer line is the honest
+version of that, and it only appears when there is something to report.
 
 ## Configuration
 

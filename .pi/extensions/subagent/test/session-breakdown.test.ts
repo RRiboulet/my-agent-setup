@@ -12,10 +12,10 @@
 //
 // Why patch 2 needs tests at all: summing whole session files double counts the
 // prefix a forked file inherits from its parent. Measured on this machine, one
-// real `handoff: fork` child reported 1.79x its own cost, and sessions/ already
-// contained 2,989,693 duplicated tokens from pi's own /fork. The numbers below
-// are the fixtures' numbers, chosen so a regression cannot hide inside a
-// plausible-looking total.
+// real `handoff: "fork"` child held 1,473,545 tokens against the 527,566 its
+// own turns added, and sessions/ already contained 2,989,693 duplicated tokens
+// from pi's own /fork. The numbers below are the fixtures' numbers, chosen so a
+// regression cannot hide inside a plausible-looking total.
 
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -26,7 +26,7 @@ import { after, test } from "node:test";
 import { __test__ } from "../../session-breakdown.ts";
 import { withEnv } from "./helpers.ts";
 
-const { computeBreakdown, defaultSessionRoots, inheritedNote, readEntryIds, readSessionHeader, resolveInheritedIds } = __test__;
+const { BreakdownComponent, computeBreakdown, defaultSessionRoots, inheritedNote, readEntryIds, readSessionHeader, resolveInheritedIds } = __test__;
 
 const MODEL_CHANGE = { type: "model_change", id: "mc1", parentId: null, provider: "openrouter", modelId: "test/model" };
 
@@ -220,8 +220,9 @@ test("LOCAL PATCH 2: a fork contributes only its own turns", async () => {
 		assert.equal(t.sessions, 2, "the child still counts as a session");
 		assert.equal(round(t.inherited.cost), 0.412, "and the excluded amount is reported");
 		assert.equal(t.inherited.entries, 2);
-		assert.equal(t.inherited.sessions, 1);
-		assert.equal(t.inherited.unknownParents, 0);
+		assert.equal(t.inherited.forkedSessions, 1);
+		assert.equal(t.inherited.unknownLineage, 0);
+		assert.equal(t.inherited.childSessions, 1);
 	});
 });
 
@@ -309,10 +310,55 @@ test("LOCAL PATCH 2: an unreadable parent is counted in full and reported", asyn
 		]);
 
 		const t = await totals(defaultSessionRoots(agentDir));
-		assert.equal(t.inherited.unknownParents, 1, "flagged rather than silently guessed");
-		assert.equal(t.inherited.sessions, 1);
+		assert.equal(t.inherited.unknownLineage, 1, "flagged rather than silently guessed");
 		assert.equal(round(t.cost), 0.06, "overcounting is the safe direction, but it is labelled");
-		assert.match(inheritedNote(t.inherited)!, /unreadable parent/);
+		assert.match(inheritedNote(t.inherited)!, /unreadable header or parent/);
+	});
+});
+
+test("LOCAL PATCH 2: a file whose own header is unreadable is reported, not assumed clean", async () => {
+	await withFixtureDir(async (agentDir) => {
+		const sessions = path.join(agentDir, "sessions", "--tmp-fixture--");
+		const parentFile = await writeSession(path.join(sessions, `${stamp()}_parent.jsonl`), [
+			header("parent"),
+			MODEL_CHANGE,
+			assistant({ totalTokens: 100, cost: 0.5 }),
+		]);
+		// pi's `_rewriteFile` truncates before it writes, and pi tolerates junk
+		// before the header, so a scan can catch a fork mid-rewrite: the entries are
+		// all there but the header is not the first line. Without the report, this
+		// file's inherited prefix is counted a second time, silently.
+		const torn = path.join(sessions, `${stamp()}_torn.jsonl`);
+		await mkdir(path.dirname(torn), { recursive: true });
+		await writeFile(
+			torn,
+			["{ truncated", ...(await inheritedPrefix(parentFile)), JSON.stringify(assistant({ totalTokens: 10, cost: 0.01 }))].join("\n") + "\n",
+			"utf8",
+		);
+
+		const t = await totals([path.join(agentDir, "sessions")]);
+		assert.equal(t.inherited.unknownLineage, 1);
+		assert.equal(t.inherited.forkedSessions, 0, "nothing could be recognised as inherited");
+		assert.match(inheritedNote(t.inherited)!, /unreadable header or parent/);
+	});
+});
+
+test("LOCAL PATCH 3: a lineage child with no inherited prefix claims nothing", async () => {
+	await withFixtureDir(async (agentDir) => {
+		// `handoff: lineage` writes a header-only file that still points at its
+		// parent. If that parent is later deleted there is nothing to exclude, and
+		// the note must not claim that "0 inherited entries" were excluded.
+		await writeSession(path.join(agentDir, "tmux-subagents", "sid", "rid", "session", "lineage.jsonl"), [
+			header("lineage", path.join(agentDir, "sessions", "gone", "parent.jsonl")),
+			MODEL_CHANGE,
+			assistant({ totalTokens: 30, cost: 0.03 }),
+		]);
+
+		const t = await totals(defaultSessionRoots(agentDir));
+		const note = inheritedNote(t.inherited)!;
+		assert.equal(t.inherited.unknownLineage, 1);
+		assert.doesNotMatch(note, /inherited entr/);
+		assert.match(note, /1 child transcript/);
 	});
 });
 
@@ -325,7 +371,7 @@ test("LOCAL PATCH 2: a parent cycle terminates instead of hanging", async () => 
 		await writeSession(b, [header("b", a), MODEL_CHANGE, assistant({ totalTokens: 10, cost: 0.01 })]);
 
 		const t = await totals([path.join(agentDir, "sessions")]);
-		assert.equal(t.inherited.unknownParents, 2, "both files report a broken chain");
+		assert.equal(t.inherited.unknownLineage, 2, "both files report a broken chain");
 		// Each file still contributes its own entries: ids are excluded only where
 		// the other file is a known ancestor, and a cycle is not a lineage.
 		assert.equal(round(t.cost), 0.02);
@@ -408,8 +454,9 @@ test("the composite day: parent, fork, standalone and a resumed child", async ()
 		assert.equal(t.sessions, 4);
 		assert.equal(t.tokens, 1000 + 200 + 120 + 80 + 60);
 		assert.equal(round(t.inherited.cost), 0.412);
-		assert.equal(t.inherited.sessions, 1);
-		assert.equal(t.inherited.unknownParents, 0);
+		assert.equal(t.inherited.forkedSessions, 1);
+		assert.equal(t.inherited.unknownLineage, 0);
+		assert.equal(t.inherited.childSessions, 3);
 	});
 });
 
@@ -424,8 +471,62 @@ test("with no child sessions at all the numbers are the stock scanner's", async 
 			{ sessions: t.sessions, messages: t.messages, tokens: t.tokens, cost: round(t.cost) },
 			{ sessions: 2, messages: 2, tokens: 1000, cost: 1 },
 		);
-		assert.equal(t.inherited.sessions, 0);
+		assert.equal(t.inherited.forkedSessions, 0);
+		assert.equal(t.inherited.childSessions, 0);
 		assert.equal(inheritedNote(t.inherited), null, "no note when there is nothing to explain");
+	});
+});
+
+test("LOCAL PATCH 3: the note reaches the screen", async () => {
+	await withFixtureDir(async (agentDir) => {
+		const sessions = path.join(agentDir, "sessions", "--tmp-fixture--");
+		const parentFile = await writeSession(path.join(sessions, `${stamp()}_parent.jsonl`), [
+			header("parent"),
+			MODEL_CHANGE,
+			assistant({ totalTokens: 1000, cost: 0.412 }),
+		]);
+		await writeSession(path.join(agentDir, "tmux-subagents", "sid", "rid", "session", "fork.jsonl"), [
+			header("fork", parentFile),
+			...(await inheritedPrefix(parentFile)),
+			assistant({ totalTokens: 200, cost: 0.088 }),
+		]);
+
+		const data = await computeBreakdown(undefined, undefined, { roots: defaultSessionRoots(agentDir) });
+
+		// The interactive view. Reverting the two call sites that render this line
+		// left the suite green until this test existed: `inheritedNote` was pinned as
+		// a function and nothing pinned that anyone calls it.
+		const rendered = new BreakdownComponent(
+			data,
+			{ terminal: { rows: 40 }, requestRender() {} } as never,
+			() => {},
+		).render(160);
+		assert.ok(
+			rendered.some((line) => line.includes("1 child transcript") && line.includes("2 inherited entries excluded")),
+			`the footer must reach the rendered view, got:\n${rendered.join("\n")}`,
+		);
+
+		// The non-interactive path, which is what a script or an agent reads.
+		// `withEnv` points the agent dir at the fixture so this asserts on the
+		// fixture's numbers and never on the machine's real usage.
+		const sent: Array<{ content: string }> = [];
+		let run: Promise<void> | undefined;
+		const pi = {
+			registerCommand(_name: string, spec: { handler: (args: string, ctx: unknown) => Promise<void> }) {
+				run = spec.handler("", { hasUI: false });
+			},
+			sendMessage(message: { content: string }) {
+				sent.push(message);
+			},
+		};
+		const mod = await import("../../session-breakdown.ts");
+		await withEnv({ PI_CODING_AGENT_DIR: agentDir }, async () => {
+			(mod.default as (pi: unknown) => void)(pi);
+			await run;
+		});
+		assert.equal(sent.length, 1);
+		assert.match(sent[0]!.content, /Session breakdown \(non-interactive\)/);
+		assert.match(sent[0]!.content, /2 inherited entries excluded/);
 	});
 });
 
@@ -456,17 +557,20 @@ test("a pi-native fork inside sessions/ stops double counting", async () => {
 
 test("LOCAL PATCH 3: the note names what was excluded and what was uncertain", () => {
 	assert.equal(
-		inheritedNote({ sessions: 3, entries: 120, messages: 100, tokens: 5000, cost: 0.25, unknownParents: 0 }),
-		"incl. child sessions · 3 forked/child sessions · 120 inherited entries excluded ($0.250 counted once, in the parent)",
+		inheritedNote({ entries: 120, tokens: 5000, cost: 0.25, forkedSessions: 3, unknownLineage: 0, childSessions: 5 }),
+		"last 90 days · 5 child transcripts · 3 forked sessions, 120 inherited entries excluded ($0.250, counted in the parent when it is in range)",
 	);
 	assert.equal(
-		inheritedNote({ sessions: 1, entries: 1, messages: 1, tokens: 5, cost: 0.01, unknownParents: 1 }),
-		"incl. child sessions · 1 forked/child session · 1 inherited entry excluded ($0.0100 counted once, in the parent) · 1 with unreadable parent, counted in full",	);
-	assert.equal(inheritedNote({ sessions: 0, entries: 0, messages: 0, tokens: 0, cost: 0, unknownParents: 0 }), null);
+		inheritedNote({ entries: 1, tokens: 5, cost: 0, forkedSessions: 1, unknownLineage: 1, childSessions: 1 }),
+		// A zero-cost model reports $0.00 for megabytes of context, so the token
+		// count is what actually says something.
+		"last 90 days · 1 child transcript · 1 forked session, 1 inherited entry excluded (5 tokens, counted in the parent when it is in range) · 1 with unreadable header or parent, counted in full",
+	);
+	assert.equal(inheritedNote({ entries: 0, tokens: 0, cost: 0, forkedSessions: 0, unknownLineage: 0, childSessions: 0 }), null);
 });
 
 test("LOCAL PATCH 4: the test surface is exported and the default export is still a factory", async () => {
-	for (const name of ["computeBreakdown", "defaultSessionRoots", "inheritedNote", "parseSessionFile", "readEntryIds", "readSessionHeader", "resolveInheritedIds"]) {
+	for (const name of ["BreakdownComponent", "computeBreakdown", "defaultSessionRoots", "inheritedNote", "readEntryIds", "readSessionHeader", "resolveInheritedIds"]) {
 		assert.equal(typeof (__test__ as Record<string, unknown>)[name], "function", `__test__.${name} must be exported`);
 	}
 	const mod = await import("../../session-breakdown.ts");

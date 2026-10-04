@@ -39,10 +39,13 @@
 //      surprising total explains itself next to the number.
 //   4. A __test__ export, so the aggregation can be tested over fixtures.
 //
-// Why patch 2 is not optional: summing whole files reported 1.79x the real cost
-// of a fork run, and the same duplication was already present inside sessions/
-// (2,989,693 tokens, 0.96% of the reported total) from pi's native forking,
-// with no subagent involved. Measurements and rationale: TODO-859f419f.
+// Why patch 2 is not optional: summing whole files counted a fork run's
+// inherited prefix again — measured 2026-10-04 on a real `handoff: "fork"`
+// child whose transcript held 1,473,545 tokens against the 527,566 the run
+// itself added, so 64% of the file was somebody else's requests — and the same
+// duplication was already present inside sessions/ (2,989,693 tokens, ~1% of the
+// reported total) from pi's native forking, with no subagent involved.
+// Measurements and rationale: TODO-859f419f.
 // ---------------------------------------------------------------------------
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -149,30 +152,34 @@ interface ParsedSession {
 	messagesByModel: Map<ModelKey, number>;
 	tokensByModel: Map<ModelKey, number>;
 	// LOCAL PATCH 2: absolute path of the session this file was forked from, as
-	// recorded in its v3 header, and the inherited prefix that was excluded
-	// (LOCAL PATCH n). Upstream parses the header and discards this field.
-	parentSession: string | null;
+	// recorded in its v3 header, and the inherited usage that was excluded
+	// (LOCAL PATCH 2). Upstream parses the header and discards this field.
 	inherited: InheritedTotals;
 }
 
 /** Usage carried by entries a session inherited from an ancestor file. */
 interface InheritedTotals {
 	entries: number;
-	messages: number;
 	tokens: number;
 	cost: number;
 }
 
-/** What the scan learned about forked sessions, surfaced in the footer. */
+/** What the scan learned about forked and child sessions, for the footer. */
 interface InheritedReport extends InheritedTotals {
-	/** Files that inherited at least one entry, plus files whose parent could not be read. */
-	sessions: number;
-	/** Files whose ancestor chain could not be walked to the end. */
-	unknownParents: number;
+	/** Files that excluded at least one inherited entry. */
+	forkedSessions: number;
+	/**
+	 * Files whose own header, or whose ancestor chain, could not be read. They are
+	 * counted in full — overcounting is the safe direction to be wrong in — but the
+	 * number is reported rather than left to be discovered.
+	 */
+	unknownLineage: number;
+	/** Files scanned outside `sessions/`: child transcripts of the subagent extension. */
+	childSessions: number;
 }
 
 function emptyInheritedTotals(): InheritedTotals {
-	return { entries: 0, messages: 0, tokens: 0, cost: 0 };
+	return { entries: 0, tokens: 0, cost: 0 };
 }
 
 interface DayAgg {
@@ -695,21 +702,20 @@ async function parseSessionFile(
 	// one of these are copies of another file's entries, not requests this
 	// session made, so they are skipped for every aggregate.
 	inheritedIds?: ReadonlySet<string>,
+	// LOCAL PATCH 2: the same header's `parentSession`, handed down by the lineage
+	// walk so this function does not read the header a second time. Used only by
+	// the dead-session filter below.
+	parentSession?: string | null,
 ): Promise<ParsedSession | null> {
 	const fileName = path.basename(filePath);
 	let startedAt = parseSessionStartFromFilename(fileName);
 	let currentModel: ModelKey | null = null;
 	let currentModelIsFaux = false;
 	let cwd: CwdKey | null = null;
-	// LOCAL PATCH 2: the file this session was forked from, per its v3 header.
-	let parentSession: string | null = null;
 
 	const modelsUsed = new Set<ModelKey>();
-	// LOCAL PATCH 2: usage carried by entries inherited from an ancestor, and how
-	// many entries this file owns, so a fork that inherited everything still
-	// counts as a session.
+	// LOCAL PATCH 2: usage carried by entries inherited from an ancestor.
 	const inherited = emptyInheritedTotals();
-	let ownEntries = 0;
 	let messages = 0;
 	let tokens = 0;
 	let totalCost = 0;
@@ -744,10 +750,8 @@ async function parseSessionFile(
 					cwd = obj.cwd.trim();
 				}
 				// LOCAL PATCH 2: upstream reads the header and keeps only timestamp
-				// and cwd. `parentSession` is the lineage link it discards.
-				if (typeof obj?.parentSession === "string" && obj.parentSession) {
-					parentSession = obj.parentSession;
-				}
+				// and cwd. The `parentSession` it discards is the lineage link, read
+				// once by resolveInheritedIds and passed in.
 				continue;
 			}
 
@@ -761,8 +765,6 @@ async function parseSessionFile(
 				// inherited prefix carries non-message entries too (model_change,
 				// thinking_level_change) and the footer says "entries excluded".
 				inherited.entries += 1;
-			} else {
-				ownEntries += 1;
 			}
 
 			if (obj?.type === "model_change") {
@@ -799,7 +801,6 @@ async function parseSessionFile(
 			// file already counts. Record what it carried, then skip every aggregate
 			// below — messages, tokens, cost and the per-model buckets.
 			if (inheritedEntry) {
-				inherited.messages += 1;
 				inherited.tokens += tok;
 				inherited.cost += cost;
 				continue;
@@ -833,11 +834,10 @@ async function parseSessionFile(
 	// Skip dead sessions: nothing was ever answered by a model.
 	//
 	// LOCAL PATCH 2: a fork that inherited its parent's every entry has an empty
-	// `modelsUsed` and no own entries, yet it is a session the user really started
-	// — a child seeded from the parent branch and then abandoned. A declared
-	// `parentSession` is what distinguishes that case from a file that genuinely
-	// never spoke to a model, so it is the escape hatch.
-	if (!startedAt || (modelsUsed.size === 0 && ownEntries === 0 && parentSession === null)) return null;
+	// `modelsUsed`, yet it is a session the user really started — a child seeded
+	// from the parent branch and then abandoned. A declared `parentSession` is what
+	// distinguishes that from a file that genuinely never spoke to a model.
+	if (!startedAt || (modelsUsed.size === 0 && !parentSession)) return null;
 	const dayKeyLocal = toLocalDayKey(startedAt);
 	const dow = DOW_NAMES[mondayIndex(startedAt)];
 	const tod = todBucketForHour(startedAt.getHours());
@@ -855,7 +855,6 @@ async function parseSessionFile(
 		costByModel,
 		messagesByModel,
 		tokensByModel,
-		parentSession,
 		inherited,
 	};
 }
@@ -1577,27 +1576,44 @@ function renderLeftRight(left: string, right: string, width: number): string {
 
 // LOCAL PATCH 3 (ours): say what was excluded, next to the number.
 //
-// The decision this extension makes — an inherited prefix is not a request this
-// session made — is invisible in the totals, so the first person to compare a
-// day against an invoice has no way to know it was made. One line, dimmed, under
-// the summary: how many forked/child sessions were scanned, how many inherited
-// entries were kept out of the totals, and whether any file's lineage could not
-// be resolved (those are counted in full, which is the safe direction to be
-// wrong in, but it must not be silent).
+// Two decisions this extension makes are invisible in the totals: child
+// transcripts are now part of the scan (LOCAL PATCH 1), and an inherited prefix
+// is not a request this session made (LOCAL PATCH 2). The first person to compare
+// a day against an invoice has no way to know either happened, so one dimmed
+// line under the summary carries them.
+//
+// Every clause is conditional on the thing it reports actually having happened —
+// a footer that cries wolf is a footer nobody reads:
+//   - `child transcripts` only when a file outside sessions/ was scanned, so a
+//     standalone-only workspace still learns that its session count grew.
+//   - the exclusion clause only when entries were actually excluded. A `lineage`
+//     child whose parent has since been deleted inherits nothing, and claiming
+//     "0 entries excluded, $0.00 counted once" would be three false claims.
+//   - the uncertainty clause only when a header or parent chain was unreadable.
+//     Those files are counted in full, which is the safe direction to be wrong in,
+//     but it must not be silent.
+//
+// The amount is the excluded usage; cost when there is any, tokens otherwise,
+// because a local or zero-priced model reports $0.00 for megabytes of context and
+// "$0.0000 excluded" says nothing. The parent clause says "when it is in range"
+// because the excluded copy is counted by the parent's own file, which may be
+// outside the displayed window or older than the archive.
 function inheritedNote(inherited: InheritedReport): string | null {
-	const { sessions, entries, cost, unknownParents } = inherited;
-	if (sessions === 0 && unknownParents === 0) return null;
+	const { childSessions, forkedSessions, entries, tokens, cost, unknownLineage } = inherited;
+	if (childSessions === 0 && forkedSessions === 0 && unknownLineage === 0) return null;
+
 	const parts: string[] = [];
-	if (sessions > 0) {
-		parts.push(`${formatCount(sessions)} forked/child session${sessions === 1 ? "" : "s"}`);
+	if (childSessions > 0) parts.push(`${formatCount(childSessions)} child transcript${childSessions === 1 ? "" : "s"}`);
+	if (forkedSessions > 0 && entries > 0) {
+		const amount = cost > 0 ? formatUsd(cost) : `${formatCount(tokens)} tokens`;
 		parts.push(
-			`${formatCount(entries)} inherited entr${entries === 1 ? "y" : "ies"} excluded (${formatUsd(cost)} counted once, in the parent)`,
+			`${formatCount(forkedSessions)} forked session${forkedSessions === 1 ? "" : "s"}, ${formatCount(entries)} inherited entr${entries === 1 ? "y" : "ies"} excluded (${amount}, counted in the parent when it is in range)`,
 		);
 	}
-	if (unknownParents > 0) {
-		parts.push(`${unknownParents} with unreadable parent, counted in full`);
+	if (unknownLineage > 0) {
+		parts.push(`${unknownLineage} with unreadable header or parent, counted in full`);
 	}
-	return `incl. child sessions · ${parts.join(" · ")}`;
+	return `last 90 days · ${parts.join(" · ")}`;
 }
 
 function rangeSummary(range: RangeAgg, days: number, mode: MeasurementMode): string {
@@ -1620,23 +1636,32 @@ function rangeSummary(range: RangeAgg, days: number, mode: MeasurementMode): str
 // bookkeeping: collect the ids of every ancestor on the `parentSession` chain
 // and let the parser skip them.
 //
-// Two deliberate limits:
+// Four deliberate limits:
 //   - The chain is followed by PATH, not by scanning for ids that happen to
 //     match. A global `Set<entryId>` would be simpler and wrong: entry ids are
 //     8 hex characters, collision-checked only within a single file, so at
 //     ~50k entries a global set starts colliding and silently dropping real
 //     usage. Scoping to one lineage keeps that collision space at hundreds.
-//   - Only ancestors of scanned files are read, so this costs one extra pass
-//     over a handful of files, not a second walk of the archive.
-//
-// `broken` means the chain could not be walked to the end (a parent deleted by
-// `subagent_clean --delete-files`, an `/import`ed transcript whose source is
-// gone, a cycle, or an absurdly deep chain). Whatever ids were recovered are
-// still excluded, and the caller reports the file rather than quietly counting
-// an unknown prefix as this session's own work.
+//   - The chain is walked transitively, not just one level. pi's v1→v2 migration
+//     (`migrateV1ToV2`) reissues every entry id and rewrites the file, so a
+//     mid-generation session can stop containing ids its own child still holds;
+//     only the grandparent's ids catch the rest of the prefix.
+//   - Only ancestors of scanned files are read (cached per path), so this costs
+//     a second pass over a handful of files, not a second walk of the archive.
+//   - `broken` means the chain could not be walked: a parent deleted by
+//     `subagent_clean --delete-files`, an `/import`ed transcript whose source is
+//     gone, a cycle, an implausibly deep chain, or a file whose OWN header could
+//     not be read — the last case matters, because pi's `_rewriteFile` truncates
+//     before it writes, so a scan can catch a file mid-rewrite and would then
+//     count an inherited prefix twice without knowing it. Whatever ids were
+//     recovered are still excluded, and the caller reports the file rather than
+//     quietly counting an unknown prefix as this session's own work.
 const MAX_ANCESTOR_DEPTH = 64;
 
 interface LineageResolution {
+	/** This file's own `parentSession`, or null when it has none (or is unreadable). */
+	parent: string | null;
+	/** Ids owned by an ancestor. Empty when nothing was inherited. */
 	ids: Set<string>;
 	broken: boolean;
 }
@@ -1649,27 +1674,26 @@ async function resolveInheritedIds(
 ): Promise<LineageResolution> {
 	const ids = new Set<string>();
 	const seen = new Set<string>([filePath]);
-	let current: string | null = null;
 
 	// The header of the file itself, then of each ancestor in turn.
 	const first = await cachedHeader(filePath, headerCache, signal);
-	if (!first) return { ids, broken: false }; // unreadable: parseSessionFile skips it anyway
-	current = first.parentSession;
+	if (!first) return { parent: null, ids, broken: true };
+	let current = first.parentSession;
 
 	for (let depth = 0; current; depth++) {
-		if (depth >= MAX_ANCESTOR_DEPTH || seen.has(current)) return { ids, broken: true };
+		if (depth >= MAX_ANCESTOR_DEPTH || seen.has(current)) return { parent: first.parentSession, ids, broken: true };
 		seen.add(current);
 
 		const ancestorIds = await cachedIds(current, idCache, signal);
-		if (!ancestorIds) return { ids, broken: true };
+		if (!ancestorIds) return { parent: first.parentSession, ids, broken: true };
 		for (const id of ancestorIds) ids.add(id);
 
 		const header = await cachedHeader(current, headerCache, signal);
-		if (!header) return { ids, broken: true };
+		if (!header) return { parent: first.parentSession, ids, broken: true };
 		current = header.parentSession;
 	}
 
-	return { ids, broken: false };
+	return { parent: first.parentSession, ids, broken: false };
 }
 
 async function cachedHeader(
@@ -1707,12 +1731,18 @@ async function computeBreakdown(
 	onProgress?.({ phase: "scan", foundFiles: 0, parsedFiles: 0, totalFiles: 0, currentFile: undefined });
 
 	// LOCAL PATCH 1: one walk per root (sessions/, plus the child-session roots).
-	const candidates: string[] = [];
-	for (const root of roots) {
-		candidates.push(...(await walkSessionFiles(root, start90, signal, (found) => {
-			onProgress?.({ phase: "scan", foundFiles: found });
-		})));
+	// Which root a file came from is recorded, because LOCAL PATCH 3 has to be able
+	// to say that child transcripts are in the graph at all — a workspace that only
+	// ever launches `standalone` children has nothing to exclude, and would
+	// otherwise get a silently inflated session count with no note at all.
+	const candidates: Array<{ filePath: string; isChild: boolean }> = [];
+	for (const [index, root] of roots.entries()) {
+		const found = await walkSessionFiles(root, start90, signal, (count) => {
+			onProgress?.({ phase: "scan", foundFiles: count });
+		});
+		for (const filePath of found) candidates.push({ filePath, isChild: index > 0 });
 	}
+	const paths = candidates.map((c) => c.filePath);
 
 	const totalFiles = candidates.length;
 	onProgress?.({
@@ -1720,16 +1750,23 @@ async function computeBreakdown(
 		foundFiles: totalFiles,
 		totalFiles,
 		parsedFiles: 0,
-		currentFile: totalFiles > 0 ? path.basename(candidates[0]!) : undefined,
+		currentFile: totalFiles > 0 ? path.basename(paths[0]!) : undefined,
 	});
 
 	// LOCAL PATCH 2: lineage state for the scan.
 	const headerCache = new Map<string, { parentSession: string | null } | null>();
 	const idCache = new Map<string, Set<string> | null>();
-	const inherited: InheritedReport = { sessions: 0, entries: 0, messages: 0, tokens: 0, cost: 0, unknownParents: 0 };
+	const inherited: InheritedReport = {
+		entries: 0,
+		tokens: 0,
+		cost: 0,
+		forkedSessions: 0,
+		unknownLineage: 0,
+		childSessions: 0,
+	};
 
 	let parsedFiles = 0;
-	for (const filePath of candidates) {
+	for (const { filePath, isChild } of candidates) {
 		if (signal?.aborted) break;
 		parsedFiles += 1;
 		onProgress?.({ phase: "parse", parsedFiles, totalFiles, currentFile: path.basename(filePath) });
@@ -1737,16 +1774,21 @@ async function computeBreakdown(
 		// Every file gets a lineage resolution; for the overwhelming majority
 		// (no `parentSession`) that is one header read and an empty id set.
 		const lineage = await resolveInheritedIds(filePath, headerCache, idCache, signal);
-		const session = await parseSessionFile(filePath, signal, lineage.ids.size > 0 ? lineage.ids : undefined);
+		const session = await parseSessionFile(
+			filePath,
+			signal,
+			lineage.ids.size > 0 ? lineage.ids : undefined,
+			lineage.parent,
+		);
 		if (!session) continue;
 
-		if (lineage.ids.size > 0 || lineage.broken) {
-			inherited.sessions += 1;
+		if (isChild) inherited.childSessions += 1;
+		if (lineage.broken) inherited.unknownLineage += 1;
+		if (session.inherited.entries > 0) {
+			inherited.forkedSessions += 1;
 			inherited.entries += session.inherited.entries;
-			inherited.messages += session.inherited.messages;
 			inherited.tokens += session.inherited.tokens;
 			inherited.cost += session.inherited.cost;
-			if (lineage.broken) inherited.unknownParents += 1;
 		}
 
 		const sessionDay = localMidnight(session.startedAt);
@@ -2142,10 +2184,10 @@ export default function sessionBreakdownExtension(pi: ExtensionAPI) {
 // tests assert on: the roots, the lineage resolution, the per-file parser and the
 // whole-scan aggregation. Nothing here is used at runtime.
 export const __test__ = {
+	BreakdownComponent,
 	computeBreakdown,
 	defaultSessionRoots,
 	inheritedNote,
-	parseSessionFile,
 	readEntryIds,
 	readSessionHeader,
 	resolveInheritedIds,

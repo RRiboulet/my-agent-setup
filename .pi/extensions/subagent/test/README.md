@@ -40,6 +40,7 @@ test.
 | `handoff.test.ts` | child launch argv per mode, lineage/fork session seeding, live-branch fork ordering, and the usage baseline |
 | `lifecycle.test.ts` | launch, concurrency queueing, finalisation, failure detection, cancel, status, clean, shutdown stops the watcher, turn-level interrupt, the live widget (install/refresh/clear) |
 | `interrupt.test.ts` | the `interrupt.json` marker (validation, reading, writing), the child reporter's abort path, and the parent lifecycle of an interrupted run |
+| `session-breakdown.test.ts` | the vendored `/session-breakdown`: aggregation over fixture session trees, and its four `LOCAL PATCH` hunks — agent-dir roots, inherited-prefix exclusion, the footer note (including that it reaches both the TUI and the non-interactive path), and the `__test__` surface |
 | `helpers.ts` | env/temp-dir isolation and polling helpers |
 
 `lifecycle.test.ts` drives the real extension factory with a fake
