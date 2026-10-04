@@ -216,8 +216,9 @@ export function observeStatus(
 
 	const { updatedAt, sequence } = observation;
 	// Strictly greater, matching the rule the parent applies to run.activity. An
-	// identical replay is accepted and is idempotent, so a repeated read of the
-	// same file cannot restart a duration.
+	// identical replay is REJECTED, and that is what makes it idempotent: the state
+	// returned is the one already held, so a repeated read of the same file cannot
+	// restart a duration.
 	if (state.lastActivitySequence !== null && sequence <= state.lastActivitySequence) return state;
 
 	const phase = observation.phase;

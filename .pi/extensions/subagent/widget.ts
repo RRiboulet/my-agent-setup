@@ -21,7 +21,7 @@ export const MAX_WIDGET_ROWS = 4;
 export const MAX_TASK_LENGTH = 60;
 
 export interface StatusRow {
-	/** Short run id — the widget is a glance, so the first four bytes identify the row. */
+	/** Short run id — the widget is a glance, so `run.id.slice(0, 8)` identifies the row. */
 	id: string;
 	/** First line of the task, already truncated by the caller or trimmed here. */
 	task: string;

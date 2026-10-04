@@ -19,6 +19,7 @@
 
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, test } from "node:test";
@@ -577,6 +578,52 @@ test("a pi-native fork inside sessions/ stops double counting", async () => {
 		const t = await totals([path.join(agentDir, "sessions")]);
 		assert.equal(round(t.cost), 0.52, "0.5 from the parent, 0.02 from the fork");
 		assert.equal(t.sessions, 2);
+	});
+});
+
+test("a session file that vanishes mid-scan costs one file, not the report", async () => {
+	await withFixtureDir(async (agentDir) => {
+		const sessions = path.join(agentDir, "sessions", "--tmp-fixture--");
+		await writeSession(path.join(sessions, `${stamp()}_a.jsonl`), [header("a"), MODEL_CHANGE, assistant({ totalTokens: 10, cost: 0.01 })]);
+		const victim = path.join(sessions, `${stamp()}_victim.jsonl`);
+		await writeSession(victim, [header("victim"), MODEL_CHANGE, assistant({ totalTokens: 999, cost: 0.9 })]);
+
+		// Delete it in the gap the real world has: `subagent_clean --delete-files`
+		// removes run dirs under the tree being walked, and pi's `_rewriteFile`
+		// truncates a file before rewriting it. Upstream's parseSessionFile had no
+		// catch, so this threw ENOENT out of computeBreakdown and the interactive
+		// view showed "Failed to analyze sessions" for all 90 days.
+		let deleted = false;
+		const data = await computeBreakdown(undefined, (update) => {
+			if (!deleted && update.phase === "parse") {
+				deleted = true;
+				rmSync(victim, { force: true });
+			}
+		}, { roots: defaultSessionRoots(agentDir) });
+
+		assert.equal(deleted, true, "the fixture must actually delete mid-scan");
+		const range = data.ranges.get(30)!;
+		assert.equal(range.sessions, 1, "the surviving session is still reported");
+		assert.equal(range.totalTokens, 10);
+	});
+});
+
+test("the footer counts only what is inside the 90 days it claims", async () => {
+	await withFixtureDir(async (agentDir) => {
+		// The walk's inclusion test and the aggregation's day test disagree for a
+		// file with no timestamp in its NAME: the walk falls back to mtime and lets
+		// it in, and the parser then dates it from the header. Give it a header from
+		// long ago and a fresh mtime, and it is parsed but attributed outside every
+		// window — so it must not appear in a line that says "last 90 days".
+		const sessions = path.join(agentDir, "sessions", "--tmp-fixture--");
+		const old = new Date(Date.now() - 200 * 24 * 60 * 60 * 1000).toISOString();
+		const header200d = { ...header("old"), timestamp: old };
+		await writeSession(path.join(sessions, `no-timestamp-in-the-name.jsonl`), [header200d, MODEL_CHANGE, assistant({ totalTokens: 5, cost: 0.005 })]);
+
+		const data = await computeBreakdown(undefined, undefined, { roots: defaultSessionRoots(agentDir) });
+		assert.equal(data.inherited.childSessions, 0);
+		assert.equal(data.inherited.unknownLineage, 0);
+		assert.equal(inheritedNote(data.inherited), null, "nothing outside the window, nothing to report");
 	});
 });
 

@@ -1887,6 +1887,20 @@ test("the note about hidden tools only ships when they are hidden", async () => 
 		const note = changes?.descriptions?.subagent;
 		assert.ok(note?.includes("not declared while"), `the note must be added when the tools are hidden: ${note}`);
 		assert.ok(note.startsWith(h.tools.get("subagent")?.description as string), "it extends the description rather than replacing it");
+
+		// A loadout that does not list the tool at all: the hook must fall back to
+		// the extension's own description rather than throwing. This branch was
+		// unreachable while every test passed a declared `subagent`, and it did
+		// throw — a bare `subagentDescription` that does not exist, hidden because pi
+		// wraps prepareLoadout in a try/catch that only logs. pi would have shipped a
+		// session with no note and no error.
+		const empty = {
+			declared: [] as Array<{ name: string; description?: string }>,
+			getExposure: (name: string) => h.toolExposure(name),
+		};
+		const fallback = (h.tools.get("subagent") as { prepareLoadout?: (l: unknown) => { descriptions?: Record<string, string> } }).prepareLoadout?.(empty);
+		assert.match(fallback?.descriptions?.subagent ?? "", /not declared while/);
+		assert.match(fallback?.descriptions?.subagent ?? "", /delegated task/, "and falls back to the tool's own description");
 	});
 });
 

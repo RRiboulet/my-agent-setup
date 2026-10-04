@@ -98,7 +98,8 @@
 //     authoritative over it.
 // 15. Lazy tool exposure (see resolveManagementExposure and
 //     registerManagementTools): the five management tools — status, cancel,
-//     interrupt, resume, clean — are registered at `session_start` with pi's
+//     interrupt, resume, clean — are registered at `session_start` and again at
+//     `before_agent_start` with pi's
 //     `exposure: "codemode"` when `codemode` or `tool_search` is active, so their
 //     descriptions, schemas, snippets and guidelines stop riding along on requests
 //     that never use them. `subagent` itself stays declared: it is the entry point,
@@ -1933,7 +1934,7 @@ const noteInterrupt = async (
 		prepareLoadout(loadout) {
 			if (loadout.getExposure("subagent_status") !== "codemode") return undefined;
 			const tool = loadout.declared.find((entry) => entry.name === "subagent");
-			const description = tool?.description ?? subagentDescription;
+			const description = tool?.description ?? SUBAGENT_DESCRIPTION;
 			return {
 				descriptions: {
 					subagent: `${description} The other subagent tools (subagent_status, subagent_cancel, subagent_interrupt, subagent_resume, subagent_clean) are not declared while \`codemode\` or \`tool_search\` is active: reach them with tool_search, or tools.<name>(...) in a codemode script.`,

@@ -239,7 +239,7 @@ export default function (pi: ExtensionAPI) {
 			if (ctx.hasUI) ctx.ui.setStatus("web-search", `searching: ${input.query}`);
 			try {
 				const search = await runSearch(input, ctx.signal);
-				pi.sendUserMessage(
+				await pi.sendUserMessage(
 					`Native web search result for "${search.query}" (${search.provider}/${search.model}):\n\n${search.result}`,
 				);
 			} catch (error) {

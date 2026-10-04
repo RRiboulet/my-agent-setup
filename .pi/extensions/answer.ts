@@ -598,15 +598,22 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// Send the answers directly as a message and trigger a turn
-			pi.sendMessage(
-				{
-					customType: "answers",
-					content: "I answered your questions in the following way:\n\n" + answersResult,
-					display: true,
-				},
-				{ triggerTurn: true },
-			);
+			// Send the answers directly as a message and trigger a turn.
+			// Awaited with a catch: this is the last statement of the handler, so an
+			// unawaited rejection here escapes after pi's own try/catch has returned —
+			// an unhandled rejection with the /answer overlay already closed.
+			try {
+				await pi.sendMessage(
+					{
+						customType: "answers",
+						content: "I answered your questions in the following way:\n\n" + answersResult,
+						display: true,
+					},
+					{ triggerTurn: true },
+				);
+			} catch (error) {
+				console.error("answer: failed to deliver the answers", error);
+			}
 	};
 
 	pi.registerCommand("answer", {

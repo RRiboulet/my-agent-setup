@@ -2003,8 +2003,15 @@ export default function todosExtension(pi: ExtensionAPI) {
 								return;
 							}
 							void (async () => {
-								await applyTodoAction(record, "delete");
-								setActiveComponent(selector);
+								// Caught: withTodoLock re-throws whatever it wraps, and this runs
+								// after the render loop has moved on, so an unhandled rejection
+								// would surface with the /todos overlay open and no explanation.
+								try {
+									await applyTodoAction(record, "delete");
+									setActiveComponent(selector);
+								} catch (error) {
+									notify(ctx, `delete failed: ${(error as Error).message}`, "error");
+								}
 							})();
 						});
 						setActiveComponent(deleteConfirm);
@@ -2024,7 +2031,11 @@ export default function todosExtension(pi: ExtensionAPI) {
 						theme,
 						record,
 						(action) => {
-							void handleActionSelection(record, action);
+							// Caught for the same reason as the delete path above: these fire
+							// after the overlay's own frame, so a rejection would be unhandled.
+							void handleActionSelection(record, action).catch((error: unknown) => {
+								ctx.ui.notify(`action failed: ${(error as Error).message}`, "error");
+							});
 						},
 						() => {
 							setActiveComponent(selector);
@@ -2043,7 +2054,9 @@ export default function todosExtension(pi: ExtensionAPI) {
 					keybindings,
 					todos,
 					(todo) => {
-						void handleSelect(todo);
+						void handleSelect(todo).catch((error: unknown) => {
+							ctx.ui.notify(`open failed: ${(error as Error).message}`, "error");
+						});
 					},
 					() => done(),
 					searchTerm || undefined,

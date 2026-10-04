@@ -828,6 +828,18 @@ async function parseSessionFile(
 				costByModel.set(mk, (costByModel.get(mk) ?? 0) + cost);
 			}
 		}
+	} catch {
+		// LOCAL PATCH 2: one vanished file must not cost the whole report.
+		//
+		// Upstream wraps this loop in try/finally with no catch, so a stream error
+		// propagates out of computeBreakdown and the interactive path shows "Failed to
+		// analyze sessions" for the entire 90 days. That is not a theoretical race
+		// here: `subagent_clean --delete-files` removes run dirs under the very tree
+		// being walked, pi's `_rewriteFile` truncates a file before rewriting it, and
+		// this function's own header reader — called microseconds earlier for the same
+		// path — already degrades to null on any error. Skipping the file is the
+		// behaviour every other read path here already has.
+		return null;
 	} finally {
 		rl.close();
 		stream.destroy();
@@ -1790,6 +1802,16 @@ async function computeBreakdown(
 		);
 		if (!session) continue;
 
+		// LOCAL PATCH 3: the note is rendered as "last 90 days …", so it may only
+		// count files that are inside the 90-day range. The walk's inclusion test and
+		// the aggregation's day test do not always agree — a file reached by the
+		// mtime fallback can be parsed and then attributed outside every window — and
+		// counting those anyway would put a number on screen that describes a wider
+		// period than the line claims.
+		const sessionDay = localMidnight(session.startedAt);
+		const days90 = range90.days;
+		if (sessionDay < days90[0].date || sessionDay > days90[days90.length - 1].date) continue;
+
 		if (isChild) inherited.childSessions += 1;
 		if (lineage.broken) inherited.unknownLineage += 1;
 		if (session.inherited.entries > 0) {
@@ -1799,7 +1821,6 @@ async function computeBreakdown(
 			inherited.cost += session.inherited.cost;
 		}
 
-		const sessionDay = localMidnight(session.startedAt);
 		for (const d of RANGE_DAYS) {
 			const range = ranges.get(d)!;
 			const start = range.days[0].date;
