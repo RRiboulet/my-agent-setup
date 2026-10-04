@@ -37,7 +37,11 @@ each entry point explicitly:
 Without that file `pi install` succeeds, clones the repo, and quietly loads
 nothing.
 
-Pinning works: `git:github.com/RRiboulet/my-agent-setup@v1.0.0`.
+Pinning works the usual way — append a tag or a commit:
+`git:github.com/RRiboulet/my-agent-setup@<ref>`. One caveat worth knowing:
+`v1.0.0` predates this repo becoming a pi package (the resources moved to `.pi/`
+after that tag, and `package.json` came later still), so pinning to it installs
+nothing. Pin a ref at or after the manifest commit, or track `main`.
 
 Project-local extensions only load **after you grant project trust**, so on a
 fresh machine pi asks on first start; until then the extensions are silently

@@ -52,9 +52,10 @@ Added:
     guessed at, and reported.
   - Because a total that silently drops context looks exactly like one that is
     simply wrong, a dimmed footer line reports what the scan did — e.g.
-    `last 90 days · 33 child transcripts · 6 forked sessions, 290 inherited
+    `last 90 days · N child transcripts · 6 forked sessions, 290 inherited
     entries excluded (3.0M tokens, counted in the parent when it is in range) · 1
-    with unreadable header or parent, lineage incomplete`. Delegation is not free
+    with unreadable header or parent, lineage incomplete` — captured on the day,
+    so the file counts move and the token total does not. Delegation is not free
     — a forked child really is billed for re-sending the prefix, mostly as cache
     reads — so this is about counting each request once, not about pretending
     otherwise. Each clause appears only when it has something to report, and the

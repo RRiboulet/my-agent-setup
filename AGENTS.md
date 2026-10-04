@@ -6,12 +6,21 @@
 2. Commit the release changes.
 3. Tag with the version and push commits and tags.
 
-Versions are git tags. This repository is not published to npm.
+Versions are git tags. This repository is not published to npm — it is
+`private` and consumes no npm packages, but it IS consumable as a pi package:
+`package.json` carries a `pi` manifest listing the extension entry points and
+skills, which is what makes `pi install git:github.com/RRiboulet/my-agent-setup`
+work in another project.
 
 ## Extensions
 
 Pi extensions live in `./.pi/extensions` and skills in `./.pi/skills`. When
 working in this repo, add or update them there.
+
+Adding a new extension or skill means adding it to the `pi` manifest in
+`package.json` as well: it lives in a dot-prefixed directory, which package
+discovery will not glob, so an unlisted extension installs nowhere.
+`test/package-manifest.test.ts` fails if the manifest and the tree disagree.
 
 You can consult pi for reference — the installed `@earendil-works/pi-coding-agent`
 docs at `/usr/lib/node_modules/@earendil-works/pi-coding-agent/docs/` are the

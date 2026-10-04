@@ -57,11 +57,11 @@ size:
   directly with a fake TUI and theme, so `setWidget` is called with the right
   key and placement but nothing proves the strip looks right in a live TUI.
   See "Manual check" below.
-- **`registerChildReporter`** (~438-560) — its activity wiring is exercised
+- **`registerChildReporter`** (index.ts:550 onward) — its activity wiring is exercised
   (the harness fires the events and reads the snapshot back), as is the
   interrupted settle, but the atomic result writing and the shutdown fallback
   still need a real child pi process.
-- **`attachToSubagentAndExit`** (~351-400) — ends in `process.exit`, so it needs
+- **`attachToSubagentAndExit`** (index.ts:395 onward) — ends in `process.exit`, so it needs
   a real terminal; the legacy `v1.` target decode is untested.
 - **`subagent_clean` `all_sessions`** — only the in-session path is covered;
   `delete_files` in-session is now covered, including the transcript accounting
@@ -73,11 +73,6 @@ size:
 - **long-poll behaviour** — the fake always reports `pane_dead = "1"`, so
   "pane still alive, keep waiting" is untested; `pi.exec`'s `timeout` option is
   ignored by the fake, so no timeout or abort path runs.
-
-- **the widget's placement in a real terminal.** The tests render the component
-  directly with a fake TUI and theme, so `setWidget` is called with the right key
-  and placement, but nothing proves the strip looks right in a live TUI. See
-  "Manual check" below.
 
 Anything requiring a live child pi process — real context handoff on resume, key
 delivery for `subagent_interrupt` against a real TUI, and liveness when a child
@@ -121,7 +116,7 @@ declared.
 The harness models pi's **declared set**, not just the definitions: a tool is
 declared iff it is in the active set and its exposure is not `hidden`. Asserting
 on `definition.exposure` instead is what let the first version of this feature —
-which changed the exposure and removed nothing — pass 200 green tests.
+which changed the exposure and removed nothing — pass 200 green tests (the suite is larger now; the point is that the payload assertion alone was not enough).
 
 ## Flakiness
 
