@@ -62,12 +62,46 @@ model's tool declarations when pi can reach them another way — that is, when
 
 ```jsonc
 // ~/.pi/agent/settings.json
-{ "defaultTools": ["read", "bash", "edit", "write", "+codemode", "+tool_search"] }
+{ "defaultTools": ["+tool_search"] }
 ```
+
+Use the modifier-only form. `resolveDefaultTools` (settings-manager.js:55)
+*replaces* the inherited selection as soon as a list contains any plain name,
+and only treats an all-modifier list as an addition — so this composes with
+whatever another layer's `defaultTools` says, where restating pi's four defaults
+would silently couple this repo to them.
 
 `tool_search` then loads one when the model asks for it, and a codemode script
 can call it as `tools.subagent_status({ id })`. Without either tool they stay
 declared exactly as before, so nothing depends on this being switched on.
+
+### Measured, not assumed
+
+Request payloads, real pi 1.0.2 with this extension, headless `--print` with a
+one-word prompt; bytes are the whole provider payload, averaged over the (single)
+request of each run:
+
+| `defaultTools` | payload | declared tools |
+|---|---|---|
+| *(unset)* | 19,578 B | 12 |
+| `["+tool_search"]` | **16,000 B** | 8 |
+| `["+codemode"]` | 21,069 B | 8 |
+| `["+codemode", "+tool_search"]` | 21,809 B | 9 |
+| `["+codemode", "+tool_search"]` + `codemode.mode: "only"` | 19,985 B | 2 |
+
+So `+tool_search` alone is the win: **−3,578 B per request (~890 tokens)**, and
+0 of the 5 management tools declared. `subagent` stays declared throughout, and
+a real run confirmed the model reaching `subagent_status` through `tool_search`
+when it was not declared.
+
+`+codemode` is deliberately *not* enabled. Its own description is 4,933 bytes,
+and with `codemode.mode: "on"` (the default) every declared tool also carries a
+`Codemode: tools.<name>(args) resolves to …` note — ~52 bytes × the declared
+set, which scales against you on a large tool set. Together they cost more than
+the five hidden tools do. `mode: "only"` hides the base tools too, but its
+description then lists all of them, so it lands in the same place. Add
+`"+codemode"` if you want the script workflow and the prompt is worth its price
+to you; it is one entry, and nothing in the extension changes either way.
 
 Subagent delegation is non-blocking: start independent tasks together and poll
 with `subagent_status`. There is no blocking wait, and a finishing run never

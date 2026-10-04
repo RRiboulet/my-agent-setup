@@ -102,8 +102,18 @@ Features:
     than baked into the description, so it costs nothing in the sessions where it
     would be false.
   - To switch it on, add either to your tool set, e.g.
-    `"defaultTools": ["read", "bash", "edit", "write", "+codemode", "+tool_search"]`
-    in `~/.pi/agent/settings.json`. Nothing is enabled silently.
+    `"defaultTools": ["+tool_search"]` in `~/.pi/agent/settings.json`. Nothing
+    is enabled silently. Use the modifier-only form: `resolveDefaultTools`
+    replaces the inherited selection as soon as a list contains any plain name,
+    and only treats an all-modifier list as an addition. Measured on pi 1.0.2
+    with this extension: `["+tool_search"]` takes the request payload from
+    19,578 to 16,000 bytes (~890 tokens) with 0 of the 5 management tools
+    declared, while `["+codemode", "+tool_search"]` makes it *worse* (21,809) —
+    codemode's own description is 4,933 bytes and every declared tool grows a
+    ~52-byte note pointing at it. `codemode.mode: "only"` hides the base tools
+    but then lists them all in codemode's description, landing in the same
+    place (19,985). So the setting ships as `+tool_search` alone; `+codemode` is
+    one entry away for anyone who wants the script workflow.
 
 - **Live subagent status widget.** A strip above the editor lists every live
   run with what it is doing (`active (bash 45s)`, `waiting 12s`, `stalled 3m`)

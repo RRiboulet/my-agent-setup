@@ -17,6 +17,24 @@ You can consult pi for reference — the installed `@earendil-works/pi-coding-ag
 docs at `/usr/lib/node_modules/@earendil-works/pi-coding-agent/docs/` are the
 source of truth for the API this code targets — but do not modify pi itself.
 
+## Subagent tools
+
+The five management tools — `subagent_status`, `subagent_cancel`,
+`subagent_interrupt`, `subagent_resume`, `subagent_clean` — are **not declared**
+in this repo's sessions: `defaultTools: ["+tool_search"]` in
+`~/.pi/agent/settings.json` puts them behind `tool_search` so their descriptions
+and schemas stop riding along on every request (measured: ~890 tokens a
+request). `subagent` itself stays declared.
+
+So reach them in two steps:
+
+1. `tool_search` for the tool you want.
+2. Then call it, e.g. `subagent_status({ id })`.
+
+There is no blocking wait, so collecting a result means polling
+`subagent_status` — `subagent_status({ compact: true })` is the cheap
+one-line-per-run form, and the single-run path is the one that returns output.
+
 ## Tests
 
 ```bash
