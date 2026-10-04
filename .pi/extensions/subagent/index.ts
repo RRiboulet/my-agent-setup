@@ -109,6 +109,22 @@
 //     tool activated on registration stays active. Re-checked before every agent
 //     turn, because `/tools` can switch discovery off and strand tools that were
 //     registered hidden.
+// 16. Bounded list output (see listview.ts): with no blocking wait, polling
+//     `subagent_status` is the only way a model collects a result, so the list
+//     view is a per-turn cost rather than an occasional one. It used to render
+//     PANE_PREVIEW_LINES of raw pane for EVERY live run (~70 lines at the default
+//     concurrency, mostly a TUI redrawing itself). Now the budget is on the LIST,
+//     not per run: at most LIST_DETAIL_BUDGET runs get the full block and every
+//     other run gets one line — id, status, elapsed, usage — which is what a poll
+//     needs to decide what to inspect. A `compact` flag drops the detail blocks
+//     entirely. Three rules keep it honest: the budget goes to the runs that hold
+//     a pane (`showsPane`, newest first — `queued` has no child and is always the
+//     newest, so admitting it would spend the budget on nothing); a row carries
+//     the one note that cannot be re-fetched (a failure reason, an interrupted
+//     run's attach command); and when `include_output` had to leave an answer out,
+//     the reply says so. The single-run path is untouched — it is the collection
+//     path, and no flag may make it cheaper. With one or two runs in the session
+//     the output is unchanged.
 //
 // The child reporter (CHILD_ENV) still reports completion the same way; patch 11
 // only adds the activity snapshot to it, and patch 13 only diverts the aborted
@@ -174,6 +190,7 @@ import {
 	type SubagentActivityScope,
 } from "./activity.ts";
 import { formatUsage, readSessionUsage, type RunUsage } from "./usage.ts";
+import { renderRunList, runHeadline, type ListRow } from "./listview.ts";
 
 const ATTACH_FLAG = "attach-subagent";
 const CHILD_ENV = "PI_TMUX_SUBAGENT_CHILD";
@@ -220,7 +237,7 @@ type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "
  * to it when — and only when — the management tools are hidden from the model.
  */
 const SUBAGENT_DESCRIPTION =
-	"Start a delegated task in a separate interactive Pi process inside a detached tmux session and return immediately. The main agent is not blocked and may start more subagents or keep working. Runs execute concurrently (bounded by PI_SUBAGENT_MAX_CONCURRENT, default 4); extra runs are queued. Children inherit the current provider/model/thinking, defaulting the provider to OpenRouter. Use subagent_status to inspect progress and collect results (subagent_status({ id }) returns that run's output once it finishes), subagent_interrupt to abort a run's current turn while keeping its child alive, and subagent_cancel to stop a run outright. There is no blocking wait: poll subagent_status. Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.";
+	"Start a delegated task in a separate interactive Pi process inside a detached tmux session and return immediately. The main agent is not blocked and may start more subagents or keep working. Runs execute concurrently (bounded by PI_SUBAGENT_MAX_CONCURRENT, default 4); extra runs are queued. Children inherit the current provider/model/thinking, defaulting the provider to OpenRouter. Use subagent_status to inspect progress and collect results (subagent_status({ id }) returns that run's output once it finishes; subagent_status({ compact: true }) is a cheap one-line-per-run poll), subagent_interrupt to abort a run's current turn while keeping its child alive, and subagent_cancel to stop a run outright. There is no blocking wait: poll subagent_status. Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.";
 
 interface ChildResult {
 	version: 1;
@@ -750,7 +767,6 @@ function statusDetail(snapshot: StatusSnapshot): string {
 }
 
 /** Feed the classifier from the activity read: the snapshot, or why there is none. */
-// Feed the classifier from the activity read: the snapshot, or why there is none.
 function observationFromRead(read: ActivityReadResult): StatusObservation {
 	if (!read.ok) return { snapshot: read.reason, snapshotError: read.error };
 	const snapshot = read.activity;
@@ -812,6 +828,20 @@ function isTerminal(status: RunStatus): boolean {
  */
 function holdsChild(status: RunStatus): boolean {
 	return status === "queued" || status === "running" || status === "interrupted";
+}
+
+/**
+ * True when a run has a pane worth SHOWING: a child that is running, or one that
+ * was interrupted and is sitting at its prompt with its transcript intact.
+ *
+ * Narrower than `holdsChild`, which also counts `queued` — a queued run has no
+ * child and therefore no pane, and nothing to show beyond its queue position.
+ * The list view's detail budget goes to these runs (local patch 16); `queued`
+ * being the newest runs in a session is exactly why admitting it there would
+ * hand the budget to the runs with nothing to say.
+ */
+function showsPane(status: RunStatus): boolean {
+	return status === "running" || status === "interrupted";
 }
 
 /**
@@ -890,6 +920,43 @@ function formatActivity(activity: RunActivity | undefined): string | undefined {
 	return parts.join(" ");
 }
 
+/**
+ * The list view's projection of a run: id, status, elapsed, usage.
+ *
+ * Durations and usage are formatted HERE rather than in listview.ts, which stays
+ * structural so the budget policy can be tested without a run record.
+ */
+function listRow(run: RunRecord): ListRow {
+	const durationText = formatDuration(run.startedAt, run.finishedAt);
+	const usageText = formatUsage(run.usage);
+	// The note is what has to survive onto a one-line row, because everything else
+	// the full block carries is one `subagent_status({ id })` away.
+	const note = interruptedAttachNote(run) ?? errorNote(run);
+	return {
+		id: run.id,
+		status: run.status,
+		...(durationText === undefined ? {} : { durationText }),
+		...(usageText === undefined ? {} : { usageText }),
+		createdAt: run.createdAt,
+		detailWorthy: showsPane(run.status),
+		...(note === undefined ? {} : { note }),
+	};
+}
+
+/** An interrupted run's route to the child that is still alive, or nothing. */
+function interruptedAttachNote(run: RunRecord): string | undefined {
+	// Its pane is still the only view of that child, so the block would say the
+	// same thing; this is only here for when an interrupted run loses the budget.
+	return run.status === "interrupted" ? `attach: ${run.attachCommand}` : undefined;
+}
+
+/** A failure reason, clipped to the first line, or nothing. */
+function errorNote(run: RunRecord): string | undefined {
+	const detail = run.error?.split("\n", 1)[0]?.trim();
+	if (!detail) return undefined;
+	return detail.length <= 60 ? `! ${detail}` : `! ${detail.slice(0, 59)}…`;
+}
+
 function runSummary(run: RunRecord, options: { pane?: boolean; output?: boolean } = {}): string {
 	const duration = formatDuration(run.startedAt, run.finishedAt);
 	const usage = formatUsage(run.usage);
@@ -899,7 +966,9 @@ function runSummary(run: RunRecord, options: { pane?: boolean; output?: boolean 
 	// so this is false for it as well.
 	const activity = holdsChild(run.status) ? formatActivity(run.activity) : undefined;
 	const lines = [
-		`${run.id}  ${run.status}${duration ? ` · ${duration}` : ""}${usage ? ` · ${usage}` : ""}`,
+		// The same headline the list view uses for a run without a detail block,
+		// shared so the two cannot drift apart (see runHeadline).
+		runHeadline({ id: run.id, status: run.status, ...(duration === undefined ? {} : { durationText: duration }), ...(usage === undefined ? {} : { usageText: usage }) }),
 		`  task: ${run.task.split("\n", 1)[0]?.slice(0, 100) ?? run.task}`,
 		`  model: ${run.provider}/${run.model} (${run.thinking})`,
 	];
@@ -1904,14 +1973,20 @@ const noteInterrupt = async (
 			name: "subagent_status",
 			label: "Subagent Status",
 			description:
-				"Collect a subagent result, or list this session's runs. With an id: that run's status, model, tmux attach command, its final output once finished and its latest pane output while running. Without an id: every run's status, duration and usage. There is no blocking wait, so poll this instead. Non-blocking.",
+				"Collect a subagent result, or list this session's runs. With an id: that run's status, model, tmux attach command, its final output once finished and its latest pane output while running. Without an id: every run's status, duration and usage, with the full detail — pane, activity, attach command — for at most the two runs that still hold a child, and a one-line row for the rest. Pass compact: true for one line per run and no pane. There is no blocking wait, so poll this instead. Non-blocking.",
 			promptSnippet: "Inspect non-blocking subagent runs and their output",
 			parameters: Type.Object({
 				id: Type.Optional(Type.String({ description: "Run id to inspect. Omit to list all runs in this session." })),
 				include_output: Type.Optional(
 					Type.Boolean({
 						description:
-							"List view only. Include each finished run's full output. Defaults to false, because a list of many runs would otherwise carry every answer at once; inspecting a single id always returns its output.",
+							"List view only. Include each finished run's full output. Defaults to false, because a list of many runs would otherwise carry every answer at once; inspecting a single id always returns its output. The list's detail budget still applies: when it leaves an output out, the reply says how many and which runs to fetch.",
+					}),
+				),
+				compact: Type.Optional(
+					Type.Boolean({
+						description:
+							"List view only. One short line per run (id, status, elapsed, usage) and no pane or detail block. Defaults to false. Use it for a cheap poll; inspect a specific run by id for its output. Ignored together with an id, which always returns the full record.",
 					}),
 				),
 			}),
@@ -1939,14 +2014,33 @@ const noteInterrupt = async (
 				if (runsArray.length === 0) {
 					return { content: [{ type: "text", text: "No subagent runs in this session." }], details: { runs: [] } };
 				}
-				const text = runsArray
-					.map((run) => {
+				// The budget spans the WHOLE list (see listview.ts): without it a poll
+				// pays PANE_PREVIEW_LINES for every live run, which at four concurrent
+				// runs is most of the payload and says little a status line does not.
+				// `compact` drops the detail blocks entirely. Each row carries its run so
+				// the detail renderer needs no second lookup.
+				const text = renderRunList({
+					runs: runsArray.map((run) => ({ ...listRow(run), run })),
+					compact: params.compact === true,
+					renderDetail: ({ run }) => {
 						// An interrupted run has no final output yet but its pane is the
-						// only view of the child's prompt, so it is shown like a live run.
-						const live = run.status === "running" || run.status === "interrupted";
+						// only view of the child's prompt, so it is shown like a running one.
+						const live = showsPane(run.status);
 						return runSummary(run, { pane: live, output: includeOutput || live });
-					})
-					.join("\n\n");
+					},
+					// A bound that silently withholds an answer is worse than a big one: a
+					// model that cannot tell "left out" from "there is none" will not go and
+					// ask. Only include_output can be withheld this way, so only it needs
+					// saying; the pane is a nicety the caller did not ask for by name.
+					omittedNote: (omitted) => {
+						const withheld = omitted.filter(({ run }) => !showsPane(run.status) && run.output !== undefined);
+						if (withheld.length === 0) return undefined;
+						return (
+							`${withheld.length} finished run(s) have output that this list's detail budget left out. ` +
+							`Call subagent_status({ id }) for each; omit include_output to see status only.`
+						);
+					},
+				});
 				return { content: [{ type: "text", text }], details: { runs: runsArray } };
 			},
 		},
@@ -2314,6 +2408,7 @@ export const __test__ = {
 	isMissingTmuxTarget,
 	isSameOrDescendant,
 	isTerminal,
+	listRow,
 	readBooleanEnv,
 	readIntEnv,
 	readNonNegativeIntEnv,
@@ -2324,6 +2419,7 @@ export const __test__ = {
 	shellQuote,
 	startRepeatingRefresh,
 	statusDetail,
+	showsPane,
 	textFromAssistant,
 	tmuxSessionName,
 	tmuxSocketPath,

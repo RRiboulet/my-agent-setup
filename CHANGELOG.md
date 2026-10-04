@@ -61,6 +61,23 @@ result — and always returned the full output plus 18 lines of pane.
 
 Features:
 
+- **`subagent_status` no longer pays for the whole list on every poll.** With
+  `subagent_wait` gone, polling is the only way a model collects a result, and
+  the list view rendered 18 lines of raw pane for *every* live run — around 70
+  lines at the default concurrency, mostly a TUI redrawing itself. The pane
+  budget is now on the LIST rather than per run: at most two runs get the full
+  block (pane, activity, attach command), chosen live first and newest first,
+  and every other run gets one line — id, status, elapsed, usage — which is what
+  a poll needs to decide which run to inspect. A new `compact: true` drops the
+  detail blocks entirely for a cheap poll. Three rules keep the bound honest: the
+  budget goes to the runs that actually hold a pane and never to `queued` ones
+  (which have no child, are always the newest, and would spend the budget on
+  nothing); a one-line row keeps the one thing that cannot simply be re-fetched,
+  the failure reason or an interrupted run's attach command; and when
+  `include_output` had to leave an answer out, the reply says how many and how to
+  get them. Both flags are list-view controls; the
+  single-run path still returns the full record and its output, because that is
+  the collection path and must not be made cheaper by a flag.
 - **The management tools stop costing every request.** `subagent_status`,
   `subagent_cancel`, `subagent_interrupt`, `subagent_resume` and `subagent_clean`
   are registered with pi's `exposure: "codemode"` when — and only when — the

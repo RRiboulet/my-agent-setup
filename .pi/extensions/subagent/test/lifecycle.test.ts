@@ -20,6 +20,7 @@ import { test } from "node:test";
 import subagentExtension, { type RunRecord } from "../index.ts";
 import { getActivityFilePath, readActivityFile } from "../activity.ts";
 import { getInterruptFilePath } from "../interrupt.ts";
+import { LIST_DETAIL_BUDGET } from "../listview.ts";
 import { waitFor, withEnv, withTempAgentDir } from "./helpers.ts";
 
 const SESSION_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
@@ -497,6 +498,69 @@ test("subagent_status lists runs and inspects one", async () => {
 	});
 });
 
+test("the list view caps its pane output across the whole list", async () => {
+	// Local patch 16. Polling this tool is the only way to collect a result, so the
+	// list is a per-turn cost. It used to carry PANE_PREVIEW_LINES for EVERY live
+	// run; now the pane budget is on the LIST, and the runs outside it get one line.
+	await withHarness({ paneText: "CHILD-PANE" }, async (h) => {
+		const ids: string[] = [];
+		for (let index = 0; index < 4; index += 1) {
+			const run = (await h.call("subagent", { task: `bounded ${index}` })).details as unknown as RunRecord;
+			ids.push(run.id);
+		}
+		// Wait for the CONTENT of every pane: the watcher can record an empty capture
+		// on an early tick, and a `pane !== undefined` check would let this race
+		// ahead of the assertions below (a flake seen before it was tightened).
+		await waitFor(async () => (await h.readRuns()).filter((run) => run.pane?.includes("CHILD-PANE")).length === 4);
+
+		const listed = await h.call("subagent_status", {});
+		for (const id of ids) assert.ok(listed.text.includes(id), `every run is listed: ${id}`);
+		assert.equal(
+			listed.text.split("CHILD-PANE").length - 1,
+			2,
+			`pane output is capped for the list as a whole, not per run (budget ${LIST_DETAIL_BUDGET}): ${listed.text}`,
+		);
+		assert.equal(listed.text.split("task: bounded").length - 1, 2);
+
+		const compact = await h.call("subagent_status", { compact: true });
+		assert.ok(!compact.text.includes("CHILD-PANE"), `compact carries no pane: ${compact.text}`);
+		assert.ok(!compact.text.includes("task: bounded"), `compact carries no detail block: ${compact.text}`);
+		assert.equal(
+			compact.text.split("\n").filter((line) => line.trim().length > 0).length,
+			4,
+			`compact is one line per run, so every run appears exactly once: ${compact.text}`,
+		);
+		// A run that did not earn a block is still legible: id, status, then usage.
+		assert.match(compact.text, new RegExp(`${ids[0]}  running`));
+	});
+});
+
+test("include_output says which finished outputs the budget left out", async () => {
+	// The list's budget caps the detail blocks, and the output lives inside one. A
+	// bound that withholds an answer silently is worse than an expensive list: a
+	// model that cannot tell "left out" from "there is none" will not go and ask.
+	await withHarness(undefined, async (h) => {
+		const ids: string[] = [];
+		for (let index = 0; index < 3; index += 1) {
+			const run = (await h.call("subagent", { task: `answer ${index}` })).details as unknown as RunRecord;
+			ids.push(run.id);
+			await h.writeResult(run, { version: 1, status: "completed", output: `ANSWER-${index}`, finishedAt: Date.now() });
+		}
+		await waitFor(async () => (await h.readRuns()).every((run) => run.status === "completed"));
+
+		const listed = await h.call("subagent_status", { include_output: true });
+		assert.equal(listed.text.split("ANSWER-").length - 1, 1, `one answer fits the budget: ${listed.text}`);
+		assert.match(listed.text, /2 finished run\(s\) have output that this list's detail budget left out/);
+		assert.match(listed.text, /subagent_status\(\{ id \}\)/, "and it says how to get the rest");
+
+		// Each one is still reachable by id, which is the point of the note.
+		for (const [index, id] of ids.entries()) {
+			const inspected = await h.call("subagent_status", { id });
+			assert.ok(inspected.text.includes(`ANSWER-${index}`), `${id} still has its answer`);
+		}
+	});
+});
+
 test("subagent_clean reaps finished runs but leaves active ones alone", async () => {
 	await withHarness(undefined, async (h) => {
 		const done = (await h.call("subagent", { task: "finishes" })).details as unknown as RunRecord;
@@ -952,10 +1016,13 @@ test("the single-run status path always returns the output, finished or not", as
 	// With no blocking wait this is the only way to collect a result, so the
 	// obvious call — subagent_status({ id }) — has to be the right one, with
 	// include_output reserved for the list view where many answers would otherwise
-	// arrive at once.
+	// arrive at once. `compact` is a list-view control for the same reason.
 	await withHarness({ paneText: "LIVE-PANE-CONTENT" }, async (h) => {
 		const live = (await h.call("subagent", { task: "collect me" })).details as unknown as RunRecord;
-		await waitFor(async () => (await h.readRuns())[0].pane !== undefined);
+		// Wait for the CONTENT, not merely for a pane field: the watcher can record
+		// an empty capture on an early tick, and `pane !== undefined` would then let
+		// the test race ahead of the assertions below (a flake seen on main).
+		await waitFor(async () => (await h.readRuns())[0].pane?.includes("LIVE-PANE-CONTENT") === true);
 		for (const flag of [undefined, false, true]) {
 			const inspected = await h.call("subagent_status", { id: live.id, ...(flag === undefined ? {} : { include_output: flag }) });
 			assert.ok(inspected.text.includes("LIVE-PANE-CONTENT"), `a live run's pane is the only view of it (include_output: ${flag}): ${inspected.text}`);
@@ -972,6 +1039,10 @@ test("the single-run status path always returns the output, finished or not", as
 		const withoutOutput = await h.call("subagent_status", { id: live.id, include_output: false });
 		assert.ok(withoutOutput.text.includes("THE-ACTUAL-OUTPUT"), `the default call must return the answer: ${withoutOutput.text}`);
 		assert.match(withoutOutput.text, /completed/);
+
+		// A list-view flag must never reach the collection path.
+		const compactInspect = await h.call("subagent_status", { id: live.id, compact: true });
+		assert.ok(compactInspect.text.includes("THE-ACTUAL-OUTPUT"), `compact does not apply to an id: ${compactInspect.text}`);
 	});
 });
 
@@ -1854,3 +1925,4 @@ test("the management tools are registered once, not on every tick", async () => 
 		}
 	});
 });
+

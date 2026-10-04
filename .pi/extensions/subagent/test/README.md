@@ -34,6 +34,7 @@ test.
 | `tmux.test.ts` | tmux session/socket naming, command construction, `--attach-subagent` parsing |
 | `status.test.ts` | `runSummary`, `isTerminal`, `holdsChild`, `runDirOwnsLiveTranscript`, `isMissingTmuxTarget`, `statusDetail`, `formatDuration`, `trimPane`, `truncateToolText`, `textFromAssistant` |
 | `classifier.test.ts` | the status classifier: phase classification, stall/recovery transitions, monotonicity against stale snapshots, `interrupted` authority |
+| `listview.test.ts` | the bounded `subagent_status` list: the total detail budget, `compact`, one-line rows, the withheld-output note, and the run→row projection |
 | `widget.test.ts` | `renderStatusRows` and the widget component: icons, capping, task trimming, width fitting |
 | `usage.test.ts` | child session usage/cost accounting |
 | `handoff.test.ts` | child launch argv per mode, lineage/fork session seeding, live-branch fork ordering, and the usage baseline |
