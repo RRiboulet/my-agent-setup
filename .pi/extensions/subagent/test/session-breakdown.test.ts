@@ -300,7 +300,7 @@ test("LOCAL PATCH 2: a fork that inherited everything still counts as a session"
 	});
 });
 
-test("LOCAL PATCH 2: an unreadable parent is counted in full and reported", async () => {
+test("LOCAL PATCH 2: an unreadable parent is reported as an incomplete lineage", async () => {
 	await withFixtureDir(async (agentDir) => {
 		const ghost = path.join(agentDir, "tmux-subagents", "sid", "gone", "session", "fork.jsonl");
 		await writeSession(ghost, [
@@ -312,7 +312,34 @@ test("LOCAL PATCH 2: an unreadable parent is counted in full and reported", asyn
 		const t = await totals(defaultSessionRoots(agentDir));
 		assert.equal(t.inherited.unknownLineage, 1, "flagged rather than silently guessed");
 		assert.equal(round(t.cost), 0.06, "overcounting is the safe direction, but it is labelled");
-		assert.match(inheritedNote(t.inherited)!, /unreadable header or parent/);
+		assert.match(inheritedNote(t.inherited)!, /lineage incomplete/);
+	});
+});
+
+test("LOCAL PATCH 2: a half-walked chain says so, and claims nothing it did not do", async () => {
+	await withFixtureDir(async (agentDir) => {
+		const sessions = path.join(agentDir, "sessions", "--tmp-fixture--");
+		const midFile = await writeSession(path.join(sessions, `${stamp()}_mid.jsonl`), [
+			// Its own parent is gone, but the file is readable, so its ids are known.
+			header("mid", path.join(sessions, "vanished-grandparent.jsonl")),
+			MODEL_CHANGE,
+			assistant({ totalTokens: 100, cost: 0.1 }),
+		]);
+		// The child excludes what it can resolve (mid's entries) and keeps the rest.
+		await writeSession(path.join(sessions, `${stamp()}_child.jsonl`), [
+			header("child", midFile),
+			...(await inheritedPrefix(midFile)),
+			assistant({ totalTokens: 10, cost: 0.01 }),
+		]);
+
+		const t = await totals([path.join(agentDir, "sessions")]);
+		const note = inheritedNote(t.inherited)!;
+		assert.equal(t.inherited.unknownLineage, 2, "mid's broken chain and the child that inherited from it");
+		assert.equal(t.inherited.forkedSessions, 1);
+		assert.equal(round(t.cost), 0.11, "mid 0.1 + child 0.01, with the prefix excluded");
+		// "counted in full" would be false here: this child DID exclude entries.
+		assert.doesNotMatch(note, /counted in full/);
+		assert.match(note, /lineage incomplete/);
 	});
 });
 
@@ -339,7 +366,7 @@ test("LOCAL PATCH 2: a file whose own header is unreadable is reported, not assu
 		const t = await totals([path.join(agentDir, "sessions")]);
 		assert.equal(t.inherited.unknownLineage, 1);
 		assert.equal(t.inherited.forkedSessions, 0, "nothing could be recognised as inherited");
-		assert.match(inheritedNote(t.inherited)!, /unreadable header or parent/);
+		assert.match(inheritedNote(t.inherited)!, /lineage incomplete/);
 	});
 });
 
@@ -564,7 +591,7 @@ test("LOCAL PATCH 3: the note names what was excluded and what was uncertain", (
 		inheritedNote({ entries: 1, tokens: 5, cost: 0, forkedSessions: 1, unknownLineage: 1, childSessions: 1 }),
 		// A zero-cost model reports $0.00 for megabytes of context, so the token
 		// count is what actually says something.
-		"last 90 days · 1 child transcript · 1 forked session, 1 inherited entry excluded (5 tokens, counted in the parent when it is in range) · 1 with unreadable header or parent, counted in full",
+		"last 90 days · 1 child transcript · 1 forked session, 1 inherited entry excluded (5 tokens, counted in the parent when it is in range) · 1 with unreadable header or parent, lineage incomplete",
 	);
 	assert.equal(inheritedNote({ entries: 0, tokens: 0, cost: 0, forkedSessions: 0, unknownLineage: 0, childSessions: 0 }), null);
 });

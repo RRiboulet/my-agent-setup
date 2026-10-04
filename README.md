@@ -80,13 +80,20 @@ upstream on purpose, so a later refresh is a readable diff. Our changes are four
 4. **A `__test__` export**, so the aggregation is testable over fixtures instead
    of a developer's real transcripts.
 
-Measured on this machine (2026-10-04; reproduce with
-`node tools/measure-session-usage.mjs`, read-only): child transcripts that were
-invisible — **$0.067741 of $1.708118, 4.0% of the cost, across 35 files** — are
-now counted, and **3,003,013 duplicated tokens across 6 forked files** are no
-longer counted twice. One more file carries a `parentSession` that cannot be
-resolved (its source transcript is gone); it is counted in full, and the footer
-says so rather than leaving it to be discovered.
+Measured on this machine on 2026-10-04, with
+`node tools/measure-session-usage.mjs` (read-only, independent of the extension
+so a bug in it cannot hide on both sides of the comparison): child transcripts
+that were invisible — **$0.067741 of $1.708118, 4.0% of the cost** — are now
+counted, and **3,003,013 duplicated tokens across 6 forked files** are no longer
+counted twice (that figure comes from the extension's own lineage walk, which the
+harness does not reproduce; the harness reports the dollar gap and, per fork run,
+the prefix measured against the extension's recorded `usageFromLine`).
+
+Those counts are of a machine that was being used while they were taken, so they
+move; the dollar figures are stable only because every duplicated entry on this
+box reports `cost.total = 0`. One file carries a `parentSession` that cannot be
+resolved — its source transcript is gone — so its lineage is incomplete and the
+footer says that instead of leaving it to be discovered.
 
 A forked child's *own* turns still cost real money: its re-send of the parent's
 prefix is billed, mostly as cache reads. This is about counting each request

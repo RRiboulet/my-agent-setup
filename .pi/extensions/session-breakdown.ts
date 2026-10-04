@@ -151,9 +151,8 @@ interface ParsedSession {
 	costByModel: Map<ModelKey, number>;
 	messagesByModel: Map<ModelKey, number>;
 	tokensByModel: Map<ModelKey, number>;
-	// LOCAL PATCH 2: absolute path of the session this file was forked from, as
-	// recorded in its v3 header, and the inherited usage that was excluded
-	// (LOCAL PATCH 2). Upstream parses the header and discards this field.
+	// LOCAL PATCH 2: the usage this session inherited from an ancestor and had
+	// excluded again. Upstream keeps no equivalent field.
 	inherited: InheritedTotals;
 }
 
@@ -169,9 +168,10 @@ interface InheritedReport extends InheritedTotals {
 	/** Files that excluded at least one inherited entry. */
 	forkedSessions: number;
 	/**
-	 * Files whose own header, or whose ancestor chain, could not be read. They are
-	 * counted in full — overcounting is the safe direction to be wrong in — but the
-	 * number is reported rather than left to be discovered.
+	 * Files whose own header, or whose ancestor chain, could not be read. Whatever
+	 * ids were recovered before the break are still excluded and the rest is
+	 * counted, so the error is always towards counting too much — but the number is
+	 * reported rather than left to be discovered.
 	 */
 	unknownLineage: number;
 	/** Files scanned outside `sessions/`: child transcripts of the subagent extension. */
@@ -282,8 +282,10 @@ interface BreakdownData {
 //     exactly this and was closed unmerged.
 //   - The subagent extension's child sessions are invisible: they live at
 //     <agentDir>/tmux-subagents/<parent-session-id>/<run-id>/session/, a SIBLING
-//     of sessions/. $0.067741 of $1.708118 of real cost, and ~3.3M tokens, were
-//     missing from the view.
+//     of sessions/. Measured 2026-10-04: $0.067741 of $1.708118 of real cost was
+//     missing from the view. (Token counts are deliberately not quoted: they move
+//     with every run, and every duplicated entry on that machine reported
+//     cost.total = 0 anyway.)
 //
 // Legacy `subagents` is that extension's run dir under its previous name
 // (RUNS_DIR was "subagents" before it became "tmux-subagents"); three files
@@ -1590,8 +1592,8 @@ function renderLeftRight(left: string, right: string, width: number): string {
 //     child whose parent has since been deleted inherits nothing, and claiming
 //     "0 entries excluded, $0.00 counted once" would be three false claims.
 //   - the uncertainty clause only when a header or parent chain was unreadable.
-//     Those files are counted in full, which is the safe direction to be wrong in,
-//     but it must not be silent.
+//     Such a file is half-measured at worst, which errs towards counting too much,
+//     but a half-measurement must not be silent either.
 //
 // The amount is the excluded usage; cost when there is any, tokens otherwise,
 // because a local or zero-priced model reports $0.00 for megabytes of context and
@@ -1611,8 +1613,14 @@ function inheritedNote(inherited: InheritedReport): string | null {
 		);
 	}
 	if (unknownLineage > 0) {
-		parts.push(`${unknownLineage} with unreadable header or parent, counted in full`);
+		// NOT "counted in full": a half-walked chain is both excluded and uncertain —
+		// its own prefix was dropped where the ancestor could be read, and whatever
+		// could not be resolved stayed in. So this says the lineage was incomplete,
+		// which is the thing that is actually true, and leaves the direction of the
+		// error to the reader (it is always towards counting more, never less).
+		parts.push(`${unknownLineage} with unreadable header or parent, lineage incomplete`);
 	}
+	if (parts.length === 0) return null;
 	return `last 90 days · ${parts.join(" · ")}`;
 }
 

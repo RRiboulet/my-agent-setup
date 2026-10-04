@@ -31,16 +31,20 @@ Added:
     this and was closed unmerged — and so were the subagent extension's child
     sessions, which live in sibling trees (`tmux-subagents/`, legacy
     `subagents/`). Measured 2026-10-04 on this machine: **$0.067741 of
-    $1.708118 (4.0% of cost) was missing from the view**, plus 35 child
-    transcripts.
+    $1.708118 (4.0% of cost) was missing from the view**. Token counts are not
+    quoted: they move with every run, and every duplicated entry on this box
+    reports `cost.total = 0` anyway. Reproduce the dollar gap with
+    `node tools/measure-session-usage.mjs`.
   - A forked session file carries a verbatim copy of its parent's tail, ids
     included, so summing whole files counts those requests twice. This is not
     hypothetical and not only ours: pi's own `/fork`, `/clone` and `--fork` copy
     entries into the session dir, and **2,989,693 tokens (~1% of the reported
     total) were already duplicated inside `sessions/`** before the subagent
-    extension was involved. A real `handoff: "fork"` child held 1,473,545 tokens
-    in its transcript against the 527,566 its own turns added — 64% of the file
-    was somebody else's requests. Inherited entries are now excluded from
+    extension was involved. A real `handoff: "fork"` child measured at the time
+    held 1,473,545 tokens in its transcript against the 527,566 its own turns
+    added — 64% of the file was somebody else's requests. (That transcript has
+    since been reaped, so the figure is historical; the arithmetic is in
+    TODO-859f419f.) Inherited entries are now excluded from
     messages, tokens and cost, resolved through the `parentSession` path in the
     v3 header, which pi, upstream's `split-fork.ts` and our `handoff.ts` all
     write and no analytics code read. A file still counts as one session; a file
@@ -48,12 +52,15 @@ Added:
     guessed at, and reported.
   - Because a total that silently drops context looks exactly like one that is
     simply wrong, a dimmed footer line reports what the scan did — e.g.
-    `last 90 days · 35 child transcripts · 6 forked sessions, 290 inherited
+    `last 90 days · 33 child transcripts · 6 forked sessions, 290 inherited
     entries excluded (3.0M tokens, counted in the parent when it is in range) · 1
-    with unreadable header or parent, counted in full`. Delegation is not free —
-    a forked child really is billed for re-sending the prefix, mostly as cache
+    with unreadable header or parent, lineage incomplete`. Delegation is not free
+    — a forked child really is billed for re-sending the prefix, mostly as cache
     reads — so this is about counting each request once, not about pretending
-    otherwise. Both clauses only appear when they have something to report.
+    otherwise. Each clause appears only when it has something to report, and the
+    uncertain one says "lineage incomplete" rather than "counted in full": a
+    half-walked chain is partly excluded and partly not, and the error, when there
+    is one, is always towards counting too much.
 
 Maintenance:
 
