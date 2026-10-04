@@ -24,6 +24,7 @@ inactive.
 | `.pi/extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent`, `subagent_status`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel`, `subagent_clean`, a live child-activity phase and a status widget above the editor |
 | `.pi/extensions/todos.ts` | `/todos` TUI and the `todo` tool |
 | `.pi/extensions/answer.ts` | `/answer`: extract questions from the last response and answer them in a focused TUI |
+| `.pi/extensions/session-breakdown.ts` | `/session-breakdown`: sessions, messages, tokens and cost per day over 7/30/90, model breakdown, contributions-style calendar. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with four local patches — see below |
 | `.pi/extensions/native-web-search.ts` | Native web search tool (ships with `.pi/skills/native-web-search/`) |
 | `.pi/skills/native-web-search/` | Skill for the above — the two must travel together |
 | `pi-session.sh` | Launch pi under tmux with an OpenRouter model |
@@ -44,6 +45,47 @@ The `.devcontainer/` provides all of these.
 bash .pi/extensions/subagent/test/setup-deps.sh      # symlinks pi's packages into node_modules
 node --test .pi/extensions/subagent/test/*.test.ts
 ```
+
+## `/session-breakdown`
+
+Read-only analytics over the session transcripts in `$(pi agent dir)`:
+sessions, messages, tokens and cost per day over the last 7/30/90 days, a model
+/ directory / weekday / time-of-day breakdown, and a GitHub-contributions-style
+calendar. Nothing is written and no network call is made.
+
+It is **vendored, not ours**: `session-breakdown.ts` comes from
+[mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
+(`extensions/session-breakdown.ts`, Apache-2.0 — Copyright (c) mitsuhiko and
+contributors). Upstream ships it with no tests; the file is kept close to
+upstream on purpose, so a later refresh is a readable diff. Our changes are four
+`LOCAL PATCH` hunks, marked in place and listed in the file header:
+
+1. **Roots.** Upstream hardcodes `<homedir>/.pi/agent/sessions`. We read the
+   agent dir from pi (`getAgentDir()`, so `PI_CODING_AGENT_DIR` works — upstream
+   PR #24 asked for this and was closed unmerged) and sweep three trees:
+   `sessions/`, plus `tmux-subagents/` and the legacy `subagents/`, which is
+   where the subagent extension writes child transcripts. Those are siblings of
+   `sessions/`, so the stock scanner never saw them.
+2. **Inherited entries are not this session's spend.** A forked session file
+   starts with a verbatim copy of its parent's tail, entry ids included. pi's own
+   `/fork`, `/clone` and `--fork` do this, and so does a subagent run launched
+   with `handoff: "fork"`. Those copies are records of requests some other
+   process made, so they are excluded from messages, tokens and cost — resolved
+   through the `parentSession` path in the v3 header, which every producer writes
+   and nothing read before. The file still counts as one session, and a file
+   whose parent can no longer be read is counted in full rather than guessed at.
+3. **A footer line** saying how many inherited entries were excluded and how
+   many files had an unreadable parent, because a total that silently drops
+   context is indistinguishable from one that is simply wrong.
+4. **A `__test__` export**, so the aggregation is testable over fixtures instead
+   of a developer's real transcripts.
+
+Measured effect on this machine, before and after: child sessions that were
+invisible ($0.067741 of $1.708118, and ~3.3M tokens) are now counted, and
+3,003,013 duplicated tokens across 7 forked files are no longer counted twice.
+A forked child's *own* turns still cost real money — its re-send of the parent's
+prefix is billed, mostly as cache reads — so this is about counting each request
+once, not about pretending delegation is free.
 
 ## Configuration
 

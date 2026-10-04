@@ -14,6 +14,43 @@ Initial tagged release, tracking pi 1.0.0. Contents:
 
 ### Unreleased
 
+Added:
+
+- **`/session-breakdown`** (`.pi/extensions/session-breakdown.ts`): sessions,
+  messages, tokens and cost per day over 7/30/90, a model / directory / weekday
+  / time-of-day breakdown and a contributions-style calendar. Read-only, no
+  network, no writes.
+  **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
+  `extensions/session-breakdown.ts` (Apache-2.0, Copyright (c) mitsuhiko and
+  contributors) — not our code. Upstream ships it untested and we keep it close
+  to upstream so a refresh stays a readable diff; our four `LOCAL PATCH` hunks
+  are listed in the file header and in the README. Two of them fix numbers that
+  were wrong on this machine:
+  - Upstream hardcodes `<homedir>/.pi/agent/sessions`, so a relocated agent dir
+    (`PI_CODING_AGENT_DIR`) was invisible — upstream PR #24 asked for this and
+    was closed unmerged — and so were the subagent extension's child sessions,
+    which live in sibling trees (`tmux-subagents/`, legacy `subagents/`).
+    Measured: **$0.067741 of $1.708118 (4.1% of cost) and ~3.3M tokens were
+    missing** from the view.
+  - A forked session file carries a verbatim copy of its parent's tail, ids
+    included, so summing whole files counts those requests twice. This is not
+    hypothetical and not only ours: pi's own `/fork`, `/clone` and `--fork` copy
+    entries into the session dir, and **2,989,693 tokens (0.96% of the reported
+    total) were already duplicated inside `sessions/`** before the subagent
+    extension was involved. A real `handoff: "fork"` child reported **1.79x** its
+    own cost. Inherited entries are now excluded from messages, tokens and cost,
+    resolved through the `parentSession` path in the v3 header — which pi,
+    upstream's `split-fork.ts` and our `handoff.ts` all write and no analytics
+    code read. A file still counts as one session; a file whose parent cannot be
+    read is counted in full rather than guessed at.
+  - Because a total that silently drops context looks exactly like one that is
+    simply wrong, a dimmed footer line reports what was excluded:
+    `incl. child sessions · N forked/child sessions · M inherited entries
+    excluded ($X counted once, in the parent) · K with unreadable parent,
+    counted in full`. Delegation is not free — a forked child really is billed
+    for re-sending the prefix, mostly as cache reads — so this is about counting
+    each request once, not about pretending otherwise.
+
 Maintenance:
 
 - `PI_SUBAGENT_*` integers are now parsed strictly: `"3m"`, `"1e9"` and `"3.9"`
