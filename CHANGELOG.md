@@ -62,6 +62,19 @@ Added:
     half-walked chain is partly excluded and partly not, and the error, when there
     is one, is always towards counting too much.
 
+Fixed:
+
+- **`pi install git:github.com/RRiboulet/my-agent-setup` installed nothing.** The
+  README advertised it, but a git-sourced package is discovered either from a `pi`
+  manifest in `package.json` or from conventional `extensions/` and `skills/`
+  directories at the package root, and this repo had neither — its resources live
+  in `.pi/extensions/`, which is dot-prefixed and therefore not found by a glob.
+  The install reported success and loaded zero extensions. Added the manifest
+  (five extension entry points plus the one skill), and a test that checks it
+  against the filesystem in both directions, so adding an extension without
+  listing it fails the suite instead of failing silently on someone else's
+  machine.
+
 Maintenance:
 
 - `PI_SUBAGENT_*` integers are now parsed strictly: `"3m"`, `"1e9"` and `"3.9"`

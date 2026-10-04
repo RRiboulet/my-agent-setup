@@ -2,25 +2,52 @@
 
 Personal pi extensions, skills and the devcontainer that runs them.
 
-Nothing here depends on npm publishing. pi discovers this repository's
-resources from the conventional `extensions/` and `skills/` directories, so it
-can be used as a package source directly:
+Nothing here depends on npm publishing. The repository doubles as a pi
+package, so these extensions can be installed into any other project:
 
 ```bash
-pi install git:github.com/<user>/<repo>          # clone + discover
-pi install --local git:github.com/<user>/<repo>  # pin for this project only
+pi install git:github.com/RRiboulet/my-agent-setup          # for me, every project
+pi install --local git:github.com/RRiboulet/my-agent-setup  # pin for one project only
 ```
 
-Pinning works: `git:github.com/<user>/<repo>@v1.0.0`.
+Verified on a clean agent dir and an empty project: both install the five
+extensions and the `native-web-search` skill.
+
+The one non-obvious part is that this needs the `pi` manifest in
+`package.json`. A git-sourced package is discovered either from that manifest or
+from conventional `extensions/`, `skills/`, `prompts/` and `themes/` directories
+at the package root — and this repo keeps its resources in `.pi/extensions/`,
+which is dot-prefixed, so a glob will not find it. The manifest therefore lists
+each entry point explicitly:
+
+```jsonc
+// package.json
+"pi": {
+  "extensions": [
+    ".pi/extensions/answer.ts",
+    ".pi/extensions/native-web-search.ts",
+    ".pi/extensions/session-breakdown.ts",
+    ".pi/extensions/todos.ts",
+    ".pi/extensions/subagent/index.ts"   // the rest of that dir is its internals
+  ],
+  "skills": [".pi/skills/native-web-search"]
+}
+```
+
+Without that file `pi install` succeeds, clones the repo, and quietly loads
+nothing.
+
+Pinning works: `git:github.com/RRiboulet/my-agent-setup@v1.0.0`.
 
 Project-local extensions only load **after you grant project trust**, so on a
 fresh machine pi asks on first start; until then the extensions are silently
-inactive.
+inactive. Installed packages are loaded regardless of project trust.
 
 ## Contents
 
 | Path | What it is |
 |---|---|
+| `package.json` | the `pi` manifest that makes this repo installable as a package (see above) |
 | `.pi/extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent`, `subagent_status`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel`, `subagent_clean`, a live child-activity phase and a status widget above the editor |
 | `.pi/extensions/todos.ts` | `/todos` TUI and the `todo` tool |
 | `.pi/extensions/answer.ts` | `/answer`: extract questions from the last response and answer them in a focused TUI |
