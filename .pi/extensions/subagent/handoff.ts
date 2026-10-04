@@ -18,8 +18,15 @@
 //     `--resume`; combining them is a hard `process.exit(1)` in
 //     `dist/main.js:243-256`. We therefore never emit `--session-id`
 //     alongside `--session`.
-//   - `pi --session <missing-file>` silently starts a fresh empty session, so
-//     every mode that hands over an existing file checks it exists first.
+//   - Note that `--fork` is NOT in that list: `--fork` and `--session-id` do
+//     compose, and pairing them is pi's sanctioned way to fork with a chosen
+//     id. Only duplicate ids error. (`--session` + `--continue` also compose,
+//     with `--session` winning.)
+//   - `pi --session <missing-file>` silently starts a fresh empty session AND
+//     invents a new UUID id, so the conversation silently diverges from the
+//     parent's instead of merely being empty. Every mode that hands over an
+//     existing file checks it exists first; the guard is mandatory, not
+//     defensive.
 //   - `SessionManager._loadEntries` assigns `leafId` to each non-header entry
 //     in file order, which means a session file's ACTIVE BRANCH is simply its
 //     last non-header line. There is no persisted leaf pointer.

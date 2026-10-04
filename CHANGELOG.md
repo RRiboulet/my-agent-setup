@@ -115,6 +115,27 @@ Features:
     place (19,985). So the setting ships as `+tool_search` alone; `+codemode` is
     one entry away for anyone who wants the script workflow.
 
+- **The child publishes what it is doing, and the parent reports it.** A live
+  run used to be one undifferentiated "running", which cannot distinguish a
+  child that is working from one that wedged on its first token. The child now
+  writes a small snapshot to `<runDir>/activity.json` — phase, scope, tool name,
+  and a monotonic `sequence` — and `subagent_status` shows the live line
+  (`activity: active (bash)`) for non-terminal runs. This is what the status
+  widget below is built on; it is also the input to its stall detection.
+  - Diagnostic only. Nothing about completion, cancellation or failure depends
+    on it, and an unreadable, stale or malformed snapshot degrades to "no
+    activity observed" rather than to a wrong status.
+  - A phase transition bypasses the 500 ms write throttle; chatty updates inside
+    a phase do not. Found while testing: a plain throttle let a run look idle to
+    the watcher for a whole window immediately after it started working — the
+    one moment the snapshot exists to describe. `settled()` forces its write for
+    the same reason the parent treats `result.json` as the completion signal:
+    "done" has to be durable before the parent reads it.
+  - `runningChildId` and `sequence` are both validated on read, so a snapshot
+    left by an earlier child in a reused run dir cannot be attributed to the
+    current one, and an older snapshot cannot overwrite a newer one the parent
+    already saw. Writes are serialized and atomic; after repeated failures the
+    recorder disables itself instead of spamming a doomed path.
 - **Live subagent status widget.** A strip above the editor lists every live
   run with what it is doing (`active (bash 45s)`, `waiting 12s`, `stalled 3m`)
   and how long it has been at it, so progress is visible without polling
