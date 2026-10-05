@@ -44,11 +44,37 @@ Create a git commit for the current changes using a concise Conventional Commits
   - File paths or globs should limit which files to commit. If files are specified, only stage/commit those unless the user explicitly asks otherwise.
   - If arguments combine files and instructions, honor both.
 
-## LOCAL ADAPTATION B: this repo does not commit to `main` — except for releases
+## LOCAL ADAPTATION B: this repo has two long-lived branches, and you commit to neither
 
 Upstream's skill is repo-agnostic and would commit anywhere. Here `AGENTS.md`
-requires a branch per change, and `main` moves only by a merged PR or a release
-tag. The rule branches on *why* you are standing on `main*, not on `main` itself.
+defines the shape: `dev` takes all work in flight, `main` takes releases only, and
+every feature branch starts from `dev`.
+
+**Before staging anything, check both which branch you are on and what it is
+based on.** The second check is the one that gets skipped, and skipping it has
+shipped pull requests carrying another branch's commits:
+
+```bash
+git branch --show-current          # which branch am I on
+git fetch origin                   # a stale local `dev` fakes this check
+git log --oneline dev..HEAD        # must list ONLY this change's commits
+```
+
+Anything in that log that you did not write means the base is wrong. Fix it now,
+not after review.
+
+Then:
+
+- **On a feature branch based on `dev`:** commit here. That is the normal case.
+- **On `dev` itself:** stop and branch first (`git checkout -b <change-name>`
+  from `dev`), then commit there. `dev` takes merged pull requests, not direct
+  commits.
+- **On `main`:** `main` is releases only. During the release procedure in
+  `AGENTS.md` — retitling the changelog section, then merging `dev` into `main` —
+  a commit here is correct. At any other time, branch from `dev` instead. A
+  revert is an ordinary change and belongs on a branch off `dev`; if it undoes an
+  already-tagged release, the tag has to move too, so raise that rather than
+  quietly re-tagging.
 
 **Step zero, before any of it: is an operation already in progress?** A rebase,
 merge, cherry-pick or bisect leaves HEAD detached, so the branch probe below
@@ -73,24 +99,11 @@ If any of those indicate work in progress: **finish that operation** —
 A resolution commit made mid-rebase needs `git rebase --continue` afterwards or
 the rebase is not finished.
 
-**Then, the branch rule:**
-
-1. Check `git branch --show-current` — only meaningful once nothing is in
-   progress, because step zero has ruled out the empty-string case.
-   - **On a feature branch:** commit here. Nothing else to do.
-   - **On `main` while making a change:** stop and branch first
-     (`git checkout -b <change-name>`), then commit there. `main` is updated by
-     merging a PR on GitHub (`gh pr merge`), never by committing on it or by
-     fast-forwarding locally. A revert is an ordinary change and belongs on a
-     branch — unless it undoes an already-tagged release, in which case the tag
-     has to move too, so raise that rather than quietly re-tagging.
-   - **On `main` during the release procedure in `AGENTS.md`:** commit here.
-     That is the one place `main` is meant to move. This skill only commits; the
-     tag and push are `AGENTS.md` Releases step 3.
-
 Recorded exception, also deliberate: the `AGENTS.md` branch rule itself was
-committed straight to `main` (`d4fcca9`) — a rule about `main` is only useful to
-the next session if it is already there.
+committed straight to `main` (`d4fcca9`), and the dev/main split was likewise
+committed there rather than through a release. A rule about which branches to use
+is only useful to the next session if it is already where the next session
+looks — and a rule is not a release.
 
 ## Steps
 

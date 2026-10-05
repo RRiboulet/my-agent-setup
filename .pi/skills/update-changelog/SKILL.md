@@ -29,23 +29,23 @@ Use the following commands to gather commit information:
 git describe --tags --abbrev=0
 
 # LOCAL ADAPTATION: the range depends on where you are. Upstream's
-# `<baseline-version>..HEAD` is only right on `main` at release time; on a
+# `<baseline-version>..HEAD` is only right on `dev` at release time; on a
 # feature branch it re-reads every commit already merged since the tag, and
 # after a rebase those already-changelogged commits come back under new hashes.
-git log <baseline-version>..main   # at release time, on main (AGENTS.md step 1)
-git log main..HEAD                 # on a feature branch: this branch's own work
+git log <baseline-version>..dev    # at release time, on dev (AGENTS.md step 1)
+git log dev..HEAD                  # on a feature branch: this branch's own work
 ```
 
-`v1.0.0..main` returns everything merged since the tag — including work already
-written up — while `main..HEAD` on a working branch returns exactly the commits
+`v1.0.0..dev` returns everything merged since the tag — including work already
+written up — while `dev..HEAD` on a working branch returns exactly the commits
 that branch contributed. Do not put a count in this file: it is stale the moment
 the next commit lands.
 
 **But the release-time range is titles, not reasoning.** `AGENTS.md`'s workflow
 merges with `gh pr merge --squash`, so the branch's individual commits do not
-survive into `main`. After a squash, `git log <tag>..main` gives you one line
+survive into `dev`. After a squash, `git log <tag>..dev` gives you one line
 per PR whose subject is the PR title. The reasoning lives in the PR body and in
-the commits that were squashed away, neither of which is reachable from `main`.
+the commits that were squashed away, neither of which is reachable from `dev`.
 So at release time, read the range for the *list* of changes and then fetch each
 one:
 
@@ -54,9 +54,9 @@ gh pr list --state merged --search "merged:>=<since-date>" \
   --json number,title,body,mergedAt
 ```
 
-**On a branch stacked on another unmerged branch**, `main..HEAD` includes the
+**On a branch stacked on another unmerged branch**, `dev..HEAD` includes the
 base branch's commits, which are already written up on that branch's PR. Either
-subtract them (`git log main..feature-a`) or leave the entry to the base branch
+subtract them (`git log dev..feature-a`) or leave the entry to the base branch
 and only note the delta.
 
 ### 3. Update the changelog
@@ -113,7 +113,7 @@ Read the existing changelog file (`CHANGELOG.md`, or `CHANGELOG` if missing) and
 
 * If the current changelog already has an "Unreleased" section with content, append to it rather than replacing it
 * Preserve the existing changelog style and formatting (headings, bullet style, ordering, and spacing)
-* If the repo uses a different default branch name, treat that as the "current version" instead of `main`
+* This repo's integration branch is `dev`; `main` takes releases only
 * When in doubt about whether a change is significant, err on the side of including it
 
 ## LOCAL ADAPTATION: this repo's changelog is not the flat list above
