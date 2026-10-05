@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.1.0 — 2026-10-05
+
 Added:
 
 - **`commit` and `update-changelog` skills** (`.pi/skills/commit/`,
