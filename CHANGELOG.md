@@ -99,6 +99,18 @@ Fixed:
 
 Maintenance:
 
+- **`native-web-search` is now attributed.** The skill was vendored from
+  [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) all along and
+  carried no provenance header, which made it look locally original — and I told a
+  reviewer exactly that while reviewing a different branch. It is not: all of
+  upstream's functions survive and three were added (`runOpenRouterSearch`,
+  `defaultModelId`, `defaultBaseUrl`) for OpenRouter, which is the provider this
+  machine actually authenticates with. Both files now carry the same
+  VENDORED/NOT OURS header and Apache-2.0 line as the other vendored resources,
+  `SKILL.md` lists the three patches, and the README distinguishes this skill
+  (**vendored**) from `native-web-search.ts` (**ours** — upstream has no such
+  extension).
+
 - **`gh` is baked into the devcontainer** (`.devcontainer/Dockerfile`): branches
   could not reach GitHub from inside the container at all — no `gh`, no
   credential, and an HTTPS remote that could not authenticate. `GH_CONFIG_DIR`
