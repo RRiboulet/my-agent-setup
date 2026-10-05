@@ -43,9 +43,14 @@ nothing.
 
 Pinning works the usual way — append a tag or a commit:
 `git:github.com/RRiboulet/my-agent-setup@<ref>`. One caveat worth knowing:
-`v1.0.0` predates this repo becoming a pi package (the resources moved to `.pi/`
-after that tag, and `package.json` came later still), so pinning to it installs
-nothing. Pin a ref at or after the manifest commit, or track `main`.
+`v1.0.0` is not empty, but it is the old layout — the resources sit in
+conventional root `extensions/` and `skills/`, which pi discovers without any
+manifest, so pinning to it installs four extensions and one skill (no
+`/session-breakdown`, no `commit` or `update-changelog`). What installs
+*nothing* is the stretch between the move to `.pi/` and the manifest commit
+`e4e072f`: dot-prefixed directories are not found by a glob, so the install
+succeeds, clones, and quietly loads zero resources. Pin a ref at or after
+`e4e072f`, or track `main`.
 
 Project-local extensions only load **after you grant project trust**, so on a
 fresh machine pi asks on first start; until then the extensions are silently

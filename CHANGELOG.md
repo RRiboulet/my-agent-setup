@@ -4,6 +4,20 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.1.1 — 2026-10-05
+
+Fixed:
+
+- **The README's `v1.0.0` pinning caveat was backwards.** It said pinning to
+  `v1.0.0` "installs nothing", implying the tag predates pi packaging. It does
+  not: at `v1.0.0` the resources are in conventional root `extensions/` and
+  `skills/`, which pi finds with no manifest at all, so that ref installs four
+  extensions and one skill. The ref that installs nothing is the stretch
+  between the move to `.pi/` and the manifest commit `e4e072f` — dot-prefixed
+  directories are not globbed, so the install succeeds and loads zero. Found by
+  installing each of them and reading what actually loaded.
+
+
 ## v1.1.0 — 2026-10-05
 
 Added:
