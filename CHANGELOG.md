@@ -16,6 +16,27 @@ Initial tagged release, tracking pi 1.0.0. Contents:
 
 Added:
 
+- **`commit` and `update-changelog` skills** (`.pi/skills/commit/`,
+  `.pi/skills/update-changelog/`): the two steps of the release procedure in
+  `AGENTS.md` that were being done by hand. Both vendored from
+  [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0,
+  commit `0865c84`), like our other four resources, and adapted in place:
+  - `commit` keeps upstream's Conventional Commits subject format but drops its
+    72-character limit — 8 of this repo's 30 commits exceed it, the longest at
+    102, because the convention here is a subject that carries the actual claim
+    — and adds the branch rule, with the release commit as the one deliberate
+    exception (`AGENTS.md` has `main` move for releases and nothing else).
+  - `update-changelog` replaces upstream's `<baseline>..HEAD` commit range with
+    the one a branch-per-change workflow actually wants (`main..HEAD` on a
+    branch, `<tag>..main` at release time), and corrects two rules that
+    contradict this repo: that insignificant changes should be dropped (most of
+    this changelog is exactly those, reasoning included) and that entries are
+    bolded lead-ins (the *sections* are plain text; the entries are the bold
+    part).
+  - It also records a wart rather than fixing it: `### Unreleased` currently
+    sits *inside* `## v1.0.0`, so the next tag would ship an "Unreleased"
+    section under the previous release. The skill tells the agent to raise it;
+    restructuring `CHANGELOG.md` is a separate decision.
 - **`/session-breakdown`** (`.pi/extensions/session-breakdown.ts`): sessions,
   messages, tokens and cost per day over 7/30/90, a model / directory / weekday
   / time-of-day breakdown and a contributions-style calendar. Read-only, no
