@@ -78,6 +78,18 @@ Fixed:
 
 Maintenance:
 
+- **`gh` is baked into the devcontainer** (`.devcontainer/Dockerfile`): branches
+  could not reach GitHub from inside the container at all — no `gh`, no
+  credential, and an HTTPS remote that could not authenticate. `GH_CONFIG_DIR`
+  points at the `pi-agent-config` volume, so one `gh auth login` survives a
+  rebuild; `/home/vscode` is container-local and is discarded, and that
+  distinction is the whole design. The token is in no image layer, no repo file
+  and no `.git/config`. An adversarial review of the first version of this found
+  that the credential *survived* a rebuild while the credential **helper** did
+  not — `gh auth setup-git` writes to `~/.gitconfig` on the overlay — so `git
+  push` broke after every rebuild. The helper is now registered system-wide in
+  the Dockerfile, which is the part `gh auth setup-git` should have been.
+
 - **Three subagent behaviours were documented as tested and were not.** A
   simplification audit ran 47 single-behaviour mutations against this suite;
   three survived, meaning nothing would have failed had the behaviour been

@@ -3,7 +3,8 @@
 ## Branches
 
 **Do not work on `main`.** Every change gets its own branch off `main`, and
-`main` only ever moves to take a release (see "Releases"). Branch names name the
+`main` moves only two ways: a merged pull request (see "Pull requests") and the
+release commit itself (see "Releases"). Nothing is committed directly to it. Branch names name the
 change, not the session: `session-breakdown-coverage`, `subagent-test-closure`.
 
 The reason is that `CHANGELOG.md`'s `Unreleased` section is shared ground. Two
@@ -16,6 +17,29 @@ stands alone.
 When two branches are ready at once, merge or rebase in an order you choose
 yourself — `main` is not a priority queue, and neither branch is urgent over
 the other.
+
+## Pull requests
+
+Branches reach GitHub through `gh`, which is baked into the devcontainer image
+(`.devcontainer/Dockerfile`) rather than installed at runtime, so a rebuild does
+not silently drop it. The token lives in the `pi-agent-config` volume via
+`GH_CONFIG_DIR=/home/vscode/.pi/gh`, which is what makes one `gh auth login` last
+across rebuilds — `/home/vscode` itself is container-local and is discarded.
+
+One-time setup, run by the human (it needs a browser):
+
+```bash
+gh auth login --hostname github.com --git-protocol https --web
+```
+
+That is the whole setup. `git push` then works with no credential in
+`.git/config`, because the Dockerfile registers gh as git's credential helper
+system-wide — deliberately, not via `gh auth setup-git`, which writes to
+`~/.gitconfig` on the container-local overlay and is discarded on rebuild. The
+token would survive that; the helper would not, and push would break silently.
+
+Check *where* the token lives before trusting a login: `gh auth status` prints the
+path, and that path decides whether it survives.
 
 ## Releases
 
