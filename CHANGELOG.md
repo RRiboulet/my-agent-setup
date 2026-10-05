@@ -60,6 +60,12 @@ Maintenance:
   loading twice in one process and asserting the tools are registered the second
   time; it was verified to fail when the declarations are hoisted. Added a
   comment explaining the shape, and removed a stray `;;`. No behaviour change.
+- **`postCreate.sh` now defaults `GH_CONFIG_DIR` instead of trusting the image's
+  `ENV`.** The Dockerfile sets it, but a container built from an older image does
+  not have it, and the later `mkdir -p "$GH_CONFIG_DIR"` then expands to
+  `mkdir -p ""`, which fails under `set -e` and aborts the rest of postCreate.
+  Defaulting to the same `/home/vscode/.pi/gh` makes the script self-sufficient
+  and cannot change behaviour when the `ENV` is present.
 
 ## v1.1.1 — 2026-10-05
 
