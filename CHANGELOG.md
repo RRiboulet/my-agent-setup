@@ -46,6 +46,20 @@ Fixed:
   usage baselines. The transcript is now claimed synchronously, with no `await`
   between the check and the claim, and released once the run is registered.
 
+Maintenance:
+
+- **The management-tool registration memo is closure state, and now says so.**
+  A code review read `appliedManagementExposure` / `managementToolsRegistered`
+  as module-level and warned that a reload could strand the five management
+  tools. They are not module-level: the factory opens far above them and closes
+  at the end of the file, so they reset on every extension load — the block is
+  simply written without the factory's indentation, which is why it read as
+  module state. The suite already depended on the reset (every test builds a
+  fresh harness, then calls `subagent_status`), and a new test pins it by
+  loading twice in one process and asserting the tools are registered the second
+  time; it was verified to fail when the declarations are hoisted. Added a
+  comment explaining the shape, and removed a stray `;;`. No behaviour change.
+
 ## v1.1.1 — 2026-10-05
 
 Fixed:

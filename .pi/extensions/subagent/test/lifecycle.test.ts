@@ -2190,3 +2190,24 @@ test("the management tools are registered once, not on every tick", async () => 
 	});
 });
 
+test("a fresh extension load re-registers the management tools", async () => {
+	// The registration memo is CLOSURE state, so a new load starts unregistered.
+	// If it were hoisted to module scope, the second load in this same process
+	// would skip registration and the new session would have no subagent_status at
+	// all — and "registered once" would not notice, because it only ever looks at
+	// one load.
+	await withTempAgentDir(async () => {
+		const first = await createHarness();
+		await first.shutdown();
+		const second = await createHarness();
+		try {
+			for (const name of ["subagent_status", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
+				assert.ok(second.tools.has(name), `${name} must be registered again after a fresh load, not skipped by a shared memo`);
+			}
+		} finally {
+			await second.shutdown();
+		}
+	});
+});
+
+

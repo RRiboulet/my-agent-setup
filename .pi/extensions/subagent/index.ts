@@ -1333,6 +1333,15 @@ export default function subagentExtension(pi: ExtensionAPI): void {
  *
  * The memo is what makes that cheap: the common case is a no-op.
  */
+// CLOSURE state, not module state: the factory (`subagentExtension`) opened far
+// above and closes at the end of this file, so these reset on every extension
+// load. A reload or a session replacement builds a new runtime and re-invokes the
+// factory (`createAgentSessionServices` -> `resourceLoader.reload`), so the five
+// tools are registered again for the new session. Do NOT hoist them to module
+// scope: a module-level memo would survive the load and leave a fresh session
+// with no management tools at all. (This block is written without the factory's
+// indentation, which is what makes it read as module state; the braces say
+// otherwise.)
 let appliedManagementExposure: ToolExposure | undefined;
 let managementToolsRegistered = false;
 
@@ -1352,7 +1361,7 @@ const registerManagementTools = (): void => {
 	for (const tool of managementToolDefinitions) {
 		pi.registerTool(exposure ? { ...tool, exposure } : tool);
 	}
-};;
+};
 
 // --- Live widget (local patch 14) ---------------------------------------------
 //
