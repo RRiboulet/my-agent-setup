@@ -4,6 +4,63 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Fixed:
+
+- **`subagent_interrupt` reported an interrupt that landed as "no new interrupt
+  was reported" whenever the watcher beat the tool's poll to the marker.** The
+  confirmation poll inferred staleness from `noteInterrupt`'s return value, but
+  the watcher folds the *same* marker on its 500 ms tick. When the watcher got
+  there first, `noteInterrupt` reported "no change" for an interrupt the child had
+  genuinely settled, and the tool told the model that a stop it had just caused
+  had not happened. Confirmation now rests on the marker's freshness relative to
+  the baseline captured before the Escape, never on whether that call happened to
+  change the record. The run was always correctly `interrupted`; only the answer
+  was wrong. A run that had already reached a terminal status when the abort was
+  reported is now answered as `superseded` rather than confirmed — the marker is
+  real, but the run is over and claiming a stop would assert a state it is not
+  in. Repro without the fix: `subagent_interrupt` against a child whose marker is
+  folded by the watcher before the tool reads it.
+- **Cancelled and tmux-failed subagent runs now report the tokens and cost they
+  had already burned.** Only `finalizeRun` read the child's session usage, so a
+  run stopped by `subagent_cancel`, or by a tmux-level failure, wrote
+  `usage: undefined` and reported no tokens in `subagent_status`, in the list
+  view or in the completion notification — even though a cancelled run is very
+  often one that had spent real money first. Usage is now read before the
+  terminal status is persisted, and a standalone run's session file (whose exact
+  name the parent only learns when the child reports a result) is discovered
+  under the run dir so the read has something to read. The inherited-context
+  baseline is still honoured, so a fork or resume is not charged for what it
+  inherited. A run cancelled by `kill-on-shutdown` is read the same way, so the
+  shutdown path reports its cost too.
+- **The late-`result.json` re-read in `finalizeMissingChild` is now covered.** It
+  guards the window between the watcher's first result read and its pane probe,
+  where a child that reports and exits in the same instant would otherwise be
+  recorded as failed. Deleting the re-read left the suite green, so the test now
+  drives the window directly by writing the result while the pane probe is in
+  flight — verified to fail when the re-read is removed.
+- **Two `subagent_resume` calls fired in parallel can no longer open two pi
+  processes on one transcript.** A finished run stays terminal forever, so the
+  "is another resume in flight" scan over `runs` was the only guard — and a
+  resume does filesystem I/O (`mkdir`, `countSessionLines`) between that scan and
+  the new run being registered, so two calls that did not await each other both
+  passed it and appended to the same JSONL, interleaving branches and scrambling
+  usage baselines. The transcript is now claimed synchronously, with no `await`
+  between the check and the claim, and released once the run is registered.
+
+Maintenance:
+
+- **The management-tool registration memo is closure state, and now says so.**
+  A code review read `appliedManagementExposure` / `managementToolsRegistered`
+  as module-level and warned that a reload could strand the five management
+  tools. They are not module-level: the factory opens far above them and closes
+  at the end of the file, so they reset on every extension load — the block is
+  simply written without the factory's indentation, which is why it read as
+  module state. The suite already depended on the reset (every test builds a
+  fresh harness, then calls `subagent_status`), and a new test pins it by
+  loading twice in one process and asserting the tools are registered the second
+  time; it was verified to fail when the declarations are hoisted. Added a
+  comment explaining the shape, and removed a stray `;;`. No behaviour change.
+
 ## v1.1.1 — 2026-10-05
 
 Fixed:

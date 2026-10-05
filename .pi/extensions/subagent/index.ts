@@ -719,6 +719,21 @@ function isMissingTmuxTarget(result: { code: number; stdout: string; stderr: str
 	);
 }
 
+/**
+ * Whether an interrupt marker is NEWER than the baseline captured just before an
+ * Escape was sent.
+ *
+ * Confirmation is decided by this, never by whether `noteInterrupt` changed the
+ * record. The watcher folds the same marker on its 500ms tick, so if it gets
+ * there first `noteInterrupt` reports "no change" for an interrupt that
+ * genuinely landed — the tool would then call a real stop "stale". A marker that
+ * is not newer than the baseline is the PREVIOUS interrupt's, because the marker
+ * file is never deleted (local patch 13).
+ */
+function markerIsNewerThan(marker: SubagentInterruptMarker, since: { interrupts: number; at: number }): boolean {
+	return marker.interrupts > since.interrupts || marker.interruptedAt > since.at;
+}
+
 /** The parse error behind an unusable snapshot, if it has one worth showing. */
 function describeSnapshotError(snapshot: StatusSnapshot): string | null {
 	if (snapshot.snapshotState !== "invalid" || !snapshot.snapshotError) return null;
@@ -884,6 +899,37 @@ function isSameOrDescendant(base: string, candidate: string): boolean {
 	return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
+/**
+ * The child's session file, discovering it for a standalone run that never
+ * reported one.
+ *
+ * A standalone child is launched with `--session-dir <runDir>/session
+ * --session-id <run id>`, and pi names the file `<timestamp>_<session id>.jsonl`
+ * there. The parent does not learn the exact path until the child reports it in
+ * `result.json`, so a run stopped before that — cancel, tmux failure — has to
+ * find it to report the tokens it burned. The id suffix is tried first so a
+ * leftover file from an earlier attempt in the same dir cannot be picked up;
+ * the directory otherwise holds exactly one session for a standalone run.
+ *
+ * Uses the recorded `sessionFile` when there is one, which is also what every
+ * non-standalone mode gets: lineage and fork write to a known path, and resume
+ * appends to its ancestor's file (whose own session dir is empty).
+ */
+async function findChildSessionFile(run: RunRecord): Promise<string | undefined> {
+	if (run.sessionFile && existsSync(run.sessionFile)) return run.sessionFile;
+	if (run.mode && run.mode !== "standalone") return run.sessionFile;
+	const dir = path.join(run.runDir, "session");
+	let entries: string[];
+	try {
+		entries = await readdir(dir);
+	} catch {
+		return run.sessionFile;
+	}
+	const jsonl = entries.filter((name) => name.endsWith(".jsonl"));
+	const match = jsonl.find((name) => name.endsWith(`_${run.id}.jsonl`)) ?? (jsonl.length === 1 ? jsonl[0] : undefined);
+	return match ? path.join(dir, match) : run.sessionFile;
+}
+
 function resolveModel(
 	ctx: ExtensionContext,
 	providerOverride: string | undefined,
@@ -1040,6 +1086,16 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	const toolStallAfterMs = readIntEnv("PI_SUBAGENT_TOOL_STALL_SECONDS", DEFAULT_TOOL_STALL_SECONDS) * 1000;
 
 	const runs = new Map<string, RunRecord>();
+	/**
+	 * Session files a resume has claimed but not yet registered a run for.
+	 *
+	 * A resume does I/O (`mkdir`, `countSessionLines`) between the "is another
+	 * resume in flight" scan and the new run landing in `runs`, so two calls fired
+	 * without awaiting each other could both pass that scan. The claim is added and
+	 * removed around that window; once the run is registered the ordinary scan sees
+	 * it.
+	 */
+	const reservedResumes = new Set<string>();
 	const timers = new Map<string, ReturnType<typeof setTimeout>>();
 	// The last activity string written to runs.json, so a chatty child does not
 	// rewrite the index when nothing visible changed.
@@ -1170,6 +1226,28 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		}
 	};
 
+	/**
+	 * Read the usage a run has burned so far, honouring its inherited-context
+	 * baseline.
+	 *
+	 * Called before a terminal status is persisted by the paths that never receive a
+	 * child result — cancel, and a tmux-level failure — so a run that spent real
+	 * tokens before it stopped does not report none. `readSessionUsage` already
+	 * excludes the lines a fork or resume inherited; a missing or unreadable session
+	 * file leaves the field as it was. The `?? run.usage` fallback is a no-op today:
+	 * every caller reaches here with `usage` unset (`subagent_resume` clears it on
+	 * the new record), so it can neither surface stale data nor erase a value that
+	 * a future caller already set.
+	 */
+	const captureRunUsage = async (run: RunRecord): Promise<void> => {
+		const sessionFile = await findChildSessionFile(run);
+		run.usage = (await readSessionUsage(sessionFile, { fromLine: run.usageFromLine ?? 0 })) ?? run.usage;
+		// Remember a discovered path: it makes the child session visible to
+		// subagent_status and subagent_clean, which otherwise would not know one
+		// exists until the run reported a result.
+		if (sessionFile) run.sessionFile = sessionFile;
+	};
+
 	const finalizeRun = async (run: RunRecord, result: ChildResult): Promise<void> => {
 		run.status = result.status === "completed" ? "completed" : "failed";
 		run.finishedAt = result.finishedAt || Date.now();
@@ -1190,7 +1268,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			run.error = result.error.trim();
 		}
 		run.output = truncateToolText(output || "(no text output)");
-		run.usage = (await readSessionUsage(run.sessionFile, { fromLine: run.usageFromLine ?? 0 })) ?? run.usage;
+		await captureRunUsage(run);
 		await persist();
 		// After the notification: a display problem must never be able to swallow
 		// the completion message, which is how the main agent learns the run ended.
@@ -1206,6 +1284,9 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		run.interruptRequestedAt = undefined;
 		run.error = message;
 		run.finishedAt = Date.now();
+		// The child is gone, but it may have spent real tokens first; a tmux-level
+		// failure must not report none. See captureRunUsage.
+		await captureRunUsage(run);
 		await persist();
 		// After the notification: a display problem must never be able to swallow
 		// the completion message, which is how the main agent learns the run ended.
@@ -1252,6 +1333,15 @@ export default function subagentExtension(pi: ExtensionAPI): void {
  *
  * The memo is what makes that cheap: the common case is a no-op.
  */
+// CLOSURE state, not module state: the factory (`subagentExtension`) opened far
+// above and closes at the end of this file, so these reset on every extension
+// load. A reload or a session replacement builds a new runtime and re-invokes the
+// factory (`createAgentSessionServices` -> `resourceLoader.reload`), so the five
+// tools are registered again for the new session. Do NOT hoist them to module
+// scope: a module-level memo would survive the load and leave a fresh session
+// with no management tools at all. (This block is written without the factory's
+// indentation, which is what makes it read as module state; the braces say
+// otherwise.)
 let appliedManagementExposure: ToolExposure | undefined;
 let managementToolsRegistered = false;
 
@@ -1271,7 +1361,7 @@ const registerManagementTools = (): void => {
 	for (const tool of managementToolDefinitions) {
 		pi.registerTool(exposure ? { ...tool, exposure } : tool);
 	}
-};;
+};
 
 // --- Live widget (local patch 14) ---------------------------------------------
 //
@@ -1463,6 +1553,7 @@ const noteInterrupt = async (
 	type InterruptConfirmation =
 		| { state: "confirmed"; marker: SubagentInterruptMarker }
 		| { state: "stale"; marker: SubagentInterruptMarker }
+		| { state: "superseded"; marker: SubagentInterruptMarker; runStatus: RunStatus }
 		| { state: "unconfirmed"; aborted: boolean };
 
 	/**
@@ -1472,6 +1563,14 @@ const noteInterrupt = async (
 	 * baseline a second interrupt would be "confirmed" instantly by the first
 	 * interrupt's marker, while the child kept streaming — the tool would then
 	 * report a stop that never happened.
+	 *
+	 * Confirmation comes from the marker's freshness (`markerIsNewerThan`), NOT
+	 * from `noteInterrupt`'s return value: the watcher folds the same marker on its
+	 * own tick, and if it wins the race `noteInterrupt` reports "no change" for an
+	 * interrupt that did land. Folding the marker here is still attempted, so a run
+	 * that is not already terminal is recorded; the boolean is simply not evidence
+	 * of staleness. A run that already ended refuses the fold, and is reported as
+	 * `superseded` rather than confirmed — the status stands.
 	 */
 	const awaitInterruptMarker = async (
 		run: RunRecord,
@@ -1486,8 +1585,16 @@ const noteInterrupt = async (
 		for (;;) {
 			const marker = await readInterruptMarker(getInterruptFilePath(run.runDir), run.id);
 			if (marker.ok) {
-				const folded = await noteInterrupt(run, marker.marker, since);
-				if (folded) return { state: "confirmed", marker: marker.marker };
+				if (markerIsNewerThan(marker.marker, since)) {
+					await noteInterrupt(run, marker.marker, since);
+					// A newer marker normally confirms — whether or not THIS call folded it,
+					// since the watcher may have. `noteInterrupt` refuses a run that is already
+					// terminal (completed/failed/cancelled), and then the marker is real while
+					// the status stands: claiming "confirmed" would assert a stop that is not
+					// the run's state. Report the supersession instead.
+					if (run.status === "interrupted") return { state: "confirmed", marker: marker.marker };
+					return { state: "superseded", marker: marker.marker, runStatus: run.status };
+				}
 				stale = marker.marker;
 			}
 			if (Date.now() >= deadline) return stale ? { state: "stale", marker: stale } : { state: "unconfirmed", aborted: false };
@@ -1800,12 +1907,19 @@ const noteInterrupt = async (
 		stopWidgetTimer();
 		clearWidget();
 		statusStates.clear();
+		// Per-session scratch: a reload builds a fresh closure, so this is belt and
+		// braces, but it keeps the one piece of in-flight resume state from outliving
+		// the session if the closure is ever reused.
+		reservedResumes.clear();
 		statusUi = undefined;
 		for (const run of runs.values()) {
 			if (killOnShutdown && holdsChild(run.status)) {
 				run.status = "cancelled";
 				run.finishedAt = Date.now();
 				await killTmuxSession(run);
+				// Kill first, then read: the child has stopped writing, but the tokens it
+				// already burned are still its own. Same reason as subagent_cancel.
+				await captureRunUsage(run);
 				continue;
 			}
 			// An interrupted child is reaped here even though holdsChild says it is
@@ -2071,6 +2185,10 @@ const noteInterrupt = async (
 				await pi.exec("tmux", tmuxArgs("kill-session", "-t", run.tmuxSession)).catch(() => undefined);
 				run.status = "cancelled";
 				run.finishedAt = Date.now();
+				// A cancelled run is very often one that had already spent real tokens;
+				// read them before the terminal status is persisted, not never. The
+				// session file survives the tmux kill, so this is still readable.
+				await captureRunUsage(run);
 				await persist();
 				refreshStatusWidget();
 				void drainQueue();
@@ -2160,7 +2278,12 @@ const noteInterrupt = async (
 								"The child aborted its current turn and is idle at its prompt; its session file is intact.",
 								`Next: attach (${run.attachCommand}) to steer it, or subagent_cancel to stop it. It still holds its concurrency slot until then.`,
 							]
-						: outcome.state === "stale"
+						: outcome.state === "superseded"
+							? [
+									`Escape sent to subagent ${id}, but the run had already reached ${outcome.runStatus} when the abort was reported, so the interrupt did not change its status.`,
+									`The run is ${outcome.runStatus}; inspect it with subagent_status({ id: "${id}" }).`,
+								]
+							: outcome.state === "stale"
 							? [
 									`Escape sent to subagent ${id}, but no new interrupt was reported: the only marker present is the one from the previous interrupt${outcome.marker.interruptedAt ? ` at ${new Date(outcome.marker.interruptedAt).toISOString()}` : ""}.`,
 									"The child either was idle (Escape does nothing then) or has not aborted yet. Attach to see, and use subagent_cancel to stop it.",
@@ -2230,63 +2353,81 @@ const noteInterrupt = async (
 					);
 				}
 
-				const id = randomUUID();
-				const runDir = path.join(sessionRunsDir, id);
-				const tmuxSession = tmuxSessionName(id);
-				const run: RunRecord = {
-					...previous,
-					id,
-					// The follow-up becomes this attempt's task; the original stays on the
-					// ancestor record, which `resumeOf` points at. Appending instead
-					// would grow the field without bound across attempts.
-					task: message,
-					tmuxSession,
-					tmuxTarget: `${tmuxSession}:0.0`,
-					attachCommand: "",
-					captureCommand: "",
-					killCommand: "",
-					runDir,
-					resultPath: path.join(runDir, "result.json"),
-					status: "queued",
-					createdAt: Date.now(),
-					startedAt: undefined,
-					finishedAt: undefined,
-					pane: undefined,
-					output: undefined,
-					error: undefined,
-					usage: undefined,
-					activity: undefined,
-					// Interrupt history belongs to the run that owns it: a fresh child was
-					// never sent an Escape, and inheriting the counters would make
-					// subagent_status report an interrupt for an attempt that had none.
-					interrupts: undefined,
-					interruptedAt: undefined,
-					interruptRequestedAt: undefined,
-					mode: "resume",
-					resumeOf: previous.id,
-					attempt: (previous.attempt ?? 1) + 1,
-					sessionFile,
-				};
-				updateTmuxCommands(run);
+				// The scan above only sees runs that have ALREADY registered. The work
+				// below (mkdir, countSessionLines) awaits before the new run lands, so a
+				// second resume fired without awaiting this one would pass the same scan.
+				// Claim the transcript synchronously — no await between the check and the
+				// add — and release it once the run is registered, where the scan sees it.
+				if (reservedResumes.has(sessionFile)) {
+					throw new Error(
+						`Another resume of session file ${sessionFile} is already starting. ` +
+							`Wait for it to launch, then resume it instead of ${previous.id}.`,
+					);
+				}
+				reservedResumes.add(sessionFile);
+				try {
+					const id = randomUUID();
+					const runDir = path.join(sessionRunsDir, id);
+					const tmuxSession = tmuxSessionName(id);
+					const run: RunRecord = {
+						...previous,
+						id,
+						// The follow-up becomes this attempt's task; the original stays on the
+						// ancestor record, which `resumeOf` points at. Appending instead
+						// would grow the field without bound across attempts.
+						task: message,
+						tmuxSession,
+						tmuxTarget: `${tmuxSession}:0.0`,
+						attachCommand: "",
+						captureCommand: "",
+						killCommand: "",
+						runDir,
+						resultPath: path.join(runDir, "result.json"),
+						status: "queued",
+						createdAt: Date.now(),
+						startedAt: undefined,
+						finishedAt: undefined,
+						pane: undefined,
+						output: undefined,
+						error: undefined,
+						usage: undefined,
+						activity: undefined,
+						// Interrupt history belongs to the run that owns it: a fresh child was
+						// never sent an Escape, and inheriting the counters would make
+						// subagent_status report an interrupt for an attempt that had none.
+						interrupts: undefined,
+						interruptedAt: undefined,
+						interruptRequestedAt: undefined,
+						mode: "resume",
+						resumeOf: previous.id,
+						attempt: (previous.attempt ?? 1) + 1,
+						sessionFile,
+					};
+					updateTmuxCommands(run);
 
-				await mkdir(runDir, { recursive: true, mode: 0o700 });
-				await mkdir(path.join(runDir, "session"), { recursive: true, mode: 0o700 });
-				await writeFile(path.join(runDir, "task.md"), `# Delegated task\n\n${message}\n`, {
-					encoding: "utf8",
-					mode: 0o600,
-				});
-				// Only the child's new turns are charged to this attempt.
-				run.usageFromLine = await countSessionLines(sessionFile);
+					await mkdir(runDir, { recursive: true, mode: 0o700 });
+					await mkdir(path.join(runDir, "session"), { recursive: true, mode: 0o700 });
+					await writeFile(path.join(runDir, "task.md"), `# Delegated task\n\n${message}\n`, {
+						encoding: "utf8",
+						mode: 0o600,
+					});
+					// Only the child's new turns are charged to this attempt.
+					run.usageFromLine = await countSessionLines(sessionFile);
 
-				await startRun(run);
+					await startRun(run);
 
-				const lines = [
-					`Resumed subagent ${previous.id} as ${id} (attempt ${run.attempt}).`,
-					`Follow-up: ${message.split("\n", 1)[0] ?? message}`,
-					`Session: ${sessionFile}`,
-					`Attach: ${run.attachCommand}`,
-				];
-				return { content: [{ type: "text", text: lines.join("\n") }], details: run };
+					const lines = [
+						`Resumed subagent ${previous.id} as ${id} (attempt ${run.attempt}).`,
+						`Follow-up: ${message.split("\n", 1)[0] ?? message}`,
+						`Session: ${sessionFile}`,
+						`Attach: ${run.attachCommand}`,
+					];
+					return { content: [{ type: "text", text: lines.join("\n") }], details: run };
+				} finally {
+					// `startRun` has registered the run, so the ordinary scan sees it now;
+					// the claim has done its job either way.
+					reservedResumes.delete(sessionFile);
+				}
 			},
 		},
 
@@ -2408,6 +2549,7 @@ export const __test__ = {
 	holdsChild,
 	isMissingTmuxTarget,
 	isSameOrDescendant,
+	markerIsNewerThan,
 	isTerminal,
 	listRow,
 	observationFromRead,
