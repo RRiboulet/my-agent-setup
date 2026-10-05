@@ -3,6 +3,32 @@ name: native-web-search
 description: "Trigger native web search. Use when you need quick internet research with concise summaries and full source URLs."
 ---
 
+<!-- VENDORED, NOT OURS.
+     native-web-search/SKILL.md — Copyright (c) mitsuhiko and contributors
+     https://github.com/mitsuhiko/agent-stuff (skills/native-web-search/SKILL.md)
+     Licensed under the Apache License, Version 2.0.
+     Upstream: mitsupi v1.6.0, commit 0865c84.
+
+     Three LOCAL PATCH hunks, all of them OpenRouter support, since this machine
+     authenticates through OpenRouter and not through either upstream provider:
+       1. `openrouter` added as a third --provider value, invoked through
+          OpenRouter's `web` plugin, with `openai/gpt-4o-mini:online` as its
+          default model id.
+       2. A provider-precedence resolver: the --provider flag, then
+          `defaultProvider` in settings.json, then the first credential present
+          in auth.json (openrouter, openai-codex, anthropic). Upstream required
+          an explicit provider.
+       3. Notes that OpenRouter only actually searches with a web-enabled model
+          id (`:online` suffix, Perplexity Sonar); any other id silently loses
+          web access — a failure that looks like a working call returning nothing.
+     Plus one behaviour note that is ours and not a patch: if the `web_search`
+     tool is available in the session, prefer it and treat this skill as the
+     manual fallback.
+
+     Verified against upstream 0865c84 on 2026-10-05: every function upstream
+     defines is still defined here, and the three added are `runOpenRouterSearch`,
+     `defaultModelId` and `defaultBaseUrl`. Nothing upstream was dropped. -->
+
 # Native Web Search
 
 Use this skill to run a **fast model with native web search enabled** and get a concise research summary with explicit full URLs.

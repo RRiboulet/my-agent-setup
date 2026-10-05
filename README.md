@@ -11,7 +11,7 @@ pi install --local git:github.com/RRiboulet/my-agent-setup  # pin for one projec
 ```
 
 Verified on a clean agent dir and an empty project: both install the five
-extensions and the `native-web-search` skill.
+extensions and the three skills.
 
 The one non-obvious part is that this needs the `pi` manifest in
 `package.json`. A git-sourced package is discovered either from that manifest or
@@ -60,8 +60,8 @@ inactive. Installed packages are loaded regardless of project trust.
 | `.pi/extensions/todos.ts` | `/todos` TUI and the `todo` tool |
 | `.pi/extensions/answer.ts` | `/answer`: extract questions from the last response and answer them in a focused TUI |
 | `.pi/extensions/session-breakdown.ts` | `/session-breakdown`: sessions, messages, tokens and cost per day over 7/30/90, model breakdown, contributions-style calendar. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with four local patches — see below |
-| `.pi/extensions/native-web-search.ts` | Native web search tool (ships with `.pi/skills/native-web-search/`) |
-| `.pi/skills/native-web-search/` | Skill for the above — the two must travel together |
+| `.pi/extensions/native-web-search.ts` | Native web search tool — **ours**, not upstream: it registers the `web_search` tool. Ships with `.pi/skills/native-web-search/`, which *is* vendored |
+| `.pi/skills/native-web-search/` | Script + docs for the above. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/native-web-search/`, with three local OpenRouter patches. The two must travel together |
 | `.pi/skills/commit/` | Conventional Commits subjects, and the branch-per-change rule from `AGENTS.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/commit/SKILL.md`, with two local adaptations |
 | `.pi/skills/update-changelog/` | Writes `CHANGELOG.md`'s `Unreleased` section from the commits since the last tag. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/update-changelog/SKILL.md`, with one local adaptation |
 | `pi-session.sh` | Launch pi under tmux with an OpenRouter model |
