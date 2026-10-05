@@ -66,6 +66,12 @@ Maintenance:
   `mkdir -p ""`, which fails under `set -e` and aborts the rest of postCreate.
   Defaulting to the same `/home/vscode/.pi/gh` makes the script self-sufficient
   and cannot change behaviour when the `ENV` is present.
+- **The `todo` tool now asks for a symbol or a file name instead of a
+  `file:line` number.** Line references drift as the code moves, and the current
+  todo list demonstrated it: several had gone stale after a single refactor. The
+  tool description tells the model to name the file or the symbol. This is
+  advice, not a constraint — a line number is still allowed when it is the
+  clearest available locator.
 
 ## v1.1.1 — 2026-10-05
 
