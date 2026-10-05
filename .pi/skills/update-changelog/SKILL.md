@@ -3,8 +3,15 @@ name: update-changelog
 description: "Read this skill before updating changelogs"
 ---
 
-<!-- Vendored from https://github.com/mitsuhiko/agent-stuff (skills/update-changelog/SKILL.md)
-     Upstream commit 0865c84. LOCAL ADAPTATION, marked below. -->
+<!-- VENDORED, NOT OURS.
+     update-changelog/SKILL.md — Copyright (c) mitsuhiko and contributors
+     https://github.com/mitsuhiko/agent-stuff (skills/update-changelog/SKILL.md)
+     Licensed under the Apache License, Version 2.0.
+     Upstream: mitsupi v1.6.0, commit 0865c84.
+
+     One LOCAL ADAPTATION below, marked in place. It covers this repo's section
+     headings, its significance filter, and the commit range that matches a
+     branch-per-change workflow. -->
 
 Update the repository changelog with changes between the last release and the current version that are not yet incorporated. If `CHANGELOG.md` does not exist, use `CHANGELOG` instead.
 
@@ -21,9 +28,17 @@ Use the following commands to gather commit information:
 # Get the baseline version (if not provided)
 git describe --tags --abbrev=0
 
-# Get all commits since the baseline version
-git log <baseline-version>..HEAD
+# LOCAL ADAPTATION: the range depends on where you are. Upstream's
+# `<baseline-version>..HEAD` is only right on `main` at release time; on a
+# feature branch it re-reads every commit already merged since the tag, and
+# after a rebase those already-changelogged commits come back under new hashes.
+git log <baseline-version>..main   # at release time, on main (AGENTS.md step 1)
+git log main..HEAD                 # on a feature branch: this branch's own work
 ```
+
+On this repo today `v1.0.0..HEAD` returns all 30 unreleased commits, while
+`main..HEAD` on a working branch returns exactly the commits that branch
+contributed — which is the change the changelog entry is about.
 
 ### 3. Update the changelog
 Read the existing changelog file (`CHANGELOG.md`, or `CHANGELOG` if missing) and check if there are changes not yet incorporated, then add them. Always add them to the "Unreleased" section only. If there is none yet, add it at the top in the same style as the existing changelog (for example, `## Unreleased` vs `## [Unreleased]`).
@@ -32,7 +47,7 @@ Read the existing changelog file (`CHANGELOG.md`, or `CHANGELOG` if missing) and
 
 ### Content Guidelines
 * Focus on **notable changes** that affect users (features, fixes, breaking changes)
-* Mention pull requests (`#NUMBER`) when available, but not raw commit hashes
+* Mention pull requests (`#NUMBER`) when available, but not raw commit hashes (never fires here — see "No pull requests to cite")
 * Ignore insignificant changes (typo fixes, internal refactoring, minor documentation updates)
 * Group related changes together when appropriate
 * Order entries by importance: breaking changes first, then features, then fixes
@@ -88,13 +103,24 @@ The example above is upstream's (CPython). This repository's changelog is not a
 flat bullet list, and copying that shape into it would be wrong. What is
 actually here:
 
-- Sections are `Added:` / `Fixed:` / `Maintenance:` (and one-off headings like
-  `Pruned for a first iteration, deliberately`), each a bolded lead-in.
+- Sections are plain-text headings, never bold: `Added:`, `Fixed:`,
+  `Maintenance:`, `Features:`, `Fixes:`, plus prose headings that name where
+  the work came from (`Pruned for a first iteration, deliberately (all removed,
+  not deprecated):`, `Fixes to the handoff work, from an adversarial review:`).
+  Reuse one that exists before inventing one. It is the *entries* that are
+  bolded, e.g. `**\`/session-breakdown\`**` — not the headings.
 - Entries explain **why**, at length. A `Fixed:` bullet here routinely runs ten
   lines and names the failure it prevents. That is deliberate: this is a
   personal repo where the reasoning is the point.
 - `AGENTS.md` is the release procedure — changelog, commit, tag, push. This
   skill only covers the first of those steps.
+
+- The significance filter above ("ignore internal refactoring, minor
+  documentation updates") does **not** apply here, and following it would lose
+  most of this changelog. Its entries are largely docs fixes, line-ending
+  repairs, test-harness churn and refactors, each recorded with the reasoning —
+  this is a personal repo where the reasoning is the deliverable. Write them
+  up.
 
 So: read the surrounding entries before writing, and match them.
 

@@ -30,7 +30,11 @@ each entry point explicitly:
     ".pi/extensions/todos.ts",
     ".pi/extensions/subagent/index.ts"   // the rest of that dir is its internals
   ],
-  "skills": [".pi/skills/native-web-search"]
+  "skills": [
+    ".pi/skills/commit",
+    ".pi/skills/native-web-search",
+    ".pi/skills/update-changelog"
+  ]
 }
 ```
 
@@ -58,6 +62,8 @@ inactive. Installed packages are loaded regardless of project trust.
 | `.pi/extensions/session-breakdown.ts` | `/session-breakdown`: sessions, messages, tokens and cost per day over 7/30/90, model breakdown, contributions-style calendar. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with four local patches — see below |
 | `.pi/extensions/native-web-search.ts` | Native web search tool (ships with `.pi/skills/native-web-search/`) |
 | `.pi/skills/native-web-search/` | Skill for the above — the two must travel together |
+| `.pi/skills/commit/` | Conventional Commits subjects, and the branch-per-change rule from `AGENTS.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/commit/SKILL.md`, with two local adaptations |
+| `.pi/skills/update-changelog/` | Writes `CHANGELOG.md`'s `Unreleased` section from the commits since the last tag. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/update-changelog/SKILL.md`, with one local adaptation |
 | `pi-session.sh` | Launch pi under tmux with an OpenRouter model |
 | `MODELS.txt` | Model ids this workspace runs with |
 
