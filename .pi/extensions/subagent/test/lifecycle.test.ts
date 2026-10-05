@@ -1088,6 +1088,37 @@ test("subagent_resume refuses a second concurrent resume of the same transcript"
 	});
 });
 
+test("two resumes fired in parallel cannot both launch on one transcript", async () => {
+	// The guard scans `runs`, but a resume does I/O (`mkdir`, `countSessionLines`)
+	// before its run lands there, so two calls fired without awaiting each other
+	// both passed it and two pi processes appended to one JSONL. The synchronous
+	// claim on the session file is what stops the second.
+	await withTempAgentDir(async (agentDir) => {
+		const harness = await createHarness({ sessionManager: liveBranchSessionManager(agentDir) as never });
+		try {
+			const first = (await harness.call("subagent", { task: "forked work", handoff: "fork" })).details as unknown as RunRecord;
+			await completeRun(harness, first);
+
+			const results = await Promise.allSettled([
+				harness.call("subagent_resume", { id: first.id, message: "one" }),
+				harness.call("subagent_resume", { id: first.id, message: "two" }),
+			]);
+			const fulfilled = results.filter((r) => r.status === "fulfilled");
+			const rejected = results.filter((r): r is PromiseRejectedResult => r.status === "rejected");
+			assert.equal(fulfilled.length, 1, "exactly one resume may launch");
+			assert.equal(rejected.length, 1, "the second must be refused, not launched");
+			assert.match(String(rejected[0].reason), /already starting|already using this session file/);
+
+			const appending = (await harness.readRuns()).filter(
+				(run) => run.sessionFile === first.sessionFile && ["queued", "running", "interrupted"].includes(run.status),
+			);
+			assert.equal(appending.length, 1, "one live appender on the transcript");
+		} finally {
+			await harness.shutdown();
+		}
+	});
+});
+
 test("the single-run status path always returns the output, finished or not", async () => {
 	// With no blocking wait this is the only way to collect a result, so the
 	// obvious call — subagent_status({ id }) — has to be the right one, with

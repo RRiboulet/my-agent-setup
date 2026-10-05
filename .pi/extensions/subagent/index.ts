@@ -1086,6 +1086,16 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	const toolStallAfterMs = readIntEnv("PI_SUBAGENT_TOOL_STALL_SECONDS", DEFAULT_TOOL_STALL_SECONDS) * 1000;
 
 	const runs = new Map<string, RunRecord>();
+	/**
+	 * Session files a resume has claimed but not yet registered a run for.
+	 *
+	 * A resume does I/O (`mkdir`, `countSessionLines`) between the "is another
+	 * resume in flight" scan and the new run landing in `runs`, so two calls fired
+	 * without awaiting each other could both pass that scan. The claim is added and
+	 * removed around that window; once the run is registered the ordinary scan sees
+	 * it.
+	 */
+	const reservedResumes = new Set<string>();
 	const timers = new Map<string, ReturnType<typeof setTimeout>>();
 	// The last activity string written to runs.json, so a chatty child does not
 	// rewrite the index when nothing visible changed.
@@ -2327,63 +2337,81 @@ const noteInterrupt = async (
 					);
 				}
 
-				const id = randomUUID();
-				const runDir = path.join(sessionRunsDir, id);
-				const tmuxSession = tmuxSessionName(id);
-				const run: RunRecord = {
-					...previous,
-					id,
-					// The follow-up becomes this attempt's task; the original stays on the
-					// ancestor record, which `resumeOf` points at. Appending instead
-					// would grow the field without bound across attempts.
-					task: message,
-					tmuxSession,
-					tmuxTarget: `${tmuxSession}:0.0`,
-					attachCommand: "",
-					captureCommand: "",
-					killCommand: "",
-					runDir,
-					resultPath: path.join(runDir, "result.json"),
-					status: "queued",
-					createdAt: Date.now(),
-					startedAt: undefined,
-					finishedAt: undefined,
-					pane: undefined,
-					output: undefined,
-					error: undefined,
-					usage: undefined,
-					activity: undefined,
-					// Interrupt history belongs to the run that owns it: a fresh child was
-					// never sent an Escape, and inheriting the counters would make
-					// subagent_status report an interrupt for an attempt that had none.
-					interrupts: undefined,
-					interruptedAt: undefined,
-					interruptRequestedAt: undefined,
-					mode: "resume",
-					resumeOf: previous.id,
-					attempt: (previous.attempt ?? 1) + 1,
-					sessionFile,
-				};
-				updateTmuxCommands(run);
+				// The scan above only sees runs that have ALREADY registered. The work
+				// below (mkdir, countSessionLines) awaits before the new run lands, so a
+				// second resume fired without awaiting this one would pass the same scan.
+				// Claim the transcript synchronously — no await between the check and the
+				// add — and release it once the run is registered, where the scan sees it.
+				if (reservedResumes.has(sessionFile)) {
+					throw new Error(
+						`Another resume of session file ${sessionFile} is already starting. ` +
+							`Wait for it to launch, then resume it instead of ${previous.id}.`,
+					);
+				}
+				reservedResumes.add(sessionFile);
+				try {
+					const id = randomUUID();
+					const runDir = path.join(sessionRunsDir, id);
+					const tmuxSession = tmuxSessionName(id);
+					const run: RunRecord = {
+						...previous,
+						id,
+						// The follow-up becomes this attempt's task; the original stays on the
+						// ancestor record, which `resumeOf` points at. Appending instead
+						// would grow the field without bound across attempts.
+						task: message,
+						tmuxSession,
+						tmuxTarget: `${tmuxSession}:0.0`,
+						attachCommand: "",
+						captureCommand: "",
+						killCommand: "",
+						runDir,
+						resultPath: path.join(runDir, "result.json"),
+						status: "queued",
+						createdAt: Date.now(),
+						startedAt: undefined,
+						finishedAt: undefined,
+						pane: undefined,
+						output: undefined,
+						error: undefined,
+						usage: undefined,
+						activity: undefined,
+						// Interrupt history belongs to the run that owns it: a fresh child was
+						// never sent an Escape, and inheriting the counters would make
+						// subagent_status report an interrupt for an attempt that had none.
+						interrupts: undefined,
+						interruptedAt: undefined,
+						interruptRequestedAt: undefined,
+						mode: "resume",
+						resumeOf: previous.id,
+						attempt: (previous.attempt ?? 1) + 1,
+						sessionFile,
+					};
+					updateTmuxCommands(run);
 
-				await mkdir(runDir, { recursive: true, mode: 0o700 });
-				await mkdir(path.join(runDir, "session"), { recursive: true, mode: 0o700 });
-				await writeFile(path.join(runDir, "task.md"), `# Delegated task\n\n${message}\n`, {
-					encoding: "utf8",
-					mode: 0o600,
-				});
-				// Only the child's new turns are charged to this attempt.
-				run.usageFromLine = await countSessionLines(sessionFile);
+					await mkdir(runDir, { recursive: true, mode: 0o700 });
+					await mkdir(path.join(runDir, "session"), { recursive: true, mode: 0o700 });
+					await writeFile(path.join(runDir, "task.md"), `# Delegated task\n\n${message}\n`, {
+						encoding: "utf8",
+						mode: 0o600,
+					});
+					// Only the child's new turns are charged to this attempt.
+					run.usageFromLine = await countSessionLines(sessionFile);
 
-				await startRun(run);
+					await startRun(run);
 
-				const lines = [
-					`Resumed subagent ${previous.id} as ${id} (attempt ${run.attempt}).`,
-					`Follow-up: ${message.split("\n", 1)[0] ?? message}`,
-					`Session: ${sessionFile}`,
-					`Attach: ${run.attachCommand}`,
-				];
-				return { content: [{ type: "text", text: lines.join("\n") }], details: run };
+					const lines = [
+						`Resumed subagent ${previous.id} as ${id} (attempt ${run.attempt}).`,
+						`Follow-up: ${message.split("\n", 1)[0] ?? message}`,
+						`Session: ${sessionFile}`,
+						`Attach: ${run.attachCommand}`,
+					];
+					return { content: [{ type: "text", text: lines.join("\n") }], details: run };
+				} finally {
+					// `startRun` has registered the run, so the ordinary scan sees it now;
+					// the claim has done its job either way.
+					reservedResumes.delete(sessionFile);
+				}
 			},
 		},
 

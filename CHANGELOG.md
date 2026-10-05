@@ -37,6 +37,14 @@ Fixed:
   recorded as failed. Deleting the re-read left the suite green, so the test now
   drives the window directly by writing the result while the pane probe is in
   flight — verified to fail when the re-read is removed.
+- **Two `subagent_resume` calls fired in parallel can no longer open two pi
+  processes on one transcript.** A finished run stays terminal forever, so the
+  "is another resume in flight" scan over `runs` was the only guard — and a
+  resume does filesystem I/O (`mkdir`, `countSessionLines`) between that scan and
+  the new run being registered, so two calls that did not await each other both
+  passed it and appended to the same JSONL, interleaving branches and scrambling
+  usage baselines. The transcript is now claimed synchronously, with no `await`
+  between the check and the claim, and released once the run is registered.
 
 ## v1.1.1 — 2026-10-05
 
