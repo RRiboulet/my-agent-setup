@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.1.1 — 2026-10-05
+
 Fixed:
 
 - **The README's `v1.0.0` pinning caveat was backwards.** It said pinning to
