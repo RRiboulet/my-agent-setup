@@ -15,8 +15,11 @@ Fixed:
   had not happened. Confirmation now rests on the marker's freshness relative to
   the baseline captured before the Escape, never on whether that call happened to
   change the record. The run was always correctly `interrupted`; only the answer
-  was wrong. Repro without the fix: `subagent_interrupt` against a child whose
-  marker is folded by the watcher before the tool reads it.
+  was wrong. A run that had already reached a terminal status when the abort was
+  reported is now answered as `superseded` rather than confirmed — the marker is
+  real, but the run is over and claiming a stop would assert a state it is not
+  in. Repro without the fix: `subagent_interrupt` against a child whose marker is
+  folded by the watcher before the tool reads it.
 - **Cancelled and tmux-failed subagent runs now report the tokens and cost they
   had already burned.** Only `finalizeRun` read the child's session usage, so a
   run stopped by `subagent_cancel`, or by a tmux-level failure, wrote

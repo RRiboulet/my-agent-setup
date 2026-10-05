@@ -1534,6 +1534,7 @@ const noteInterrupt = async (
 	type InterruptConfirmation =
 		| { state: "confirmed"; marker: SubagentInterruptMarker }
 		| { state: "stale"; marker: SubagentInterruptMarker }
+		| { state: "superseded"; marker: SubagentInterruptMarker; runStatus: RunStatus }
 		| { state: "unconfirmed"; aborted: boolean };
 
 	/**
@@ -1547,8 +1548,10 @@ const noteInterrupt = async (
 	 * Confirmation comes from the marker's freshness (`markerIsNewerThan`), NOT
 	 * from `noteInterrupt`'s return value: the watcher folds the same marker on its
 	 * own tick, and if it wins the race `noteInterrupt` reports "no change" for an
-	 * interrupt that did land. Folding the marker here is still done, so the run is
-	 * recorded either way; the boolean is simply not evidence of staleness.
+	 * interrupt that did land. Folding the marker here is still attempted, so a run
+	 * that is not already terminal is recorded; the boolean is simply not evidence
+	 * of staleness. A run that already ended refuses the fold, and is reported as
+	 * `superseded` rather than confirmed — the status stands.
 	 */
 	const awaitInterruptMarker = async (
 		run: RunRecord,
@@ -1565,7 +1568,13 @@ const noteInterrupt = async (
 			if (marker.ok) {
 				if (markerIsNewerThan(marker.marker, since)) {
 					await noteInterrupt(run, marker.marker, since);
-					return { state: "confirmed", marker: marker.marker };
+					// A newer marker normally confirms — whether or not THIS call folded it,
+					// since the watcher may have. `noteInterrupt` refuses a run that is already
+					// terminal (completed/failed/cancelled), and then the marker is real while
+					// the status stands: claiming "confirmed" would assert a stop that is not
+					// the run's state. Report the supersession instead.
+					if (run.status === "interrupted") return { state: "confirmed", marker: marker.marker };
+					return { state: "superseded", marker: marker.marker, runStatus: run.status };
 				}
 				stale = marker.marker;
 			}
@@ -2243,7 +2252,12 @@ const noteInterrupt = async (
 								"The child aborted its current turn and is idle at its prompt; its session file is intact.",
 								`Next: attach (${run.attachCommand}) to steer it, or subagent_cancel to stop it. It still holds its concurrency slot until then.`,
 							]
-						: outcome.state === "stale"
+						: outcome.state === "superseded"
+							? [
+									`Escape sent to subagent ${id}, but the run had already reached ${outcome.runStatus} when the abort was reported, so the interrupt did not change its status.`,
+									`The run is ${outcome.runStatus}; inspect it with subagent_status({ id: "${id}" }).`,
+								]
+							: outcome.state === "stale"
 							? [
 									`Escape sent to subagent ${id}, but no new interrupt was reported: the only marker present is the one from the previous interrupt${outcome.marker.interruptedAt ? ` at ${new Date(outcome.marker.interruptedAt).toISOString()}` : ""}.`,
 									"The child either was idle (Escape does nothing then) or has not aborted yet. Attach to see, and use subagent_cancel to stop it.",

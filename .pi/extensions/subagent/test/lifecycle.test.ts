@@ -1309,6 +1309,36 @@ test("an interrupt the watcher folded first is still reported as confirmed", asy
 	);
 });
 
+test("an interrupt whose run already ended is reported as superseded, not confirmed", async () => {
+	// `noteInterrupt` refuses a run that is already terminal, so a newer marker
+	// cannot fold. Claiming "interrupted" would assert a stop that is not the run's
+	// state, and "stale" would blame the previous interrupt; the tool says what
+	// actually happened instead.
+	let lateRace: (() => Promise<void>) | undefined;
+	await withHarness(
+		{
+			interruptConfirmMs: "5000",
+			afterEscapeSent: async () => {
+				await lateRace?.();
+			},
+		},
+		async (h) => {
+			const run = (await h.call("subagent", { task: "ends before the abort lands" })).details as unknown as RunRecord;
+			lateRace = async () => {
+				await h.writeResult(run, { version: 1, status: "completed", output: "already done", finishedAt: Date.now() });
+				await waitFor(async () => (await h.readRuns())[0].status === "completed");
+				// A marker newer than the baseline, for a run that is already over.
+				await h.writeInterrupt(run, { interrupts: 1, interruptedAt: Date.now() });
+			};
+
+			const outcome = await h.call("subagent_interrupt", { id: run.id });
+			assert.match(outcome.text, /already reached completed/, outcome.text);
+			assert.doesNotMatch(outcome.text, /Subagent .* interrupted\./, outcome.text);
+			assert.equal((await h.readRuns())[0].status, "completed", "a terminal status is not resurrected by a later marker");
+		},
+	);
+});
+
 test("a stale marker cannot confirm a second interrupt", async () => {
 	// Regression: the marker file is never deleted, so a second interrupt used to
 	// read the FIRST one back within a millisecond and report "interrupted" while

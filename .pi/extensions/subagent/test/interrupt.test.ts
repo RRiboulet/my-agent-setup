@@ -97,6 +97,7 @@ test("a marker confirms only when it is newer than the escape baseline", () => {
 	});
 	const baseline = { interrupts: 1, at: 100 };
 	assert.equal(__test__.markerIsNewerThan(at(2, 300), baseline), true, "a higher count is newer");
+	assert.equal(__test__.markerIsNewerThan(at(2, 50), baseline), true, "a higher count is newer even when the clock went backwards");
 	assert.equal(__test__.markerIsNewerThan(at(1, 200), baseline), true, "a later clock alone is newer");
 	assert.equal(__test__.markerIsNewerThan(at(1, 100), baseline), false, "the same marker is not newer");
 	assert.equal(__test__.markerIsNewerThan(at(0, 100), baseline), false, "an older count is not newer");
