@@ -1,5 +1,22 @@
 # Agent Notes
 
+## Branches
+
+**Do not work on `main`.** Every change gets its own branch off `main`, and
+`main` only ever moves to take a release (see "Releases"). Branch names name the
+change, not the session: `session-breakdown-coverage`, `subagent-test-closure`.
+
+The reason is that `CHANGELOG.md`'s `Unreleased` section is shared ground. Two
+changes in flight both add a `Maintenance` bullet there, so parallel branches
+conflict on merge even when their code does not. A branch keeps one change's
+tests, files and changelog entry together, and makes each one independently
+verifiable: check it out in a worktree and run the suite before assuming it
+stands alone.
+
+When two branches are ready at once, merge or rebase in an order you choose
+yourself — `main` is not a priority queue, and neither branch is urgent over
+the other.
+
 ## Releases
 
 1. Update `CHANGELOG.md` for the release.
