@@ -101,6 +101,19 @@ Maintenance:
   (**vendored**) from `native-web-search.ts` (**ours** — upstream has no such
   extension).
 
+- **Work happens on `dev`; `main` takes releases only.** Feature branches start
+  from `dev`, merge into `dev` by pull request, and `dev` merges into `main` only
+  when a release is cut. `main` was previously both the integration branch and the
+  release branch, which meant a half-finished change was always one merge away
+  from a tag.
+- **"Check your base before you commit"** (`AGENTS.md`, and the first step of the
+  `commit` skill's local adaptation): `git log --oneline dev..HEAD` must list only
+  this change's commits. Branching off the wrong parent happened three times in
+  one session, and each time it shipped a pull request carrying another branch's
+  commit — caught in review every time rather than by the author, which is the
+  part worth fixing. A release merge is the one that is not a squash, so `main`'s
+  history is the real one.
+
 - **`gh` is baked into the devcontainer** (`.devcontainer/Dockerfile`): branches
   could not reach GitHub from inside the container at all — no `gh`, no
   credential, and an HTTPS remote that could not authenticate. `GH_CONFIG_DIR`

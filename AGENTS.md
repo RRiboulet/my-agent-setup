@@ -2,21 +2,51 @@
 
 ## Branches
 
-**Do not work on `main`.** Every change gets its own branch off `main`, and
-`main` moves only two ways: a merged pull request (see "Pull requests") and the
-release commit itself (see "Releases"). Nothing is committed directly to it. Branch names name the
-change, not the session: `session-breakdown-coverage`, `subagent-test-closure`.
+Two long-lived branches, and everything else hangs off them:
 
-The reason is that `CHANGELOG.md`'s `Unreleased` section is shared ground. Two
-changes in flight both add a `Maintenance` bullet there, so parallel branches
-conflict on merge even when their code does not. A branch keeps one change's
-tests, files and changelog entry together, and makes each one independently
-verifiable: check it out in a worktree and run the suite before assuming it
-stands alone.
+| Branch | What lands on it |
+|---|---|
+| `dev` | all work in flight. Every feature branch starts here. |
+| `main` | releases only. Nothing is built here; it is what a tag points at. |
+
+**Start a feature branch from `dev`, never from `main` and never from another
+feature branch.** Branch names name the change, not the session:
+`attribute-native-web-search`, `fix-changelog-unreleased-structure`.
+
+A branch merges into `dev` through a pull request. `dev` merges into `main` at
+release time (see "Releases"). `main` is therefore always releasable, and a
+half-finished change is never one merge away from a tag.
+
+### Check your base before you commit
+
+This is not ceremony. Branching off the wrong parent has happened three times in
+one session, and each time it shipped a pull request carrying another branch's
+commit — caught by a reviewer, not by the author. It is one command:
+
+```bash
+git fetch origin
+git log --oneline dev..HEAD     # must list ONLY this change's commits
+```
+
+Anything in that list that you did not write means the base is wrong. Fix it
+before committing, not after review. `git merge-base --is-ancestor dev HEAD`
+answers the same question with a yes/no.
+
+`git fetch` first is not a detail. The check is only as good as the ref it
+compares against, and a local `dev` left over from before three PRs merged will
+happily list their commits as yours — which is the same false alarm as the bug
+it is meant to catch, and just as likely to be ignored.
+
+### Why a branch per change
+
+`CHANGELOG.md`'s `Unreleased` section is shared ground. Two changes in flight
+both add a `Maintenance` bullet there, so parallel branches conflict on merge
+even when their code does not. A branch keeps one change's tests, files and
+changelog entry together, and makes each one independently verifiable: check it
+out in a worktree and run the suite before assuming it stands alone.
 
 When two branches are ready at once, merge or rebase in an order you choose
-yourself — `main` is not a priority queue, and neither branch is urgent over
-the other.
+yourself — `dev` is not a priority queue.
 
 ## Pull requests
 
@@ -68,9 +98,21 @@ written from PR titles and bodies, not from `git log`.
 
 ## Releases
 
-1. Update `CHANGELOG.md` for the release.
-2. Commit the release changes.
-3. Tag with the version and push commits and tags.
+A release is the only thing that moves `main`. Everything since the last tag
+accumulates on `dev`; `main` is brought forward and tagged.
+
+1. On `dev`, update `CHANGELOG.md`: retitle `## Unreleased` to
+   `## vX.Y.Z — <today's date>`, and add a fresh empty `## Unreleased` above it.
+   Nothing else in the file moves. `.pi/skills/update-changelog/` has the detail,
+   and `changelog-structure.test.ts` enforces the shape.
+2. Commit that, push `dev`, and open a pull request **`dev` → `main`**. This is
+   the one merge that is not a squash: a release wants its history, and `main`'s
+   commits should be the real ones. Use "Rebase and merge" or "Merge commit",
+   never "Squash".
+3. `gh pr merge <n> --merge --delete-branch` — but do **not** let it delete
+   `dev`. Re-create it locally if needed: `git branch dev origin/dev`.
+4. Tag the merge commit on `main` and push the tag:
+   `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
 
 Versions are git tags. This repository is not published to npm — it is
 `private` and consumes no npm packages, but it IS consumable as a pi package:
