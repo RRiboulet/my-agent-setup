@@ -52,9 +52,12 @@ done
 # via GH_CONFIG_DIR (set in the Dockerfile), which is what makes one `gh auth login`
 # last across rebuilds. Creating the directory here is all this needs to do; an
 # unauthenticated gh is still useful (it reads public repos fine).
-mkdir -p /home/vscode/.pi/gh
+# sudo, and after the chown below: on a first-run volume the mount point inherits
+# the image's root ownership, so a plain `mkdir -p` as vscode fails and `set -e`
+# aborts postCreate before the chown that would have fixed it.
 
 sudo chown -R vscode:vscode /home/vscode/.pi "$REPO"
+mkdir -p "$GH_CONFIG_DIR"
 
 if ! gh auth status >/dev/null 2>&1; then
   cat <<'MSG'
@@ -66,9 +69,8 @@ gh is installed but not authenticated. One-time setup, in this terminal:
 It prints a one-time code and a URL: open the URL, paste the code, approve. The
 token lands in the pi-config volume, so it survives a rebuild. Then run
 
-  gh auth setup-git
-
-which teaches git to use gh as its credential helper, so plain `git push` works.
+Nothing else is needed: git's credential helper is configured system-wide in
+the Dockerfile, so plain `git push` works in a fresh container without this.
 MSG
 fi
 

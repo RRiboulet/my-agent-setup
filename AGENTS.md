@@ -3,7 +3,8 @@
 ## Branches
 
 **Do not work on `main`.** Every change gets its own branch off `main`, and
-`main` only ever moves to take a release (see "Releases"). Branch names name the
+`main` moves only two ways: a merged pull request (see "Pull requests") and the
+release commit itself (see "Releases"). Nothing is committed directly to it. Branch names name the
 change, not the session: `session-breakdown-coverage`, `subagent-test-closure`.
 
 The reason is that `CHANGELOG.md`'s `Unreleased` section is shared ground. Two
@@ -29,36 +30,16 @@ One-time setup, run by the human (it needs a browser):
 
 ```bash
 gh auth login --hostname github.com --git-protocol https --web
-gh auth setup-git        # teaches git to use gh as its credential helper
 ```
 
-`gh auth setup-git` is the part that matters for everything else: after it,
-plain `git push` works without any credential in `.git/config`.
+That is the whole setup. `git push` then works with no credential in
+`.git/config`, because the Dockerfile registers gh as git's credential helper
+system-wide — deliberately, not via `gh auth setup-git`, which writes to
+`~/.gitconfig` on the container-local overlay and is discarded on rebuild. The
+token would survive that; the helper would not, and push would break silently.
 
-**The one gotcha:** `GH_CONFIG_DIR` from the Dockerfile only applies to
-containers built *after* that change. In a container that predates it, `gh auth
-login` writes to `~/.config/gh/`, which is ephemeral — so a rebuild silently
-loses the token and `gh auth status` starts failing again. If you authenticate
-and later rebuild, either copy the config into the volume
-(`cp ~/.config/gh/*.yml "$GH_CONFIG_DIR"/`) or export `GH_CONFIG_DIR` before
-logging in. Check *where* `gh auth status` says the token lives: it prints the
-path, and that path is the thing that decides whether the login survives.
-
-The workflow, once that is done:
-
-1. Work on a branch (see "Branches"), committing as the `commit` skill directs.
-2. `git push -u origin <branch>`
-3. `gh pr create --fill` — `--fill` uses the commits for title and body, which
-   this repo's long commit subjects suit. Always say in the body what a reviewer
-   should check and what you verified.
-4. `gh pr merge --squash` (or `--merge` to keep the branch's own commits).
-5. Bring `main` up to date and delete the branch:
-   `git checkout main && git pull --ff-only && git branch -d <branch>`.
-
-Tags are cut from `main`, never from a feature branch.
-
-Never put a token in `.git/config`, in the Dockerfile, or in a file in the repo.
-If authentication is needed mid-session, stop and ask rather than improvising.
+Check *where* the token lives before trusting a login: `gh auth status` prints the
+path, and that path decides whether it survives.
 
 ## Releases
 
