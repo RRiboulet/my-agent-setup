@@ -1633,6 +1633,27 @@ test("kill-on-shutdown cancels an interrupted run", async () => {
 	});
 });
 
+test("kill-on-shutdown records the usage a running child had burned", async () => {
+	// Same bug class as subagent_cancel: shutting down cancels the run, so it must
+	// report what the child spent before it was killed. Exercised on a RUNNING run,
+	// not just an interrupted one.
+	await withTempAgentDir(async () => {
+		await withEnv({ PI_SUBAGENT_KILL_ON_SHUTDOWN: "true" }, async () => {
+			const harness = await createHarness();
+			try {
+				const run = (await harness.call("subagent", { task: "killed from under it" })).details as unknown as RunRecord;
+				await writeChildSession(run, [{ input: 250, output: 50 }]);
+				await harness.shutdown();
+				const killed = (await harness.readRuns())[0];
+				assert.equal(killed.status, "cancelled");
+				assert.equal(killed.usage?.totalTokens, 300, "a shutdown kill is a cancel, and cancels report their usage");
+			} finally {
+				await harness.shutdown();
+			}
+		});
+	});
+});
+
 test("subagent_interrupt refuses a queued run and a finished one", async () => {
 	await withHarness({ maxConcurrent: "1" }, async (h) => {
 		await h.call("subagent", { task: "occupies the only slot" });

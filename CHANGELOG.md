@@ -30,7 +30,8 @@ Fixed:
   name the parent only learns when the child reports a result) is discovered
   under the run dir so the read has something to read. The inherited-context
   baseline is still honoured, so a fork or resume is not charged for what it
-  inherited.
+  inherited. A run cancelled by `kill-on-shutdown` is read the same way, so the
+  shutdown path reports its cost too.
 - **The late-`result.json` re-read in `finalizeMissingChild` is now covered.** It
   guards the window between the watcher's first result read and its pane probe,
   where a child that reports and exits in the same instant would otherwise be

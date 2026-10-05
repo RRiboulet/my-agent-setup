@@ -1907,12 +1907,19 @@ const noteInterrupt = async (
 		stopWidgetTimer();
 		clearWidget();
 		statusStates.clear();
+		// Per-session scratch: a reload builds a fresh closure, so this is belt and
+		// braces, but it keeps the one piece of in-flight resume state from outliving
+		// the session if the closure is ever reused.
+		reservedResumes.clear();
 		statusUi = undefined;
 		for (const run of runs.values()) {
 			if (killOnShutdown && holdsChild(run.status)) {
 				run.status = "cancelled";
 				run.finishedAt = Date.now();
 				await killTmuxSession(run);
+				// Kill first, then read: the child has stopped writing, but the tokens it
+				// already burned are still its own. Same reason as subagent_cancel.
+				await captureRunUsage(run);
 				continue;
 			}
 			// An interrupted child is reaped here even though holdsChild says it is
