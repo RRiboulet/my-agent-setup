@@ -13,13 +13,14 @@ import { existsSync } from "node:fs";
 import * as path from "node:path";
 import { test } from "node:test";
 
-import subagentExtension from "../index.ts";
+import subagentExtension, { __test__ } from "../index.ts";
 import { readActivityFile, getActivityFilePath } from "../activity.ts";
 import {
 	createInterruptMarkerWriter,
 	getInterruptFilePath,
 	readInterruptMarker,
 	validateInterruptMarker,
+	type SubagentInterruptMarker,
 } from "../interrupt.ts";
 import { withEnv, withTempAgentDir } from "./helpers.ts";
 
@@ -82,6 +83,23 @@ test("readInterruptMarker distinguishes a missing file from a broken one", async
 		const good = await readInterruptMarker(filePath, RUN_ID);
 		assert.equal(good.ok && good.marker.interrupts, 1);
 	});
+});
+
+test("a marker confirms only when it is newer than the escape baseline", () => {
+	// The predicate the confirmation poll now trusts. A marker from the PREVIOUS
+	// interrupt is not newer: the marker file is never deleted, so it is read back
+	// on every poll and must not confirm a request that just went out.
+	const at = (interrupts: number, interruptedAt: number): SubagentInterruptMarker => ({
+		version: 1,
+		runId: RUN_ID,
+		interrupts,
+		interruptedAt,
+	});
+	const baseline = { interrupts: 1, at: 100 };
+	assert.equal(__test__.markerIsNewerThan(at(2, 300), baseline), true, "a higher count is newer");
+	assert.equal(__test__.markerIsNewerThan(at(1, 200), baseline), true, "a later clock alone is newer");
+	assert.equal(__test__.markerIsNewerThan(at(1, 100), baseline), false, "the same marker is not newer");
+	assert.equal(__test__.markerIsNewerThan(at(0, 100), baseline), false, "an older count is not newer");
 });
 
 test("the writer counts interrupts and survives a failing write", async () => {

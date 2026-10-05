@@ -719,6 +719,21 @@ function isMissingTmuxTarget(result: { code: number; stdout: string; stderr: str
 	);
 }
 
+/**
+ * Whether an interrupt marker is NEWER than the baseline captured just before an
+ * Escape was sent.
+ *
+ * Confirmation is decided by this, never by whether `noteInterrupt` changed the
+ * record. The watcher folds the same marker on its 500ms tick, so if it gets
+ * there first `noteInterrupt` reports "no change" for an interrupt that
+ * genuinely landed — the tool would then call a real stop "stale". A marker that
+ * is not newer than the baseline is the PREVIOUS interrupt's, because the marker
+ * file is never deleted (local patch 13).
+ */
+function markerIsNewerThan(marker: SubagentInterruptMarker, since: { interrupts: number; at: number }): boolean {
+	return marker.interrupts > since.interrupts || marker.interruptedAt > since.at;
+}
+
 /** The parse error behind an unusable snapshot, if it has one worth showing. */
 function describeSnapshotError(snapshot: StatusSnapshot): string | null {
 	if (snapshot.snapshotState !== "invalid" || !snapshot.snapshotError) return null;
@@ -1472,6 +1487,12 @@ const noteInterrupt = async (
 	 * baseline a second interrupt would be "confirmed" instantly by the first
 	 * interrupt's marker, while the child kept streaming — the tool would then
 	 * report a stop that never happened.
+	 *
+	 * Confirmation comes from the marker's freshness (`markerIsNewerThan`), NOT
+	 * from `noteInterrupt`'s return value: the watcher folds the same marker on its
+	 * own tick, and if it wins the race `noteInterrupt` reports "no change" for an
+	 * interrupt that did land. Folding the marker here is still done, so the run is
+	 * recorded either way; the boolean is simply not evidence of staleness.
 	 */
 	const awaitInterruptMarker = async (
 		run: RunRecord,
@@ -1486,8 +1507,10 @@ const noteInterrupt = async (
 		for (;;) {
 			const marker = await readInterruptMarker(getInterruptFilePath(run.runDir), run.id);
 			if (marker.ok) {
-				const folded = await noteInterrupt(run, marker.marker, since);
-				if (folded) return { state: "confirmed", marker: marker.marker };
+				if (markerIsNewerThan(marker.marker, since)) {
+					await noteInterrupt(run, marker.marker, since);
+					return { state: "confirmed", marker: marker.marker };
+				}
 				stale = marker.marker;
 			}
 			if (Date.now() >= deadline) return stale ? { state: "stale", marker: stale } : { state: "unconfirmed", aborted: false };
@@ -2408,6 +2431,7 @@ export const __test__ = {
 	holdsChild,
 	isMissingTmuxTarget,
 	isSameOrDescendant,
+	markerIsNewerThan,
 	isTerminal,
 	listRow,
 	observationFromRead,

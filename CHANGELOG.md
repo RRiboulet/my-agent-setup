@@ -4,6 +4,20 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Fixed:
+
+- **`subagent_interrupt` reported an interrupt that landed as "no new interrupt
+  was reported" whenever the watcher beat the tool's poll to the marker.** The
+  confirmation poll inferred staleness from `noteInterrupt`'s return value, but
+  the watcher folds the *same* marker on its 500 ms tick. When the watcher got
+  there first, `noteInterrupt` reported "no change" for an interrupt the child had
+  genuinely settled, and the tool told the model that a stop it had just caused
+  had not happened. Confirmation now rests on the marker's freshness relative to
+  the baseline captured before the Escape, never on whether that call happened to
+  change the record. The run was always correctly `interrupted`; only the answer
+  was wrong. Repro without the fix: `subagent_interrupt` against a child whose
+  marker is folded by the watcher before the tool reads it.
+
 ## v1.1.1 — 2026-10-05
 
 Fixed:

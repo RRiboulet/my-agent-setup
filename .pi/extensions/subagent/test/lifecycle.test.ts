@@ -79,6 +79,14 @@ interface HarnessOptions {
 	mode?: string;
 	/** Overrides ctx.sessionManager, so fork/lineage tests can present a real live branch. */
 	sessionManager?: Record<string, unknown>;
+	/**
+	 * Invoked when the Escape key is sent to a child, while the tool's confirmation
+	 * poll is still suspended on that exec. Lets a test fold the interrupt marker
+	 * through the watcher BEFORE the tool reads it, deterministically reproducing
+	 * the watcher-wins race instead of hoping the 100ms poll and 500ms tick land in
+	 * that order.
+	 */
+	afterEscapeSent?: () => Promise<void>;
 }
 
 async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -150,6 +158,9 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 			execCalls.push({ command, args });
 			if (options.execDelayMs) await new Promise((resolve) => setTimeout(resolve, options.execDelayMs));
 			const joined = args.join(" ");
+			if (options.afterEscapeSent && joined.includes("send-keys") && args.includes("Escape")) {
+				await options.afterEscapeSent();
+			}
 			if (joined.includes("-V")) return { code: 0, stdout: "tmux 3.3a", stderr: "" };
 			const paneCall = joined.includes("capture-pane") || joined.includes("display-message");
 			// A tick starts at its capture-pane, so the counter resets there.
@@ -1223,6 +1234,44 @@ test("subagent_interrupt confirms once the child writes the marker", async () =>
 		assert.match(status.text, /interrupt: turn aborted/);
 		assert.match(status.text, /idle at its prompt/);
 	});
+});
+
+test("an interrupt the watcher folded first is still reported as confirmed", async () => {
+	// Regression: the confirmation poll inferred staleness from `noteInterrupt`'s
+	// return value. The watcher folds the SAME marker on its 500ms tick, so when it
+	// won the race the tool read a marker that genuinely confirmed the interrupt
+	// but reported "no new interrupt was reported" — telling the agent that a stop
+	// it had just caused had not happened.
+	//
+	// `afterEscapeSent` blocks the Escape exec until the watcher has folded the
+	// marker, so the race is deterministic: by the time the tool polls, the run is
+	// already `interrupted` and `noteInterrupt` has nothing left to change.
+	let foldMarker: (() => Promise<void>) | undefined;
+	await withHarness(
+		{
+			interruptConfirmMs: "5000",
+			afterEscapeSent: async () => {
+				await foldMarker?.();
+			},
+		},
+		async (h) => {
+			const run = (await h.call("subagent", { task: "watcher wins the race" })).details as unknown as RunRecord;
+			foldMarker = async () => {
+				await h.writeInterrupt(run);
+				// Let the watcher drain the marker before the tool's poll resumes.
+				await waitFor(async () => (await h.readRuns())[0].status === "interrupted");
+			};
+
+			const interrupted = await h.call("subagent_interrupt", { id: run.id });
+			assert.match(
+				interrupted.text,
+				new RegExp(`Subagent ${run.id} interrupted\\.`),
+				`a marker newer than the baseline confirms even when the watcher folded it first: ${interrupted.text}`,
+			);
+			assert.doesNotMatch(interrupted.text, /no new interrupt was reported/);
+			assert.equal((await h.readRuns())[0].interrupts, 1, "the interrupt is counted exactly once");
+		},
+	);
 });
 
 test("a stale marker cannot confirm a second interrupt", async () => {
