@@ -29,22 +29,23 @@ Use the following commands to gather commit information:
 git describe --tags --abbrev=0
 
 # LOCAL ADAPTATION: the range depends on where you are. Upstream's
-# `<baseline-version>..HEAD` is only right on `main` at release time; on a
+# `<baseline-version>..HEAD` is only right on `dev` at release time; on a
 # feature branch it re-reads every commit already merged since the tag, and
 # after a rebase those already-changelogged commits come back under new hashes.
-git log <baseline-version>..main   # at release time, on main (AGENTS.md step 1)
-git log main..HEAD                 # on a feature branch: this branch's own work
+git log <baseline-version>..dev    # at release time, on dev (AGENTS.md step 1)
+git log dev..HEAD                  # on a feature branch: this branch's own work
 ```
 
-On `main` today, `v1.0.0..main` returns everything merged since the tag (28
-commits), including work already written up; `main..HEAD` on a working branch
-returns exactly the commits that branch contributed.
+`v1.0.0..dev` returns everything merged since the tag — including work already
+written up — while `dev..HEAD` on a working branch returns exactly the commits
+that branch contributed. Do not put a count in this file: it is stale the moment
+the next commit lands.
 
-**But the release-time range is titles, not reasoning.** `AGENTS.md` step 4
+**But the release-time range is titles, not reasoning.** `AGENTS.md`'s workflow
 merges with `gh pr merge --squash`, so the branch's individual commits do not
-survive into `main`. After a squash, `git log <tag>..main` gives you one line
+survive into `dev`. After a squash, `git log <tag>..dev` gives you one line
 per PR whose subject is the PR title. The reasoning lives in the PR body and in
-the commits that were squashed away, neither of which is reachable from `main`.
+the commits that were squashed away, neither of which is reachable from `dev`.
 So at release time, read the range for the *list* of changes and then fetch each
 one:
 
@@ -53,9 +54,9 @@ gh pr list --state merged --search "merged:>=<since-date>" \
   --json number,title,body,mergedAt
 ```
 
-**On a branch stacked on another unmerged branch**, `main..HEAD` includes the
+**On a branch stacked on another unmerged branch**, `dev..HEAD` includes the
 base branch's commits, which are already written up on that branch's PR. Either
-subtract them (`git log main..feature-a`) or leave the entry to the base branch
+subtract them (`git log dev..feature-a`) or leave the entry to the base branch
 and only note the delta.
 
 ### 3. Update the changelog
@@ -112,7 +113,7 @@ Read the existing changelog file (`CHANGELOG.md`, or `CHANGELOG` if missing) and
 
 * If the current changelog already has an "Unreleased" section with content, append to it rather than replacing it
 * Preserve the existing changelog style and formatting (headings, bullet style, ordering, and spacing)
-* If the repo uses a different default branch name, treat that as the "current version" instead of `main`
+* This repo's integration branch is `dev`; `main` takes releases only
 * When in doubt about whether a change is significant, err on the side of including it
 
 ## LOCAL ADAPTATION: this repo's changelog is not the flat list above
@@ -143,25 +144,22 @@ actually here:
 
 So: read the surrounding entries before writing, and match them.
 
-### Known wart: the `Unreleased` heading is nested, not top-level
+### Where the `Unreleased` section goes
 
-`CHANGELOG.md` currently carries `### Unreleased` *inside* the newest release
-heading, after that release's contents:
+`CHANGELOG.md` carries `## Unreleased` as a top-level section directly under the
+title, above the newest release. Append to it; never start a new one, and never
+nest it under a released version.
 
-```
-## v1.0.0 — 2026-10-02
-Initial tagged release, tracking pi 1.0.0. Contents:
-- ...
-### Unreleased          <-- an H3 under a released version
-Added:
-```
+That was not always true. Until 2026-10-05 it sat as `### Unreleased` *inside*
+the `## v1.0.0` heading, after that release's contents — so tagging the next
+version would have shipped a section labelled "Unreleased" under the previous
+release, with nowhere for the release after it to write. Fixed by promoting it to
+a top-level `##` section above the newest release, which also restores the
+descending order the rest of the file uses.
 
-Appending to it is still correct and this skill does not change that. But at
-release time it needs promoting to its own `##` section above the version it
-was nested under — otherwise the tag for the next version ships a section
-labelled "Unreleased" *inside the previous release*, and the next release has
-nowhere to write. Raise it with the user rather than restructuring the release
-document silently.
+At release time, that section becomes the release: retitle `## Unreleased` to
+`## vX.Y.Z — <date>`, add a new empty `## Unreleased` above it, and tag the
+commit. Nothing else in the file moves.
 
 ### Pull requests: cite the PR, not the commit
 
@@ -172,5 +170,5 @@ rather than per PR. So:
 
 - Cite `#N` from the PR when there is one, which after a squash merge is the
   only place the number survives — `git log` shows `(#N)` in the subject.
-- Do not cite the branch. It is deleted after merge (`git branch -d`), so the
+- Do not cite the branch. It is deleted after merge (`--delete-branch`), so the
   reference would dangle.

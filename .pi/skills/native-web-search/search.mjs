@@ -1,5 +1,20 @@
 #!/usr/bin/env node
 
+// VENDORED, NOT OURS.
+// search.mjs — Copyright (c) mitsuhiko and contributors
+// https://github.com/mitsuhiko/agent-stuff (skills/native-web-search/search.mjs)
+// Licensed under the Apache License, Version 2.0.
+// Upstream: mitsupi v1.6.0, commit 0865c84.
+//
+// One LOCAL PATCH, and it is most of the file: OpenRouter support. Upstream
+// speaks `openai-codex` and `anthropic`; this adds `openrouter` via its `web`
+// plugin, plus `runOpenRouterSearch`, `defaultModelId` and `defaultBaseUrl`, and
+// a resolver that picks a provider from the --provider flag, then
+// `defaultProvider` in settings.json, then whichever credential exists in
+// auth.json. See the LOCAL PATCH hunks listed in SKILL.md beside this file.
+//
+// Verified against upstream 0865c84: no upstream function was removed.
+
 import { existsSync, readFileSync, writeFileSync, realpathSync } from "fs";
 import { spawnSync, execSync } from "child_process";
 import { homedir } from "os";

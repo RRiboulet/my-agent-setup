@@ -2,21 +2,68 @@
 
 ## Branches
 
-**Do not work on `main`.** Every change gets its own branch off `main`, and
-`main` moves only two ways: a merged pull request (see "Pull requests") and the
-release commit itself (see "Releases"). Nothing is committed directly to it. Branch names name the
-change, not the session: `session-breakdown-coverage`, `subagent-test-closure`.
+Two long-lived branches, and everything else hangs off them:
 
-The reason is that `CHANGELOG.md`'s `Unreleased` section is shared ground. Two
-changes in flight both add a `Maintenance` bullet there, so parallel branches
-conflict on merge even when their code does not. A branch keeps one change's
-tests, files and changelog entry together, and makes each one independently
-verifiable: check it out in a worktree and run the suite before assuming it
-stands alone.
+| Branch | What lands on it |
+|---|---|
+| `dev` | all work in flight. Every feature branch starts here. |
+| `main` | releases only. Nothing is built here; it is what a tag points at. |
+
+**Start a feature branch from `dev`, never from `main` and never from another
+feature branch.** Branch names name the change, not the session:
+`attribute-native-web-search`, `fix-changelog-unreleased-structure`.
+
+A branch merges into `dev` through a pull request. `dev` merges into `main` at
+release time (see "Releases"). `main` is therefore always releasable, and a
+half-finished change is never one merge away from a tag.
+
+### Check your base before you commit
+
+This is not ceremony. Branching off the wrong parent has happened three times in
+one session, and each time it shipped a pull request carrying another branch's
+commit — caught by a reviewer, not by the author. Two checks, and **both are
+needed**, because the two ways of getting this wrong look different:
+
+```bash
+git fetch origin
+git merge-base --is-ancestor dev HEAD    # 0 = base is right, 1 = it is not
+git log --oneline dev..HEAD              # should list ONLY this change's commits
+```
+
+The ancestor check is the one that catches the mistake that actually happened:
+branching off `main`, or off a `dev` that had fallen behind. In that case
+`git log dev..HEAD` prints **nothing** — HEAD simply has nothing `dev` lacks — so
+a check based only on that log reports a clean branch that is quietly based on
+the wrong commit. The log is the second half: once the ancestor check fails, it
+tells you *what* is in the way.
+
+Verified both directions on a scratch branch:
+
+| Situation | `git log dev..HEAD` | `merge-base --is-ancestor` |
+|---|---|---|
+| branched off `main`, which is behind `dev` | empty — **misses it** | **fails** — catches it |
+| foreign commits stacked on `dev` | lists them | passes — correct, base is right |
+| correct branch off `dev` | only my commits | passes |
+
+`git fetch` first is not a detail. The check is only as good as the ref it
+compares against, and a local `dev` left over from before three PRs merged will
+happily list their commits as yours — the same false alarm as the bug it is meant
+to catch, and just as likely to be ignored.
+
+A branch legitimately based on **another unmerged feature branch** still shows
+foreign commits, and neither check can tell that apart from a mistake. Subtract
+the base branch explicitly (`git log dev..feature-a`) or rebase onto `dev` first.
+
+### Why a branch per change
+
+`CHANGELOG.md`'s `Unreleased` section is shared ground. Two changes in flight
+both add a `Maintenance` bullet there, so parallel branches conflict on merge
+even when their code does not. A branch keeps one change's tests, files and
+changelog entry together, and makes each one independently verifiable: check it
+out in a worktree and run the suite before assuming it stands alone.
 
 When two branches are ready at once, merge or rebase in an order you choose
-yourself — `main` is not a priority queue, and neither branch is urgent over
-the other.
+yourself — `dev` is not a priority queue.
 
 ## Pull requests
 
@@ -41,11 +88,48 @@ token would survive that; the helper would not, and push would break silently.
 Check *where* the token lives before trusting a login: `gh auth status` prints the
 path, and that path decides whether it survives.
 
+## The workflow
+
+Once authenticated:
+
+1. Work on a branch (see "Branches"), committing as the `.pi/skills/commit/`
+   skill directs where it is present.
+2. `git push -u origin <branch>`
+3. `gh pr create --fill` — `--fill` uses the commits for title and body, which
+   this repo's long commit subjects suit. Always say in the body what a reviewer
+   should check and what you verified.
+4. `gh pr merge --squash --delete-branch`. `--delete-branch` is not optional
+   politeness: a squash merge does not put the branch tip in `main`'s history, so
+   a later `git branch -d <branch>` fails with "not fully merged" and needs `-D`.
+   Letting gh delete both the local and the remote branch avoids both.
+5. Bring `main` up to date: `git checkout main && git pull --ff-only`.
+
+Tags are cut from `main`, never from a feature branch.
+
+Never put a token in `.git/config`, in the Dockerfile, or in a file in the repo.
+If authentication is needed mid-session, stop and ask rather than improvising.
+
+Note the consequence for step 1 of any changelog work: after a squash merge the
+branch's individual commits no longer exist in `main`, so release notes are
+written from PR titles and bodies, not from `git log`.
+
 ## Releases
 
-1. Update `CHANGELOG.md` for the release.
-2. Commit the release changes.
-3. Tag with the version and push commits and tags.
+A release is the only thing that moves `main`. Everything since the last tag
+accumulates on `dev`; `main` is brought forward and tagged.
+
+1. On `dev`, update `CHANGELOG.md`: retitle `## Unreleased` to
+   `## vX.Y.Z — <today's date>`, and add a fresh empty `## Unreleased` above it.
+   Nothing else in the file moves. `.pi/skills/update-changelog/` has the detail,
+   and `changelog-structure.test.ts` enforces the shape.
+2. Commit that, push `dev`, and open a pull request **`dev` → `main`**. This is
+   the one merge that is not a squash: a release wants its history, and `main`'s
+   commits should be the real ones. Use "Rebase and merge" or "Merge commit",
+   never "Squash".
+3. `gh pr merge <n> --merge --delete-branch` — but do **not** let it delete
+   `dev`. Re-create it locally if needed: `git branch dev origin/dev`.
+4. Tag the merge commit on `main` and push the tag:
+   `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
 
 Versions are git tags. This repository is not published to npm — it is
 `private` and consumes no npm packages, but it IS consumable as a pi package:

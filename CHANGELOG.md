@@ -2,17 +2,9 @@
 
 Versions are git tags. This repository is not published to npm.
 
-## v1.0.0 — 2026-10-02
+## Unreleased
 
-Initial tagged release, tracking pi 1.0.0. Contents:
-
-- `answer` extension (`/answer`) with question extraction.
-- `native-web-search` extension and matching skill.
-- `todos` extension with file-based todo management.
-- `subagent` extension: non-blocking delegation of tasks into detached tmux
-  sessions, with status inspection, waiting, and cancellation.
-
-### Unreleased
+## v1.1.0 — 2026-10-05
 
 Added:
 
@@ -33,10 +25,10 @@ Added:
     this changelog is exactly those, reasoning included) and that entries are
     bolded lead-ins (the *sections* are plain text; the entries are the bold
     part).
-  - It also records a wart rather than fixing it: `### Unreleased` currently
-    sits *inside* `## v1.0.0`, so the next tag would ship an "Unreleased"
-    section under the previous release. The skill tells the agent to raise it;
-    restructuring `CHANGELOG.md` is a separate decision.
+  - It also recorded a wart rather than fixing it: `### Unreleased` sat
+    *inside* `## v1.0.0`, so the next tag would have shipped an "Unreleased"
+    section under the previous release. The skill told the agent to raise it and
+    `CHANGELOG.md` was restructured as a separate change.
 - **`/session-breakdown`** (`.pi/extensions/session-breakdown.ts`): sessions,
   messages, tokens and cost per day over 7/30/90, a model / directory / weekday
   / time-of-day breakdown and a contributions-style calendar. Read-only, no
@@ -98,6 +90,42 @@ Fixed:
   machine.
 
 Maintenance:
+
+- **The base check added an hour ago was half a check, and testing it found
+  that.** `git log --oneline dev..HEAD` is the wrong primary check: a branch cut
+  off `main` is *behind* `dev` rather than ahead of it, so the log prints nothing
+  and reports a clean branch that is based on the wrong commit — the exact
+  mistake the check was added to catch. The ancestor check,
+  `git merge-base --is-ancestor dev HEAD`, is the one that sees it. Both are now
+  documented, with the log demoted to answering "what is in the way" once the
+  ancestor check has failed, and a table of what each does in each situation.
+  Caught by running the check against a deliberately mis-parented branch, not by
+  reading it.
+
+- **`native-web-search` is now attributed.** The skill was vendored from
+  [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) all along and
+  carried no provenance header, which made it look locally original — and I told a
+  reviewer exactly that while reviewing a different branch. It is not: all of
+  upstream's functions survive and three were added (`runOpenRouterSearch`,
+  `defaultModelId`, `defaultBaseUrl`) for OpenRouter, which is the provider this
+  machine actually authenticates with. Both files now carry the same
+  VENDORED/NOT OURS header and Apache-2.0 line as the other vendored resources,
+  `SKILL.md` lists the three patches, and the README distinguishes this skill
+  (**vendored**) from `native-web-search.ts` (**ours** — upstream has no such
+  extension).
+
+- **Work happens on `dev`; `main` takes releases only.** Feature branches start
+  from `dev`, merge into `dev` by pull request, and `dev` merges into `main` only
+  when a release is cut. `main` was previously both the integration branch and the
+  release branch, which meant a half-finished change was always one merge away
+  from a tag.
+- **"Check your base before you commit"** (`AGENTS.md`, and the first step of the
+  `commit` skill's local adaptation): `git log --oneline dev..HEAD` must list only
+  this change's commits. Branching off the wrong parent happened three times in
+  one session, and each time it shipped a pull request carrying another branch's
+  commit — caught in review every time rather than by the author, which is the
+  part worth fixing. A release merge is the one that is not a squash, so `main`'s
+  history is the real one.
 
 - **`gh` is baked into the devcontainer** (`.devcontainer/Dockerfile`): branches
   could not reach GitHub from inside the container at all — no `gh`, no
@@ -433,3 +461,28 @@ Fixes:
 - `pi --session <missing-file>` does not merely start empty — it invents a new
   UUID, silently diverging from the parent transcript. Resume now verifies the
   file exists and fails loudly instead.
+
+- **`### Unreleased` was nested inside `## v1.0.0`.** Tagging the next version
+  would have shipped a section labelled "Unreleased" under the *previous*
+  release, and the release after that would have had nowhere to write — the file
+  has no top-level place for unreleased work. Promoted to a top-level `##`
+  Unreleased above the newest release, which also restores the descending order
+  the rest of the file uses. The `v1.0.0` notes are untouched. `AGENTS.md`
+  describes the release procedure but never mentioned the structure, so a release
+  done by following the docs would have got this wrong silently.
+- **The changelog's structure had no test at all.** Nothing in the suite read
+  `CHANGELOG.md`, so a heading moving to the wrong level was invisible until
+  someone cut a release. `changelog-structure.test.ts` now asserts that
+  `## Unreleased` exists once at level 2, precedes every release, is never nested,
+  that versions descend, and that a section carries at most one `Added:` /
+  `Fixed:` / `Maintenance:` block in that order.
+
+## v1.0.0 — 2026-10-02
+
+Initial tagged release, tracking pi 1.0.0. Contents:
+
+- `answer` extension (`/answer`) with question extraction.
+- `native-web-search` extension and matching skill.
+- `todos` extension with file-based todo management.
+- `subagent` extension: non-blocking delegation of tasks into detached tmux
+  sessions, with status inspection, waiting, and cancellation.
