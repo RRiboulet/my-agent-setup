@@ -91,18 +91,32 @@ test("each release section has exactly one label per kind", async () => {
 	}
 });
 
-test("section blocks appear in the order Added, Fixed, Maintenance", async () => {
+test("within a section, blocks run Added, Fixed, Maintenance", async () => {
+	// Per section, not across the whole file. The first `## Unreleased` section
+	// may legitimately open with `Fixed:` while a later release section opens
+	// with `Added:` — the file is newest-first, so the first occurrence of each
+	// label says nothing about the order inside any one section. This version of
+	// the check assumed otherwise and failed the first time a new section opened
+	// with a fix rather than a feature.
 	const text = await readFile(CHANGELOG, "utf8");
-	const found = ["Added:", "Fixed:", "Maintenance:"]
-		.map((label) => ({ label, at: text.indexOf(`\n${label}`) }))
-		.filter((block) => block.at !== -1);
-	assert.ok(found.length >= 2, "expected the file to keep its labelled blocks");
-	// Adjacent comparison, not every pair: the point is that the sequence is
-	// increasing, and comparing each block against every other would also
-	// "fail" on a correctly ordered file by testing Fixed < Maintenance.
-	for (const [index, block] of found.entries()) {
-		const previous = found[index - 1];
-		if (!previous) continue;
-		assert.ok(previous.at < block.at, `"${previous.label}" should come before "${block.label}"`);
+	const order = ["Added:", "Fixed:", "Maintenance:"];
+	const sections = text.split(/^## /m).slice(1);
+	let checked = 0;
+	for (const section of sections) {
+		const lines = section.split("\n");
+		const positions = order
+			.map((label) => ({ label, at: lines.findIndex((line) => line.trimEnd() === label) }))
+			.filter((entry) => entry.at !== -1);
+		if (positions.length < 2) continue;
+		checked += 1;
+		for (const [index, entry] of positions.entries()) {
+			const previous = positions[index - 1];
+			if (!previous) continue;
+			assert.ok(
+				previous.at < entry.at,
+				`section "${lines[0]}" has ${entry.label} before ${previous.label}`,
+			);
+		}
 	}
+	assert.ok(checked > 0, "expected at least one section with two or more labelled blocks");
 });
