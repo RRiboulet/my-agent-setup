@@ -1458,6 +1458,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 			`Manage file-based todos in ${todosDirLabel} (list, list-all, get, create, update, append, delete, claim, release). ` +
 			"Title is the short summary; body is long-form markdown notes (update replaces, append adds). " +
 			"Todo ids are shown as TODO-<hex>; id parameters accept TODO-<hex> or the raw hex filename. " +
+			"When a todo points at code, name the file or the symbol, not a `file:line` number: lines drift as the code moves and go stale. " +
 			"Claim tasks before working on them to avoid conflicts, and close them when complete.", 
 		parameters: TodoParams,
 
