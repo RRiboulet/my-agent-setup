@@ -89,6 +89,17 @@ Fixed:
 
 Maintenance:
 
+- **The base check added an hour ago was half a check, and testing it found
+  that.** `git log --oneline dev..HEAD` is the wrong primary check: a branch cut
+  off `main` is *behind* `dev` rather than ahead of it, so the log prints nothing
+  and reports a clean branch that is based on the wrong commit — the exact
+  mistake the check was added to catch. The ancestor check,
+  `git merge-base --is-ancestor dev HEAD`, is the one that sees it. Both are now
+  documented, with the log demoted to answering "what is in the way" once the
+  ancestor check has failed, and a table of what each does in each situation.
+  Caught by running the check against a deliberately mis-parented branch, not by
+  reading it.
+
 - **`native-web-search` is now attributed.** The skill was vendored from
   [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) all along and
   carried no provenance header, which made it look locally original — and I told a

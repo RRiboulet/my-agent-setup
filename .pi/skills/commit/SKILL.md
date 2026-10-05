@@ -57,11 +57,20 @@ shipped pull requests carrying another branch's commits:
 ```bash
 git branch --show-current          # which branch am I on
 git fetch origin                   # a stale local `dev` fakes this check
-git log --oneline dev..HEAD        # must list ONLY this change's commits
+git merge-base --is-ancestor dev HEAD   # non-zero exit = wrong base
+git log --oneline dev..HEAD        # then: which commits are in the way
 ```
 
-Anything in that log that you did not write means the base is wrong. Fix it now,
-not after review.
+Both checks, because the two ways of being wrong look different. A branch cut off
+`main` is *behind* `dev`, so the log prints nothing and only the ancestor check
+sees it; a branch carrying another branch's commits is caught by the log. The
+ancestor check is the one that matters — it is the mistake that actually keeps
+happening.
+
+Anything in the log that you did not write means the base is wrong. Fix it now,
+not after review. A branch legitimately stacked on another unmerged feature
+branch will also show foreign commits; subtract the base (`git log dev..feature-a`)
+or rebase onto `dev` first.
 
 Then:
 
