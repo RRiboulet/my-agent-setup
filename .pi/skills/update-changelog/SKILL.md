@@ -36,9 +36,27 @@ git log <baseline-version>..main   # at release time, on main (AGENTS.md step 1)
 git log main..HEAD                 # on a feature branch: this branch's own work
 ```
 
-On this repo today `v1.0.0..HEAD` returns all 30 unreleased commits, while
-`main..HEAD` on a working branch returns exactly the commits that branch
-contributed — which is the change the changelog entry is about.
+On `main` today, `v1.0.0..main` returns everything merged since the tag (28
+commits), including work already written up; `main..HEAD` on a working branch
+returns exactly the commits that branch contributed.
+
+**But the release-time range is titles, not reasoning.** `AGENTS.md` step 4
+merges with `gh pr merge --squash`, so the branch's individual commits do not
+survive into `main`. After a squash, `git log <tag>..main` gives you one line
+per PR whose subject is the PR title. The reasoning lives in the PR body and in
+the commits that were squashed away, neither of which is reachable from `main`.
+So at release time, read the range for the *list* of changes and then fetch each
+one:
+
+```bash
+gh pr list --state merged --search "merged:>=<since-date>" \
+  --json number,title,body,mergedAt
+```
+
+**On a branch stacked on another unmerged branch**, `main..HEAD` includes the
+base branch's commits, which are already written up on that branch's PR. Either
+subtract them (`git log main..feature-a`) or leave the entry to the base branch
+and only note the delta.
 
 ### 3. Update the changelog
 Read the existing changelog file (`CHANGELOG.md`, or `CHANGELOG` if missing) and check if there are changes not yet incorporated, then add them. Always add them to the "Unreleased" section only. If there is none yet, add it at the top in the same style as the existing changelog (for example, `## Unreleased` vs `## [Unreleased]`).
@@ -104,11 +122,12 @@ flat bullet list, and copying that shape into it would be wrong. What is
 actually here:
 
 - Sections are plain-text headings, never bold: `Added:`, `Fixed:`,
-  `Maintenance:`, `Features:`, `Fixes:`, plus prose headings that name where
-  the work came from (`Pruned for a first iteration, deliberately (all removed,
-  not deprecated):`, `Fixes to the handoff work, from an adversarial review:`).
-  Reuse one that exists before inventing one. It is the *entries* that are
-  bolded, e.g. `**\`/session-breakdown\`**` — not the headings.
+  `Maintenance:`, `Features:`, `Fixes:`, `Pruned for a first iteration,
+  deliberately (all removed, not deprecated):`, and prose headings that name
+  where the fixes came from (`Fixes to the handoff work, from an adversarial
+  review:`, `Fixes found by reviewing that work, before it shipped:`). Reuse one
+  that exists before inventing one — an agent given three headings invents a
+  fourth.
 - Entries explain **why**, at length. A `Fixed:` bullet here routinely runs ten
   lines and names the failure it prevents. That is deliberate: this is a
   personal repo where the reasoning is the point.
@@ -144,8 +163,14 @@ labelled "Unreleased" *inside the previous release*, and the next release has
 nowhere to write. Raise it with the user rather than restructuring the release
 document silently.
 
-### No pull requests to cite
+### Pull requests: cite the PR, not the commit
 
-This repository is pushed by one person and uses no PRs, so the
-"mention pull requests when available" rule above never fires here. Cite the
-branch or nothing.
+This repo *does* use pull requests — `AGENTS.md` has a Pull requests section and
+merges happen on GitHub via `gh pr merge`. What is true is narrower: no commit
+subject here carries a `#N`, and `CHANGELOG.md` is written between releases
+rather than per PR. So:
+
+- Cite `#N` from the PR when there is one, which after a squash merge is the
+  only place the number survives — `git log` shows `(#N)` in the subject.
+- Do not cite the branch. It is deleted after merge (`git branch -d`), so the
+  reference would dangle.

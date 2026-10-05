@@ -23,11 +23,13 @@ Create a git commit for the current changes using a concise Conventional Commits
 - `scope` OPTIONAL. Short noun in parentheses for the affected area (e.g., `api`, `parser`, `ui`).
 - `summary` REQUIRED. Short, imperative, no trailing period.
 
-<!-- LOCAL ADAPTATION A: the length rule. Upstream says "<= 72 chars", but 8 of
-     the 30 commits in this repo exceed that, the longest at 102 — the convention
+<!-- LOCAL ADAPTATION A: the length rule. Upstream says "<= 72 chars", but 8
+     subjects on `main` exceed that, the longest 102 — the convention
      here is a full sentence carrying the actual claim, with the detail in the
      body. Telling an agent to obey 72 would shorten subjects this repo has
-     deliberately written long. Upstream's "do NOT add sign-offs" IS correct here
+     deliberately written long. (Counted on `main` at `d4fcca9`: 8 subjects over
+     72 characters, the longest 102. Do not restate the total in prose anywhere —
+     it goes stale with every commit; count it when you need it.) Upstream's "do NOT add sign-offs" IS correct here
      and is kept verbatim: zero Signed-off-by trailers in the whole history. -->
 
 ## Notes
@@ -45,21 +47,46 @@ Create a git commit for the current changes using a concise Conventional Commits
 ## LOCAL ADAPTATION B: this repo does not commit to `main` — except for releases
 
 Upstream's skill is repo-agnostic and would commit anywhere. Here `AGENTS.md`
-requires a branch per change, and `main` moves only to take a release. So the
-rule branches on *why* you are standing on `main`, not on `main` itself:
+requires a branch per change, and `main` moves only by a merged PR or a release
+tag. The rule branches on *why* you are standing on `main*, not on `main` itself.
 
-1. Check `git branch --show-current`.
+**Step zero, before any of it: is an operation already in progress?** A rebase,
+merge, cherry-pick or bisect leaves HEAD detached, so the branch probe below
+returns an empty string and reads as "no branch" — which sends you down the
+"branch first" path. That path *succeeds* mid-rebase, and strands the operation:
+the branch is created, the rebase is left pending, and the conflict resolution
+you just committed belongs to neither the branch you meant to update nor the one
+you are on. This repo sanctions rebases, and the likeliest conflict during one
+is `CHANGELOG.md`, so it is not a corner case.
+
+```bash
+git status --porcelain=v2 --branch | head -1   # branch.head is "(detached)" mid-operation
+ls .git/rebase-merge .git/rebase-apply 2>/dev/null   # rebase
+git rev-parse -q --verify CHERRY_PICK_HEAD     # cherry-pick
+git rev-parse -q --verify MERGE_HEAD           # merge
+git rev-parse -q --verify REBASE_HEAD          # rebase (older git)
+```
+
+If any of those indicate work in progress: **finish that operation** —
+`git rebase --continue`, `--skip`, or `--abort`; `git cherry-pick --continue`;
+`git merge --continue`. Do not create a branch, and do not apply the rule below.
+A resolution commit made mid-rebase needs `git rebase --continue` afterwards or
+the rebase is not finished.
+
+**Then, the branch rule:**
+
+1. Check `git branch --show-current` — only meaningful once nothing is in
+   progress, because step zero has ruled out the empty-string case.
    - **On a feature branch:** commit here. Nothing else to do.
    - **On `main` while making a change:** stop and branch first
-     (`git checkout -b <change-name>`), then commit there. `main` moves by
-     fast-forwarding a reviewed branch, not by committing on it. Reverts and
-     merge-conflict resolutions are ordinary changes and belong on a branch —
-     and note that you cannot branch mid-merge anyway, so finish or abort the
-     merge first.
+     (`git checkout -b <change-name>`), then commit there. `main` is updated by
+     merging a PR on GitHub (`gh pr merge`), never by committing on it or by
+     fast-forwarding locally. A revert is an ordinary change and belongs on a
+     branch — unless it undoes an already-tagged release, in which case the tag
+     has to move too, so raise that rather than quietly re-tagging.
    - **On `main` during the release procedure in `AGENTS.md`:** commit here.
-     That is the one place `main` is supposed to move, and the release commit
-     belongs to it. This skill only commits; the fast-forward and the tag are
-     separate steps of that procedure.
+     That is the one place `main` is meant to move. This skill only commits; the
+     tag and push are `AGENTS.md` Releases step 3.
 
 Recorded exception, also deliberate: the `AGENTS.md` branch rule itself was
 committed straight to `main` (`d4fcca9`) — a rule about `main` is only useful to
