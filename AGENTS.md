@@ -21,21 +21,38 @@ half-finished change is never one merge away from a tag.
 
 This is not ceremony. Branching off the wrong parent has happened three times in
 one session, and each time it shipped a pull request carrying another branch's
-commit — caught by a reviewer, not by the author. It is one command:
+commit — caught by a reviewer, not by the author. Two checks, and **both are
+needed**, because the two ways of getting this wrong look different:
 
 ```bash
 git fetch origin
-git log --oneline dev..HEAD     # must list ONLY this change's commits
+git merge-base --is-ancestor dev HEAD    # 0 = base is right, 1 = it is not
+git log --oneline dev..HEAD              # should list ONLY this change's commits
 ```
 
-Anything in that list that you did not write means the base is wrong. Fix it
-before committing, not after review. `git merge-base --is-ancestor dev HEAD`
-answers the same question with a yes/no.
+The ancestor check is the one that catches the mistake that actually happened:
+branching off `main`, or off a `dev` that had fallen behind. In that case
+`git log dev..HEAD` prints **nothing** — HEAD simply has nothing `dev` lacks — so
+a check based only on that log reports a clean branch that is quietly based on
+the wrong commit. The log is the second half: once the ancestor check fails, it
+tells you *what* is in the way.
+
+Verified both directions on a scratch branch:
+
+| Situation | `git log dev..HEAD` | `merge-base --is-ancestor` |
+|---|---|---|
+| branched off `main`, which is behind `dev` | empty — **misses it** | **fails** — catches it |
+| foreign commits stacked on `dev` | lists them | passes — correct, base is right |
+| correct branch off `dev` | only my commits | passes |
 
 `git fetch` first is not a detail. The check is only as good as the ref it
 compares against, and a local `dev` left over from before three PRs merged will
-happily list their commits as yours — which is the same false alarm as the bug
-it is meant to catch, and just as likely to be ignored.
+happily list their commits as yours — the same false alarm as the bug it is meant
+to catch, and just as likely to be ignored.
+
+A branch legitimately based on **another unmerged feature branch** still shows
+foreign commits, and neither check can tell that apart from a mistake. Subtract
+the base branch explicitly (`git log dev..feature-a`) or rebase onto `dev` first.
 
 ### Why a branch per change
 
