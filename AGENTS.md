@@ -41,6 +41,31 @@ token would survive that; the helper would not, and push would break silently.
 Check *where* the token lives before trusting a login: `gh auth status` prints the
 path, and that path decides whether it survives.
 
+## The workflow
+
+Once authenticated:
+
+1. Work on a branch (see "Branches"), committing as the `.pi/skills/commit/`
+   skill directs where it is present.
+2. `git push -u origin <branch>`
+3. `gh pr create --fill` — `--fill` uses the commits for title and body, which
+   this repo's long commit subjects suit. Always say in the body what a reviewer
+   should check and what you verified.
+4. `gh pr merge --squash --delete-branch`. `--delete-branch` is not optional
+   politeness: a squash merge does not put the branch tip in `main`'s history, so
+   a later `git branch -d <branch>` fails with "not fully merged" and needs `-D`.
+   Letting gh delete both the local and the remote branch avoids both.
+5. Bring `main` up to date: `git checkout main && git pull --ff-only`.
+
+Tags are cut from `main`, never from a feature branch.
+
+Never put a token in `.git/config`, in the Dockerfile, or in a file in the repo.
+If authentication is needed mid-session, stop and ask rather than improvising.
+
+Note the consequence for step 1 of any changelog work: after a squash merge the
+branch's individual commits no longer exist in `main`, so release notes are
+written from PR titles and bodies, not from `git log`.
+
 ## Releases
 
 1. Update `CHANGELOG.md` for the release.
