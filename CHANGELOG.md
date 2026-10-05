@@ -2,17 +2,7 @@
 
 Versions are git tags. This repository is not published to npm.
 
-## v1.0.0 — 2026-10-02
-
-Initial tagged release, tracking pi 1.0.0. Contents:
-
-- `answer` extension (`/answer`) with question extraction.
-- `native-web-search` extension and matching skill.
-- `todos` extension with file-based todo management.
-- `subagent` extension: non-blocking delegation of tasks into detached tmux
-  sessions, with status inspection, waiting, and cancellation.
-
-### Unreleased
+## Unreleased
 
 Added:
 
@@ -33,10 +23,10 @@ Added:
     this changelog is exactly those, reasoning included) and that entries are
     bolded lead-ins (the *sections* are plain text; the entries are the bold
     part).
-  - It also records a wart rather than fixing it: `### Unreleased` currently
-    sits *inside* `## v1.0.0`, so the next tag would ship an "Unreleased"
-    section under the previous release. The skill tells the agent to raise it;
-    restructuring `CHANGELOG.md` is a separate decision.
+  - It also recorded a wart rather than fixing it: `### Unreleased` sat
+    *inside* `## v1.0.0`, so the next tag would have shipped an "Unreleased"
+    section under the previous release. The skill told the agent to raise it and
+    `CHANGELOG.md` was restructured as a separate change.
 - **`/session-breakdown`** (`.pi/extensions/session-breakdown.ts`): sessions,
   messages, tokens and cost per day over 7/30/90, a model / directory / weekday
   / time-of-day breakdown and a contributions-style calendar. Read-only, no
@@ -433,3 +423,28 @@ Fixes:
 - `pi --session <missing-file>` does not merely start empty — it invents a new
   UUID, silently diverging from the parent transcript. Resume now verifies the
   file exists and fails loudly instead.
+
+- **`### Unreleased` was nested inside `## v1.0.0`.** Tagging the next version
+  would have shipped a section labelled "Unreleased" under the *previous*
+  release, and the release after that would have had nowhere to write — the file
+  has no top-level place for unreleased work. Promoted to a top-level `##`
+  Unreleased above the newest release, which also restores the descending order
+  the rest of the file uses. The `v1.0.0` notes are untouched. `AGENTS.md`
+  describes the release procedure but never mentioned the structure, so a release
+  done by following the docs would have got this wrong silently.
+- **The changelog's structure had no test at all.** Nothing in the suite read
+  `CHANGELOG.md`, so a heading moving to the wrong level was invisible until
+  someone cut a release. `changelog-structure.test.ts` now asserts that
+  `## Unreleased` exists once at level 2, precedes every release, is never nested,
+  that versions descend, and that a section carries at most one `Added:` /
+  `Fixed:` / `Maintenance:` block in that order.
+
+## v1.0.0 — 2026-10-02
+
+Initial tagged release, tracking pi 1.0.0. Contents:
+
+- `answer` extension (`/answer`) with question extraction.
+- `native-web-search` extension and matching skill.
+- `todos` extension with file-based todo management.
+- `subagent` extension: non-blocking delegation of tasks into detached tmux
+  sessions, with status inspection, waiting, and cancellation.
