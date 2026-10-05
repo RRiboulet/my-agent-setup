@@ -17,6 +17,23 @@ Fixed:
   change the record. The run was always correctly `interrupted`; only the answer
   was wrong. Repro without the fix: `subagent_interrupt` against a child whose
   marker is folded by the watcher before the tool reads it.
+- **Cancelled and tmux-failed subagent runs now report the tokens and cost they
+  had already burned.** Only `finalizeRun` read the child's session usage, so a
+  run stopped by `subagent_cancel`, or by a tmux-level failure, wrote
+  `usage: undefined` and reported no tokens in `subagent_status`, in the list
+  view or in the completion notification — even though a cancelled run is very
+  often one that had spent real money first. Usage is now read before the
+  terminal status is persisted, and a standalone run's session file (whose exact
+  name the parent only learns when the child reports a result) is discovered
+  under the run dir so the read has something to read. The inherited-context
+  baseline is still honoured, so a fork or resume is not charged for what it
+  inherited.
+- **The late-`result.json` re-read in `finalizeMissingChild` is now covered.** It
+  guards the window between the watcher's first result read and its pane probe,
+  where a child that reports and exits in the same instant would otherwise be
+  recorded as failed. Deleting the re-read left the suite green, so the test now
+  drives the window directly by writing the result while the pane probe is in
+  flight — verified to fail when the re-read is removed.
 
 ## v1.1.1 — 2026-10-05
 

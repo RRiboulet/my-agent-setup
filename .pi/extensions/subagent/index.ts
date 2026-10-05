@@ -899,6 +899,37 @@ function isSameOrDescendant(base: string, candidate: string): boolean {
 	return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
 }
 
+/**
+ * The child's session file, discovering it for a standalone run that never
+ * reported one.
+ *
+ * A standalone child is launched with `--session-dir <runDir>/session
+ * --session-id <run id>`, and pi names the file `<timestamp>_<session id>.jsonl`
+ * there. The parent does not learn the exact path until the child reports it in
+ * `result.json`, so a run stopped before that — cancel, tmux failure — has to
+ * find it to report the tokens it burned. The id suffix is tried first so a
+ * leftover file from an earlier attempt in the same dir cannot be picked up;
+ * the directory otherwise holds exactly one session for a standalone run.
+ *
+ * Uses the recorded `sessionFile` when there is one, which is also what every
+ * non-standalone mode gets: lineage and fork write to a known path, and resume
+ * appends to its ancestor's file (whose own session dir is empty).
+ */
+async function findChildSessionFile(run: RunRecord): Promise<string | undefined> {
+	if (run.sessionFile && existsSync(run.sessionFile)) return run.sessionFile;
+	if (run.mode && run.mode !== "standalone") return run.sessionFile;
+	const dir = path.join(run.runDir, "session");
+	let entries: string[];
+	try {
+		entries = await readdir(dir);
+	} catch {
+		return run.sessionFile;
+	}
+	const jsonl = entries.filter((name) => name.endsWith(".jsonl"));
+	const match = jsonl.find((name) => name.endsWith(`_${run.id}.jsonl`)) ?? (jsonl.length === 1 ? jsonl[0] : undefined);
+	return match ? path.join(dir, match) : run.sessionFile;
+}
+
 function resolveModel(
 	ctx: ExtensionContext,
 	providerOverride: string | undefined,
@@ -1185,6 +1216,28 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		}
 	};
 
+	/**
+	 * Read the usage a run has burned so far, honouring its inherited-context
+	 * baseline.
+	 *
+	 * Called before a terminal status is persisted by the paths that never receive a
+	 * child result — cancel, and a tmux-level failure — so a run that spent real
+	 * tokens before it stopped does not report none. `readSessionUsage` already
+	 * excludes the lines a fork or resume inherited; a missing or unreadable session
+	 * file leaves the field as it was. The `?? run.usage` fallback is a no-op today:
+	 * every caller reaches here with `usage` unset (`subagent_resume` clears it on
+	 * the new record), so it can neither surface stale data nor erase a value that
+	 * a future caller already set.
+	 */
+	const captureRunUsage = async (run: RunRecord): Promise<void> => {
+		const sessionFile = await findChildSessionFile(run);
+		run.usage = (await readSessionUsage(sessionFile, { fromLine: run.usageFromLine ?? 0 })) ?? run.usage;
+		// Remember a discovered path: it makes the child session visible to
+		// subagent_status and subagent_clean, which otherwise would not know one
+		// exists until the run reported a result.
+		if (sessionFile) run.sessionFile = sessionFile;
+	};
+
 	const finalizeRun = async (run: RunRecord, result: ChildResult): Promise<void> => {
 		run.status = result.status === "completed" ? "completed" : "failed";
 		run.finishedAt = result.finishedAt || Date.now();
@@ -1205,7 +1258,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			run.error = result.error.trim();
 		}
 		run.output = truncateToolText(output || "(no text output)");
-		run.usage = (await readSessionUsage(run.sessionFile, { fromLine: run.usageFromLine ?? 0 })) ?? run.usage;
+		await captureRunUsage(run);
 		await persist();
 		// After the notification: a display problem must never be able to swallow
 		// the completion message, which is how the main agent learns the run ended.
@@ -1221,6 +1274,9 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		run.interruptRequestedAt = undefined;
 		run.error = message;
 		run.finishedAt = Date.now();
+		// The child is gone, but it may have spent real tokens first; a tmux-level
+		// failure must not report none. See captureRunUsage.
+		await captureRunUsage(run);
 		await persist();
 		// After the notification: a display problem must never be able to swallow
 		// the completion message, which is how the main agent learns the run ended.
@@ -2094,6 +2150,10 @@ const noteInterrupt = async (
 				await pi.exec("tmux", tmuxArgs("kill-session", "-t", run.tmuxSession)).catch(() => undefined);
 				run.status = "cancelled";
 				run.finishedAt = Date.now();
+				// A cancelled run is very often one that had already spent real tokens;
+				// read them before the terminal status is persisted, not never. The
+				// session file survives the tmux kill, so this is still readable.
+				await captureRunUsage(run);
 				await persist();
 				refreshStatusWidget();
 				void drainQueue();

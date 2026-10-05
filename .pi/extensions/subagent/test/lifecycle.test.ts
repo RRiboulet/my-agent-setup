@@ -87,6 +87,12 @@ interface HarnessOptions {
 	 * that order.
 	 */
 	afterEscapeSent?: () => Promise<void>;
+	/**
+	 * Invoked when the pane probe reports the pane dead (`paneDead: true`), before
+	 * `finalizeMissingChild` runs. Lets a test write a result into the window
+	 * between the watcher's first result read and its post-probe re-read.
+	 */
+	afterPaneDeadProbe?: () => Promise<void>;
 }
 
 async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -188,6 +194,7 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 				return { code: 0, stdout: options.paneText ?? "child working\n", stderr: "" };
 			}
 			if (joined.includes("display-message")) {
+				if (options.afterPaneDeadProbe && options.paneDead) await options.afterPaneDeadProbe();
 				return { code: 0, stdout: options.paneDead ? "1" : "0", stderr: "" };
 			}
 			return { code: 0, stdout: "", stderr: "" };
@@ -350,6 +357,34 @@ async function waitForRunStatus(h: Harness, status: string, note = ""): Promise<
 		`run never reached "${status}"${note ? ` (${note})` : ""}; last record=${JSON.stringify(last)}; ` +
 			`since the target was broken: ${panes} capture-pane, ${displays} display-message, ${h.execCalls.length} exec calls total`,
 	);
+}
+
+/**
+ * Write a child session file under the run dir, as a standalone child would.
+ *
+ * The parent does not learn this path until the child reports a result, so a run
+ * stopped before that — cancel, tmux failure — has to discover it to report the
+ * usage it burned.
+ */
+async function writeChildSession(
+	run: RunRecord,
+	usage: { input: number; output: number; cost?: number }[],
+): Promise<string> {
+	const file = path.join(run.runDir, "session", `2026-01-01T00-00-00-000Z_${run.id}.jsonl`);
+	const lines = [
+		JSON.stringify({ type: "session", version: 3, id: run.id, timestamp: "2026-01-01T00:00:00.000Z", cwd: run.cwd }),
+		...usage.map((u) =>
+			JSON.stringify({
+				type: "message",
+				message: {
+					role: "assistant",
+					usage: { input: u.input, output: u.output, totalTokens: u.input + u.output, cost: { total: u.cost ?? 0 } },
+				},
+			}),
+		),
+	];
+	await writeFile(file, `${lines.join("\n")}\n`, "utf8");
+	return file;
 }
 
 async function withHarness<T>(
@@ -1487,6 +1522,38 @@ test("subagent_cancel releases an interrupted child", async () => {
 	});
 });
 
+test("a cancelled run reports the usage it burned before it was stopped", async () => {
+	// A cancelled run is very often one that had already spent real tokens, so
+	// reporting none understates what the session cost. The child never reported a
+	// result, so the session file has to be discovered from the run dir.
+	await withHarness(undefined, async (h) => {
+		const run = (await h.call("subagent", { task: "burns tokens, then cancelled" })).details as unknown as RunRecord;
+		const sessionFile = await writeChildSession(run, [
+			{ input: 300, output: 100, cost: 0.02 },
+			{ input: 200, output: 50, cost: 0.03 },
+		]);
+
+		await h.call("subagent_cancel", { id: run.id });
+		await waitFor(async () => (await h.readRuns())[0].status === "cancelled");
+		const cancelled = (await h.readRuns())[0];
+		assert.equal(cancelled.usage?.totalTokens, 650, "cancel must not discard what the child already spent");
+		assert.equal(cancelled.usage?.turns, 2);
+		assert.equal(cancelled.sessionFile, sessionFile, "the discovered session file is recorded, so status and clean can see it");
+	});
+});
+
+test("a run failed at the tmux layer still reports its usage", async () => {
+	await withHarness(undefined, async (h) => {
+		const run = (await h.call("subagent", { task: "socket dies after spending" })).details as unknown as RunRecord;
+		await writeChildSession(run, [{ input: 400, output: 100 }]);
+
+		h.failPaneAlways();
+		await waitForRunStatus(h, "failed");
+		const failed = (await h.readRuns())[0];
+		assert.equal(failed.usage?.totalTokens, 500, "a tmux-level failure is not evidence of zero tokens");
+	});
+});
+
 test("kill-on-shutdown cancels an interrupted run", async () => {
 	await withTempAgentDir(async () => {
 		await withEnv({ PI_SUBAGENT_KILL_ON_SHUTDOWN: "true" }, async () => {
@@ -1596,6 +1663,37 @@ test("a result written as the session disappears still wins", async () => {
 		await waitFor(async () => (await h.readRuns())[0].status === "completed");
 		assert.equal((await h.readRuns())[0].output, "got out in time");
 	});
+});
+
+test("a result that lands during the pane probe still wins", async () => {
+	// The re-read in finalizeMissingChild covers the window between the watcher's
+	// FIRST result read and its pane probe. A test that writes the result before
+	// the first tick (the one above) never enters that window — which is why
+	// deleting the re-read left the whole suite green. `afterPaneDeadProbe` writes
+	// into the window directly: the result exists only after the probe has run.
+	let writeLate: (() => Promise<void>) | undefined;
+	await withHarness(
+		{
+			paneDead: true,
+			afterPaneDeadProbe: async () => {
+				await writeLate?.();
+			},
+		},
+		async (h) => {
+			const run = (await h.call("subagent", { task: "reports during the pane probe" })).details as unknown as RunRecord;
+			writeLate = async () => {
+				await h.writeResult(run, {
+					version: 1,
+					status: "completed",
+					output: "landed in the window",
+					finishedAt: Date.now(),
+				});
+			};
+
+			await waitFor(async () => (await h.readRuns())[0].status === "completed");
+			assert.equal((await h.readRuns())[0].output, "landed in the window");
+		},
+	);
 });
 
 test("an unclassifiable tmux failure fails the run only after a run of them", async () => {
