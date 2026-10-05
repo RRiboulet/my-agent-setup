@@ -654,3 +654,187 @@ test("LOCAL PATCH 4: the test surface is exported and the default export is stil
 function round(n: number): number {
 	return Math.round(n * 1e6) / 1e6;
 }
+
+// --- upstream 0865c84 / 2ac4480 / ab1e7f3 (vendored 2026-10-05) ---------------
+//
+// These three are upstream's, not ours, and arrived with no tests: the file
+// ships untested upstream. They are pinned here for the same reason as the
+// local patches — a regression must fail the suite, not a person's invoice.
+
+/** An assistant line from a faux/test provider, as pi's mock provider emits. */
+function fauxAssistant(u: Usage) {
+	seq += 1;
+	return {
+		type: "message",
+		id: `e${seq}`,
+		parentId: "mc1",
+		timestamp: new Date().toISOString(),
+		message: { role: "assistant", api: "faux:abc123", provider: "faux", model: "faux-1", usage: usage(u) },
+	};
+}
+
+/** An assistant line from a named provider/model (the shared helper hardcodes one). */
+function assistantAs(provider: string, model: string, u: Usage, parentId = "mc1") {
+	seq += 1;
+	return {
+		type: "message",
+		id: `e${seq}`,
+		parentId,
+		timestamp: new Date().toISOString(),
+		message: { role: "assistant", provider, model, usage: usage(u) },
+	};
+}
+
+/** A model_change, which declares a model without necessarily using it. */
+function modelChange(provider: string, modelId: string, id = `mc${++seq}`) {
+	return { type: "model_change", id, parentId: null, provider, modelId };
+}
+
+test("a model_change alone does not make a model count as used", async () => {
+	// Upstream 0865c84. Sessions routinely start on a default model and switch
+	// before sending anything, so the declared model must not enter the table —
+	// it inflates per-model session counts and shares for a model that never ran.
+	await withFixtureDir(async (dir) => {
+		const sessions = path.join(dir, "sessions");
+		await writeSession(path.join(sessions, `${stamp()}_switch.jsonl`), [
+			header("switch"),
+			modelChange("openrouter", "never/used", "mc-never"),
+			modelChange("openrouter", "actually/used", "mc-used"),
+			assistantAs("openrouter", "actually/used", { totalTokens: 10, cost: 0.01 }, "mc-used"),
+		]);
+
+		const data = await computeBreakdown(undefined, undefined, { roots: [sessions] });
+		const range = data.ranges.get(30)!;
+		assert.deepEqual(
+			[...range.modelSessions.keys()].sort(),
+			["openrouter/actually/used"],
+			"only the model that produced a message is a model this session used",
+		);
+		assert.equal(range.sessions, 1, "the session still counts once");
+	});
+});
+
+test("a session where no model ever answered is skipped entirely", async () => {
+	// Upstream 0865c84, the other half: "a session happened" is not the same as
+	// "a model was used". Before the fix any transcript with a message counted,
+	// so an abandoned session inflated both the session count and the totals.
+	await withFixtureDir(async (dir) => {
+		const sessions = path.join(dir, "sessions");
+		await writeSession(path.join(sessions, `${stamp()}_abandoned.jsonl`), [
+			header("abandoned"),
+			{ type: "message", id: "u1", parentId: null, timestamp: new Date().toISOString(), message: { role: "user", content: "hi" } },
+		]);
+		await writeSession(path.join(sessions, `${stamp()}_answered.jsonl`), [
+			header("answered"),
+			modelChange("openrouter", "real/model", "mc-real"),
+			assistantAs("openrouter", "real/model", { totalTokens: 10, cost: 0.01 }, "mc-real"),
+		]);
+
+		const t = await totals([sessions]);
+		assert.equal(t.sessions, 1, "only the session that reached a model is reported");
+		assert.equal(t.messages, 1);
+	});
+
+	// The one exception, and it is ours: a fork that inherited every entry it
+	// has has answered nothing itself, yet the user really did start it.
+	// LOCAL PATCH 2 keeps those, and this is the seam where upstream's tightened
+	// rule and our exception meet — so it is asserted from both sides.
+	await withFixtureDir(async (dir) => {
+		const sessions = path.join(dir, "sessions");
+		const parent = await writeSession(path.join(sessions, `${stamp()}_parent.jsonl`), [
+			header("parent"),
+			modelChange("openrouter", "real/model", "mc-real"),
+			assistantAs("openrouter", "real/model", { totalTokens: 10, cost: 0.01 }, "mc-real"),
+		]);
+		await writeSession(path.join(sessions, `${stamp()}_fork.jsonl`), [
+			header("fork", parent),
+			...(await inheritedPrefix(parent)),
+		]);
+
+		const t = await totals([sessions]);
+		assert.equal(t.sessions, 2, "the abandoned fork is still a session the user started");
+		assert.equal(t.tokens, 10, "and none of its inherited context is billed to it again");
+	});
+});
+
+test("a session that only ever spoke to a faux provider is not a session", async () => {
+	// Upstream 2ac4480. pi's mock/test provider reports synthetic token
+	// estimates; counting them would put invented usage in a real bill summary.
+	await withFixtureDir(async (dir) => {
+		const sessions = path.join(dir, "sessions");
+		await writeSession(path.join(sessions, `${stamp()}_fauxonly.jsonl`), [
+			header("fauxonly"),
+			modelChange("faux", "faux-1"),
+			fauxAssistant({ totalTokens: 999_999, cost: 42 }),
+		]);
+		await writeSession(path.join(sessions, `${stamp()}_real.jsonl`), [
+			header("real"),
+			modelChange("openrouter", "real/model", "mc-real"),
+			assistantAs("openrouter", "real/model", { totalTokens: 10, cost: 0.01 }, "mc-real"),
+		]);
+
+		const t = await totals([sessions]);
+		assert.equal(t.sessions, 1, "the faux-only session is dropped entirely");
+		assert.equal(t.tokens, 10, "its synthetic estimate contributes nothing");
+		assert.equal(t.cost, 0.01);
+	});
+});
+
+test("faux usage inside a real session is skipped, and does not blank the model", async () => {
+	// The mixed case the two fixes above have to agree on: skipping faux entries
+	// must not fall back to the previous model and bill them to it.
+	await withFixtureDir(async (dir) => {
+		const sessions = path.join(dir, "sessions");
+		await writeSession(path.join(sessions, `${stamp()}_mixed.jsonl`), [
+			header("mixed"),
+			modelChange("openrouter", "real/model", "mc-real"),
+			assistantAs("openrouter", "real/model", { totalTokens: 10, cost: 0.01 }, "mc-real"),
+			fauxAssistant({ totalTokens: 500_000, cost: 7 }),
+			assistantAs("openrouter", "real/model", { totalTokens: 5, cost: 0.02 }, "mc-real"),
+		]);
+
+		const t = await totals([sessions]);
+		assert.equal(t.tokens, 15, "the faux estimate is dropped, the two real turns kept");
+		assert.equal(round(t.cost), 0.03);
+	});
+});
+
+test("cost/session column and provider grouping come from the aggregation", async () => {
+	// Upstream ab1e7f3. The model table grew a cost/session column and a
+	// provider-grouped view; both read the per-model maps this adds, and the
+	// grouped maps are keyed by model name alone, so two providers running the
+	// same model share one row.
+	await withFixtureDir(async (dir) => {
+		const sessions = path.join(dir, "sessions");
+		await writeSession(path.join(sessions, `${stamp()}_a.jsonl`), [
+			header("a"),
+			modelChange("openrouter", "vendor/foo", "mc-openrouter"),
+			assistantAs("openrouter", "vendor/foo", { totalTokens: 100, cost: 0.1 }, "mc-openrouter"),
+		]);
+		await writeSession(path.join(sessions, `${stamp()}_b.jsonl`), [
+			header("b"),
+			modelChange("anthropic", "vendor/foo", "mc-anthropic"),
+			assistantAs("anthropic", "vendor/foo", { totalTokens: 300, cost: 0.3 }, "mc-anthropic"),
+		]);
+
+		const data = await computeBreakdown(undefined, undefined, { roots: [sessions] });
+		const range = data.ranges.get(30)!;
+
+		// Split: one row per provider-qualified model.
+		assert.equal(range.modelSessions.get("openrouter/vendor/foo"), 1);
+		assert.equal(range.modelSessions.get("anthropic/vendor/foo"), 1);
+
+		// Grouped: one row for `vendor/foo`, across both providers.
+		assert.equal(range.groupedModelSessions.get("vendor/foo"), 2, "the grouped map is provider-agnostic");
+		assert.equal(range.groupedModelCost.get("vendor/foo"), round(0.4), "cost rolls up the same way");
+
+		// And the column the table actually renders: cost/session for the group.
+		const rendered = new BreakdownComponent(
+			data,
+			{ terminal: { rows: 40 }, requestRender() {} } as never,
+			() => {},
+		).render(160);
+		assert.ok(rendered.length > 0);
+		assert.match(rendered.join("\n"), /vendor\/foo/, "the grouped model reaches the rendered table");
+	});
+});

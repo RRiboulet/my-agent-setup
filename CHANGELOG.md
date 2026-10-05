@@ -103,6 +103,27 @@ Maintenance:
   or did not (3) — a wrong answer, not a slow one, and a review proved it by
   shortening the sleep. The harness counts ticks, so the test waits for the
   event; both mutation kills (3 to 1, 3 to 2) are re-verified after the change.
+- **Five tests for the vendored `/session-breakdown`, covering behaviour that
+  had none on either side.** Upstream ships this 1.8k-line file with no tests,
+  and we had pinned only our own `LOCAL PATCH` hunks — so three upstream
+  behaviours were live in this repo and untested: faux/test-provider sessions are
+  skipped (`2ac4480`; their token estimates are synthetic, not usage), only a
+  model that actually produced a message is counted (`0865c84`; a default model a
+  session switched away from before sending anything was inflating per-model
+  session counts), and the cost/session column with provider grouping (`ab1e7f3`).
+  Two of the three are numbers a person reads as a bill. Each test was verified
+  by re-introducing the upstream fix and watching it fail; deleting LOCAL PATCH 2
+  fails 8 tests, so the change did not quietly neuter it.
+  Two things worth recording:
+  - `0865c84` tightens the dead-session rule that LOCAL PATCH 2 amends, and that
+    seam is now asserted from both sides: upstream drops any session where no
+    model answered, we keep a declared fork, because a child seeded from a parent
+    branch and abandoned is a session the user really started.
+  - A test asserting "a tool result naming a model does not mark it used" was
+    written and then deleted: upstream deliberately counts such a message
+    (`explicitMk || role === "assistant"`), so the test asserted a bug that does
+    not exist. The mutation run is what caught it, which is the argument for
+    running one.
 - `PI_SUBAGENT_*` integers are now parsed strictly: `"3m"`, `"1e9"` and `"3.9"`
   are reported on stderr and ignored rather than truncated by `parseInt`, which
   would have turned a mistyped stall threshold into seconds. A behavioural change

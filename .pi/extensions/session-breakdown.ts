@@ -24,7 +24,15 @@
 //
 // Vendored verbatim, with four LOCAL PATCH hunks below — each marked in place
 // with a `LOCAL PATCH n` comment and listed here so a later `diff` against
-// upstream stays readable:
+// upstream stays readable.
+//
+// Upstream base: commit 0865c84 ("fix(session-breakdown): only count models that
+// produced messages"). Verified on 2026-10-05 by diffing against upstream: of
+// the 160 lines the three commits before it added, this file carries 158
+// verbatim, and the only two it does not are the two lines below that
+// LOCAL PATCH 2 amends on purpose. So this file is current, and the local
+// amendments are the whole of the delta — do not re-vendor it on the assumption
+// that it lags.
 //
 //   1. SESSION_ROOTS instead of a hardcoded SESSION_ROOT: follows pi's
 //      getAgentDir() (so PI_CODING_AGENT_DIR works — upstream PR #24 was closed
