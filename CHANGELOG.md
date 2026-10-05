@@ -78,6 +78,31 @@ Fixed:
 
 Maintenance:
 
+- **Three subagent behaviours were documented as tested and were not.** A
+  simplification audit ran 47 single-behaviour mutations against this suite;
+  three survived, meaning nothing would have failed had the behaviour been
+  deleted. `usage.fromLine` (`usage.ts`) had no unit coverage at all, despite
+  being the guarantee this changelog advertises for token accounting — a fork or
+  resume is not charged for inherited context: `usage.test.ts` never passed
+  `fromLine`, and `lifecycle.test.ts` pinned the baseline number rather than that
+  it is honoured. `MAX_TRANSIENT_TMUX_FAILURES` (`index.ts`) was vacuously
+  covered: the harness's `failPaneOnce` broke only the first of the two tmux
+  calls a watcher tick makes, so the second succeeded, the failure was cleared,
+  and "one failure is tolerated" could not fail for any reason. And
+  `observationFromRead`, the only bridge from an activity read to a status
+  observation, was untested, which left `snapshotProblemLabel`'s one non-null
+  branch reachable only from a hand-built snapshot. Each now has a test that
+  fails when the behaviour is removed, verified by reverting the implementation
+  in a scratch copy. A fourth audit entry (`validateCwd`'s not-a-directory
+  branch) was stale — `pure.test.ts` already covered it — and needed nothing.
+  No behaviour changed: the only production edit is one line adding
+  `observationFromRead` to the `__test__` export block.
+- The tmux-failure tolerance test now synchronises on a counter the harness
+  owns rather than a `setTimeout`. It previously slept 700 ms and then asserted
+  an exact tick count, which meant it either caught the blip already banked (2)
+  or did not (3) — a wrong answer, not a slow one, and a review proved it by
+  shortening the sleep. The harness counts ticks, so the test waits for the
+  event; both mutation kills (3 to 1, 3 to 2) are re-verified after the change.
 - `PI_SUBAGENT_*` integers are now parsed strictly: `"3m"`, `"1e9"` and `"3.9"`
   are reported on stderr and ignored rather than truncated by `parseInt`, which
   would have turned a mistyped stall threshold into seconds. A behavioural change

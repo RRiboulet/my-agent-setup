@@ -2410,6 +2410,7 @@ export const __test__ = {
 	isSameOrDescendant,
 	isTerminal,
 	listRow,
+	observationFromRead,
 	readBooleanEnv,
 	readIntEnv,
 	readNonNegativeIntEnv,

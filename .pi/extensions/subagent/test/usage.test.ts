@@ -47,6 +47,33 @@ test("readSessionUsage sums assistant and nested toolResult usage", async (t) =>
 	assert.equal(usage.turns, 2, "only assistant messages count as turns");
 });
 
+test("readSessionUsage honours fromLine, so inherited context is not billed to the run", async (t) => {
+	// A fork copies its parent's transcript verbatim and a resumed run keeps its
+	// earlier attempts, so the leading lines are not this run's work. Summing the
+	// whole file would double-count every inherited token across parent and child.
+	const file = await writeSession(t, [
+		JSON.stringify({ type: "session", version: 3, id: "s" }),
+		usageLine("assistant", { input: 100, output: 50, totalTokens: 150, cost: { total: 1 } }),
+		usageLine("toolResult", { input: 10, totalTokens: 10, cost: { total: 0.1 } }),
+		usageLine("assistant", { input: 2, output: 3, totalTokens: 5, cost: { total: 0.02 } }),
+		usageLine("assistant", { input: 1, totalTokens: 1 }),
+	]);
+	const whole = await readSessionUsage(file);
+	assert.ok(whole);
+	assert.equal(whole.input, 113, "without fromLine the whole file is the run's usage");
+
+	const fromTwo = await readSessionUsage(file, { fromLine: 2 });
+	assert.ok(fromTwo);
+	assert.equal(fromTwo.input, 13, "the first two lines were inherited, not spent by this run");
+	assert.equal(fromTwo.output, 3);
+	assert.equal(fromTwo.totalTokens, 16);
+	assert.equal(fromTwo.turns, 2, "the inherited assistant turn is not a turn of this run");
+	assert.ok(Math.abs(fromTwo.cost - 0.12) < 1e-9);
+
+	// A baseline past the end of the file leaves nothing to attribute.
+	assert.equal(await readSessionUsage(file, { fromLine: 9 }), undefined);
+});
+
 test("readSessionUsage skips malformed lines and non-usage entries", async (t) => {
 	const file = await writeSession(t, [
 		"{not json",

@@ -37,6 +37,9 @@ interface Harness {
 	failPaneOnce: () => void;
 	/** Fail every pane call with an unclassifiable error (an unreachable socket). */
 	failPaneAlways: () => void;
+	/** Ticks in which the mock served an unclassifiable failure. */
+	paneFailureTicks: () => number;
+	resetPaneFailureTicks: () => void;
 	/** setWidget calls, in order. An `undefined` content is a clear. */
 	widgetCalls: { key: string; hasContent: boolean; placement: string | undefined }[];
 	/** Every registerTool call, in order, with the exposure it was given. */
@@ -89,6 +92,14 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 	// Unclassifiable failures, counted down: `once` for a single blip.
 	let paneFailures = 0;
 	let paneFailureMode = "";
+	// True while the in-flight tick is inside a budgeted failure.
+	let paneTickFailing = false;
+	// Ticks, not pane calls, in which an unclassifiable failure was served. A
+	// watcher tick makes exactly one capture-pane and one display-message, and
+	// banks at most one failure, so tests synchronise on this instead of
+	// sleeping and hoping the poll clock got there first.
+	let paneFailureTicks = 0;
+	let countedThisTick = false;
 	// Widget plumbing (local patch 14).
 	const widgetCalls: { key: string; hasContent: boolean; placement: string | undefined }[] = [];
 	// Every registration, in order, so a test can see the load-time one and the
@@ -141,14 +152,27 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 			const joined = args.join(" ");
 			if (joined.includes("-V")) return { code: 0, stdout: "tmux 3.3a", stderr: "" };
 			const paneCall = joined.includes("capture-pane") || joined.includes("display-message");
+			// A tick starts at its capture-pane, so the counter resets there.
+			if (joined.includes("capture-pane")) countedThisTick = false;
 			if (paneCall && targetMissing) {
 				return { code: 1, stdout: "", stderr: "can't find pane: pi-agent-gone" };
 			}
-			if (paneCall && paneFailures > 0) {
-				// "always" keeps failing; any finite count is a blip that recovers.
-				if (paneFailureMode !== "always") paneFailures -= 1;
+			if (paneCall && (paneFailures > 0 || paneTickFailing)) {
+				// A budgeted failure covers the WHOLE tick, not just its first pane
+				// call: watchTick only counts a failure when BOTH its tmux calls
+				// fail, so failing capture-pane alone would recover on display-message
+				// and never reach countTmuxFailure at all.
+				if (paneFailureMode !== "always" && !paneTickFailing) {
+					paneFailures -= 1;
+					paneTickFailing = true;
+				}
+				if (!countedThisTick) {
+					paneFailureTicks += 1;
+					countedThisTick = true;
+				}
 				return { code: 1, stdout: "", stderr: "error connecting to /tmp/tmux-subagents.sock (No such file or directory)" };
 			}
+			if (paneCall) paneTickFailing = false;
 			if (joined.includes("capture-pane")) {
 				return { code: 0, stdout: options.paneText ?? "child working\n", stderr: "" };
 			}
@@ -219,8 +243,14 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 			targetMissing = true;
 		},
 		failPaneOnce: () => {
+			// One whole tick, not one pane call: see the exec mock.
 			paneFailureMode = "once";
 			paneFailures = 1;
+			paneTickFailing = false;
+		},
+		paneFailureTicks: () => paneFailureTicks,
+		resetPaneFailureTicks: () => {
+			paneFailureTicks = 0;
 		},
 		failPaneAlways: () => {
 			paneFailureMode = "always";
@@ -1524,15 +1554,27 @@ test("an unclassifiable tmux failure fails the run only after a run of them", as
 	// unreachable socket must not leave the watcher polling forever either. The
 	// failure is reported as "cannot be reached", not as "the child exited": the
 	// two claims need different evidence.
+	//
+	// The constant is pinned from both sides: one failing tick is tolerated, and
+	// the run dies on the MAX_TRANSIENT_TMUX_FAILURES-th consecutive one. Lowering
+	// the constant would fail this run during the tolerated blip; raising it would
+	// leave it polling past the tick counted below.
+	//
+	// Synchronised on the harness counter, not on a sleep: the first tick is armed
+	// at POLL_INTERVAL_MS after the run starts, so a fixed wait either catches the
+	// blip already banked (2) or not (3) — a wrong answer rather than a slow one.
+	// Wait for the event instead.
 	await withHarness(undefined, async (h) => {
 		const run = (await h.call("subagent", { task: "socket blips" })).details as unknown as RunRecord;
 		h.failPaneOnce();
-		await new Promise((resolve) => setTimeout(resolve, 700));
+		await waitFor(() => h.paneFailureTicks() === 1);
 		assert.equal((await h.readRuns())[0].status, "running", "one failure is tolerated");
 
 		h.failPaneAlways();
+		h.resetPaneFailureTicks();
 		h.execCalls.length = 0;
 		await waitForRunStatus(h, "failed", "unclassifiable tmux failure");
+		assert.equal(h.paneFailureTicks(), 2, "one failure so far, so two more consecutive ones reach the limit of 3");
 		assert.match((await h.readRuns())[0].error ?? "", /could not be reached over tmux/);
 		assert.doesNotMatch((await h.readRuns())[0].error ?? "", /exited before reporting/);
 	});

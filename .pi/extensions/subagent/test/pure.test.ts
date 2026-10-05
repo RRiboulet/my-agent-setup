@@ -1,9 +1,16 @@
-// Unit tests for shell quoting, env parsing, path containment and model
-// resolution.
+// Unit tests for shell quoting, env parsing, path containment, model
+// resolution and the activity-read to status-observation bridge.
 //
 // Risk covered: shellQuote feeds the tmux/attach command strings that are
 // executed in a shell; isSameOrDescendant decides whether a child pi may run in
 // a given cwd; the env readers gate concurrency, auto-reap and notification.
+//
+// observationFromRead is here for the same reason as the rest: it is the only
+// bridge from what the child wrote (an ActivityReadResult) to what the
+// classifier consumes (a StatusObservation), and a mangled crossing is
+// indistinguishable from a child that went quiet. Its failure reason decides
+// whether a run looks like it has not started, is corrupt, or belongs to a
+// different child.
 
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
@@ -12,10 +19,13 @@ import * as path from "node:path";
 import { test } from "node:test";
 
 import { __test__ } from "../index.ts";
+import { classifyStatus, createStatusState, DEFAULT_STALL_AFTER_MS, observeStatus } from "../status.ts";
 import { withEnv } from "./helpers.ts";
 
-const { isSameOrDescendant, readBooleanEnv, readIntEnv, readNonNegativeIntEnv, resolveModel, shellQuote, validateCwd } =
+const { isSameOrDescendant, observationFromRead, readBooleanEnv, readIntEnv, readNonNegativeIntEnv, resolveModel, shellQuote, validateCwd } =
 	__test__;
+
+const T0 = 1_700_000_000_000;
 
 test("shellQuote quotes a value for POSIX shells", () => {
 	assert.equal(shellQuote(""), "''");
@@ -170,4 +180,63 @@ test("validateCwd accepts a directory and rejects missing paths and files", asyn
 	} finally {
 		await rm(dir, { recursive: true, force: true });
 	}
+});
+
+test("observationFromRead is the only bridge from an activity read to an observation", () => {
+	// The read failure reason must survive the crossing verbatim: it is the only
+	// thing that tells a run that has not started yet (missing) from one whose
+	// file is corrupt (invalid) or was written by a different child (wrong-id),
+	// and the parse error is what describeSnapshotError later renders.
+	// Field by field, not deepEqual: an observation with no error carries no
+	// `snapshotError` at all, and pinning the key's presence would fail a
+	// refactor to `{ snapshot: read.reason }` for no behavioural reason.
+	const missingObs = observationFromRead({ ok: false, reason: "missing" });
+	assert.equal(missingObs.snapshot, "missing");
+	assert.equal(missingObs.snapshotError, undefined);
+	const invalidObs = observationFromRead({ ok: false, reason: "invalid", error: "activity is not valid JSON: nope" });
+	assert.equal(invalidObs.snapshot, "invalid");
+	assert.equal(invalidObs.snapshotError, "activity is not valid JSON: nope");
+	const wrongId = observationFromRead({ ok: false, reason: "wrong-id" });
+	assert.equal(wrongId.snapshot, "wrong-id");
+	assert.equal(wrongId.snapshotError, undefined);
+
+	assert.deepEqual(
+		observationFromRead({
+			ok: true,
+			activity: {
+				version: 1,
+				runningChildId: "run-1",
+				createdAt: T0,
+				updatedAt: T0 + 5_000,
+				sequence: 7,
+				latestEvent: "tool_execution_start",
+				phase: "active",
+				agentActive: true,
+				providerActive: false,
+				toolActive: true,
+				activeScope: "tool",
+				activeSince: T0 + 1_000,
+				toolName: "bash",
+			},
+		}),
+		{
+			snapshot: "present",
+			updatedAt: T0 + 5_000,
+			sequence: 7,
+			phase: "active",
+			activeScope: "tool",
+			activeSince: T0 + 1_000,
+			toolName: "bash",
+			latestEvent: "tool_execution_start",
+		},
+	);
+
+	// End to end, so the one labelled branch of snapshotProblemLabel is reachable
+	// from a real read rather than only from a hand-built observation.
+	const state = createStatusState({ runStatus: "running", startTimeMs: T0 });
+	const healthy = observeStatus(state, observationFromRead({ ok: false, reason: "missing" }), T0);
+	const broke = observeStatus(healthy, observationFromRead({ ok: false, reason: "wrong-id" }), T0 + 1_000);
+	assert.equal(classifyStatus(broke, T0 + 1_000 + DEFAULT_STALL_AFTER_MS).statusLabel, "wrong activity id");
+	const invalid = observeStatus(state, observationFromRead({ ok: false, reason: "invalid", error: "boom" }), T0);
+	assert.equal(classifyStatus(invalid, T0).snapshotError, "boom", "the parse error is kept for the renderer");
 });
