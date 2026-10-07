@@ -272,7 +272,6 @@ interface RunRecord {
 	tmuxTarget: string;
 	attachCommand: string;
 	captureCommand: string;
-	killCommand: string;
 	runDir: string;
 	resultPath: string;
 	trusted: boolean;
@@ -390,7 +389,6 @@ function updateTmuxCommands(run: RunRecord): void {
 	const tmux = tmuxCommandPrefix();
 	run.attachCommand = `pi --${ATTACH_FLAG} ${shellQuote(run.id)}`;
 	run.captureCommand = `${tmux} capture-pane -p -J -t ${shellQuote(run.tmuxTarget)}`;
-	run.killCommand = `${tmux} kill-session -t ${shellQuote(run.tmuxSession)}`;
 }
 
 function attachToSubagentAndExit(rawTarget: string): never {
@@ -560,7 +558,7 @@ function registerChildReporter(pi: ExtensionAPI, resultPath: string, runId: stri
 	// The aborted turn currently in flight, latched by `turn_end` and consumed by
 	// `agent_settled`. `agent_settled` carries no payload and fires for aborted
 	// runs too, so the outcome has to be remembered across the two events.
-	let abortedTurn: { turnIndex?: number; stopReason?: string } | undefined;
+	let abortedTurn: { stopReason?: string } | undefined;
 
 	// Liveness snapshot (local patch 11). The path is derived from the result
 	// path the child was already given, so nothing new crosses the environment
@@ -642,7 +640,6 @@ function registerChildReporter(pi: ExtensionAPI, resultPath: string, runId: stri
 		// stopReason, so it is read through a narrowing shape rather than a cast.
 		const stopReason = (event.message as { stopReason?: unknown } | undefined)?.stopReason;
 		abortedTurn = {
-			...(typeof event.turnIndex === "number" ? { turnIndex: event.turnIndex } : {}),
 			...(typeof stopReason === "string" ? { stopReason } : {}),
 		};
 	});
@@ -2000,7 +1997,6 @@ const noteInterrupt = async (
 				tmuxTarget: `${tmuxSession}:0.0`,
 				attachCommand: "",
 				captureCommand: "",
-				killCommand: "",
 				runDir,
 				resultPath,
 				trusted: false,
@@ -2384,7 +2380,6 @@ const noteInterrupt = async (
 						tmuxTarget: `${tmuxSession}:0.0`,
 						attachCommand: "",
 						captureCommand: "",
-						killCommand: "",
 						runDir,
 						resultPath: path.join(runDir, "result.json"),
 						status: "queued",

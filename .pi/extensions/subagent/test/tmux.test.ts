@@ -25,7 +25,6 @@ function makeRun(overrides: Partial<RunRecord> = {}): RunRecord {
 		tmuxTarget: `${tmuxSessionName("abcdef01-2345-4678-89ab-cdef01234567")}:0.0`,
 		attachCommand: "",
 		captureCommand: "",
-		killCommand: "",
 		runDir: "/tmp/run",
 		resultPath: "/tmp/run/result.json",
 		trusted: false,
@@ -46,14 +45,13 @@ test("tmuxSocketPath lives under the agent directory", async () => {
 	});
 });
 
-test("updateTmuxCommands builds quoted attach, capture and kill commands", async () => {
+test("updateTmuxCommands builds quoted attach and capture commands", async () => {
 	await withTempAgentDir(async (agentDir) => {
 		const run = makeRun();
 		updateTmuxCommands(run);
 		const socket = `${agentDir}/tmux-subagents.sock`;
 		assert.equal(run.attachCommand, `pi --attach-subagent 'abcdef01-2345-4678-89ab-cdef01234567'`);
 		assert.equal(run.captureCommand, `tmux -S '${socket}' capture-pane -p -J -t 'pi-agent-abcdef01-2345-4678-89ab-cdef01234567:0.0'`);
-		assert.equal(run.killCommand, `tmux -S '${socket}' kill-session -t 'pi-agent-abcdef01-2345-4678-89ab-cdef01234567'`);
 	});
 });
 

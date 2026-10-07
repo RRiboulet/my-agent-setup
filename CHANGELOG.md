@@ -207,6 +207,30 @@ Maintenance:
   `TODO_ACTION_LABELS` lookup, and `formatTodoList` / `renderTodoList` share one
   `todoSections` helper instead of each rebuilding the same
   assigned/open/closed list.
+- **The last of the dead members are gone, and the `sliceByColumn` hang with
+  them.** A code-review pass flagged members with no production reader; this
+  removes them. `listTodosSync` in `todos.ts` (the async `listTodos` is the only
+  one used), `QnAComponent.allQuestionsAnswered` in `answer.ts`,
+  `SubagentActivityRecorder.flush()` in `activity.ts` (every terminal path
+  awaits `settled()`/`shutdown()`; its test actually exercised `settled()`, so
+  it is renamed rather than dropped), `paneResult()` in the test helpers, and
+  the `killCommand` field on `RunRecord` (cancelling re-derives the command with
+  `tmuxArgs("kill-session", …)`, so nothing rendered it). The interrupt marker's
+  `turnIndex` goes too: it was latched from `turn_end`, written to
+  `interrupt.json` and validated, but no reader ever used it — `runSummary`
+  renders `interruptedAt` and `interrupts`. `validateActivityState`, a pure
+  pass-through, is replaced by exporting `validateActivity` directly. The dead
+  legend path in `session-breakdown.ts` (`renderLegendItems`,
+  `renderLegendBlock`, `renderLeftRight`, `fitRight`) had no call sites — the
+  live legend is built inline — and its only reason to exist was
+  `sliceByColumn`, which cannot terminate on an unterminated ESC
+  (`sliceByColumn("ab\x1b", 0, 10)` hangs); deleting the path deletes the hang.
+  `readSessionHeader` and `readEntryIds` now share one `forEachJsonLine`, so the
+  stream/readline/try-finally scaffolding exists once. Deliberately kept:
+  `agentActive` / `providerActive` on the activity snapshot, which no renderer
+  reads but which the validator uses to enforce "a done snapshot cannot have
+  active work" and which make a hand-inspected `activity.json` self-describing;
+  a comment on the type now says so.
 
 ## v1.1.1 — 2026-10-05
 

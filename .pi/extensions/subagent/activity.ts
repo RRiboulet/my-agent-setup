@@ -49,6 +49,18 @@ export interface SubagentActivityState {
 	sequence: number;
 	latestEvent: SubagentActivityEvent;
 	phase: SubagentActivityPhase;
+	/**
+	 * Fine-grained active flags. Only `toolActive` is read by the parent's
+	 * renderer, but all three are validated — a `done` snapshot may not report
+	 * active work — and written so the snapshot is self-describing for anyone
+	 * inspecting `activity.json`. `agentActive` is derivable (`markActive` is the
+	 * only path into `phase === "active"` and it always sets it), so its
+	 * validator arm only catches a desynced write; `providerActive` is not — a
+	 * tool can run inside a provider request, leaving `activeScope === "tool"`
+	 * with `providerActive` still true. All three are kept rather than dropped:
+	 * they are the wire format's required booleans, and removing one of three
+	 * siblings is churn without a functional gain.
+	 */
 	agentActive: boolean;
 	providerActive: boolean;
 	toolActive: boolean;
@@ -76,8 +88,6 @@ export interface SubagentActivityRecorder {
 	 *  parent can observe `result.json`. */
 	settled(): Promise<void>;
 	shutdown(): Promise<void>;
-	/** Wait for any in-flight write to land. */
-	flush(): Promise<void>;
 	/** Snapshot of the current state, for tests and diagnostics. */
 	current(): SubagentActivityState;
 }
@@ -135,7 +145,8 @@ function optionalString(object: Record<string, unknown>, field: string): string 
 	return object[field] === undefined ? undefined : (object[field] as string);
 }
 
-function validateActivity(value: unknown, expectedChildId: string): ActivityReadResult {
+/** Validate an already-parsed snapshot value. */
+export function validateActivity(value: unknown, expectedChildId: string): ActivityReadResult {
 	const object = requireObject(value);
 	if (!object) return invalid("activity must be an object");
 	if (object.version !== 1) return invalid("unsupported activity version");
@@ -182,11 +193,6 @@ function validateActivity(value: unknown, expectedChildId: string): ActivityRead
 	}
 
 	return { ok: true, activity: object as unknown as SubagentActivityState };
-}
-
-/** Validate an already-parsed snapshot value. */
-export function validateActivityState(value: unknown, expectedChildId: string): ActivityReadResult {
-	return validateActivity(value, expectedChildId);
 }
 
 /**
@@ -367,7 +373,6 @@ export function createActivityRecorder(options: ActivityRecorderOptions): Subage
 			record("session_shutdown", () => {
 				markDone();
 			}),
-		flush: () => chain,
 		current,
 	};
 }

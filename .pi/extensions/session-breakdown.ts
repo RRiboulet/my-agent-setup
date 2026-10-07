@@ -80,52 +80,6 @@ type DowKey = string; // "Mon", "Tue", etc.
 type TodKey = string; // "after-midnight", "morning", "afternoon", "evening", "night"
 type BreakdownView = "model" | "cwd" | "dow" | "tod";
 
-function sliceByColumn(line: string, startCol: number, length: number, strict = false): string {
-	if (length <= 0) return "";
-	const endCol = startCol + length;
-	const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-	let result = "";
-	let currentCol = 0;
-	let i = 0;
-	let pendingAnsi = "";
-
-	while (i < line.length) {
-		if (line[i] === "\x1b") {
-			const match = /^\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[PX^_][^\x1b]*(?:\x1b\\)|[@-_])/.exec(line.slice(i));
-			if (match) {
-				if (currentCol >= startCol && currentCol < endCol) {
-					result += match[0];
-				} else if (currentCol < startCol) {
-					pendingAnsi += match[0];
-				}
-				i += match[0].length;
-				continue;
-			}
-		}
-
-		const nextAnsi = line.indexOf("\x1b", i);
-		const textEnd = nextAnsi === -1 ? line.length : nextAnsi;
-		for (const { segment } of segmenter.segment(line.slice(i, textEnd))) {
-			const w = visibleWidth(segment);
-			const inRange = currentCol >= startCol && currentCol < endCol;
-			const fits = !strict || currentCol + w <= endCol;
-			if (inRange && fits) {
-				if (pendingAnsi) {
-					result += pendingAnsi;
-					pendingAnsi = "";
-				}
-				result += segment;
-			}
-			currentCol += w;
-			if (currentCol >= endCol) break;
-		}
-		i = textEnd;
-		if (currentCol >= endCol) break;
-	}
-
-	return result;
-}
-
 const DOW_NAMES: DowKey[] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 const TOD_BUCKETS: { key: TodKey; label: string; from: number; to: number }[] = [
@@ -651,29 +605,63 @@ async function walkSessionFiles(
 //
 // Returns null when the file cannot be read or has no session header, which is
 // different from "readable, no parent" (that is `{ parentSession: null }`).
-async function readSessionHeader(filePath: string, signal?: AbortSignal): Promise<{ parentSession: string | null } | null> {
+/**
+ * Stream a JSONL file and invoke `onLine` with each parsed object. The
+ * stream/readline/try/finally lifecycle lives here so the two readers below
+ * cannot drift apart.
+ *
+ * Returns `true` when the walk completed, `false` when the file was unreadable
+ * or the signal aborted. A line that is not valid JSON goes to `onMalformed`,
+ * whose `false` return stops the walk (`readSessionHeader` treats a malformed
+ * first line as a failed read) while anything else keeps reading (`readEntryIds`
+ * skips it — a malformed line cannot contribute an id). `onLine` returning
+ * `false` stops the walk successfully.
+ */
+async function forEachJsonLine(
+	filePath: string,
+	signal: AbortSignal | undefined,
+	onLine: (obj: any) => boolean | void,
+	onMalformed?: () => boolean | void,
+): Promise<boolean> {
 	const stream = createReadStream(filePath, { encoding: "utf8" });
 	const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
 	try {
 		for await (const line of rl) {
-			if (signal?.aborted) return null;
+			if (signal?.aborted) return false;
 			if (!line.trim()) continue;
 			let obj: any;
 			try {
 				obj = JSON.parse(line);
 			} catch {
-				return null;
+				if (onMalformed?.() === false) return false;
+				continue;
 			}
-			if (obj?.type !== "session") return null;
-			return { parentSession: typeof obj.parentSession === "string" && obj.parentSession ? obj.parentSession : null };
+			if (onLine(obj) === false) return true;
 		}
-		return null;
+		return true;
 	} catch {
-		return null;
+		return false;
 	} finally {
 		rl.close();
 		stream.destroy();
 	}
+}
+
+async function readSessionHeader(filePath: string, signal?: AbortSignal): Promise<{ parentSession: string | null } | null> {
+	let header: { parentSession: string | null } | null = null;
+	const completed = await forEachJsonLine(
+		filePath,
+		signal,
+		(obj) => {
+			header =
+				obj?.type === "session"
+					? { parentSession: typeof obj.parentSession === "string" && obj.parentSession ? obj.parentSession : null }
+					: null;
+			return false;
+		},
+		() => false,
+	);
+	return completed ? header : null;
 }
 
 // LOCAL PATCH 2 (ours): the entry ids of a file, used to recognise the verbatim
@@ -684,26 +672,10 @@ async function readSessionHeader(filePath: string, signal?: AbortSignal): Promis
 // than treating as "nothing was inherited".
 async function readEntryIds(filePath: string, signal?: AbortSignal): Promise<Set<string> | null> {
 	const ids = new Set<string>();
-	const stream = createReadStream(filePath, { encoding: "utf8" });
-	const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-	try {
-		for await (const line of rl) {
-			if (signal?.aborted) return null;
-			if (!line.trim()) continue;
-			try {
-				const obj = JSON.parse(line);
-				if (obj?.id) ids.add(obj.id);
-			} catch {
-				// A malformed line cannot contribute an id; keep reading.
-			}
-		}
-		return ids;
-	} catch {
-		return null;
-	} finally {
-		rl.close();
-		stream.destroy();
-	}
+	const completed = await forEachJsonLine(filePath, signal, (obj) => {
+		if (obj?.id) ids.add(obj.id);
+	});
+	return completed ? ids : null;
 }
 
 async function parseSessionFile(
@@ -1318,51 +1290,6 @@ function displayModelName(modelKey: string): string {
 	return idx === -1 ? modelKey : modelKey.slice(idx + 1);
 }
 
-function renderLegendItems(modelColors: Map<ModelKey, RGB>, orderedModels: ModelKey[], otherColor: RGB): string[] {
-	const items: string[] = [];
-	for (const mk of orderedModels) {
-		const c = modelColors.get(mk);
-		if (!c) continue;
-		items.push(`${ansiFg(c, "█")} ${displayModelName(mk)}`);
-	}
-	items.push(`${ansiFg(otherColor, "█")} other`);
-	return items;
-}
-
-function fitRight(text: string, width: number): string {
-	if (width <= 0) return "";
-	let w = visibleWidth(text);
-	let t = text;
-	if (w > width) {
-		t = sliceByColumn(t, w - width, width, true);
-		w = visibleWidth(t);
-	}
-	return " ".repeat(Math.max(0, width - w)) + t;
-}
-
-function renderLegendBlock(leftLabel: string, items: string[], width: number): string[] {
-	if (width <= 0) return [];
-	if (items.length === 0) return [truncateToWidth(leftLabel, width)];
-
-	const lines: string[] = [];
-	// First line: label on left, first item right-aligned into remaining space.
-	const leftW = visibleWidth(leftLabel);
-	if (leftW >= width) {
-		lines.push(truncateToWidth(leftLabel, width));
-		// Put all items on their own lines right-aligned.
-		for (const it of items) lines.push(fitRight(it, width));
-		return lines;
-	}
-
-	const remaining = Math.max(0, width - leftW);
-	lines.push(leftLabel + fitRight(items[0], remaining));
-
-	for (let i = 1; i < items.length; i++) {
-		lines.push(fitRight(items[i], width));
-	}
-	return lines;
-}
-
 function renderModelTable(range: RangeAgg, mode: MeasurementMode, maxRows = 8, groupProviders = false): string[] {
 	// Keep this relatively narrow: model + selected metric + cost + cost/session + share.
 	const metric = graphMetricForRange(range, mode);
@@ -1580,22 +1507,6 @@ function renderTodTable(range: RangeAgg, mode: MeasurementMode): string[] {
 	}
 
 	return lines;
-}
-
-function renderLeftRight(left: string, right: string, width: number): string {
-	const leftW = visibleWidth(left);
-	if (width <= 0) return "";
-	if (leftW >= width) return truncateToWidth(left, width);
-
-	const remaining = width - leftW;
-	let rightText = right;
-	const rightW = visibleWidth(rightText);
-	if (rightW > remaining) {
-		// Keep the *rightmost* part visible.
-		rightText = sliceByColumn(rightText, rightW - remaining, remaining, true);
-	}
-	const pad = Math.max(0, remaining - visibleWidth(rightText));
-	return left + " ".repeat(pad) + rightText;
 }
 
 // LOCAL PATCH 3 (ours): say what was excluded, next to the number. Two decisions
