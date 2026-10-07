@@ -23,6 +23,7 @@ const EXTENSIONS = [
 	"../../answer.ts",
 	"../../goal.ts",
 	"../../native-web-search.ts",
+	"../../opencode-go-provider/index.ts",
 	"../../review.ts",
 	"../../session-breakdown.ts",
 	"../index.ts",
