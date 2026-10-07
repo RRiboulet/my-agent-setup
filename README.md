@@ -10,9 +10,9 @@ pi install git:github.com/RRiboulet/my-agent-setup          # for me, every proj
 pi install --local git:github.com/RRiboulet/my-agent-setup  # pin for one project only
 ```
 
-Verified on a clean agent dir and an empty project: both install the six
+Verified on a clean agent dir and an empty project: both install the seven
 extensions and the three skills. The clean-dir check ran before `review.ts`
-was added; the sixth extension is covered by the strict-ESM load test under
+was added; the seventh extension is covered by the strict-ESM load test under
 Tests.
 
 The one non-obvious part is that this needs the `pi` manifest in
@@ -27,6 +27,7 @@ each entry point explicitly:
 "pi": {
   "extensions": [
     ".pi/extensions/answer.ts",
+    ".pi/extensions/goal.ts",
     ".pi/extensions/native-web-search.ts",
     ".pi/extensions/review.ts",
     ".pi/extensions/session-breakdown.ts",
@@ -68,6 +69,7 @@ inactive. Installed packages are loaded regardless of project trust.
 | `.pi/extensions/todos.ts` | `/todos` TUI and the `todo` tool |
 | `.pi/extensions/answer.ts` | `/answer`: extract questions from the last response and answer them in a focused TUI |
 | `.pi/extensions/review.ts` | `/review` and `/end-review`: PR, branch, commit, folder and uncommitted review modes, loop-fixing, custom instructions, project-level `REVIEW_GUIDELINES.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with two local changes — see below |
+| `.pi/extensions/goal.ts` | `/goal` and the `get_goal`/`create_goal`/`update_goal` tools: a long-running objective that auto-continues across turns with an optional token budget, its state appended to the session log and reconstructed on reload/tree navigation. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with two local changes — see below |
 | `.pi/extensions/session-breakdown.ts` | `/session-breakdown`: sessions, messages, tokens and cost per day over 7/30/90, model breakdown, contributions-style calendar. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with four local patches — see below |
 | `.pi/extensions/native-web-search.ts` | Native web search tool — **ours**, not upstream: it registers the `web_search` tool. Ships with `.pi/skills/native-web-search/`, which *is* vendored |
 | `.pi/skills/native-web-search/` | Script + docs for the above. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/native-web-search/`, with three local OpenRouter patches. The two must travel together |
@@ -120,6 +122,54 @@ header:
    (arg parsers, PR-ref parsing, verdict and findings logic) so
    `review.test.ts` can cover them without loading the extension through
    jiti.
+
+## `/goal`
+
+Long-running objective mode: `/goal <objective>` starts a task that keeps
+pursuing that objective across turns instead of ending when the turn does.
+`/goal` alone shows the current goal; `/goal edit|pause|resume|clear` manage it.
+Three tools expose the same state to the model — `get_goal` (current status,
+usage and remaining budget), `create_goal` (only on explicit request; replaces a
+completed goal, refuses while one is unfinished) and `update_goal` (marks the
+goal `complete` or, after the strict three-turn blocked audit, `blocked`). An
+optional token budget (`/goal <objective>` with a `create_goal` budget, or the
+`token_budget` tool parameter) stops automatic continuation once spent, landing
+the goal in `budgetLimited`; assistant errors with usage/rate/quota wording land
+it in `usageLimited` instead of `blocked`. Objectives are capped at 4,000
+characters — beyond that the extension tells you to put the instructions in a
+file and refer to it. All state is appended to the session log as custom entries
+and reconstructed from the active branch on reload and tree navigation; there
+is no external database, so `/fork`ed and subagent sessions each carry the goal
+of their own branch.
+
+It is **vendored, not ours**: `goal.ts` comes from
+[mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
+(`extensions/goal.ts`, Apache-2.0 — Copyright (c) mitsuhiko and contributors).
+Upstream ships it with no tests; the file is kept close to upstream on purpose,
+so a later refresh is a readable diff. Our changes are listed in the file
+header:
+
+1. **Testability refactor.** `reconstructGoalFromBranch` — the reconstruction
+   loop that runs over the branch on session start and tree navigation, which
+   is where a reload can silently lose or double-count goal state — and
+   `hasExhaustedTokenBudget`, the budget-exhaustion condition, were moved from
+   inside the export factory to module scope and `export`ed, so the
+   session-reconstruction and budget-limiting logic is unit-testable without
+   pi's jiti loader.
+
+2. **`__test__` export** at the bottom exposes the module-private helpers
+   (reconstruction, status normalization, the objective limit, usage
+   accounting, continuation/budget prompts) so `goal.test.ts` can cover them
+   without loading the extension through jiti.
+
+Behaviourally it is the most invasive vendor in this repo: the extension
+queues its own follow-up turns (`deliverAs: "followUp"`) and filters its
+bookkeeping messages out of the model context on the next turn. That is
+orthogonal to the subagent extension's queueing — `subagent` messages of the
+same delivery kind are unaffected, and the custom message types the two
+extensions use never collide — but a real end-to-end continuation run still
+needs credentials and is not part of the suite; `goal.test.ts` pins the
+reconstruction and the budget-limiting decision instead.
 
 ## `/session-breakdown`
 
