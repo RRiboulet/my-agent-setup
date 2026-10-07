@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.2.0 — 2026-10-07
+
 Added:
 
 - **`opencode-go` provider** — `/model` gains a provider for fast GLM, Kimi,
