@@ -78,6 +78,63 @@ Fixed:
 
 Maintenance:
 
+- **Decided and recorded: this repo has no typecheck step, by design.**
+  `node --test` strips types without checking them, so a type error can
+  survive the suite. Adopting a typechecker would pull in the repo's first npm
+  compiler dependency (it consumes no npm packages) and would have to
+  reconcile a documented asymmetry — `todos.ts` uses TypeScript parameter
+  properties that node's strip-only loader rejects while pi's jiti loader
+  accepts, and the `erasableSyntaxOnly` fix is one the files do not currently
+  satisfy. The bug class it would catch (a bare identifier used as if it
+  existed, a `HarnessOptions` field the factory reads but no caller sets) is
+  exactly what the P1/P2 audit fixed and pinned with tests. The decision and
+  its reason now live in AGENTS.md next to the test command, so it is not
+  re-derived.
+- **The `CwdKey` comment in `session-breakdown.ts` no longer claims the cwd
+  path is normalized.** The single-line type comment said "normalized cwd
+  path", but the only processing is `cwd.trim()` — nothing collapses a
+  trailing slash or resolves a relative path, so `/srv/app` and `/srv/app/`
+  bucket separately and both appear in the legend.
+- **The `subagent` watcher re-arms through one code path, and the legacy `v1.`
+  attach target says what it is.** `watchTick` re-armed its own 500 ms timer
+  inline at its tail while `scheduleWatch` implemented the identical re-arm;
+  the tail now calls `scheduleWatch`, so there is exactly one re-arm (and a
+  schedule that lands during a tick's awaits no longer risks arming twice).
+  The `v1.`-prefixed base64 target branch in `attachToSubagentAndExit`
+  predates session-id targets; no current code path produces it
+  (`attachCommand` is always `--attach-subagent <run.id>`, and `run.id` is a
+  UUID), so its cut-off is now stated in the code instead of leaving a reader
+  to guess whether it is live plumbing. It is kept rather than removed because
+  the file stays close to upstream. No behaviour change.
+- **`native-web-search`'s script lookup no longer advertises a path that cannot
+  exist.** `resolveScriptPath` probed `here/../../skills/native-web-search/`
+  for the skill, but `here` is the extensions dir (`.pi/extensions`), so that
+  resolved to `<repo>/skills/...` while the script actually lives at
+  `<repo>/.pi/skills/...` — the `.pi` being the whole reason a git-sourced pi
+  package is discoverable at all. The candidate could never exist, yet the
+  thrown error listed it as somewhere to look. It now carries the `.pi`,
+  resolving relative to the repo/package root and covering both the repo tree
+  and an installed package. The lookup is factored so the candidate list is
+  testable, and a fixture-tree test pins it: a regression back to bare
+  `skills/` fails the suite.
+- **Vendored `session-breakdown.ts` comments no longer restate CHANGELOG
+  measurements.** The simplification audit counted ~230 comment lines for
+  ~240 code lines and found the specific figures (`$0.067741 / $1.708118` of
+  missing cost, a fork transcript's `1,473,545 / 527,566` tokens, `2,989,693`
+  tokens already duplicated inside `sessions/`, the "64%") copied into the
+  vendored header, `defaultSessionRoots`, and two one-liners — several blocks
+  restating CHANGELOG.md verbatim. Those figures are now written once, in the
+  CHANGELOG, and the comments point there ("measured 2026-10-04, see
+  CHANGELOG.md"), so refreshing the vendored file does not silently create a
+  second source of truth that drifts out of step. The reasoning is kept in
+  full where it is not in the CHANGELOG — why the dedupe is scoped to a
+  lineage and never global, why `model_change` state is still replayed from
+  inherited entries, why an unreadable own header counts as broken lineage
+  rather than clean. The `inheritedNote` comment, which argued the
+  child-transcripts/exclusion rationale a third time, is trimmed to what the
+  function needs, and the two `parseSessionFile` comments that explained the
+  one `if (inheritedEntry)` skip are merged into one. Comment-only; no
+  behaviour change.
 - **The management-tool registration memo is closure state, and now says so.**
   A code review read `appliedManagementExposure` / `managementToolsRegistered`
   as module-level and warned that a reload could strand the five management
