@@ -78,6 +78,11 @@ Fixed:
 
 Maintenance:
 
+- **The `CwdKey` comment in `session-breakdown.ts` no longer claims the cwd
+  path is normalized.** The single-line type comment said "normalized cwd
+  path", but the only processing is `cwd.trim()` — nothing collapses a
+  trailing slash or resolves a relative path, so `/srv/app` and `/srv/app/`
+  bucket separately and both appear in the legend.
 - **The `subagent` watcher re-arms through one code path, and the legacy `v1.`
   attach target says what it is.** `watchTick` re-armed its own 500 ms timer
   inline at its tail while `scheduleWatch` implemented the identical re-arm;

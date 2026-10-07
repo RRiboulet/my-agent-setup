@@ -71,7 +71,11 @@ import { createReadStream, type Dirent } from "node:fs";
 import readline from "node:readline";
 
 type ModelKey = string; // `${provider}/${model}`
-type CwdKey = string; // normalized cwd path
+// Trimmed, not normalized: the only processing is `cwd.trim()`. Nothing
+// collapses a trailing slash or resolves a relative path, so two headers
+// spelling `/srv/app` and `/srv/app/` land in separate buckets and both
+// appear as legend entries.
+type CwdKey = string;
 type DowKey = string; // "Mon", "Tue", etc.
 type TodKey = string; // "after-midnight", "morning", "afternoon", "evening", "night"
 type BreakdownView = "model" | "cwd" | "dow" | "tod";
