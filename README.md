@@ -72,6 +72,7 @@ inactive. Installed packages are loaded regardless of project trust.
 | `.pi/extensions/goal.ts` | `/goal` and the `get_goal`/`create_goal`/`update_goal` tools: a long-running objective that auto-continues across turns with an optional token budget, its state appended to the session log and reconstructed on reload/tree navigation. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with two local changes — see below |
 | `.pi/extensions/session-breakdown.ts` | `/session-breakdown`: sessions, messages, tokens and cost per day over 7/30/90, model breakdown, contributions-style calendar. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with four local patches — see below |
 | `.pi/extensions/native-web-search.ts` | Native web search tool — **ours**, not upstream: it registers the `web_search` tool. Ships with `.pi/skills/native-web-search/`, which *is* vendored |
+| `.pi/extensions/opencode-go-provider/` | An `opencode-go` provider for `/model`: fast GLM, Kimi, MiniMax, Qwen, DeepSeek and Grok models via opencode.ai's Go API, with the correct wire protocol per model (Anthropic, OpenAI Completions, Responses) and a per-account usage-budget widget below the editor. **Vendored** from [monotykamary/pi-opencode-go-provider](https://github.com/monotykamary/pi-opencode-go-provider) (MIT), byte-identical to upstream — see below |
 | `.pi/skills/native-web-search/` | Script + docs for the above. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/native-web-search/`, with three local OpenRouter patches. The two must travel together |
 | `.pi/skills/commit/` | Conventional Commits subjects, and the branch-per-change rule from `AGENTS.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/commit/SKILL.md`, with two local adaptations |
 | `.pi/skills/github/` | gh CLI usage: PRs, CI runs, `gh api`, structured JSON. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/github/SKILL.md`, with four local adaptations — this repo's `GH_CONFIG_DIR` auth setup, the AGENTS.md squash workflow, the token rule, and the credential-helper note |
@@ -224,6 +225,29 @@ A forked child's *own* turns still cost real money: its re-send of the parent's
 prefix is billed, mostly as cache reads. This is about counting each request
 once, not about pretending delegation is free. The footer line is the honest
 version of that, and it only appears when there is something to report.
+
+## opencode-go provider
+
+`/model` gains an `opencode-go` provider serving fast GLM, Kimi, MiniMax, Qwen,
+DeepSeek and Grok models through [opencode.ai](https://opencode.ai)'s Go API —
+Go-optimized endpoints at lower latency, the correct wire protocol per model
+(Anthropic, OpenAI Completions, Responses) and prompt-cache session affinity.
+Pick it with `/model`; the provider's default model is `kimi-k2.6`. A usage
+widget below the editor shows how much of the 5h / 7d / 30d Go-plan budgets
+remain (`/opencode-go-usage` prints the full breakdown; `off`/`on` hide and show
+the widget). Credentials resolve as `--api-key` flag → `~/.pi/agent/auth.json`
+under `opencode-go` → the `OPENCODE_API_KEY` environment variable, in that order
+(see [pi's providers doc](https://github.com/earendil-works/pi-coding-agent/blob/main/docs/providers.md)).
+
+It is **vendored, not ours**: the whole directory comes from
+[monotykamary/pi-opencode-go-provider](https://github.com/monotykamary/pi-opencode-go-provider)
+(MIT — Copyright (c) monotykamary), multi-file package kept intact.
+The manifest here imports `.pi/extensions/opencode-go-provider/index.ts`
+directly, so a refresh is a plain `cp` of the upstream tree; there are **zero
+local changes** — the files above are byte-identical to upstream commit
+`286c467` (main, 2026-10-07, package.json v1.1.18). The extension is
+side-effect-free at load (the strict-ESM guard covers it) and only depends on
+pi's host packages.
 
 ## Configuration
 

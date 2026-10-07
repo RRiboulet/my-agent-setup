@@ -11,6 +11,7 @@
       ".pi/extensions/answer.ts",
       ".pi/extensions/goal.ts",
       ".pi/extensions/native-web-search.ts",
+      ".pi/extensions/opencode-go-provider/index.ts",
       ".pi/extensions/review.ts",
       ".pi/extensions/session-breakdown.ts",
       ".pi/extensions/todos.ts",

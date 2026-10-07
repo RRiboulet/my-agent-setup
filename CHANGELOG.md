@@ -6,6 +6,16 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
+- **`opencode-go` provider** — `/model` gains a provider for fast GLM, Kimi,
+  MiniMax, Qwen, DeepSeek and Grok models served through opencode.ai's Go API
+  (Go-optimized endpoints, correct wire protocol per model — Anthropic, OpenAI
+  Completions, Responses — and prompt-cache session affinity), plus a usage
+  widget below the editor showing how much of the 5h / 7d / 30d Go-plan budgets
+  remain (`/opencode-go-usage` for the full breakdown). **Vendored** from
+  [monotykamary/pi-opencode-go-provider](https://github.com/monotykamary/pi-opencode-go-provider)
+  (MIT), byte-identical to upstream `286c467` with zero local changes (see the
+  README). Needs an opencode.ai key in `~/.pi/agent/auth.json` (`opencode-go`)
+  or the `OPENCODE_API_KEY` environment variable.
 - **`/goal`** — long-running objective mode: `/goal <objective>` (and the
   `get_goal` / `create_goal` / `update_goal` tools) starts an unbounded task
   that keeps pursuing a stated objective across turns, with an optional token
