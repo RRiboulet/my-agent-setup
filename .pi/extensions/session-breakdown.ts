@@ -49,11 +49,9 @@
 //
 // Why patch 2 is not optional: summing whole files counted a fork run's
 // inherited prefix again — measured 2026-10-04 on a real `handoff: "fork"`
-// child whose transcript held 1,473,545 tokens against the 527,566 the run
-// itself added, so 64% of the file was somebody else's requests — and the same
-// duplication was already present inside sessions/ (2,989,693 tokens, ~1% of the
-// reported total) from pi's native forking, with no subagent involved.
-// Measurements and rationale: TODO-859f419f.
+// child (see CHANGELOG.md for the figures) — and the same duplication was
+// already present inside sessions/ from pi's native forking, with no subagent
+// involved. Measurements and rationale: TODO-859f419f.
 // ---------------------------------------------------------------------------
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -286,14 +284,13 @@ interface BreakdownData {
 // Upstream hardcodes `<homedir>/.pi/agent/sessions` and walks only that. Two
 // consequences, both measured on this machine (see the vendor header):
 //   - A relocated agent dir is ignored entirely. The env var is
-//     PI_CODING_AGENT_DIR (there is no PI_AGENT_DIR); upstream PR #24 asked for
-//     exactly this and was closed unmerged.
+//     PI_CODING_AGENT_DIR (there is no PI_AGENT_DIR).
 //   - The subagent extension's child sessions are invisible: they live at
 //     <agentDir>/tmux-subagents/<parent-session-id>/<run-id>/session/, a SIBLING
-//     of sessions/. Measured 2026-10-04: $0.067741 of $1.708118 of real cost was
-//     missing from the view. (Token counts are deliberately not quoted: they move
-//     with every run, and every duplicated entry on that machine reported
-//     cost.total = 0 anyway.)
+//     of sessions/. Measured 2026-10-04: real cost was missing from the view
+//     (see CHANGELOG.md for the figure). (Token counts are deliberately not
+//     quoted: they move with every run, and every duplicated entry on that
+//     machine reported cost.total = 0 anyway.)
 //
 // Legacy `subagents` is that extension's run dir under its previous name
 // (RUNS_DIR was "subagents" before it became "tmux-subagents"); three files
@@ -765,15 +762,16 @@ async function parseSessionFile(
 				continue;
 			}
 
-			// LOCAL PATCH 2: `model_change` state is still replayed from inherited
-			// entries — a forked child does not re-announce its model — but the usage
-			// those entries carry is not this session's to bill, so only the
-			// accounting further down is skipped.
+			// LOCAL PATCH 2: an inherited entry is a copy of an entry an ancestor
+			// file already counts, so it is not this session's to bill. It is still
+			// counted (entries += 1) rather than dropped, because the prefix carries
+			// non-message entries too (model_change, thinking_level_change) and the
+			// footer says "entries excluded". `model_change` state is likewise still
+			// replayed from inherited entries — a forked child does not re-announce
+			// its model — so only the accounting further down is skipped, never that
+			// replay or the entries count.
 			const inheritedEntry = inheritedIds !== undefined && obj?.id !== undefined && inheritedIds.has(obj.id);
 			if (inheritedEntry) {
-				// Counted here rather than in the message branch below, because an
-				// inherited prefix carries non-message entries too (model_change,
-				// thinking_level_change) and the footer says "entries excluded".
 				inherited.entries += 1;
 			}
 
@@ -807,9 +805,8 @@ async function parseSessionFile(
 			const tok = extractTokensTotal(usage);
 			const cost = extractCostTotal(usage);
 
-			// LOCAL PATCH 2: an inherited entry is a copy of an entry an ancestor
-			// file already counts. Record what it carried, then skip every aggregate
-			// below — messages, tokens, cost and the per-model buckets.
+			// LOCAL PATCH 2: record what the inherited entry carried, then skip the
+			// message/token/cost aggregates — see the inherited-entry comment above.
 			if (inheritedEntry) {
 				inherited.tokens += tok;
 				inherited.cost += cost;
@@ -1596,30 +1593,25 @@ function renderLeftRight(left: string, right: string, width: number): string {
 	return left + " ".repeat(pad) + rightText;
 }
 
-// LOCAL PATCH 3 (ours): say what was excluded, next to the number.
-//
-// Two decisions this extension makes are invisible in the totals: child
-// transcripts are now part of the scan (LOCAL PATCH 1), and an inherited prefix
-// is not a request this session made (LOCAL PATCH 2). The first person to compare
-// a day against an invoice has no way to know either happened, so one dimmed
-// line under the summary carries them.
-//
-// Every clause is conditional on the thing it reports actually having happened —
-// a footer that cries wolf is a footer nobody reads:
-//   - `child transcripts` only when a file outside sessions/ was scanned, so a
-//     standalone-only workspace still learns that its session count grew.
-//   - the exclusion clause only when entries were actually excluded. A `lineage`
-//     child whose parent has since been deleted inherits nothing, and claiming
-//     "0 entries excluded, $0.00 counted once" would be three false claims.
+// LOCAL PATCH 3 (ours): say what was excluded, next to the number. Two decisions
+// this extension makes are invisible in the totals — child transcripts are now
+// part of the scan (LOCAL PATCH 1) and an inherited prefix is not a request this
+// session made (LOCAL PATCH 2) — and someone comparing a day against an invoice
+// has no way to know either happened, so one dimmed line under the summary
+// carries them. Every clause is conditional on the thing it reports actually
+// having happened — a footer that cries wolf is a footer nobody reads:
+//   - `child transcripts` only when a file outside sessions/ was scanned.
+//   - the exclusion clause only when entries were actually excluded: a `lineage`
+//     child whose parent has since been deleted inherits nothing.
 //   - the uncertainty clause only when a header or parent chain was unreadable.
-//     Such a file is half-measured at worst, which errs towards counting too much,
-//     but a half-measurement must not be silent either.
+//     Such a file is half-measured at worst, which errs towards counting too
+//     much, but a half-measurement must not be silent either.
 //
 // The amount is the excluded usage; cost when there is any, tokens otherwise,
-// because a local or zero-priced model reports $0.00 for megabytes of context and
-// "$0.0000 excluded" says nothing. The parent clause says "when it is in range"
-// because the excluded copy is counted by the parent's own file, which may be
-// outside the displayed window or older than the archive.
+// because a local or zero-priced model reports $0.00 for megabytes of context
+// and "$0.0000 excluded" says nothing. The parent clause says "when it is in
+// range" because the excluded copy is counted by the parent's own file, which
+// may be outside the displayed window or older than the archive.
 function inheritedNote(inherited: InheritedReport): string | null {
 	const { childSessions, forkedSessions, entries, tokens, cost, unknownLineage } = inherited;
 	if (childSessions === 0 && forkedSessions === 0 && unknownLineage === 0) return null;

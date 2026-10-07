@@ -78,7 +78,25 @@ Fixed:
 
 Maintenance:
 
-- **The management-tool registration memo is closure state, and now says so.**
+- **Vendored `session-breakdown.ts` comments no longer restate CHANGELOG
+  measurements.** The simplification audit counted ~230 comment lines for
+  ~240 code lines and found the specific figures (`$0.067741 / $1.708118` of
+  missing cost, a fork transcript's `1,473,545 / 527,566` tokens, `2,989,693`
+  tokens already duplicated inside `sessions/`, the "64%") copied into the
+  vendored header, `defaultSessionRoots`, and two one-liners — several blocks
+  restating CHANGELOG.md verbatim. Those figures are now written once, in the
+  CHANGELOG, and the comments point there ("measured 2026-10-04, see
+  CHANGELOG.md"), so refreshing the vendored file does not silently create a
+  second source of truth that drifts out of step. The reasoning is kept in
+  full where it is not in the CHANGELOG — why the dedupe is scoped to a
+  lineage and never global, why `model_change` state is still replayed from
+  inherited entries, why an unreadable own header counts as broken lineage
+  rather than clean. The `inheritedNote` comment, which argued the
+  child-transcripts/exclusion rationale a third time, is trimmed to what the
+  function needs, and the two `parseSessionFile` comments that explained the
+  one `if (inheritedEntry)` skip are merged into one. Comment-only; no
+  behaviour change.
+
   A code review read `appliedManagementExposure` / `managementToolsRegistered`
   as module-level and warned that a reload could strand the five management
   tools. They are not module-level: the factory opens far above them and closes
