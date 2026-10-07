@@ -10,8 +10,10 @@ pi install git:github.com/RRiboulet/my-agent-setup          # for me, every proj
 pi install --local git:github.com/RRiboulet/my-agent-setup  # pin for one project only
 ```
 
-Verified on a clean agent dir and an empty project: both install the five
-extensions and the three skills.
+Verified on a clean agent dir and an empty project: both install the six
+extensions and the three skills. The clean-dir check ran before `review.ts`
+was added; the sixth extension is covered by the strict-ESM load test under
+Tests.
 
 The one non-obvious part is that this needs the `pi` manifest in
 `package.json`. A git-sourced package is discovered either from that manifest or
@@ -26,6 +28,7 @@ each entry point explicitly:
   "extensions": [
     ".pi/extensions/answer.ts",
     ".pi/extensions/native-web-search.ts",
+    ".pi/extensions/review.ts",
     ".pi/extensions/session-breakdown.ts",
     ".pi/extensions/todos.ts",
     ".pi/extensions/subagent/index.ts"   // the rest of that dir is its internals
@@ -64,11 +67,13 @@ inactive. Installed packages are loaded regardless of project trust.
 | `.pi/extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent`, `subagent_status`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel`, `subagent_clean`, a live child-activity phase and a status widget above the editor |
 | `.pi/extensions/todos.ts` | `/todos` TUI and the `todo` tool |
 | `.pi/extensions/answer.ts` | `/answer`: extract questions from the last response and answer them in a focused TUI |
+| `.pi/extensions/review.ts` | `/review` and `/end-review`: PR, branch, commit, folder and uncommitted review modes, loop-fixing, custom instructions, project-level `REVIEW_GUIDELINES.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with two local changes — see below |
 | `.pi/extensions/session-breakdown.ts` | `/session-breakdown`: sessions, messages, tokens and cost per day over 7/30/90, model breakdown, contributions-style calendar. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with four local patches — see below |
 | `.pi/extensions/native-web-search.ts` | Native web search tool — **ours**, not upstream: it registers the `web_search` tool. Ships with `.pi/skills/native-web-search/`, which *is* vendored |
 | `.pi/skills/native-web-search/` | Script + docs for the above. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/native-web-search/`, with three local OpenRouter patches. The two must travel together |
 | `.pi/skills/commit/` | Conventional Commits subjects, and the branch-per-change rule from `AGENTS.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/commit/SKILL.md`, with two local adaptations |
 | `.pi/skills/update-changelog/` | Writes `CHANGELOG.md`'s `Unreleased` section from the commits since the last tag. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/update-changelog/SKILL.md`, with one local adaptation |
+| `REVIEW_GUIDELINES.md` | Project-level review guidelines read by `/review` — branch hygiene, token rules, changelog shape, PR workflow, line endings |
 | `pi-session.sh` | Launch pi under tmux with an OpenRouter model |
 
 ## Requirements
@@ -86,6 +91,34 @@ The `.devcontainer/` provides all of these.
 bash .pi/extensions/subagent/test/setup-deps.sh      # symlinks pi's packages into node_modules
 node --test .pi/extensions/subagent/test/*.test.ts
 ```
+
+## `/review`
+
+Interactive code review with five modes — PR (`/review pr 123` or a full URL),
+base branch (`/review branch main`), uncommitted changes (`/review uncommitted`),
+a specific commit (`/review commit <sha>`), and folder/file snapshot
+(`/review folder src docs`). Toggles for loop-fixing (review/fix cycle, max 10
+iterations) and shared custom instructions. Reads a project-level
+`REVIEW_GUIDELINES.md` (looked up next to `.pi/`), so house rules — check the
+base before committing, never put a token in `.git/config`, changelog shape —
+are where the reviewer actually reads them.
+
+It is **vendored, not ours**: `review.ts` comes from
+[mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
+(`extensions/review.ts`, Apache-2.0 — Copyright (c) mitsuhiko and contributors).
+Upstream ships it with no tests; the file is kept close to upstream on purpose,
+so a later refresh is a readable diff. Our changes are listed in the file
+header:
+
+1. **Testability refactor.** `parseReviewPaths`, `parseArgs`, `tokenizeArgs`
+   and the end-review prompt templates were moved from inside the export
+   factory to module scope, `export`ed and re-indented, so the parsing and
+   rubric logic is unit-testable without pi's jiti loader.
+
+2. **`__test__` export** at the bottom exposes the module-private helpers
+   (arg parsers, PR-ref parsing, verdict and findings logic) so
+   `review.test.ts` can cover them without loading the extension through
+   jiti.
 
 ## `/session-breakdown`
 

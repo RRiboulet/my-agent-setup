@@ -4,6 +4,15 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Added:
+
+- **`/review` and `/end-review`** — interactive code review with five modes
+  (PR, base branch, uncommitted, commit, folder), loop-fixing toggle, shared
+  custom instructions, and project-level `REVIEW_GUIDELINES.md`. **Vendored**
+  from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
+  (Apache-2.0), with two local changes — a testability
+  refactor and a `__test__` export (see the README).
+
 Fixed:
 
 - **`subagent_interrupt` reported an interrupt that landed as "no new interrupt

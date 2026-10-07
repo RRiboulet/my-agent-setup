@@ -10,6 +10,7 @@
     "extensions": [
       ".pi/extensions/answer.ts",
       ".pi/extensions/native-web-search.ts",
+      ".pi/extensions/review.ts",
       ".pi/extensions/session-breakdown.ts",
       ".pi/extensions/todos.ts",
       ".pi/extensions/subagent/index.ts"

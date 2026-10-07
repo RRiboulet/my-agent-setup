@@ -22,6 +22,7 @@ import { test } from "node:test";
 const EXTENSIONS = [
 	"../../answer.ts",
 	"../../native-web-search.ts",
+	"../../review.ts",
 	"../../session-breakdown.ts",
 	"../index.ts",
 ] as const;
