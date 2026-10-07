@@ -32,6 +32,21 @@ export interface WebSearchInput {
 	timeout_ms?: number;
 }
 
+// The candidate order matters: the extension's own dir first (a script tucked
+// next to the extension), then the skill relative to the repo/package root
+// (here is `.pi/extensions`, so `.pi/skills` sits two levels up), then the same
+// relative to cwd. Candidates are quoted in the failure message, so a path that
+// can never exist is worse than useless — it advertises a lie. The second
+// candidate is `here/../../.pi/skills/...`, never `here/../../skills/...`:
+// `.pi` is the whole reason a git-sourced pi package is discoverable at all.
+function scriptCandidates(here: string, cwd: string): string[] {
+	return [
+		join(here, "search.mjs"),
+		join(here, "..", "..", ".pi", "skills", "native-web-search", "search.mjs"),
+		join(cwd, ".pi", "skills", "native-web-search", "search.mjs"),
+	];
+}
+
 function resolveScriptPath(): string {
 	const configured = process.env[SCRIPT_ENV_VAR];
 	if (configured) {
@@ -39,11 +54,7 @@ function resolveScriptPath(): string {
 	}
 
 	const here = dirname(fileURLToPath(import.meta.url));
-	const candidates = [
-		join(here, "search.mjs"),
-		join(here, "..", "..", "skills", "native-web-search", "search.mjs"),
-		join(process.cwd(), ".pi", "skills", "native-web-search", "search.mjs"),
-	];
+	const candidates = scriptCandidates(here, process.cwd());
 
 	for (const candidate of candidates) {
 		if (existsSync(candidate)) return candidate;
@@ -250,3 +261,8 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 }
+
+export const __test__ = {
+	resolveScriptPath,
+	scriptCandidates,
+};

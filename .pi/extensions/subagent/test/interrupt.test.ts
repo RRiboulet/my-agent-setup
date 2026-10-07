@@ -13,13 +13,14 @@ import { existsSync } from "node:fs";
 import * as path from "node:path";
 import { test } from "node:test";
 
-import subagentExtension from "../index.ts";
+import subagentExtension, { __test__ } from "../index.ts";
 import { readActivityFile, getActivityFilePath } from "../activity.ts";
 import {
 	createInterruptMarkerWriter,
 	getInterruptFilePath,
 	readInterruptMarker,
 	validateInterruptMarker,
+	type SubagentInterruptMarker,
 } from "../interrupt.ts";
 import { withEnv, withTempAgentDir } from "./helpers.ts";
 
@@ -31,7 +32,6 @@ function marker(overrides: Record<string, unknown> = {}): Record<string, unknown
 		runId: RUN_ID,
 		interruptedAt: 1_700_000_000_000,
 		interrupts: 1,
-		turnIndex: 3,
 		stopReason: "aborted",
 		...overrides,
 	};
@@ -60,14 +60,13 @@ test("a malformed marker is reported, not thrown", () => {
 		marker({ interruptedAt: "soon" }),
 		marker({ interrupts: 0 }),
 		marker({ interrupts: 1.5 }),
-		marker({ turnIndex: "third" }),
 		marker({ stopReason: "aborted\nrm -rf /" }),
 	]) {
 		const result = validateInterruptMarker(value, RUN_ID);
 		assert.equal(result.ok, false, `${JSON.stringify(value)} must be rejected`);
 	}
 	assert.equal(validateInterruptMarker(marker(), RUN_ID).ok, true);
-	assert.equal(validateInterruptMarker(marker({ turnIndex: undefined, stopReason: undefined }), RUN_ID).ok, true);
+	assert.equal(validateInterruptMarker(marker({ stopReason: undefined }), RUN_ID).ok, true);
 });
 
 test("readInterruptMarker distinguishes a missing file from a broken one", async () => {
@@ -84,6 +83,24 @@ test("readInterruptMarker distinguishes a missing file from a broken one", async
 	});
 });
 
+test("a marker confirms only when it is newer than the escape baseline", () => {
+	// The predicate the confirmation poll now trusts. A marker from the PREVIOUS
+	// interrupt is not newer: the marker file is never deleted, so it is read back
+	// on every poll and must not confirm a request that just went out.
+	const at = (interrupts: number, interruptedAt: number): SubagentInterruptMarker => ({
+		version: 1,
+		runId: RUN_ID,
+		interrupts,
+		interruptedAt,
+	});
+	const baseline = { interrupts: 1, at: 100 };
+	assert.equal(__test__.markerIsNewerThan(at(2, 300), baseline), true, "a higher count is newer");
+	assert.equal(__test__.markerIsNewerThan(at(2, 50), baseline), true, "a higher count is newer even when the clock went backwards");
+	assert.equal(__test__.markerIsNewerThan(at(1, 200), baseline), true, "a later clock alone is newer");
+	assert.equal(__test__.markerIsNewerThan(at(1, 100), baseline), false, "the same marker is not newer");
+	assert.equal(__test__.markerIsNewerThan(at(0, 100), baseline), false, "an older count is not newer");
+});
+
 test("the writer counts interrupts and survives a failing write", async () => {
 	await withTempAgentDir(async (agentDir) => {
 		const filePath = path.join(agentDir, "interrupt.json");
@@ -98,8 +115,8 @@ test("the writer counts interrupts and survives a failing write", async () => {
 			},
 		});
 
-		await writer.mark({ turnIndex: 1, stopReason: "aborted" });
-		await writer.mark({ turnIndex: 4 });
+		await writer.mark({ stopReason: "aborted" });
+		await writer.mark();
 		assert.equal(writer.count(), 2);
 		const second = await readInterruptMarker(filePath, RUN_ID);
 		assert.equal(second.ok && second.marker.interrupts, 2, "the count is per child, so two interrupts are not collapsed");
@@ -223,7 +240,6 @@ test("an aborted turn leaves the child alive with a marker and no result", async
 		const written = await readInterruptMarker(child.interruptPath, RUN_ID);
 		assert.equal(written.ok, true, "the interrupt marker must be written");
 		assert.equal(written.ok === true && written.marker.interrupts, 1);
-		assert.equal(written.ok === true && written.marker.turnIndex, 3);
 		assert.equal(written.ok === true && written.marker.stopReason, "aborted");
 		assert.equal(existsSync(child.resultPath), false, "an interrupted turn is not a result");
 		assert.equal(child.shutdownCalls.length, 0, "the child stays alive at its prompt");

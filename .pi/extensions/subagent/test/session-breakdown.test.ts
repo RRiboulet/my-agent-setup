@@ -419,6 +419,49 @@ test("LOCAL PATCH 2: the header reader tells 'no parent' from 'unreadable'", asy
 	});
 });
 
+test("LOCAL PATCH 2: the two JSONL readers keep their different malformed-line policies", async () => {
+	// readSessionHeader and readEntryIds now share one forEachJsonLine, but they
+	// disagree about a malformed line: the header reader treats one as an
+	// unreadable file, the id reader skips it and keeps reading. Pin both, plus
+	// the blank-line skip and the abort short-circuit, because a shared helper is
+	// exactly where those two policies could silently collapse into one.
+	await withFixtureDir(async (agentDir) => {
+		const sessions = path.join(agentDir, "sessions", "--tmp-fixture--");
+
+		// A malformed FIRST line: the header reader cannot trust the file; the id
+		// reader skips it and still collects ids from later lines.
+		const tornFirst = path.join(sessions, `${stamp()}_torn-first.jsonl`);
+		await mkdir(path.dirname(tornFirst), { recursive: true });
+		await writeFile(tornFirst, `{not json\n${JSON.stringify(header("torn"))}\n`, "utf8");
+		assert.equal(await readSessionHeader(tornFirst), null);
+		assert.deepEqual(await readEntryIds(tornFirst), new Set(["torn"]));
+
+		// A malformed LATER line: the header is the first line, so it reads fine;
+		// the id reader skips the torn line and keeps the ids on both sides.
+		const tornLater = path.join(sessions, `${stamp()}_torn-later.jsonl`);
+		await writeFile(
+			tornLater,
+			`${JSON.stringify(header("later"))}\n{not json\n${JSON.stringify({ type: "message", id: "kept" })}\n`,
+			"utf8",
+		);
+		assert.deepEqual(await readSessionHeader(tornLater), { parentSession: null });
+		assert.deepEqual(await readEntryIds(tornLater), new Set(["later", "kept"]));
+
+		// Blank lines are skipped, and a valid non-session first line is "no
+		// header", not "unreadable".
+		const blankThenOther = path.join(sessions, `${stamp()}_blank.jsonl`);
+		await writeFile(blankThenOther, `\n\n${JSON.stringify({ type: "message", id: "m1" })}\n`, "utf8");
+		assert.equal(await readSessionHeader(blankThenOther), null);
+		assert.deepEqual(await readEntryIds(blankThenOther), new Set(["m1"]));
+
+		// An aborted signal stops both without a result.
+		const aborted = new AbortController();
+		aborted.abort();
+		assert.equal(await readSessionHeader(tornLater, aborted.signal), null);
+		assert.equal(await readEntryIds(tornLater, aborted.signal), null);
+	});
+});
+
 test("LOCAL PATCH 2: a malformed line does not abort the scan", async () => {
 	await withFixtureDir(async (agentDir) => {
 		const sessions = path.join(agentDir, "sessions", "--tmp-fixture--");

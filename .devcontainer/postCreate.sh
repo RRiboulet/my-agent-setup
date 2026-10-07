@@ -4,6 +4,12 @@ set -euo pipefail
 REPO=/workspace
 AGENT_DIR=/home/vscode/.pi/agent
 
+# The Dockerfile sets GH_CONFIG_DIR as an image ENV, but a container built from an
+# older image does not have it. Default it here to the same path so a bare
+# `mkdir -p "$GH_CONFIG_DIR"` below cannot expand to `mkdir -p ""`, which fails
+# under `set -e` and aborts the whole of postCreate before anything else runs.
+export GH_CONFIG_DIR="${GH_CONFIG_DIR:-/home/vscode/.pi/gh}"
+
 # --- zsh + Powerlevel10k ---
 # The common-utils feature creates ~/.zshrc before postCreate runs.
 touch ~/.zshrc

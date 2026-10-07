@@ -10,8 +10,10 @@ pi install git:github.com/RRiboulet/my-agent-setup          # for me, every proj
 pi install --local git:github.com/RRiboulet/my-agent-setup  # pin for one project only
 ```
 
-Verified on a clean agent dir and an empty project: both install the five
-extensions and the three skills.
+Verified on a clean agent dir and an empty project: both install the seven
+extensions and the three skills. The clean-dir check ran before `review.ts`
+was added; the seventh extension is covered by the strict-ESM load test under
+Tests.
 
 The one non-obvious part is that this needs the `pi` manifest in
 `package.json`. A git-sourced package is discovered either from that manifest or
@@ -25,7 +27,9 @@ each entry point explicitly:
 "pi": {
   "extensions": [
     ".pi/extensions/answer.ts",
+    ".pi/extensions/goal.ts",
     ".pi/extensions/native-web-search.ts",
+    ".pi/extensions/review.ts",
     ".pi/extensions/session-breakdown.ts",
     ".pi/extensions/todos.ts",
     ".pi/extensions/subagent/index.ts"   // the rest of that dir is its internals
@@ -64,13 +68,18 @@ inactive. Installed packages are loaded regardless of project trust.
 | `.pi/extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent`, `subagent_status`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel`, `subagent_clean`, a live child-activity phase and a status widget above the editor |
 | `.pi/extensions/todos.ts` | `/todos` TUI and the `todo` tool |
 | `.pi/extensions/answer.ts` | `/answer`: extract questions from the last response and answer them in a focused TUI |
+| `.pi/extensions/continue.ts` | `shift+alt+enter` sends the literal prompt `continue`, but only when the agent is idle, so it never steers or queues a message mid-run. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), unmodified |
+| `.pi/extensions/review.ts` | `/review` and `/end-review`: PR, branch, commit, folder and uncommitted review modes, loop-fixing, custom instructions, project-level `REVIEW_GUIDELINES.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with two local changes — see below |
+| `.pi/extensions/goal.ts` | `/goal` and the `get_goal`/`create_goal`/`update_goal` tools: a long-running objective that auto-continues across turns with an optional token budget, its state appended to the session log and reconstructed on reload/tree navigation. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with two local changes — see below |
 | `.pi/extensions/session-breakdown.ts` | `/session-breakdown`: sessions, messages, tokens and cost per day over 7/30/90, model breakdown, contributions-style calendar. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with four local patches — see below |
 | `.pi/extensions/native-web-search.ts` | Native web search tool — **ours**, not upstream: it registers the `web_search` tool. Ships with `.pi/skills/native-web-search/`, which *is* vendored |
+| `.pi/extensions/opencode-go-provider/` | An `opencode-go` provider for `/model`: fast GLM, Kimi, MiniMax, Qwen, DeepSeek and Grok models via opencode.ai's Go API, with the correct wire protocol per model (Anthropic, OpenAI Completions, Responses) and a per-account usage-budget widget below the editor. **Vendored** from [monotykamary/pi-opencode-go-provider](https://github.com/monotykamary/pi-opencode-go-provider) (MIT), byte-identical to upstream — see below |
 | `.pi/skills/native-web-search/` | Script + docs for the above. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/native-web-search/`, with three local OpenRouter patches. The two must travel together |
 | `.pi/skills/commit/` | Conventional Commits subjects, and the branch-per-change rule from `AGENTS.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/commit/SKILL.md`, with two local adaptations |
+| `.pi/skills/github/` | gh CLI usage: PRs, CI runs, `gh api`, structured JSON. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/github/SKILL.md`, with four local adaptations — this repo's `GH_CONFIG_DIR` auth setup, the AGENTS.md squash workflow, the token rule, and the credential-helper note |
 | `.pi/skills/update-changelog/` | Writes `CHANGELOG.md`'s `Unreleased` section from the commits since the last tag. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/update-changelog/SKILL.md`, with one local adaptation |
+| `REVIEW_GUIDELINES.md` | Project-level review guidelines read by `/review` — branch hygiene, token rules, changelog shape, PR workflow, line endings |
 | `pi-session.sh` | Launch pi under tmux with an OpenRouter model |
-| `MODELS.txt` | Model ids this workspace runs with |
 
 ## Requirements
 
@@ -87,6 +96,82 @@ The `.devcontainer/` provides all of these.
 bash .pi/extensions/subagent/test/setup-deps.sh      # symlinks pi's packages into node_modules
 node --test .pi/extensions/subagent/test/*.test.ts
 ```
+
+## `/review`
+
+Interactive code review with five modes — PR (`/review pr 123` or a full URL),
+base branch (`/review branch main`), uncommitted changes (`/review uncommitted`),
+a specific commit (`/review commit <sha>`), and folder/file snapshot
+(`/review folder src docs`). Toggles for loop-fixing (review/fix cycle, max 10
+iterations) and shared custom instructions. Reads a project-level
+`REVIEW_GUIDELINES.md` (looked up next to `.pi/`), so house rules — check the
+base before committing, never put a token in `.git/config`, changelog shape —
+are where the reviewer actually reads them.
+
+It is **vendored, not ours**: `review.ts` comes from
+[mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
+(`extensions/review.ts`, Apache-2.0 — Copyright (c) mitsuhiko and contributors).
+Upstream ships it with no tests; the file is kept close to upstream on purpose,
+so a later refresh is a readable diff. Our changes are listed in the file
+header:
+
+1. **Testability refactor.** `parseReviewPaths`, `parseArgs`, `tokenizeArgs`
+   and the end-review prompt templates were moved from inside the export
+   factory to module scope, `export`ed and re-indented, so the parsing and
+   rubric logic is unit-testable without pi's jiti loader.
+
+2. **`__test__` export** at the bottom exposes the module-private helpers
+   (arg parsers, PR-ref parsing, verdict and findings logic) so
+   `review.test.ts` can cover them without loading the extension through
+   jiti.
+
+## `/goal`
+
+Long-running objective mode: `/goal <objective>` starts a task that keeps
+pursuing that objective across turns instead of ending when the turn does.
+`/goal` alone shows the current goal; `/goal edit|pause|resume|clear` manage it.
+Three tools expose the same state to the model — `get_goal` (current status,
+usage and remaining budget), `create_goal` (only on explicit request; replaces a
+completed goal, refuses while one is unfinished) and `update_goal` (marks the
+goal `complete` or, after the strict three-turn blocked audit, `blocked`). An
+optional token budget (`/goal <objective>` with a `create_goal` budget, or the
+`token_budget` tool parameter) stops automatic continuation once spent, landing
+the goal in `budgetLimited`; assistant errors with usage/rate/quota wording land
+it in `usageLimited` instead of `blocked`. Objectives are capped at 4,000
+characters — beyond that the extension tells you to put the instructions in a
+file and refer to it. All state is appended to the session log as custom entries
+and reconstructed from the active branch on reload and tree navigation; there
+is no external database, so `/fork`ed and subagent sessions each carry the goal
+of their own branch.
+
+It is **vendored, not ours**: `goal.ts` comes from
+[mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
+(`extensions/goal.ts`, Apache-2.0 — Copyright (c) mitsuhiko and contributors).
+Upstream ships it with no tests; the file is kept close to upstream on purpose,
+so a later refresh is a readable diff. Our changes are listed in the file
+header:
+
+1. **Testability refactor.** `reconstructGoalFromBranch` — the reconstruction
+   loop that runs over the branch on session start and tree navigation, which
+   is where a reload can silently lose or double-count goal state — and
+   `hasExhaustedTokenBudget`, the budget-exhaustion condition, were moved from
+   inside the export factory to module scope and `export`ed, so the
+   session-reconstruction and budget-limiting logic is unit-testable without
+   pi's jiti loader.
+
+2. **`__test__` export** at the bottom exposes the module-private helpers
+   (reconstruction, status normalization, the objective limit, usage
+   accounting, continuation/budget prompts) so `goal.test.ts` can cover them
+   without loading the extension through jiti.
+
+Behaviourally it is the most invasive vendor in this repo: the extension
+queues its own follow-up turns (`deliverAs: "followUp"`) and filters its
+bookkeeping messages out of the model context on the next turn. That is
+orthogonal to the subagent extension's queueing — `subagent` messages of the
+same delivery kind are unaffected, and the custom message types the two
+extensions use never collide — but a real end-to-end continuation run still
+needs credentials and is not part of the suite; `goal.test.ts` pins the
+reconstruction and the budget-limiting decision instead.
 
 ## `/session-breakdown`
 
@@ -141,6 +226,29 @@ A forked child's *own* turns still cost real money: its re-send of the parent's
 prefix is billed, mostly as cache reads. This is about counting each request
 once, not about pretending delegation is free. The footer line is the honest
 version of that, and it only appears when there is something to report.
+
+## opencode-go provider
+
+`/model` gains an `opencode-go` provider serving fast GLM, Kimi, MiniMax, Qwen,
+DeepSeek and Grok models through [opencode.ai](https://opencode.ai)'s Go API —
+Go-optimized endpoints at lower latency, the correct wire protocol per model
+(Anthropic, OpenAI Completions, Responses) and prompt-cache session affinity.
+Pick it with `/model`; the provider's default model is `kimi-k2.6`. A usage
+widget below the editor shows how much of the 5h / 7d / 30d Go-plan budgets
+remain (`/opencode-go-usage` prints the full breakdown; `off`/`on` hide and show
+the widget). Credentials resolve as `--api-key` flag → `~/.pi/agent/auth.json`
+under `opencode-go` → the `OPENCODE_API_KEY` environment variable, in that order
+(see [pi's providers doc](https://github.com/earendil-works/pi-coding-agent/blob/main/docs/providers.md)).
+
+It is **vendored, not ours**: the whole directory comes from
+[monotykamary/pi-opencode-go-provider](https://github.com/monotykamary/pi-opencode-go-provider)
+(MIT — Copyright (c) monotykamary), multi-file package kept intact.
+The manifest here imports `.pi/extensions/opencode-go-provider/index.ts`
+directly, so a refresh is a plain `cp` of the upstream tree; there are **zero
+local changes** — the files above are byte-identical to upstream commit
+`286c467` (main, 2026-10-07, package.json v1.1.18). The extension is
+side-effect-free at load (the strict-ESM guard covers it) and only depends on
+pi's host packages.
 
 ## Configuration
 

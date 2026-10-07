@@ -4,6 +4,236 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.2.0 — 2026-10-07
+
+Added:
+
+- **`opencode-go` provider** — `/model` gains a provider for fast GLM, Kimi,
+  MiniMax, Qwen, DeepSeek and Grok models served through opencode.ai's Go API
+  (Go-optimized endpoints, correct wire protocol per model — Anthropic, OpenAI
+  Completions, Responses — and prompt-cache session affinity), plus a usage
+  widget below the editor showing how much of the 5h / 7d / 30d Go-plan budgets
+  remain (`/opencode-go-usage` for the full breakdown). **Vendored** from
+  [monotykamary/pi-opencode-go-provider](https://github.com/monotykamary/pi-opencode-go-provider)
+  (MIT), byte-identical to upstream `286c467` with zero local changes (see the
+  README). Needs an opencode.ai key in `~/.pi/agent/auth.json` (`opencode-go`)
+  or the `OPENCODE_API_KEY` environment variable.
+- **`/goal`** — long-running objective mode: `/goal <objective>` (and the
+  `get_goal` / `create_goal` / `update_goal` tools) starts an unbounded task
+  that keeps pursuing a stated objective across turns, with an optional token
+  budget and an `active`/`paused`/`blocked`/`usageLimited`/`budgetLimited`/
+  `complete` lifecycle. All state is appended to the session log and
+  reconstructed from the active branch on reload and tree navigation — no
+  external database. Complements `subagent`: delegation for bounded tasks,
+  `/goal` for unbounded ones. **Vendored** from
+  [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
+  (Apache-2.0), with two local changes — a testability refactor
+  (`reconstructGoalFromBranch`, `hasExhaustedTokenBudget`) and a `__test__`
+  export (see the README).
+- **`/review` and `/end-review`** — interactive code review with five modes
+  (PR, base branch, uncommitted, commit, folder), loop-fixing toggle, shared
+  custom instructions, and project-level `REVIEW_GUIDELINES.md`. **Vendored**
+  from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
+  (Apache-2.0), with two local changes — a testability
+  refactor and a `__test__` export (see the README).
+- **`github` skill** — gh CLI usage (PRs, CI runs, `gh api`, JSON output).
+  **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
+  (Apache-2.0), with four local adaptations — this repo's `GH_CONFIG_DIR`
+  auth setup (token survives rebuilds only because it lives in the volume),
+  the AGENTS.md PR workflow (`--fill`, `--squash --delete-branch`, and the
+  non-squash dev→main release merge that must not delete `dev`), the token
+  rule (never in `.git/config`, the Dockerfile, or a repo file), and a note
+  that `--repo` is dead weight inside a checkout (see the README).
+- **`continue` shortcut** — `shift+alt+enter` sends the literal prompt
+  `continue`, but only when the agent is idle, so it can never steer a running
+  turn or queue a follow-up by accident (`isIdle()` is also false while pi is
+  retrying, compacting, or has queued messages). **Vendored** from
+  [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
+  (Apache-2.0), byte-identical to upstream `0865c84` with no local changes (see
+  the README).
+
+Fixed:
+
+- **`subagent_interrupt` reported an interrupt that landed as "no new interrupt
+  was reported" whenever the watcher beat the tool's poll to the marker.** The
+  confirmation poll inferred staleness from `noteInterrupt`'s return value, but
+  the watcher folds the *same* marker on its 500 ms tick. When the watcher got
+  there first, `noteInterrupt` reported "no change" for an interrupt the child had
+  genuinely settled, and the tool told the model that a stop it had just caused
+  had not happened. Confirmation now rests on the marker's freshness relative to
+  the baseline captured before the Escape, never on whether that call happened to
+  change the record. The run was always correctly `interrupted`; only the answer
+  was wrong. A run that had already reached a terminal status when the abort was
+  reported is now answered as `superseded` rather than confirmed — the marker is
+  real, but the run is over and claiming a stop would assert a state it is not
+  in. Repro without the fix: `subagent_interrupt` against a child whose marker is
+  folded by the watcher before the tool reads it.
+- **Cancelled and tmux-failed subagent runs now report the tokens and cost they
+  had already burned.** Only `finalizeRun` read the child's session usage, so a
+  run stopped by `subagent_cancel`, or by a tmux-level failure, wrote
+  `usage: undefined` and reported no tokens in `subagent_status`, in the list
+  view or in the completion notification — even though a cancelled run is very
+  often one that had spent real money first. Usage is now read before the
+  terminal status is persisted, and a standalone run's session file (whose exact
+  name the parent only learns when the child reports a result) is discovered
+  under the run dir so the read has something to read. The inherited-context
+  baseline is still honoured, so a fork or resume is not charged for what it
+  inherited. A run cancelled by `kill-on-shutdown` is read the same way, so the
+  shutdown path reports its cost too.
+- **The late-`result.json` re-read in `finalizeMissingChild` is now covered.** It
+  guards the window between the watcher's first result read and its pane probe,
+  where a child that reports and exits in the same instant would otherwise be
+  recorded as failed. Deleting the re-read left the suite green, so the test now
+  drives the window directly by writing the result while the pane probe is in
+  flight — verified to fail when the re-read is removed.
+- **Two `subagent_resume` calls fired in parallel can no longer open two pi
+  processes on one transcript.** A finished run stays terminal forever, so the
+  "is another resume in flight" scan over `runs` was the only guard — and a
+  resume does filesystem I/O (`mkdir`, `countSessionLines`) between that scan and
+  the new run being registered, so two calls that did not await each other both
+  passed it and appended to the same JSONL, interleaving branches and scrambling
+  usage baselines. The transcript is now claimed synchronously, with no `await`
+  between the check and the claim, and released once the run is registered.
+
+Maintenance:
+
+- **Decided and recorded: this repo has no typecheck step, by design.**
+  `node --test` strips types without checking them, so a type error can
+  survive the suite. Adopting a typechecker would pull in the repo's first npm
+  compiler dependency (it consumes no npm packages) and would have to
+  reconcile a documented asymmetry — `todos.ts` uses TypeScript parameter
+  properties that node's strip-only loader rejects while pi's jiti loader
+  accepts, and the `erasableSyntaxOnly` fix is one the files do not currently
+  satisfy. The bug class it would catch (a bare identifier used as if it
+  existed, a `HarnessOptions` field the factory reads but no caller sets) is
+  exactly what the P1/P2 audit fixed and pinned with tests. The decision and
+  its reason now live in AGENTS.md next to the test command, so it is not
+  re-derived.
+- **The `CwdKey` comment in `session-breakdown.ts` no longer claims the cwd
+  path is normalized.** The single-line type comment said "normalized cwd
+  path", but the only processing is `cwd.trim()` — nothing collapses a
+  trailing slash or resolves a relative path, so `/srv/app` and `/srv/app/`
+  bucket separately and both appear in the legend.
+- **The `subagent` watcher re-arms through one code path, and the legacy `v1.`
+  attach target says what it is.** `watchTick` re-armed its own 500 ms timer
+  inline at its tail while `scheduleWatch` implemented the identical re-arm;
+  the tail now calls `scheduleWatch`, so there is exactly one re-arm (and a
+  schedule that lands during a tick's awaits no longer risks arming twice).
+  The `v1.`-prefixed base64 target branch in `attachToSubagentAndExit`
+  predates session-id targets; no current code path produces it
+  (`attachCommand` is always `--attach-subagent <run.id>`, and `run.id` is a
+  UUID), so its cut-off is now stated in the code instead of leaving a reader
+  to guess whether it is live plumbing. It is kept rather than removed because
+  the file stays close to upstream. No behaviour change.
+- **`native-web-search`'s script lookup no longer advertises a path that cannot
+  exist.** `resolveScriptPath` probed `here/../../skills/native-web-search/`
+  for the skill, but `here` is the extensions dir (`.pi/extensions`), so that
+  resolved to `<repo>/skills/...` while the script actually lives at
+  `<repo>/.pi/skills/...` — the `.pi` being the whole reason a git-sourced pi
+  package is discoverable at all. The candidate could never exist, yet the
+  thrown error listed it as somewhere to look. It now carries the `.pi`,
+  resolving relative to the repo/package root and covering both the repo tree
+  and an installed package. The lookup is factored so the candidate list is
+  testable, and a fixture-tree test pins it: a regression back to bare
+  `skills/` fails the suite.
+- **Vendored `session-breakdown.ts` comments no longer restate CHANGELOG
+  measurements.** The simplification audit counted ~230 comment lines for
+  ~240 code lines and found the specific figures (`$0.067741 / $1.708118` of
+  missing cost, a fork transcript's `1,473,545 / 527,566` tokens, `2,989,693`
+  tokens already duplicated inside `sessions/`, the "64%") copied into the
+  vendored header, `defaultSessionRoots`, and two one-liners — several blocks
+  restating CHANGELOG.md verbatim. Those figures are now written once, in the
+  CHANGELOG, and the comments point there ("measured 2026-10-04, see
+  CHANGELOG.md"), so refreshing the vendored file does not silently create a
+  second source of truth that drifts out of step. The reasoning is kept in
+  full where it is not in the CHANGELOG — why the dedupe is scoped to a
+  lineage and never global, why `model_change` state is still replayed from
+  inherited entries, why an unreadable own header counts as broken lineage
+  rather than clean. The `inheritedNote` comment, which argued the
+  child-transcripts/exclusion rationale a third time, is trimmed to what the
+  function needs, and the two `parseSessionFile` comments that explained the
+  one `if (inheritedEntry)` skip are merged into one. Comment-only; no
+  behaviour change.
+- **The management-tool registration memo is closure state, and now says so.**
+  A code review read `appliedManagementExposure` / `managementToolsRegistered`
+  as module-level and warned that a reload could strand the five management
+  tools. They are not module-level: the factory opens far above them and closes
+  at the end of the file, so they reset on every extension load — the block is
+  simply written without the factory's indentation, which is why it read as
+  module state. The suite already depended on the reset (every test builds a
+  fresh harness, then calls `subagent_status`), and a new test pins it by
+  loading twice in one process and asserting the tools are registered the second
+  time; it was verified to fail when the declarations are hoisted. Added a
+  comment explaining the shape, and removed a stray `;;`. No behaviour change.
+- **`postCreate.sh` now defaults `GH_CONFIG_DIR` instead of trusting the image's
+  `ENV`.** The Dockerfile sets it, but a container built from an older image does
+  not have it, and the later `mkdir -p "$GH_CONFIG_DIR"` then expands to
+  `mkdir -p ""`, which fails under `set -e` and aborts the rest of postCreate.
+  Defaulting to the same `/home/vscode/.pi/gh` makes the script self-sufficient
+  and cannot change behaviour when the `ENV` is present.
+- **The `todo` tool now asks for a symbol or a file name instead of a
+  `file:line` number.** Line references drift as the code moves, and the current
+  todo list demonstrated it: several had gone stale after a single refactor. The
+  tool description tells the model to name the file or the symbol. This is
+  advice, not a constraint — a line number is still allowed when it is the
+  clearest available locator.
+- **`MODELS.txt` removed.** Nothing reads it: `pi-session.sh` takes the model
+  as an argument, and the README's file tree no longer lists it.
+- **The `lifecycle.test.ts` harness bootstrap is one helper again.** Eight tests
+  open-coded the same wrapper — `withTempAgentDir`, `createHarness` with a
+  `liveBranchSessionManager(agentDir)` passed through an `as never` cast, and a
+  `try`/`finally` shutdown — because `withHarness` did not hand the callback the
+  temp `agentDir` the live-branch manager needs. `withHarness` now passes
+  `(harness, agentDir)` and accepts `sessionManager?: "liveBranch"`, building
+  the manager from the agent dir it has already set, so the eight sites and
+  their casts are gone and a test can no longer leak a harness by forgetting the
+  `finally`. `HarnessOptions` also declares the four fields `createHarness`
+  already read — `activeTools`, `requestedTools`, `unbound`,
+  `toolStallSeconds` — which type-checked only because nothing type-checks this
+  repo. Tests only; no production change.
+- **`todos.ts` error-checking is one guard, and the list renderers share one
+  section list.** `withTodoLock<T>` returns `T | { error: string }` with no
+  discriminant on the success arm, so callers repeated
+  `typeof result === "object" && "error" in result` in ten places, three more
+  wrote `"error" in result`, and `withTodoLock` itself wrote the same test on
+  `acquireLock`'s return — fourteen inline checks in all, each one a chance to
+  get the narrowing subtly wrong. They now call a single `isError(result)` type
+  guard over a named `ErrorResult`; `acquireLock` and `withTodoLock` return that
+  type instead of an inline object literal. The guard is behaviourally identical to
+  the expression it replaces on every shape the callers produce, with one
+  deliberate difference: a `null` result used to reach `"error" in null` and
+  throw a `TypeError`, and now returns `false` — no caller can produce `null`
+  (`ensureTodoExists`'s `null` is guarded at every call site), so this only
+  removes a latent crash. Also folded in two related review items: the
+  `actionLabel` seven-arm nested ternary in the tool-result renderer is now a
+  `TODO_ACTION_LABELS` lookup, and `formatTodoList` / `renderTodoList` share one
+  `todoSections` helper instead of each rebuilding the same
+  assigned/open/closed list.
+- **The last of the dead members are gone, and the `sliceByColumn` hang with
+  them.** A code-review pass flagged members with no production reader; this
+  removes them. `listTodosSync` in `todos.ts` (the async `listTodos` is the only
+  one used), `QnAComponent.allQuestionsAnswered` in `answer.ts`,
+  `SubagentActivityRecorder.flush()` in `activity.ts` (every terminal path
+  awaits `settled()`/`shutdown()`; its test actually exercised `settled()`, so
+  it is renamed rather than dropped), `paneResult()` in the test helpers, and
+  the `killCommand` field on `RunRecord` (cancelling re-derives the command with
+  `tmuxArgs("kill-session", …)`, so nothing rendered it). The interrupt marker's
+  `turnIndex` goes too: it was latched from `turn_end`, written to
+  `interrupt.json` and validated, but no reader ever used it — `runSummary`
+  renders `interruptedAt` and `interrupts`. `validateActivityState`, a pure
+  pass-through, is replaced by exporting `validateActivity` directly. The dead
+  legend path in `session-breakdown.ts` (`renderLegendItems`,
+  `renderLegendBlock`, `renderLeftRight`, `fitRight`) had no call sites — the
+  live legend is built inline — and its only reason to exist was
+  `sliceByColumn`, which cannot terminate on an unterminated ESC
+  (`sliceByColumn("ab\x1b", 0, 10)` hangs); deleting the path deletes the hang.
+  `readSessionHeader` and `readEntryIds` now share one `forEachJsonLine`, so the
+  stream/readline/try-finally scaffolding exists once. Deliberately kept:
+  `agentActive` / `providerActive` on the activity snapshot, which no renderer
+  reads but which the validator uses to enforce "a done snapshot cannot have
+  active work" and which make a hand-inspected `activity.json` self-describing;
+  a comment on the type now says so.
+
 ## v1.1.1 — 2026-10-05
 
 Fixed:

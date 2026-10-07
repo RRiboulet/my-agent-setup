@@ -46,7 +46,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 import path from "node:path";
 import fs from "node:fs/promises";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import crypto from "node:crypto";
 import {
 	Container,
@@ -160,6 +160,16 @@ type TodoToolDetails =
 			todo: TodoRecord;
 			error?: string;
 		};
+
+/** Success-verb labels for the tool result renderer; read-only actions have none. */
+const TODO_ACTION_LABELS: Partial<Record<TodoToolDetails["action"], string>> = {
+	create: "Created",
+	update: "Updated",
+	append: "Appended to",
+	delete: "Deleted",
+	claim: "Claimed",
+	release: "Released",
+};
 
 function formatTodoId(id: string): string {
 	return `${TODO_ID_PREFIX}${id}`;
@@ -971,11 +981,26 @@ async function readLockInfo(lockPath: string): Promise<LockInfo | null> {
 	}
 }
 
+/** The failure arm shared by `acquireLock`, `withTodoLock` and the todo mutators. */
+interface ErrorResult {
+	error: string;
+}
+
+/**
+ * Narrow a result to its `{ error }` failure arm. The success arm is an
+ * arbitrary `T`, so there is no discriminant field to key off. This is the one
+ * place the test is written for a lock or mutator result; `validateTodoId`
+ * results are a separate union and keep their own `"error" in` check.
+ */
+function isError<T>(result: T | ErrorResult): result is ErrorResult {
+	return typeof result === "object" && result !== null && "error" in result;
+}
+
 async function acquireLock(
 	todosDir: string,
 	id: string,
 	ctx: ExtensionContext,
-): Promise<(() => Promise<void>) | { error: string }> {
+): Promise<(() => Promise<void>) | ErrorResult> {
 	const lockPath = getLockPath(todosDir, id);
 	const now = Date.now();
 	const session = ctx.sessionManager.getSessionFile();
@@ -1031,9 +1056,9 @@ async function withTodoLock<T>(
 	id: string,
 	ctx: ExtensionContext,
 	fn: () => Promise<T>,
-): Promise<T | { error: string }> {
+): Promise<T | ErrorResult> {
 	const lock = await acquireLock(todosDir, id, ctx);
-	if (typeof lock === "object" && "error" in lock) return lock;
+	if (isError(lock)) return lock;
 	try {
 		return await fn();
 	} finally {
@@ -1068,39 +1093,6 @@ async function listTodos(todosDir: string): Promise<TodoFrontMatter[]> {
 			});
 		} catch {
 			// ignore unreadable todo
-		}
-	}
-
-	return sortTodos(todos);
-}
-
-function listTodosSync(todosDir: string): TodoFrontMatter[] {
-	let entries: string[] = [];
-	try {
-		entries = readdirSync(todosDir);
-	} catch {
-		return [];
-	}
-
-	const todos: TodoFrontMatter[] = [];
-	for (const entry of entries) {
-		if (!entry.endsWith(".md")) continue;
-		const id = entry.slice(0, -3);
-		const filePath = path.join(todosDir, entry);
-		try {
-			const content = readFileSync(filePath, "utf8");
-			const { frontMatter } = splitFrontMatter(content);
-			const parsed = parseFrontMatter(frontMatter, id);
-			todos.push({
-				id,
-				title: parsed.title,
-				tags: parsed.tags ?? [],
-				status: parsed.status,
-				created_at: parsed.created_at,
-				assigned_to_session: parsed.assigned_to_session,
-			});
-		} catch {
-			// ignore
 		}
 	}
 
@@ -1166,10 +1158,19 @@ function splitTodosByAssignment(todos: TodoFrontMatter[]): {
 	return { assignedTodos, openTodos, closedTodos };
 }
 
+/** The three list sections, in display order, shared by the text and TUI renderers. */
+function todoSections(todos: TodoFrontMatter[]): Array<{ label: string; todos: TodoFrontMatter[] }> {
+	const { assignedTodos, openTodos, closedTodos } = splitTodosByAssignment(todos);
+	return [
+		{ label: "Assigned todos", todos: assignedTodos },
+		{ label: "Open todos", todos: openTodos },
+		{ label: "Closed todos", todos: closedTodos },
+	];
+}
+
 function formatTodoList(todos: TodoFrontMatter[]): string {
 	if (!todos.length) return "No todos.";
 
-	const { assignedTodos, openTodos, closedTodos } = splitTodosByAssignment(todos);
 	const lines: string[] = [];
 	const pushSection = (label: string, sectionTodos: TodoFrontMatter[]) => {
 		lines.push(`${label} (${sectionTodos.length}):`);
@@ -1182,9 +1183,7 @@ function formatTodoList(todos: TodoFrontMatter[]): string {
 		}
 	};
 
-	pushSection("Assigned todos", assignedTodos);
-	pushSection("Open todos", openTodos);
-	pushSection("Closed todos", closedTodos);
+	for (const section of todoSections(todos)) pushSection(section.label, section.todos);
 	return lines.join("\n");
 }
 
@@ -1229,7 +1228,6 @@ function renderTodoList(
 ): string {
 	if (!todos.length) return theme.fg("dim", "No todos");
 
-	const { assignedTodos, openTodos, closedTodos } = splitTodosByAssignment(todos);
 	const lines: string[] = [];
 	const pushSection = (label: string, sectionTodos: TodoFrontMatter[]) => {
 		lines.push(theme.fg("muted", `${label} (${sectionTodos.length})`));
@@ -1246,11 +1244,7 @@ function renderTodoList(
 		}
 	};
 
-	const sections: Array<{ label: string; todos: TodoFrontMatter[] }> = [
-		{ label: "Assigned todos", todos: assignedTodos },
-		{ label: "Open todos", todos: openTodos },
-		{ label: "Closed todos", todos: closedTodos },
-	];
+	const sections = todoSections(todos);
 
 	sections.forEach((section, index) => {
 		if (index > 0) lines.push("");
@@ -1323,7 +1317,7 @@ async function updateTodoStatus(
 		return existing;
 	});
 
-	if (typeof result === "object" && "error" in result) {
+	if (isError(result)) {
 		return { error: result.error };
 	}
 
@@ -1365,7 +1359,7 @@ async function claimTodoAssignment(
 		return existing;
 	});
 
-	if (typeof result === "object" && "error" in result) {
+	if (isError(result)) {
 		return { error: result.error };
 	}
 
@@ -1405,7 +1399,7 @@ async function releaseTodoAssignment(
 		return existing;
 	});
 
-	if (typeof result === "object" && "error" in result) {
+	if (isError(result)) {
 		return { error: result.error };
 	}
 
@@ -1434,7 +1428,7 @@ async function deleteTodo(
 		return existing;
 	});
 
-	if (typeof result === "object" && "error" in result) {
+	if (isError(result)) {
 		return { error: result.error };
 	}
 
@@ -1458,6 +1452,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 			`Manage file-based todos in ${todosDirLabel} (list, list-all, get, create, update, append, delete, claim, release). ` +
 			"Title is the short summary; body is long-form markdown notes (update replaces, append adds). " +
 			"Todo ids are shown as TODO-<hex>; id parameters accept TODO-<hex> or the raw hex filename. " +
+			"When a todo points at code, name the file or the symbol, not a `file:line` number: lines drift as the code moves and go stale. " +
 			"Claim tasks before working on them to avoid conflicts, and close them when complete.", 
 		parameters: TodoParams,
 
@@ -1540,7 +1535,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 						return todo;
 					});
 
-					if (typeof result === "object" && "error" in result) {
+					if (isError(result)) {
 						return {
 							content: [{ type: "text", text: result.error }],
 							details: { action: "create", error: result.error },
@@ -1592,7 +1587,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 						return existing;
 					});
 
-					if (typeof result === "object" && "error" in result) {
+					if (isError(result)) {
 						return {
 							content: [{ type: "text", text: result.error }],
 							details: { action: "update", error: result.error },
@@ -1639,7 +1634,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 						return updated;
 					});
 
-					if (typeof result === "object" && "error" in result) {
+					if (isError(result)) {
 						return {
 							content: [{ type: "text", text: result.error }],
 							details: { action: "append", error: result.error },
@@ -1666,7 +1661,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 						ctx,
 						Boolean(params.force),
 					);
-					if (typeof result === "object" && "error" in result) {
+					if (isError(result)) {
 						return {
 							content: [{ type: "text", text: result.error }],
 							details: { action: "claim", error: result.error },
@@ -1692,7 +1687,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 						ctx,
 						Boolean(params.force),
 					);
-					if (typeof result === "object" && "error" in result) {
+					if (isError(result)) {
 						return {
 							content: [{ type: "text", text: result.error }],
 							details: { action: "release", error: result.error },
@@ -1721,7 +1716,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 						};
 					}
 					const result = await deleteTodo(todosDir, validated.id, ctx);
-					if (typeof result === "object" && "error" in result) {
+					if (isError(result)) {
 						return {
 							content: [{ type: "text", text: result.error }],
 							details: { action: "delete", error: result.error },
@@ -1783,20 +1778,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 			}
 
 			let text = renderTodoDetail(theme, details.todo, expanded);
-			const actionLabel =
-				details.action === "create"
-					? "Created"
-					: details.action === "update"
-						? "Updated"
-						: details.action === "append"
-							? "Appended to"
-							: details.action === "delete"
-								? "Deleted"
-								: details.action === "claim"
-									? "Claimed"
-									: details.action === "release"
-										? "Released"
-										: null;
+			const actionLabel = TODO_ACTION_LABELS[details.action] ?? null;
 			if (actionLabel) {
 				const lines = text.split("\n");
 				lines[0] = theme.fg("success", "✓ ") + theme.fg("muted", `${actionLabel} `) + lines[0];
@@ -1944,7 +1926,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 					if (action === "release") {
 						const result = await releaseTodoAssignment(todosDir, record.id, ctx, true);
-						if ("error" in result) {
+						if (isError(result)) {
 							ctx.ui.notify(result.error, "error");
 							return "stay";
 						}
@@ -1956,7 +1938,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 					if (action === "delete") {
 						const result = await deleteTodo(todosDir, record.id, ctx);
-						if ("error" in result) {
+						if (isError(result)) {
 							ctx.ui.notify(result.error, "error");
 							return "stay";
 						}
@@ -1968,7 +1950,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 					const nextStatus = action === "close" ? "closed" : "open";
 					const result = await updateTodoStatus(todosDir, record.id, nextStatus, ctx);
-					if ("error" in result) {
+					if (isError(result)) {
 						ctx.ui.notify(result.error, "error");
 						return "stay";
 					}

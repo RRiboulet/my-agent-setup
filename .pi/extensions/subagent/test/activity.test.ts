@@ -15,7 +15,7 @@ import {
 	createActivityRecorder,
 	getActivityFilePath,
 	readActivityFile,
-	validateActivityState,
+	validateActivity,
 	type SubagentActivityState,
 } from "../activity.ts";
 
@@ -240,7 +240,7 @@ test("a successful write resets the failure counter", async () => {
 	assert.equal(h.errors.length, 1, "the recorder is still enabled");
 });
 
-test("flush waits for an in-flight write", async () => {
+test("settled waits for an in-flight write", async () => {
 	let resolve: (() => void) | undefined;
 	const gate = new Promise<void>((r) => {
 		resolve = r;
@@ -312,7 +312,7 @@ test("every snapshot the recorder produces satisfies the read-side invariants", 
 		const h = createHarness();
 		await step(h);
 		const state = h.recorder.current();
-		const verdict = validateActivityState(state, "run-1");
+		const verdict = validateActivity(state, "run-1");
 		assert.equal(verdict.ok, true, `step ${index} produced an invalid snapshot: ${JSON.stringify(state)}`);
 	}
 });
@@ -333,7 +333,7 @@ test("validation rejects self-contradictory snapshots", async () => {
 		activeSince: 150,
 		toolName: "bash",
 	};
-	assert.equal(validateActivityState(base, "run-1").ok, true, "the coherent baseline passes");
+	assert.equal(validateActivity(base, "run-1").ok, true, "the coherent baseline passes");
 
 	const incoherent: [string, Record<string, unknown>][] = [
 		["active without a scope", { activeScope: undefined }],
@@ -347,13 +347,13 @@ test("validation rejects self-contradictory snapshots", async () => {
 		["negative sequence", { sequence: -5 }],
 	];
 	for (const [label, patch] of incoherent) {
-		const verdict = validateActivityState({ ...base, ...patch }, "run-1");
+		const verdict = validateActivity({ ...base, ...patch }, "run-1");
 		assert.equal(verdict.ok, false, `${label} must be rejected`);
 	}
 
 	// waiting is the only phase allowed to carry waitingSince.
 	assert.equal(
-		validateActivityState(
+		validateActivity(
 			{
 				...base,
 				phase: "waiting",
@@ -391,28 +391,28 @@ test("validation rejects malformed snapshots and accepts a good one", async (t) 
 		toolName: "bash",
 	};
 
-	assert.deepEqual(validateActivityState(good, "run-1"), { ok: true, activity: good });
-	assert.equal(validateActivityState(null, "run-1").ok, false);
-	assert.equal(validateActivityState([], "run-1").ok, false);
-	assert.equal(validateActivityState({ ...good, version: 2 }, "run-1").ok, false);
-	assert.equal(validateActivityState({ ...good, phase: "busy" }, "run-1").ok, false);
-	assert.equal(validateActivityState({ ...good, activeScope: "vibes" }, "run-1").ok, false);
-	assert.equal(validateActivityState({ ...good, latestEvent: "gossip" }, "run-1").ok, false);
-	assert.equal(validateActivityState({ ...good, sequence: 1.5 }, "run-1").ok, false);
-	assert.equal(validateActivityState({ ...good, updatedAt: Number.NaN }, "run-1").ok, false);
-	assert.equal(validateActivityState({ ...good, toolActive: "yes" }, "run-1").ok, false);
-	assert.equal(validateActivityState({ ...good, waitingSince: "soon" }, "run-1").ok, false);
-	assert.equal(validateActivityState({ ...good, toolName: "two\nlines" }, "run-1").ok, false);
-	assert.equal(validateActivityState({ ...good, toolName: "x".repeat(201) }, "run-1").ok, false);
-	assert.equal(validateActivityState({ ...good, runningChildId: "" }, "run-1").ok, false);
+	assert.deepEqual(validateActivity(good, "run-1"), { ok: true, activity: good });
+	assert.equal(validateActivity(null, "run-1").ok, false);
+	assert.equal(validateActivity([], "run-1").ok, false);
+	assert.equal(validateActivity({ ...good, version: 2 }, "run-1").ok, false);
+	assert.equal(validateActivity({ ...good, phase: "busy" }, "run-1").ok, false);
+	assert.equal(validateActivity({ ...good, activeScope: "vibes" }, "run-1").ok, false);
+	assert.equal(validateActivity({ ...good, latestEvent: "gossip" }, "run-1").ok, false);
+	assert.equal(validateActivity({ ...good, sequence: 1.5 }, "run-1").ok, false);
+	assert.equal(validateActivity({ ...good, updatedAt: Number.NaN }, "run-1").ok, false);
+	assert.equal(validateActivity({ ...good, toolActive: "yes" }, "run-1").ok, false);
+	assert.equal(validateActivity({ ...good, waitingSince: "soon" }, "run-1").ok, false);
+	assert.equal(validateActivity({ ...good, toolName: "two\nlines" }, "run-1").ok, false);
+	assert.equal(validateActivity({ ...good, toolName: "x".repeat(201) }, "run-1").ok, false);
+	assert.equal(validateActivity({ ...good, runningChildId: "" }, "run-1").ok, false);
 
-	const wrongId = validateActivityState(good, "other-run");
+	const wrongId = validateActivity(good, "other-run");
 	assert.equal(wrongId.ok, false);
 	assert.equal(wrongId.ok === false && wrongId.reason, "wrong-id");
 
 	// Optional fields may be absent entirely, as long as the invariants hold.
 	const minimal = { ...good, toolName: undefined };
-	assert.equal(validateActivityState(minimal, "run-1").ok, true);
+	assert.equal(validateActivity(minimal, "run-1").ok, true);
 
 	await writeFile(file, JSON.stringify(good), "utf8");
 	assert.equal((await readActivityFile(file, "run-1")).ok, true);

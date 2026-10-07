@@ -49,11 +49,9 @@
 //
 // Why patch 2 is not optional: summing whole files counted a fork run's
 // inherited prefix again — measured 2026-10-04 on a real `handoff: "fork"`
-// child whose transcript held 1,473,545 tokens against the 527,566 the run
-// itself added, so 64% of the file was somebody else's requests — and the same
-// duplication was already present inside sessions/ (2,989,693 tokens, ~1% of the
-// reported total) from pi's native forking, with no subagent involved.
-// Measurements and rationale: TODO-859f419f.
+// child (see CHANGELOG.md for the figures) — and the same duplication was
+// already present inside sessions/ from pi's native forking, with no subagent
+// involved. Measurements and rationale: TODO-859f419f.
 // ---------------------------------------------------------------------------
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -73,56 +71,14 @@ import { createReadStream, type Dirent } from "node:fs";
 import readline from "node:readline";
 
 type ModelKey = string; // `${provider}/${model}`
-type CwdKey = string; // normalized cwd path
+// Trimmed, not normalized: the only processing is `cwd.trim()`. Nothing
+// collapses a trailing slash or resolves a relative path, so two headers
+// spelling `/srv/app` and `/srv/app/` land in separate buckets and both
+// appear as legend entries.
+type CwdKey = string;
 type DowKey = string; // "Mon", "Tue", etc.
 type TodKey = string; // "after-midnight", "morning", "afternoon", "evening", "night"
 type BreakdownView = "model" | "cwd" | "dow" | "tod";
-
-function sliceByColumn(line: string, startCol: number, length: number, strict = false): string {
-	if (length <= 0) return "";
-	const endCol = startCol + length;
-	const segmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-	let result = "";
-	let currentCol = 0;
-	let i = 0;
-	let pendingAnsi = "";
-
-	while (i < line.length) {
-		if (line[i] === "\x1b") {
-			const match = /^\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[PX^_][^\x1b]*(?:\x1b\\)|[@-_])/.exec(line.slice(i));
-			if (match) {
-				if (currentCol >= startCol && currentCol < endCol) {
-					result += match[0];
-				} else if (currentCol < startCol) {
-					pendingAnsi += match[0];
-				}
-				i += match[0].length;
-				continue;
-			}
-		}
-
-		const nextAnsi = line.indexOf("\x1b", i);
-		const textEnd = nextAnsi === -1 ? line.length : nextAnsi;
-		for (const { segment } of segmenter.segment(line.slice(i, textEnd))) {
-			const w = visibleWidth(segment);
-			const inRange = currentCol >= startCol && currentCol < endCol;
-			const fits = !strict || currentCol + w <= endCol;
-			if (inRange && fits) {
-				if (pendingAnsi) {
-					result += pendingAnsi;
-					pendingAnsi = "";
-				}
-				result += segment;
-			}
-			currentCol += w;
-			if (currentCol >= endCol) break;
-		}
-		i = textEnd;
-		if (currentCol >= endCol) break;
-	}
-
-	return result;
-}
 
 const DOW_NAMES: DowKey[] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
@@ -286,14 +242,13 @@ interface BreakdownData {
 // Upstream hardcodes `<homedir>/.pi/agent/sessions` and walks only that. Two
 // consequences, both measured on this machine (see the vendor header):
 //   - A relocated agent dir is ignored entirely. The env var is
-//     PI_CODING_AGENT_DIR (there is no PI_AGENT_DIR); upstream PR #24 asked for
-//     exactly this and was closed unmerged.
+//     PI_CODING_AGENT_DIR (there is no PI_AGENT_DIR).
 //   - The subagent extension's child sessions are invisible: they live at
 //     <agentDir>/tmux-subagents/<parent-session-id>/<run-id>/session/, a SIBLING
-//     of sessions/. Measured 2026-10-04: $0.067741 of $1.708118 of real cost was
-//     missing from the view. (Token counts are deliberately not quoted: they move
-//     with every run, and every duplicated entry on that machine reported
-//     cost.total = 0 anyway.)
+//     of sessions/. Measured 2026-10-04: real cost was missing from the view
+//     (see CHANGELOG.md for the figure). (Token counts are deliberately not
+//     quoted: they move with every run, and every duplicated entry on that
+//     machine reported cost.total = 0 anyway.)
 //
 // Legacy `subagents` is that extension's run dir under its previous name
 // (RUNS_DIR was "subagents" before it became "tmux-subagents"); three files
@@ -650,29 +605,63 @@ async function walkSessionFiles(
 //
 // Returns null when the file cannot be read or has no session header, which is
 // different from "readable, no parent" (that is `{ parentSession: null }`).
-async function readSessionHeader(filePath: string, signal?: AbortSignal): Promise<{ parentSession: string | null } | null> {
+/**
+ * Stream a JSONL file and invoke `onLine` with each parsed object. The
+ * stream/readline/try/finally lifecycle lives here so the two readers below
+ * cannot drift apart.
+ *
+ * Returns `true` when the walk completed, `false` when the file was unreadable
+ * or the signal aborted. A line that is not valid JSON goes to `onMalformed`,
+ * whose `false` return stops the walk (`readSessionHeader` treats a malformed
+ * first line as a failed read) while anything else keeps reading (`readEntryIds`
+ * skips it — a malformed line cannot contribute an id). `onLine` returning
+ * `false` stops the walk successfully.
+ */
+async function forEachJsonLine(
+	filePath: string,
+	signal: AbortSignal | undefined,
+	onLine: (obj: any) => boolean | void,
+	onMalformed?: () => boolean | void,
+): Promise<boolean> {
 	const stream = createReadStream(filePath, { encoding: "utf8" });
 	const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
 	try {
 		for await (const line of rl) {
-			if (signal?.aborted) return null;
+			if (signal?.aborted) return false;
 			if (!line.trim()) continue;
 			let obj: any;
 			try {
 				obj = JSON.parse(line);
 			} catch {
-				return null;
+				if (onMalformed?.() === false) return false;
+				continue;
 			}
-			if (obj?.type !== "session") return null;
-			return { parentSession: typeof obj.parentSession === "string" && obj.parentSession ? obj.parentSession : null };
+			if (onLine(obj) === false) return true;
 		}
-		return null;
+		return true;
 	} catch {
-		return null;
+		return false;
 	} finally {
 		rl.close();
 		stream.destroy();
 	}
+}
+
+async function readSessionHeader(filePath: string, signal?: AbortSignal): Promise<{ parentSession: string | null } | null> {
+	let header: { parentSession: string | null } | null = null;
+	const completed = await forEachJsonLine(
+		filePath,
+		signal,
+		(obj) => {
+			header =
+				obj?.type === "session"
+					? { parentSession: typeof obj.parentSession === "string" && obj.parentSession ? obj.parentSession : null }
+					: null;
+			return false;
+		},
+		() => false,
+	);
+	return completed ? header : null;
 }
 
 // LOCAL PATCH 2 (ours): the entry ids of a file, used to recognise the verbatim
@@ -683,26 +672,10 @@ async function readSessionHeader(filePath: string, signal?: AbortSignal): Promis
 // than treating as "nothing was inherited".
 async function readEntryIds(filePath: string, signal?: AbortSignal): Promise<Set<string> | null> {
 	const ids = new Set<string>();
-	const stream = createReadStream(filePath, { encoding: "utf8" });
-	const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-	try {
-		for await (const line of rl) {
-			if (signal?.aborted) return null;
-			if (!line.trim()) continue;
-			try {
-				const obj = JSON.parse(line);
-				if (obj?.id) ids.add(obj.id);
-			} catch {
-				// A malformed line cannot contribute an id; keep reading.
-			}
-		}
-		return ids;
-	} catch {
-		return null;
-	} finally {
-		rl.close();
-		stream.destroy();
-	}
+	const completed = await forEachJsonLine(filePath, signal, (obj) => {
+		if (obj?.id) ids.add(obj.id);
+	});
+	return completed ? ids : null;
 }
 
 async function parseSessionFile(
@@ -765,15 +738,16 @@ async function parseSessionFile(
 				continue;
 			}
 
-			// LOCAL PATCH 2: `model_change` state is still replayed from inherited
-			// entries — a forked child does not re-announce its model — but the usage
-			// those entries carry is not this session's to bill, so only the
-			// accounting further down is skipped.
+			// LOCAL PATCH 2: an inherited entry is a copy of an entry an ancestor
+			// file already counts, so it is not this session's to bill. It is still
+			// counted (entries += 1) rather than dropped, because the prefix carries
+			// non-message entries too (model_change, thinking_level_change) and the
+			// footer says "entries excluded". `model_change` state is likewise still
+			// replayed from inherited entries — a forked child does not re-announce
+			// its model — so only the accounting further down is skipped, never that
+			// replay or the entries count.
 			const inheritedEntry = inheritedIds !== undefined && obj?.id !== undefined && inheritedIds.has(obj.id);
 			if (inheritedEntry) {
-				// Counted here rather than in the message branch below, because an
-				// inherited prefix carries non-message entries too (model_change,
-				// thinking_level_change) and the footer says "entries excluded".
 				inherited.entries += 1;
 			}
 
@@ -807,9 +781,9 @@ async function parseSessionFile(
 			const tok = extractTokensTotal(usage);
 			const cost = extractCostTotal(usage);
 
-			// LOCAL PATCH 2: an inherited entry is a copy of an entry an ancestor
-			// file already counts. Record what it carried, then skip every aggregate
-			// below — messages, tokens, cost and the per-model buckets.
+			// LOCAL PATCH 2: record what the inherited entry carried, then skip the
+			// message/token/cost aggregates, including the per-model buckets — see the
+			// inherited-entry comment above.
 			if (inheritedEntry) {
 				inherited.tokens += tok;
 				inherited.cost += cost;
@@ -1316,51 +1290,6 @@ function displayModelName(modelKey: string): string {
 	return idx === -1 ? modelKey : modelKey.slice(idx + 1);
 }
 
-function renderLegendItems(modelColors: Map<ModelKey, RGB>, orderedModels: ModelKey[], otherColor: RGB): string[] {
-	const items: string[] = [];
-	for (const mk of orderedModels) {
-		const c = modelColors.get(mk);
-		if (!c) continue;
-		items.push(`${ansiFg(c, "█")} ${displayModelName(mk)}`);
-	}
-	items.push(`${ansiFg(otherColor, "█")} other`);
-	return items;
-}
-
-function fitRight(text: string, width: number): string {
-	if (width <= 0) return "";
-	let w = visibleWidth(text);
-	let t = text;
-	if (w > width) {
-		t = sliceByColumn(t, w - width, width, true);
-		w = visibleWidth(t);
-	}
-	return " ".repeat(Math.max(0, width - w)) + t;
-}
-
-function renderLegendBlock(leftLabel: string, items: string[], width: number): string[] {
-	if (width <= 0) return [];
-	if (items.length === 0) return [truncateToWidth(leftLabel, width)];
-
-	const lines: string[] = [];
-	// First line: label on left, first item right-aligned into remaining space.
-	const leftW = visibleWidth(leftLabel);
-	if (leftW >= width) {
-		lines.push(truncateToWidth(leftLabel, width));
-		// Put all items on their own lines right-aligned.
-		for (const it of items) lines.push(fitRight(it, width));
-		return lines;
-	}
-
-	const remaining = Math.max(0, width - leftW);
-	lines.push(leftLabel + fitRight(items[0], remaining));
-
-	for (let i = 1; i < items.length; i++) {
-		lines.push(fitRight(items[i], width));
-	}
-	return lines;
-}
-
 function renderModelTable(range: RangeAgg, mode: MeasurementMode, maxRows = 8, groupProviders = false): string[] {
 	// Keep this relatively narrow: model + selected metric + cost + cost/session + share.
 	const metric = graphMetricForRange(range, mode);
@@ -1580,46 +1509,25 @@ function renderTodTable(range: RangeAgg, mode: MeasurementMode): string[] {
 	return lines;
 }
 
-function renderLeftRight(left: string, right: string, width: number): string {
-	const leftW = visibleWidth(left);
-	if (width <= 0) return "";
-	if (leftW >= width) return truncateToWidth(left, width);
-
-	const remaining = width - leftW;
-	let rightText = right;
-	const rightW = visibleWidth(rightText);
-	if (rightW > remaining) {
-		// Keep the *rightmost* part visible.
-		rightText = sliceByColumn(rightText, rightW - remaining, remaining, true);
-	}
-	const pad = Math.max(0, remaining - visibleWidth(rightText));
-	return left + " ".repeat(pad) + rightText;
-}
-
-// LOCAL PATCH 3 (ours): say what was excluded, next to the number.
-//
-// Two decisions this extension makes are invisible in the totals: child
-// transcripts are now part of the scan (LOCAL PATCH 1), and an inherited prefix
-// is not a request this session made (LOCAL PATCH 2). The first person to compare
-// a day against an invoice has no way to know either happened, so one dimmed
-// line under the summary carries them.
-//
-// Every clause is conditional on the thing it reports actually having happened —
-// a footer that cries wolf is a footer nobody reads:
-//   - `child transcripts` only when a file outside sessions/ was scanned, so a
-//     standalone-only workspace still learns that its session count grew.
-//   - the exclusion clause only when entries were actually excluded. A `lineage`
-//     child whose parent has since been deleted inherits nothing, and claiming
-//     "0 entries excluded, $0.00 counted once" would be three false claims.
+// LOCAL PATCH 3 (ours): say what was excluded, next to the number. Two decisions
+// this extension makes are invisible in the totals — child transcripts are now
+// part of the scan (LOCAL PATCH 1) and an inherited prefix is not a request this
+// session made (LOCAL PATCH 2) — and someone comparing a day against an invoice
+// has no way to know either happened, so one dimmed line under the summary
+// carries them. Every clause is conditional on the thing it reports actually
+// having happened — a footer that cries wolf is a footer nobody reads:
+//   - `child transcripts` only when a file outside sessions/ was scanned.
+//   - the exclusion clause only when entries were actually excluded: a `lineage`
+//     child whose parent has since been deleted inherits nothing.
 //   - the uncertainty clause only when a header or parent chain was unreadable.
-//     Such a file is half-measured at worst, which errs towards counting too much,
-//     but a half-measurement must not be silent either.
+//     Such a file is half-measured at worst, which errs towards counting too
+//     much, but a half-measurement must not be silent either.
 //
 // The amount is the excluded usage; cost when there is any, tokens otherwise,
-// because a local or zero-priced model reports $0.00 for megabytes of context and
-// "$0.0000 excluded" says nothing. The parent clause says "when it is in range"
-// because the excluded copy is counted by the parent's own file, which may be
-// outside the displayed window or older than the archive.
+// because a local or zero-priced model reports $0.00 for megabytes of context
+// and "$0.0000 excluded" says nothing. The parent clause says "when it is in
+// range" because the excluded copy is counted by the parent's own file, which
+// may be outside the displayed window or older than the archive.
 function inheritedNote(inherited: InheritedReport): string | null {
 	const { childSessions, forkedSessions, entries, tokens, cost, unknownLineage } = inherited;
 	if (childSessions === 0 && forkedSessions === 0 && unknownLineage === 0) return null;

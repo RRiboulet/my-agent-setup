@@ -180,6 +180,21 @@ Run it with `bash` (or `sh`), not as `./setup-deps.sh` — see "Line endings"
 below. Node runs the TypeScript directly; there is no build step. See
 `.pi/extensions/subagent/test/README.md` for what is and is not covered.
 
+#### Typechecking: deliberately none
+
+There is no `tsconfig.json` and no `tsc` in the tree, and this is on purpose.
+`node --test` strips types without checking them, so a type error can survive
+the suite — a known, accepted cost. Adding a typechecker would mean pulling in
+the repo's first npm compiler dependency (it consumes no npm packages) and
+reconciling a documented asymmetry: `todos.ts` uses TypeScript parameter
+properties that node's strip-only loader rejects while pi's jiti loader
+accepts, and the `erasableSyntaxOnly` setting that would resolve that is one
+the files do not currently satisfy. The bug class a typechecker catches — a
+bare identifier used as if it existed, a `HarnessOptions` field the factory
+reads but no caller sets — is exactly what the P1/P2 audit fixed and pinned
+with tests, so the residual risk is covered by the suite's load guards.
+Decision recorded 2026-10-05 (TODO-914d99f8): not adopting a typecheck step.
+
 ## Line endings
 
 `.gitattributes` sets `* text=auto eol=lf`, so git *normalizes* CRLF away on
