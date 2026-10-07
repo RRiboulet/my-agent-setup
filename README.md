@@ -70,7 +70,6 @@ inactive. Installed packages are loaded regardless of project trust.
 | `.pi/skills/commit/` | Conventional Commits subjects, and the branch-per-change rule from `AGENTS.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/commit/SKILL.md`, with two local adaptations |
 | `.pi/skills/update-changelog/` | Writes `CHANGELOG.md`'s `Unreleased` section from the commits since the last tag. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/update-changelog/SKILL.md`, with one local adaptation |
 | `pi-session.sh` | Launch pi under tmux with an OpenRouter model |
-| `MODELS.txt` | Model ids this workspace runs with |
 
 ## Requirements
 
