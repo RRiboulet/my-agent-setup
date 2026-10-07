@@ -42,6 +42,7 @@ test.
 | `interrupt.test.ts` | the `interrupt.json` marker (validation, reading, writing), the child reporter's abort path, and the parent lifecycle of an interrupted run |
 | `session-breakdown.test.ts` | the vendored `/session-breakdown`: aggregation over fixture session trees, its four `LOCAL PATCH` hunks — agent-dir roots, inherited-prefix exclusion, the footer note (including that it reaches both the TUI and the non-interactive path), and the `__test__` surface — and the upstream behaviours re-vendored on 2026-10-05 (faux/test-provider sessions skipped, only models that produced a message counted, cost/session + provider grouping), which ship untested upstream |
 | `review.test.ts` | the vendored `/review`: strict-ESM load guard, the `__test__` surface, arg parsing (`tokenizeArgs`/`parseArgs`/`parseReviewPaths`/`parsePrReference`), and the verdict/findings rubric (`hasNeedsAttentionVerdict`, `hasBlockingReviewFindings`, code-fence skipping, verdict fall-through) |
+| `goal.test.ts` | the vendored `/goal`: strict-ESM load guard, the `__test__` surface, and the session-log state reconstruction (`reconstructGoalFromBranch` — the reload/tree-navigation risk), the 4k objective limit, usage accounting, the budget-exhaustion decision, and the continuation/budget prompts |
 | `helpers.ts` | env/temp-dir isolation and polling helpers |
 
 `lifecycle.test.ts` drives the real extension factory with a fake

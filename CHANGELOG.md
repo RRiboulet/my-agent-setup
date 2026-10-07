@@ -6,6 +6,18 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
+- **`/goal`** — long-running objective mode: `/goal <objective>` (and the
+  `get_goal` / `create_goal` / `update_goal` tools) starts an unbounded task
+  that keeps pursuing a stated objective across turns, with an optional token
+  budget and an `active`/`paused`/`blocked`/`usageLimited`/`budgetLimited`/
+  `complete` lifecycle. All state is appended to the session log and
+  reconstructed from the active branch on reload and tree navigation — no
+  external database. Complements `subagent`: delegation for bounded tasks,
+  `/goal` for unbounded ones. **Vendored** from
+  [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
+  (Apache-2.0), with two local changes — a testability refactor
+  (`reconstructGoalFromBranch`, `hasExhaustedTokenBudget`) and a `__test__`
+  export (see the README).
 - **`/review` and `/end-review`** — interactive code review with five modes
   (PR, base branch, uncommitted, commit, folder), loop-fixing toggle, shared
   custom instructions, and project-level `REVIEW_GUIDELINES.md`. **Vendored**
