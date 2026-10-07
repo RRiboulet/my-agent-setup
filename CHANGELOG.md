@@ -12,6 +12,14 @@ Added:
   from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
   (Apache-2.0), with two local changes — a testability
   refactor and a `__test__` export (see the README).
+- **`github` skill** — gh CLI usage (PRs, CI runs, `gh api`, JSON output).
+  **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
+  (Apache-2.0), with four local adaptations — this repo's `GH_CONFIG_DIR`
+  auth setup (token survives rebuilds only because it lives in the volume),
+  the AGENTS.md PR workflow (`--fill`, `--squash --delete-branch`, and the
+  non-squash dev→main release merge that must not delete `dev`), the token
+  rule (never in `.git/config`, the Dockerfile, or a repo file), and a note
+  that `--repo` is dead weight inside a checkout (see the README).
 
 Fixed:
 
