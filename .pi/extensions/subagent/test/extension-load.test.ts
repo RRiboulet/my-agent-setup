@@ -21,6 +21,7 @@ import { test } from "node:test";
 
 const EXTENSIONS = [
 	"../../answer.ts",
+	"../../continue.ts",
 	"../../goal.ts",
 	"../../native-web-search.ts",
 	"../../opencode-go-provider/index.ts",
