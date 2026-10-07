@@ -126,10 +126,26 @@ accumulates on `dev`; `main` is brought forward and tagged.
    the one merge that is not a squash: a release wants its history, and `main`'s
    commits should be the real ones. Use "Rebase and merge" or "Merge commit",
    never "Squash".
-3. `gh pr merge <n> --merge --delete-branch` — but do **not** let it delete
-   `dev`. Re-create it locally if needed: `git branch dev origin/dev`.
+3. `gh pr merge <n> --merge` — **do not pass `--delete-branch`.** The head of
+   this pull request is `dev`, so that flag would delete the long-lived
+   integration branch. This is the one merge where the head branch must
+   survive.
 4. Tag the merge commit on `main` and push the tag:
    `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
+5. Fast-forward `dev` to the release merge, so the new tag is reachable from
+   `dev`:
+
+   ```bash
+   git checkout dev && git merge --ff-only main && git push origin dev
+   ```
+
+   Skipping this leaves the tag on `main` only, and `git describe --tags` on
+   `dev` then reports the *previous* release — which is the baseline
+   `.pi/skills/update-changelog/` reads, so the next release re-reads work that
+   already shipped. It never stops being necessary on its own: every release
+   mints a fresh merge commit that `dev` does not otherwise contain. (This step
+   was missing through v1.2.0; v1.1.1 and v1.2.0 each needed a manual
+   catch-up.)
 
 Versions are git tags. This repository is not published to npm — it is
 `private` and consumes no npm packages, but it IS consumable as a pi package:
