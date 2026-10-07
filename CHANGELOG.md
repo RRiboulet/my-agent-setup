@@ -72,6 +72,8 @@ Maintenance:
   tool description tells the model to name the file or the symbol. This is
   advice, not a constraint — a line number is still allowed when it is the
   clearest available locator.
+- **`MODELS.txt` removed.** Nothing reads it: `pi-session.sh` takes the model
+  as an argument, and the README's file tree no longer lists it.
 
 ## v1.1.1 — 2026-10-05
 
