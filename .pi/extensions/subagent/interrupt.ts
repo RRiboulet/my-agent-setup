@@ -40,8 +40,6 @@ export interface SubagentInterruptMarker {
 	interruptedAt: number;
 	/** 1-based count of aborted turns this child has settled. */
 	interrupts: number;
-	/** Index of the aborted turn, when the runtime reported one. */
-	turnIndex?: number;
 	/** The assistant message's stopReason; "aborted" for a real interrupt. */
 	stopReason?: string;
 }
@@ -61,7 +59,7 @@ export interface InterruptMarkerWriterOptions {
 
 export interface InterruptMarkerWriter {
 	/** Record one aborted turn. Resolves once the marker is durable. */
-	mark(info?: { turnIndex?: number; stopReason?: string }): Promise<void>;
+	mark(info?: { stopReason?: string }): Promise<void>;
 	/** 1-based count of interrupts this writer has recorded. */
 	count(): number;
 }
@@ -89,9 +87,6 @@ export function validateInterruptMarker(value: unknown, expectedRunId: string): 
 	if (!isFiniteNumber(object.interruptedAt)) return invalid("interruptedAt must be finite");
 	if (!Number.isInteger(object.interrupts) || (object.interrupts as number) < 1) {
 		return invalid("interrupts must be a positive integer");
-	}
-	for (const field of ["turnIndex"] as const) {
-		if (object[field] !== undefined && !Number.isInteger(object[field])) return invalid(`${field} must be an integer when present`);
 	}
 	for (const field of ["stopReason"] as const) {
 		const raw = object[field];
@@ -149,7 +144,6 @@ export function createInterruptMarkerWriter(options: InterruptMarkerWriterOption
 				runId: options.runId,
 				interruptedAt: now(),
 				interrupts: count,
-				...(info?.turnIndex === undefined ? {} : { turnIndex: info.turnIndex }),
 				...(typeof info?.stopReason === "string" ? { stopReason: info.stopReason } : {}),
 			};
 			chain = chain

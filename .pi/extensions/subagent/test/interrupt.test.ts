@@ -32,7 +32,6 @@ function marker(overrides: Record<string, unknown> = {}): Record<string, unknown
 		runId: RUN_ID,
 		interruptedAt: 1_700_000_000_000,
 		interrupts: 1,
-		turnIndex: 3,
 		stopReason: "aborted",
 		...overrides,
 	};
@@ -61,14 +60,13 @@ test("a malformed marker is reported, not thrown", () => {
 		marker({ interruptedAt: "soon" }),
 		marker({ interrupts: 0 }),
 		marker({ interrupts: 1.5 }),
-		marker({ turnIndex: "third" }),
 		marker({ stopReason: "aborted\nrm -rf /" }),
 	]) {
 		const result = validateInterruptMarker(value, RUN_ID);
 		assert.equal(result.ok, false, `${JSON.stringify(value)} must be rejected`);
 	}
 	assert.equal(validateInterruptMarker(marker(), RUN_ID).ok, true);
-	assert.equal(validateInterruptMarker(marker({ turnIndex: undefined, stopReason: undefined }), RUN_ID).ok, true);
+	assert.equal(validateInterruptMarker(marker({ stopReason: undefined }), RUN_ID).ok, true);
 });
 
 test("readInterruptMarker distinguishes a missing file from a broken one", async () => {
@@ -117,8 +115,8 @@ test("the writer counts interrupts and survives a failing write", async () => {
 			},
 		});
 
-		await writer.mark({ turnIndex: 1, stopReason: "aborted" });
-		await writer.mark({ turnIndex: 4 });
+		await writer.mark({ stopReason: "aborted" });
+		await writer.mark();
 		assert.equal(writer.count(), 2);
 		const second = await readInterruptMarker(filePath, RUN_ID);
 		assert.equal(second.ok && second.marker.interrupts, 2, "the count is per child, so two interrupts are not collapsed");
@@ -242,7 +240,6 @@ test("an aborted turn leaves the child alive with a marker and no result", async
 		const written = await readInterruptMarker(child.interruptPath, RUN_ID);
 		assert.equal(written.ok, true, "the interrupt marker must be written");
 		assert.equal(written.ok === true && written.marker.interrupts, 1);
-		assert.equal(written.ok === true && written.marker.turnIndex, 3);
 		assert.equal(written.ok === true && written.marker.stopReason, "aborted");
 		assert.equal(existsSync(child.resultPath), false, "an interrupted turn is not a result");
 		assert.equal(child.shutdownCalls.length, 0, "the child stays alive at its prompt");

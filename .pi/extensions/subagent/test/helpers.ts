@@ -62,8 +62,3 @@ export async function waitFor(predicate: () => boolean | Promise<boolean>, timeo
 	}
 	throw new Error("waitFor: condition not met within timeout");
 }
-
-/** A regex-free escape for tmux display-message output. */
-export function paneResult(stdout: string): { code: number; stdout: string; stderr: string } {
-	return { code: 0, stdout, stderr: "" };
-}

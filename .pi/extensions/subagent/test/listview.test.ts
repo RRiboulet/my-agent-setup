@@ -27,7 +27,6 @@ function makeRunRecord(overrides: Partial<RunRecord> = {}): RunRecord {
 		tmuxTarget: "pi-agent-run-x:0.0",
 		attachCommand: "pi --attach-subagent 'run-x'",
 		captureCommand: "tmux capture-pane -p",
-		killCommand: "tmux kill-session -t pi-agent-run-x",
 		runDir: "/tmp/run",
 		resultPath: "/tmp/run/result.json",
 		trusted: false,

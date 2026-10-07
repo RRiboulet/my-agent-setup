@@ -342,7 +342,6 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 					runId: run.id,
 					interruptedAt: Date.now(),
 					interrupts: 1,
-					turnIndex: 0,
 					stopReason: "aborted",
 					...overrides,
 				})}\n`,
