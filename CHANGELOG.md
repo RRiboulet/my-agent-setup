@@ -78,6 +78,18 @@ Fixed:
 
 Maintenance:
 
+- **Decided and recorded: this repo has no typecheck step, by design.**
+  `node --test` strips types without checking them, so a type error can
+  survive the suite. Adopting a typechecker would pull in the repo's first npm
+  compiler dependency (it consumes no npm packages) and would have to
+  reconcile a documented asymmetry — `todos.ts` uses TypeScript parameter
+  properties that node's strip-only loader rejects while pi's jiti loader
+  accepts, and the `erasableSyntaxOnly` fix is one the files do not currently
+  satisfy. The bug class it would catch (a bare identifier used as if it
+  existed, a `HarnessOptions` field the factory reads but no caller sets) is
+  exactly what the P1/P2 audit fixed and pinned with tests. The decision and
+  its reason now live in AGENTS.md next to the test command, so it is not
+  re-derived.
 - **The `CwdKey` comment in `session-breakdown.ts` no longer claims the cwd
   path is normalized.** The single-line type comment said "normalized cwd
   path", but the only processing is `cwd.trim()` — nothing collapses a
