@@ -78,6 +78,17 @@ Fixed:
 
 Maintenance:
 
+- **`native-web-search`'s script lookup no longer advertises a path that cannot
+  exist.** `resolveScriptPath` probed `here/../../skills/native-web-search/`
+  for the skill, but `here` is the extensions dir (`.pi/extensions`), so that
+  resolved to `<repo>/skills/...` while the script actually lives at
+  `<repo>/.pi/skills/...` — the `.pi` being the whole reason a git-sourced pi
+  package is discoverable at all. The candidate could never exist, yet the
+  thrown error listed it as somewhere to look. It now carries the `.pi`,
+  resolving relative to the repo/package root and covering both the repo tree
+  and an installed package. The lookup is factored so the candidate list is
+  testable, and a fixture-tree test pins it: a regression back to bare
+  `skills/` fails the suite.
 - **Vendored `session-breakdown.ts` comments no longer restate CHANGELOG
   measurements.** The simplification audit counted ~230 comment lines for
   ~240 code lines and found the specific figures (`$0.067741 / $1.708118` of
