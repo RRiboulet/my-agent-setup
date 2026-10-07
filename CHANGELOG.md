@@ -78,6 +78,17 @@ Fixed:
 
 Maintenance:
 
+- **The `subagent` watcher re-arms through one code path, and the legacy `v1.`
+  attach target says what it is.** `watchTick` re-armed its own 500 ms timer
+  inline at its tail while `scheduleWatch` implemented the identical re-arm;
+  the tail now calls `scheduleWatch`, so there is exactly one re-arm (and a
+  schedule that lands during a tick's awaits no longer risks arming twice).
+  The `v1.`-prefixed base64 target branch in `attachToSubagentAndExit`
+  predates session-id targets; no current code path produces it
+  (`attachCommand` is always `--attach-subagent <run.id>`, and `run.id` is a
+  UUID), so its cut-off is now stated in the code instead of leaving a reader
+  to guess whether it is live plumbing. It is kept rather than removed because
+  the file stays close to upstream. No behaviour change.
 - **`native-web-search`'s script lookup no longer advertises a path that cannot
   exist.** `resolveScriptPath` probed `here/../../skills/native-web-search/`
   for the skill, but `here` is the extensions dir (`.pi/extensions`), so that

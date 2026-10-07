@@ -402,6 +402,13 @@ function attachToSubagentAndExit(rawTarget: string): never {
 
 	let socket = tmuxSocketPath();
 	let session: string;
+	// LEGACY, kept with no expiry gate: session targets recorded before this
+	// extension printed session-id targets. No current code path produces a
+	// `v1.` blob — attachCommand is always `--attach-subagent <run.id>`, and
+	// run.id is a UUID — so this branch only fires on a hand-typed or very old
+	// recorded target. Left in place rather than removed because the file stays
+	// close to upstream; the cut-off is noted here so a reader does not mistake
+	// it for live plumbing.
 	if (target.startsWith("v1.")) {
 		// Keep attachment working for sessions started before session-id targets.
 		try {
@@ -1738,10 +1745,7 @@ const noteInterrupt = async (
 		}
 
 		if (shuttingDown) return;
-		const timer = setTimeout(() => {
-			void watchTick(run);
-		}, POLL_INTERVAL_MS);
-		timers.set(run.id, timer);
+		scheduleWatch(run);
 	};
 
 	const scheduleWatch = (run: RunRecord): void => {
