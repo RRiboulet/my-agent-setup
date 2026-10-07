@@ -28,6 +28,10 @@ function restoreEnv(saved: string | undefined): void {
 test("the candidate list pins the repo and installed-package layouts", () => {
 	const here = join("proj", ".pi", "extensions");
 	const cwd = join("proj");
+	// Candidates 2 and 3 coincide here because cwd === the repo root: candidate
+	// 2 is the repo/package-root `.pi/skills` and candidate 3 reaches the same
+	// path via cwd. That collision is deliberate and pinned, not something to
+	// dedupe away — candidate 3 is load-bearing for agent-dir installs.
 	assert.deepEqual(scriptCandidates(here, cwd), [
 		join("proj", ".pi", "extensions", "search.mjs"),
 		join("proj", ".pi", "skills", "native-web-search", "search.mjs"),

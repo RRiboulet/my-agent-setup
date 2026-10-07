@@ -810,7 +810,8 @@ async function parseSessionFile(
 			const cost = extractCostTotal(usage);
 
 			// LOCAL PATCH 2: record what the inherited entry carried, then skip the
-			// message/token/cost aggregates — see the inherited-entry comment above.
+			// message/token/cost aggregates, including the per-model buckets — see the
+			// inherited-entry comment above.
 			if (inheritedEntry) {
 				inherited.tokens += tok;
 				inherited.cost += cost;

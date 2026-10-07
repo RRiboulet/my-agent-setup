@@ -135,7 +135,7 @@ Maintenance:
   function needs, and the two `parseSessionFile` comments that explained the
   one `if (inheritedEntry)` skip are merged into one. Comment-only; no
   behaviour change.
-
+- **The management-tool registration memo is closure state, and now says so.**
   A code review read `appliedManagementExposure` / `managementToolsRegistered`
   as module-level and warned that a reload could strand the five management
   tools. They are not module-level: the factory opens far above them and closes
