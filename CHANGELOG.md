@@ -189,6 +189,24 @@ Maintenance:
   already read — `activeTools`, `requestedTools`, `unbound`,
   `toolStallSeconds` — which type-checked only because nothing type-checks this
   repo. Tests only; no production change.
+- **`todos.ts` error-checking is one guard, and the list renderers share one
+  section list.** `withTodoLock<T>` returns `T | { error: string }` with no
+  discriminant on the success arm, so callers repeated
+  `typeof result === "object" && "error" in result` in ten places, three more
+  wrote `"error" in result`, and `withTodoLock` itself wrote the same test on
+  `acquireLock`'s return — fourteen inline checks in all, each one a chance to
+  get the narrowing subtly wrong. They now call a single `isError(result)` type
+  guard over a named `ErrorResult`; `acquireLock` and `withTodoLock` return that
+  type instead of an inline object literal. The guard is behaviourally identical to
+  the expression it replaces on every shape the callers produce, with one
+  deliberate difference: a `null` result used to reach `"error" in null` and
+  throw a `TypeError`, and now returns `false` — no caller can produce `null`
+  (`ensureTodoExists`'s `null` is guarded at every call site), so this only
+  removes a latent crash. Also folded in two related review items: the
+  `actionLabel` seven-arm nested ternary in the tool-result renderer is now a
+  `TODO_ACTION_LABELS` lookup, and `formatTodoList` / `renderTodoList` share one
+  `todoSections` helper instead of each rebuilding the same
+  assigned/open/closed list.
 
 ## v1.1.1 — 2026-10-05
 
