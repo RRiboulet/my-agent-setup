@@ -17,6 +17,7 @@
     ],
     "skills": [
       ".pi/skills/commit",
+      ".pi/skills/github",
       ".pi/skills/native-web-search",
       ".pi/skills/update-changelog"
     ]
