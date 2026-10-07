@@ -42,6 +42,13 @@ Added:
   non-squash dev→main release merge that must not delete `dev`), the token
   rule (never in `.git/config`, the Dockerfile, or a repo file), and a note
   that `--repo` is dead weight inside a checkout (see the README).
+- **`continue` shortcut** — `shift+alt+enter` sends the literal prompt
+  `continue`, but only when the agent is idle, so it can never steer a running
+  turn or queue a follow-up by accident (`isIdle()` is also false while pi is
+  retrying, compacting, or has queued messages). **Vendored** from
+  [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
+  (Apache-2.0), byte-identical to upstream `0865c84` with no local changes (see
+  the README).
 
 Fixed:
 
