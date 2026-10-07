@@ -177,6 +177,18 @@ Maintenance:
   clearest available locator.
 - **`MODELS.txt` removed.** Nothing reads it: `pi-session.sh` takes the model
   as an argument, and the README's file tree no longer lists it.
+- **The `lifecycle.test.ts` harness bootstrap is one helper again.** Eight tests
+  open-coded the same wrapper — `withTempAgentDir`, `createHarness` with a
+  `liveBranchSessionManager(agentDir)` passed through an `as never` cast, and a
+  `try`/`finally` shutdown — because `withHarness` did not hand the callback the
+  temp `agentDir` the live-branch manager needs. `withHarness` now passes
+  `(harness, agentDir)` and accepts `sessionManager?: "liveBranch"`, building
+  the manager from the agent dir it has already set, so the eight sites and
+  their casts are gone and a test can no longer leak a harness by forgetting the
+  `finally`. `HarnessOptions` also declares the four fields `createHarness`
+  already read — `activeTools`, `requestedTools`, `unbound`,
+  `toolStallSeconds` — which type-checked only because nothing type-checks this
+  repo. Tests only; no production change.
 
 ## v1.1.1 — 2026-10-05
 
