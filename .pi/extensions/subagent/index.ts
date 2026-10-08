@@ -798,7 +798,6 @@ function observationFromRead(read: ActivityReadResult): StatusObservation {
 		toolName: snapshot.toolName,
 		activeSince: snapshot.activeSince,
 		waitingSince: snapshot.waitingSince,
-		latestEvent: snapshot.latestEvent,
 	});
 }
 
@@ -1375,10 +1374,10 @@ const registerManagementTools = (): void => {
 // --- Live widget (local patch 14) ---------------------------------------------
 //
 // The classifier is display-only, so none of this decides anything about a run:
-// `advanceStatusState`'s transition is deliberately ignored here. A caller that
-// must REACT to a stall would use it; this one must not, because waking the
-// parent would duplicate notifyCompletion and spam the main session with
-// something the user is already watching below the editor.
+// `advanceStatusState` reports a kind and nothing else. A caller that must REACT
+// to a stall would have to derive the edge from `currentKind`; this one must not,
+// because waking the parent would duplicate notifyCompletion and spam the main
+// session with something the user is already watching below the editor.
 
 /**
  * Runs with liveness worth showing: anything whose child may still exist.
