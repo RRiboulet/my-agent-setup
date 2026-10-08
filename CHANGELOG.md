@@ -4,6 +4,124 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.3.0 — 2026-10-08
+
+Added:
+
+- **`.pi/skills/tmux/` — a vendored skill for driving interactive CLIs
+  (python, gdb, lldb, psql, …) over a private tmux socket.** Interactive
+  processes are the one thing a one-shot bash call cannot do: they need a
+  persistent TTY, a prompt to wait for, and keystrokes sent over time. The skill
+  documents the socket discipline (`-S` everywhere, never `-L` — they address
+  different servers), literal `send-keys`, `capture-pane -J`, prompt polling,
+  and recipes for the Python REPL and gdb. Vendored from
+  [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/tmux/`
+  (Apache-2.0, commit `0865c84`) with the socket names moved from
+  `CLAUDE_TMUX_SOCKET_DIR`/`claude-*` to `PI_TMUX_SOCKET_DIR`/`pi-*`, the
+  `license: Vibecoded` frontmatter corrected to `Apache-2.0`, and upstream's
+  `wait-for-text.sh` given `-S`: it always called bare `tmux`, so on the
+  very private socket the skill requires it could not see the pane and would
+  only ever time out. `find-sessions.sh` needed four fixes: upstream's
+  `'\t'` sat inside single quotes, so tmux printed the literal two characters
+  and every row lost its attached/created columns; `#{session_created_string}`
+  is not a tmux variable, so the start time was always blank; `-q` grepped the
+  whole tab-joined row rather than the session name, so `-q Thu` matched a
+  session created on a Thursday; and `#{session_attached}` is a client count,
+  so a session with two clients printed as detached. The helpers also warn
+  when no socket is given and `$TMUX` is set, because a bare `tmux` then
+  follows `$TMUX` — which inside a subagent shell is the subagent socket — and
+  a static guard test pins the two sockets apart. The subagent
+  reconciliation the todo asked for is the
+  `pi-agent-*` reservation: `.pi/extensions/subagent/` keeps its own socket
+  (`<agent dir>/tmux-subagents.sock`) and its own session names, the skill's
+  helper scripts scan only `PI_TMUX_SOCKET_DIR`, and the skill documents both
+  the socket and the name space as off-limits so neither `find-sessions.sh --all`
+  nor a `kill-server` can reach a running child. A README row and the
+  `package.json` manifest entry travel with it.
+
+- **`.pi/skills/librarian/` — a vendored skill that caches remote git
+  repositories under the pi agent dir, so repeated references reuse a local
+  checkout.** `checkout.sh` parses `owner/repo`, host-qualified and full-URL
+  forms (plus GitHub-style deep links), partial-clones with
+  `--filter=blob:none`, and on later calls throttled-fetches (default 300s) and
+  fast-forwards when the checkout is clean and has an upstream; `--force-update`
+  skips the throttle and `--path-only` prints just the path. Vendored from
+  [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
+  `skills/librarian/` (Apache-2.0, commit `0865c84`) with the cache root moved
+  from `~/.cache/checkouts` to `<agent dir>/cache/checkouts`: on this
+  devcontainer `~/.cache` is container-local and discarded on every rebuild,
+  while the agent dir is the persistent `pi-agent-config` volume, so the cache
+  now survives one. `LIBRARIAN_CACHE_ROOT` still overrides it. A README row and
+  the `package.json` manifest entry travel with it.
+
+Maintenance:
+
+- **The devcontainer builds on pi 1.1.0, not 1.0.0.** `ARG PI_AGENT_VERSION`
+  in `.devcontainer/Dockerfile` is what the image's `npm install -g` bakes in,
+  so it — not a runtime `npm install -g @latest` — decides which pi a rebuild
+  gets. The image was one release behind, and a container running 1.0.0 that is
+  updated by hand reverts on the next rebuild: the pin is the only place the
+  version is durable. Bumped to match current upstream.
+- **The `todo` tool's six id-taking actions no longer each repeat the same
+  guard/validate/`existsSync`/result-shape block.** `get`, `update`, `append`,
+  `delete`, `claim` and `release` spelled out the same lines by hand; they now
+  share `resolveExistingTodo` (validate + existence in one step, carrying both
+  the text shown and the `details.error` stored, which differ on the not-found
+  path) and the `todoToolResult` / `todoToolError` builders. The module-level
+  mutators (`updateTodoStatus`, `claimTodoAssignment`, `releaseTodoAssignment`,
+  `deleteTodo`) deliberately keep their own resolution: their not-found message
+  echoes the caller's id case, while the tool paths lower-case it, and that
+  pre-existing inconsistency is now pinned by a test rather than quietly
+  harmonised. Found in the 2026-10-05 code review.
+- **`todos.ts` loads under a strict ESM loader again, which exposed a real
+  import bug the old exclusion had been hiding.** The extension used a
+  TypeScript parameter property (`private onQuickAction?`), which node's
+  strip-only loader rejects, so `extension-load.test.ts` left it out of the
+  guard. Converting that to a field and adding it surfaced the actual problem:
+  `TUI` is a *type-only* export of `@earendil-works/pi-tui` and was imported as
+  a value. pi's jiti loader tolerated the mismatch; the real ESM linker does
+  not, so the module would have failed the moment its top level was evaluated
+  under one. Both are fixed and `todos.ts` now joins the strict-ESM guard.
+- **New `todos-tool.test.ts`.** It drives the real `todo` tool over a throwaway
+  `PI_TODO_PATH`: every action's missing-id, malformed-id and not-found
+  response (`text` and `details`, including the `"not found"`-vs-full-message
+  split and the id-case split above), plus a
+  create→get→update→append→claim→release→delete round trip. Verified by
+  mutation — changing the not-found `details.error` turns the table red.
+- **`finalizeRun` and `markRunFailed` now share one `settleRun` tail.** Both ended
+  with the same sequence — read the child's usage, `persist()`,
+  `notifyCompletion()`, `refreshStatusWidget()`, `scheduleReap()` — copied into
+  each, and the failure path duplicated the "the child may have spent tokens even
+  when it failed" reasoning too. `settleRun` holds it once; `finalizeRun` keeps
+  only its extra `drainQueue()`. The order is unchanged, and the comment about
+  notifying before refreshing (a display problem must not swallow the completion
+  message) moved with the code. Found in the 2026-10-05 code review.
+- **`subagent/status.ts` no longer carries state nothing reads.** Three dead
+  things went. `latestEvent` was plumbed from the child's activity snapshot
+  through `StatusObservation`, `SubagentStatusState` and
+  `observationFromActivity`, but never read — the activity recorder keeps its own
+  `latestEvent`, and that is the one the parent uses. `advanceStatusState`
+  computed and returned a `SubagentStatusTransition` that its only production
+  caller discarded (the comment said so outright: "deliberately ignored"). And
+  `StatusSnapshot` exposed raw `elapsedMs` / `activeSinceMs` / `waitingSinceMs`
+  for an aggregator that does not exist: the widget and `subagent_status` both
+  render the `*Text` form. The comment asserting that aggregator was wrong, so
+  the fields went with it. The stall/recovery edge is still observable through
+  `currentKind`, which is what `classifyProblemState` reads, and
+  `classifier.test.ts` now pins that instead of the removed transition. Found in
+  the 2026-10-05 code review.
+- **The four session-breakdown tables and two palettes now share one
+  implementation each.** `renderModelTable`, `renderCwdTable`, `renderDowTable`
+  and `renderTodTable` each rebuilt the same header/divider/row loop and the same
+  cost / cost-per-session / share maths; they now call `renderMetricTable`, with
+  `metricForKind` selecting the per-key map and denominator. `choosePalette`
+  replaces the two choosers' identical cost→tokens→messages→sessions ranking. The
+  tables were previously unpinned — nothing asserted their headers — so
+  `session-breakdown.test.ts` now asserts the exact pre-refactor output for the
+  model and directory tables, the no-data lines, the fixed day/time-of-day order,
+  and both palettes; the refactor is byte-identical against it. Found in the
+  2026-10-05 code review.
+
 ## v1.2.0 — 2026-10-07
 
 Added:

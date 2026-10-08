@@ -1,6 +1,8 @@
 # Subagent extension tests
 
-Unit and behaviour tests for `.pi/extensions/subagent/`. Node runs these `.ts`
+Unit and behaviour tests for `.pi/extensions/` — the `subagent/` tree, plus the
+sibling `todos.ts` tool (`todos-tool.test.ts`), which lives here because this is
+where the test harness and the linked pi packages are. Node runs these `.ts`
 files directly (native type stripping) — there is no build step and no compiler
 in the loop, so type errors are not caught here.
 
@@ -40,9 +42,10 @@ test.
 | `handoff.test.ts` | child launch argv per mode, lineage/fork session seeding, live-branch fork ordering, and the usage baseline |
 | `lifecycle.test.ts` | launch, concurrency queueing, finalisation, failure detection, cancel, status, clean, shutdown stops the watcher, turn-level interrupt, the live widget (install/refresh/clear) |
 | `interrupt.test.ts` | the `interrupt.json` marker (validation, reading, writing), the child reporter's abort path, and the parent lifecycle of an interrupted run |
-| `session-breakdown.test.ts` | the vendored `/session-breakdown`: aggregation over fixture session trees, its four `LOCAL PATCH` hunks — agent-dir roots, inherited-prefix exclusion, the footer note (including that it reaches both the TUI and the non-interactive path), and the `__test__` surface — and the upstream behaviours re-vendored on 2026-10-05 (faux/test-provider sessions skipped, only models that produced a message counted, cost/session + provider grouping), which ship untested upstream |
+| `session-breakdown.test.ts` | the vendored `/session-breakdown`: aggregation over fixture session trees, its four `LOCAL PATCH` hunks — agent-dir roots, inherited-prefix exclusion, the footer note (including that it reaches both the TUI and the non-interactive path), and the `__test__` surface — the upstream behaviours re-vendored on 2026-10-05 (faux/test-provider sessions skipped, only models that produced a message counted, cost/session + provider grouping), which ship untested upstream, and the four metric tables' exact layout plus both palette choosers (pinned against the pre-2026-10-08-dedup output) |
 | `review.test.ts` | the vendored `/review`: strict-ESM load guard, the `__test__` surface, arg parsing (`tokenizeArgs`/`parseArgs`/`parseReviewPaths`/`parsePrReference`), and the verdict/findings rubric (`hasNeedsAttentionVerdict`, `hasBlockingReviewFindings`, code-fence skipping, verdict fall-through) |
 | `goal.test.ts` | the vendored `/goal`: strict-ESM load guard, the `__test__` surface, and the session-log state reconstruction (`reconstructGoalFromBranch` — the reload/tree-navigation risk), the 4k objective limit, usage accounting, the budget-exhaustion decision, and the continuation/budget prompts |
+| `todos-tool.test.ts` | the sibling `.pi/extensions/todos.ts` tool: the six id-taking actions' missing-id / malformed-id / not-found responses, pinned against the pre-dedup output, plus a create→mutate→delete round trip |
 | `helpers.ts` | env/temp-dir isolation and polling helpers |
 
 `lifecycle.test.ts` drives the real extension factory with a fake

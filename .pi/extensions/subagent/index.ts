@@ -350,6 +350,13 @@ function readNonNegativeIntEnv(name: string, fallback: number): number {
 	return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
+// This extension owns its own tmux server: one socket in the agent dir, and the
+// reserved `pi-agent-*` session-name space. The vendored tmux skill
+// (.pi/skills/tmux/) drives interactive CLIs on a SEPARATE socket under
+// PI_TMUX_SOCKET_DIR (default ${TMPDIR:-/tmp}/pi-tmux-sockets) with `pi-<slug>`
+// names, and documents this socket and name space as off-limits. Keep the two
+// sockets distinct: sharing one would let the skill's `kill-server` take down
+// every running child.
 function tmuxSocketPath(): string {
 	return path.join(getAgentDir(), "tmux-subagents.sock");
 }
@@ -798,7 +805,6 @@ function observationFromRead(read: ActivityReadResult): StatusObservation {
 		toolName: snapshot.toolName,
 		activeSince: snapshot.activeSince,
 		waitingSince: snapshot.waitingSince,
-		latestEvent: snapshot.latestEvent,
 	});
 }
 
@@ -1252,6 +1258,25 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		if (sessionFile) run.sessionFile = sessionFile;
 	};
 
+	/**
+	 * The terminal tail both finalisers share: read the child's usage, persist,
+	 * notify, refresh the widget, schedule the reap. Callers set their
+	 * status-specific fields first.
+	 *
+	 * The notification comes before the display refresh deliberately: a display
+	 * problem must never be able to swallow the completion message, which is how
+	 * the main agent learns the run ended.
+	 */
+	const settleRun = async (run: RunRecord): Promise<void> => {
+		// The child may have spent real tokens even when it failed at the tmux
+		// level; a failure must not report none. See captureRunUsage.
+		await captureRunUsage(run);
+		await persist();
+		await notifyCompletion(run);
+		refreshStatusWidget();
+		scheduleReap(run);
+	};
+
 	const finalizeRun = async (run: RunRecord, result: ChildResult): Promise<void> => {
 		run.status = result.status === "completed" ? "completed" : "failed";
 		run.finishedAt = result.finishedAt || Date.now();
@@ -1272,13 +1297,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			run.error = result.error.trim();
 		}
 		run.output = truncateToolText(output || "(no text output)");
-		await captureRunUsage(run);
-		await persist();
-		// After the notification: a display problem must never be able to swallow
-		// the completion message, which is how the main agent learns the run ended.
-		await notifyCompletion(run);
-		refreshStatusWidget();
-		scheduleReap(run);
+		await settleRun(run);
 		void drainQueue();
 	};
 
@@ -1288,15 +1307,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		run.interruptRequestedAt = undefined;
 		run.error = message;
 		run.finishedAt = Date.now();
-		// The child is gone, but it may have spent real tokens first; a tmux-level
-		// failure must not report none. See captureRunUsage.
-		await captureRunUsage(run);
-		await persist();
-		// After the notification: a display problem must never be able to swallow
-		// the completion message, which is how the main agent learns the run ended.
-		await notifyCompletion(run);
-		refreshStatusWidget();
-		scheduleReap(run);
+		await settleRun(run);
 	};
 
 	const readChildResult = async (run: RunRecord): Promise<ChildResult | undefined> => {
@@ -1370,10 +1381,10 @@ const registerManagementTools = (): void => {
 // --- Live widget (local patch 14) ---------------------------------------------
 //
 // The classifier is display-only, so none of this decides anything about a run:
-// `advanceStatusState`'s transition is deliberately ignored here. A caller that
-// must REACT to a stall would use it; this one must not, because waking the
-// parent would duplicate notifyCompletion and spam the main session with
-// something the user is already watching below the editor.
+// `advanceStatusState` reports a kind and nothing else. A caller that must REACT
+// to a stall would have to derive the edge from `currentKind`; this one must not,
+// because waking the parent would duplicate notifyCompletion and spam the main
+// session with something the user is already watching below the editor.
 
 /**
  * Runs with liveness worth showing: anything whose child may still exist.

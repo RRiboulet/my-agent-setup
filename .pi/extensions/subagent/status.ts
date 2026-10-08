@@ -47,7 +47,6 @@ export const DEFAULT_STALL_AFTER_MS = 180_000;
 export const DEFAULT_TOOL_STALL_AFTER_MS = 900_000;
 
 export type SubagentStatusKind = "queued" | "starting" | "active" | "waiting" | "stalled" | "interrupted";
-export type SubagentStatusTransition = "stalled" | "recovered" | null;
 export type StatusSnapshotState = "unseen" | "present" | "missing" | "invalid" | "wrong-id";
 export type StatusActivityPhase = "starting" | "active" | "waiting" | "done";
 
@@ -64,7 +63,6 @@ export type StatusObservation =
 			toolName?: string;
 			activeSince?: number;
 			waitingSince?: number;
-			latestEvent?: string;
 	  }
 	| {
 			snapshot: "missing" | "invalid" | "wrong-id";
@@ -88,7 +86,6 @@ export interface SubagentStatusState {
 	toolName: string | null;
 	waitingSinceMs: number | null;
 	phase: StatusActivityPhase | null;
-	latestEvent: string | null;
 	snapshotState: StatusSnapshotState;
 	/** When the current snapshot problem began; the first problem's clock sticks. */
 	snapshotProblemSinceMs: number | null;
@@ -99,19 +96,16 @@ export interface SubagentStatusState {
 /**
  * A classified run, at one instant.
  *
- * `*SinceMs` and `elapsedMs` are the absolute form of the durations the renderer
- * shows as `*Text`; both are kept because a caller that aggregates several runs
- * needs a sortable number, not a formatted string.
+ * Only the formatted durations are exposed. The raw `*Ms` clocks stay inside
+ * `SubagentStatusState`: nothing that consumes a snapshot aggregates or sorts by
+ * them — the widget and `subagent_status` both render the text.
  */
 export interface StatusSnapshot {
 	kind: SubagentStatusKind;
-	elapsedMs: number;
 	elapsedText: string;
-	activeSinceMs: number | null;
 	activeDurationText: string | null;
 	activeScope: string | null;
 	toolName: string | null;
-	waitingSinceMs: number | null;
 	waitingDurationText: string | null;
 	snapshotState: StatusSnapshotState;
 	snapshotError: string | null;
@@ -167,7 +161,6 @@ export function createStatusState(params: {
 		toolName: null,
 		waitingSinceMs: null,
 		phase: null,
-		latestEvent: null,
 		snapshotState: "unseen",
 		snapshotProblemSinceMs: null,
 		snapshotError: null,
@@ -181,8 +174,8 @@ export function createStatusState(params: {
 export function withRunStatus(state: SubagentStatusState, runStatus: LiveRunStatus): SubagentStatusState {
 	if (state.runStatus === runStatus) return state;
 	// classifyStatus reports `runStatus` for queued and interrupted runs directly,
-	// so no inference state needs rewiring here: only the transition edge is
-	// recorded, which is what makes the NEXT advance report no stall transition.
+	// so no inference state needs rewiring here: only `currentKind` moves, which is
+	// what lets the next advance tell a stall's edge from its level.
 	// A run that has just left the queue starts its liveness fresh; "queued" is not
 	// a kind it can ever report again, and leaving it here would be a lie the next
 	// advance has to correct.
@@ -237,7 +230,6 @@ export function observeStatus(
 		toolName: activeNow ? observation.toolName ?? null : null,
 		waitingSinceMs,
 		phase,
-		latestEvent: observation.latestEvent ?? null,
 		snapshotState: "present",
 		snapshotProblemSinceMs: null,
 		snapshotError: null,
@@ -299,13 +291,10 @@ function classifyProblemState(
 export function classifyStatus(state: SubagentStatusState, now: number): StatusSnapshot {
 	const elapsedMs = Math.max(0, now - state.startTimeMs);
 	const base = {
-		elapsedMs,
 		elapsedText: formatElapsedDuration(elapsedMs),
-		activeSinceMs: state.activeSinceMs,
 		activeDurationText: state.activeSinceMs === null ? null : formatElapsedDuration(now - state.activeSinceMs),
 		activeScope: state.activeScope,
 		toolName: state.toolName,
-		waitingSinceMs: state.waitingSinceMs,
 		waitingDurationText: state.waitingSinceMs === null ? null : formatElapsedDuration(now - state.waitingSinceMs),
 		snapshotState: state.snapshotState,
 		snapshotError: state.snapshotError,
@@ -362,26 +351,19 @@ export function classifyStatus(state: SubagentStatusState, now: number): StatusS
 }
 
 /**
- * Advance the state by one step: classify, detect a stall/recovery transition,
- * and return the next state.
+ * Advance the state by one step: classify, then fold the kind back into the state
+ * so the next step can tell a stall's edge from its level.
  *
- * A transition is for DISPLAY only. Waking the parent on every stall would
- * duplicate `notifyCompletion` and spam the main session with something the user
- * is already watching in the widget.
+ * Nothing here wakes the parent: the kind is display-only, and notifying on every
+ * stall would duplicate `notifyCompletion` and spam the main session with
+ * something the user is already watching in the widget.
  */
 export function advanceStatusState(
 	state: SubagentStatusState,
 	now: number,
-): { nextState: SubagentStatusState; snapshot: StatusSnapshot; transition: SubagentStatusTransition } {
+): { nextState: SubagentStatusState; snapshot: StatusSnapshot } {
 	const snapshot = classifyStatus(state, now);
-	const transition: SubagentStatusTransition =
-		state.currentKind !== "stalled" && snapshot.kind === "stalled"
-			? "stalled"
-			: state.currentKind === "stalled" && (snapshot.kind === "active" || snapshot.kind === "waiting")
-				? "recovered"
-				: null;
-
-	return { nextState: { ...state, currentKind: snapshot.kind }, snapshot, transition };
+	return { nextState: { ...state, currentKind: snapshot.kind }, snapshot };
 }
 
 /**
@@ -399,7 +381,6 @@ export function observationFromActivity(activity: {
 	toolName?: string;
 	activeSince?: number;
 	waitingSince?: number;
-	latestEvent?: string;
 }): StatusObservation {
 	return {
 		snapshot: "present",
@@ -410,6 +391,5 @@ export function observationFromActivity(activity: {
 		...(activity.toolName === undefined ? {} : { toolName: activity.toolName }),
 		...(activity.activeSince === undefined ? {} : { activeSince: activity.activeSince }),
 		...(activity.waitingSince === undefined ? {} : { waitingSince: activity.waitingSince }),
-		...(activity.latestEvent === undefined ? {} : { latestEvent: activity.latestEvent }),
 	};
 }

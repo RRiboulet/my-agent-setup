@@ -82,7 +82,7 @@ test("the phase in the snapshot decides active and waiting", () => {
 	);
 	assert.equal(waiting.snapshot.kind, "waiting");
 	assert.equal(waiting.snapshot.waitingDurationText, "4s");
-	assert.equal(waiting.snapshot.activeSinceMs, null, "leaving the active phase clears its since-marker");
+	assert.equal(waiting.snapshot.activeDurationText, null, "leaving the active phase clears its since-marker");
 });
 
 test("a settled-but-unread child reads as waiting, labelled done", () => {
@@ -223,7 +223,7 @@ test("a wrong-id snapshot is labelled, because it means the wrong child", () => 
 	assert.equal(classifyStatus(current, broke + DEFAULT_STALL_AFTER_MS).kind, "stalled");
 });
 
-test("recovery clears the stall and reports the transition once", () => {
+test("recovery clears the stall and the stored kind follows", () => {
 	const stallAfterMs = 60_000;
 	const start = T0;
 	let current = observeStatus(
@@ -235,18 +235,18 @@ test("recovery clears the stall and reports the transition once", () => {
 	const broke = observeStatus(current, { snapshot: "missing" }, start + 10_000);
 	const stalled = advanceStatusState(broke, start + 10_000 + stallAfterMs);
 	assert.equal(stalled.snapshot.kind, "stalled");
-	assert.equal(stalled.transition, "stalled");
+	assert.equal(stalled.nextState.currentKind, "stalled", "the kind is folded back so the next step sees the edge");
 
-	// Still stalled on the next tick: no repeated transition.
+	// Still stalled on the next tick: a level, not a fresh edge.
 	const again = advanceStatusState(stalled.nextState, start + 10_000 + stallAfterMs + 1_000);
 	assert.equal(again.snapshot.kind, "stalled");
-	assert.equal(again.transition, null, "a transition is an edge, not a level");
+	assert.equal(again.nextState.currentKind, "stalled");
 
 	// The snapshot comes back.
 	const recovered = observeStatus(stalled.nextState, present({ updatedAt: start + 90_000, sequence: 9, phase: "active" }), start + 90_000);
 	const back = advanceStatusState(recovered, start + 90_000);
 	assert.equal(back.snapshot.kind, "active");
-	assert.equal(back.transition, "recovered");
+	assert.equal(back.nextState.currentKind, "active", "recovery is folded back too");
 	assert.equal(classifyStatus(back.nextState, start + 90_100).kind, "active", "and it stays recovered");
 });
 

@@ -129,13 +129,10 @@ test("statusDetail renders one qualifier per kind", () => {
 	const snapshot = (overrides: Record<string, unknown> = {}) =>
 		({
 			kind: "active",
-			elapsedMs: 0,
 			elapsedText: "0s",
-			activeSinceMs: null,
 			activeDurationText: null,
 			activeScope: null,
 			toolName: null,
-			waitingSinceMs: null,
 			waitingDurationText: null,
 			snapshotState: "present",
 			snapshotError: null,
@@ -164,7 +161,7 @@ test("statusDetail renders one qualifier per kind", () => {
 	// wedged has been silent for seconds, and saying "stalled 1h 3m" would be a
 	// different (and much worse) claim than the one the evidence supports.
 	assert.equal(
-		statusDetail(snapshot({ kind: "stalled", statusLabel: "no activity", quietDurationText: "3m 20s", elapsedMs: 3_780_000, elapsedText: "1h 3m" })),
+		statusDetail(snapshot({ kind: "stalled", statusLabel: "no activity", quietDurationText: "3m 20s", elapsedText: "1h 3m" })),
 		"stalled 3m 20s (no activity)",
 	);
 	assert.equal(statusDetail(snapshot({ kind: "stalled", statusLabel: "no activity" })), "stalled (no activity)", "no duration is better than a wrong one");

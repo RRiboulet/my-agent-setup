@@ -11,10 +11,12 @@
 // definition and its constant tables; nothing touches the filesystem, the
 // network or pi's session state until the factory is called with an API.
 //
-// todos.ts is deliberately absent: it uses TypeScript parameter properties,
-// which node's strip-only loader rejects (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`)
-// even though pi's jiti loader accepts them. That is a loader limitation, not a
-// removed export, and it is out of scope for this guard.
+// todos.ts was previously deliberately absent: it used a TypeScript parameter
+// property, which node's strip-only loader rejects
+// (`ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX`) even though pi's jiti loader accepts it.
+// Removing that property for the todos-tool dedup also uncovered a genuine
+// strict-ESM bug the exclusion had been hiding — `TUI` is a type-only export of
+// pi-tui and was imported as a value — so todos.ts is listed here now.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -27,6 +29,7 @@ const EXTENSIONS = [
 	"../../opencode-go-provider/index.ts",
 	"../../review.ts",
 	"../../session-breakdown.ts",
+	"../../todos.ts",
 	"../index.ts",
 ] as const;
 
