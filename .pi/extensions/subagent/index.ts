@@ -1252,6 +1252,25 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		if (sessionFile) run.sessionFile = sessionFile;
 	};
 
+	/**
+	 * The terminal tail both finalisers share: read the child's usage, persist,
+	 * notify, refresh the widget, schedule the reap. Callers set their
+	 * status-specific fields first.
+	 *
+	 * The notification comes before the display refresh deliberately: a display
+	 * problem must never be able to swallow the completion message, which is how
+	 * the main agent learns the run ended.
+	 */
+	const settleRun = async (run: RunRecord): Promise<void> => {
+		// The child may have spent real tokens even when it failed at the tmux
+		// level; a failure must not report none. See captureRunUsage.
+		await captureRunUsage(run);
+		await persist();
+		await notifyCompletion(run);
+		refreshStatusWidget();
+		scheduleReap(run);
+	};
+
 	const finalizeRun = async (run: RunRecord, result: ChildResult): Promise<void> => {
 		run.status = result.status === "completed" ? "completed" : "failed";
 		run.finishedAt = result.finishedAt || Date.now();
@@ -1272,13 +1291,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			run.error = result.error.trim();
 		}
 		run.output = truncateToolText(output || "(no text output)");
-		await captureRunUsage(run);
-		await persist();
-		// After the notification: a display problem must never be able to swallow
-		// the completion message, which is how the main agent learns the run ended.
-		await notifyCompletion(run);
-		refreshStatusWidget();
-		scheduleReap(run);
+		await settleRun(run);
 		void drainQueue();
 	};
 
@@ -1288,15 +1301,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		run.interruptRequestedAt = undefined;
 		run.error = message;
 		run.finishedAt = Date.now();
-		// The child is gone, but it may have spent real tokens first; a tmux-level
-		// failure must not report none. See captureRunUsage.
-		await captureRunUsage(run);
-		await persist();
-		// After the notification: a display problem must never be able to swallow
-		// the completion message, which is how the main agent learns the run ended.
-		await notifyCompletion(run);
-		refreshStatusWidget();
-		scheduleReap(run);
+		await settleRun(run);
 	};
 
 	const readChildResult = async (run: RunRecord): Promise<ChildResult | undefined> => {

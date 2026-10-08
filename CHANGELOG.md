@@ -38,6 +38,14 @@ Maintenance:
   split and the id-case split above), plus a
   create→get→update→append→claim→release→delete round trip. Verified by
   mutation — changing the not-found `details.error` turns the table red.
+- **`finalizeRun` and `markRunFailed` now share one `settleRun` tail.** Both ended
+  with the same sequence — read the child's usage, `persist()`,
+  `notifyCompletion()`, `refreshStatusWidget()`, `scheduleReap()` — copied into
+  each, and the failure path duplicated the "the child may have spent tokens even
+  when it failed" reasoning too. `settleRun` holds it once; `finalizeRun` keeps
+  only its extra `drainQueue()`. The order is unchanged, and the comment about
+  notifying before refreshing (a display problem must not swallow the completion
+  message) moved with the code. Found in the 2026-10-05 code review.
 
 ## v1.2.0 — 2026-10-07
 
