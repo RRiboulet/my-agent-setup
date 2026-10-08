@@ -60,6 +60,17 @@ Maintenance:
   `currentKind`, which is what `classifyProblemState` reads, and
   `classifier.test.ts` now pins that instead of the removed transition. Found in
   the 2026-10-05 code review.
+- **The four session-breakdown tables and two palettes now share one
+  implementation each.** `renderModelTable`, `renderCwdTable`, `renderDowTable`
+  and `renderTodTable` each rebuilt the same header/divider/row loop and the same
+  cost / cost-per-session / share maths; they now call `renderMetricTable`, with
+  `metricForKind` selecting the per-key map and denominator. `choosePalette`
+  replaces the two choosers' identical cost→tokens→messages→sessions ranking. The
+  tables were previously unpinned — nothing asserted their headers — so
+  `session-breakdown.test.ts` now asserts the exact pre-refactor output for the
+  model and directory tables, the no-data lines, the fixed day/time-of-day order,
+  and both palettes; the refactor is byte-identical against it. Found in the
+  2026-10-05 code review.
 
 ## v1.2.0 — 2026-10-07
 

@@ -1021,38 +1021,56 @@ function sortMapByValueDesc<K extends string>(m: Map<K, number>): Array<{ key: K
 		.sort((a, b) => b.value - a.value);
 }
 
+/**
+ * Pick the top-N keys for a palette and assign colours.
+ *
+ * Both palettes rank by the same fallback — cost if anything cost money, else
+ * tokens, else messages, else sessions — and differ only in which maps they read.
+ * `totalTokens`/`totalMessages` are the RANGE totals, not the dimension's,
+ * because the fallback asks "did this report use tokens at all", not "did this
+ * model".
+ */
+function choosePalette<K extends string>(
+	maps: { cost: Map<K, number>; tokens: Map<K, number>; messages: Map<K, number>; sessions: Map<K, number> },
+	totalTokens: number,
+	totalMessages: number,
+	topN: number,
+): { colors: Map<K, RGB>; otherColor: RGB; ordered: K[] } {
+	const costSum = [...maps.cost.values()].reduce((a, b) => a + b, 0);
+	const popularity =
+		costSum > 0
+			? maps.cost
+			: totalTokens > 0
+				? maps.tokens
+				: totalMessages > 0
+					? maps.messages
+					: maps.sessions;
+
+	const ordered = sortMapByValueDesc(popularity).slice(0, topN).map((x) => x.key);
+	const colors = new Map<K, RGB>();
+	for (let i = 0; i < ordered.length; i++) {
+		colors.set(ordered[i], PALETTE[i % PALETTE.length]);
+	}
+	return { colors, otherColor: { r: 160, g: 160, b: 160 }, ordered };
+}
+
 function choosePaletteFromLast30Days(range30: RangeAgg, topN = 4, groupProviders = false): {
 	modelColors: Map<ModelKey, RGB>;
 	otherColor: RGB;
 	orderedModels: ModelKey[];
 } {
-	const modelCost = groupProviders ? range30.groupedModelCost : range30.modelCost;
-	const modelTokens = groupProviders ? range30.groupedModelTokens : range30.modelTokens;
-	const modelMessages = groupProviders ? range30.groupedModelMessages : range30.modelMessages;
-	const modelSessions = groupProviders ? range30.groupedModelSessions : range30.modelSessions;
-
-	// Prefer cost if any cost exists, else tokens, else messages, else sessions.
-	const costSum = [...modelCost.values()].reduce((a, b) => a + b, 0);
-	const popularity =
-		costSum > 0
-			? modelCost
-			: range30.totalTokens > 0
-				? modelTokens
-				: range30.totalMessages > 0
-					? modelMessages
-					: modelSessions;
-
-	const sorted = sortMapByValueDesc(popularity);
-	const orderedModels = sorted.slice(0, topN).map((x) => x.key);
-	const modelColors = new Map<ModelKey, RGB>();
-	for (let i = 0; i < orderedModels.length; i++) {
-		modelColors.set(orderedModels[i], PALETTE[i % PALETTE.length]);
-	}
-	return {
-		modelColors,
-		otherColor: { r: 160, g: 160, b: 160 },
-		orderedModels,
-	};
+	const { colors: modelColors, otherColor, ordered: orderedModels } = choosePalette(
+		{
+			cost: groupProviders ? range30.groupedModelCost : range30.modelCost,
+			tokens: groupProviders ? range30.groupedModelTokens : range30.modelTokens,
+			messages: groupProviders ? range30.groupedModelMessages : range30.modelMessages,
+			sessions: groupProviders ? range30.groupedModelSessions : range30.modelSessions,
+		},
+		range30.totalTokens,
+		range30.totalMessages,
+		topN,
+	);
+	return { modelColors, otherColor, orderedModels };
 }
 
 function chooseCwdPaletteFromLast30Days(range30: RangeAgg, topN = 4): {
@@ -1060,27 +1078,13 @@ function chooseCwdPaletteFromLast30Days(range30: RangeAgg, topN = 4): {
 	otherColor: RGB;
 	orderedCwds: CwdKey[];
 } {
-	const costSum = [...range30.cwdCost.values()].reduce((a, b) => a + b, 0);
-	const popularity =
-		costSum > 0
-			? range30.cwdCost
-			: range30.totalTokens > 0
-				? range30.cwdTokens
-				: range30.totalMessages > 0
-					? range30.cwdMessages
-					: range30.cwdSessions;
-
-	const sorted = sortMapByValueDesc(popularity);
-	const orderedCwds = sorted.slice(0, topN).map((x) => x.key);
-	const cwdColors = new Map<CwdKey, RGB>();
-	for (let i = 0; i < orderedCwds.length; i++) {
-		cwdColors.set(orderedCwds[i], PALETTE[i % PALETTE.length]);
-	}
-	return {
-		cwdColors,
-		otherColor: { r: 160, g: 160, b: 160 },
-		orderedCwds,
-	};
+	const { colors: cwdColors, otherColor, ordered: orderedCwds } = choosePalette(
+		{ cost: range30.cwdCost, tokens: range30.cwdTokens, messages: range30.cwdMessages, sessions: range30.cwdSessions },
+		range30.totalTokens,
+		range30.totalMessages,
+		topN,
+	);
+	return { cwdColors, otherColor, orderedCwds };
 }
 
 // Fixed palette for day-of-week: weekdays get cool tones, weekend gets warm
@@ -1290,122 +1294,130 @@ function displayModelName(modelKey: string): string {
 	return idx === -1 ? modelKey : modelKey.slice(idx + 1);
 }
 
-function renderModelTable(range: RangeAgg, mode: MeasurementMode, maxRows = 8, groupProviders = false): string[] {
-	// Keep this relatively narrow: model + selected metric + cost + cost/session + share.
-	const metric = graphMetricForRange(range, mode);
-	const kind = metric.kind;
+/** The selected metric's per-key map and its denominator, for one dimension. */
+function metricForKind<K extends string>(
+	kind: "sessions" | "messages" | "tokens",
+	maps: { tokens: Map<K, number>; messages: Map<K, number>; sessions: Map<K, number> },
+	totals: { tokens: number; messages: number; sessions: number },
+): { perMetric: Map<K, number>; total: number } {
+	if (kind === "tokens") return { perMetric: maps.tokens, total: totals.tokens };
+	if (kind === "messages") return { perMetric: maps.messages, total: totals.messages };
+	return { perMetric: maps.sessions, total: totals.sessions };
+}
 
-	const modelCost = groupProviders ? range.groupedModelCost : range.modelCost;
-	const modelSessions = groupProviders ? range.groupedModelSessions : range.modelSessions;
-	const modelMessages = groupProviders ? range.groupedModelMessages : range.modelMessages;
-	const modelTokens = groupProviders ? range.groupedModelTokens : range.modelTokens;
-
-	let perModel: Map<ModelKey, number>;
-	let total = 0;
-	let label = kind;
-
-	if (kind === "tokens") {
-		perModel = modelTokens;
-		total = range.totalTokens;
-	} else if (kind === "messages") {
-		perModel = modelMessages;
-		total = range.totalMessages;
-	} else {
-		perModel = modelSessions;
-		total = range.sessions;
-	}
-
-	const sorted = sortMapByValueDesc(perModel);
-	const rows = sorted.slice(0, maxRows);
-
+/**
+ * The shared table body: a header, a divider and one row per key, with value,
+ * cost, cost/session and share columns.
+ *
+ * The four tables differ only in their labels and which maps they read, so the
+ * column maths lives here once. `labelWidth` is passed in because it is the one
+ * thing each table derives differently (longest model key, abbreviated path,
+ * or a fixed width).
+ */
+function renderMetricTable<K extends string>(
+	rows: Array<{ key: K; label: string }>,
+	kind: "sessions" | "messages" | "tokens",
+	options: {
+		perMetric: Map<K, number>;
+		cost: Map<K, number>;
+		sessions: Map<K, number>;
+		total: number;
+		labelHeader: string;
+		labelWidth: number;
+		emptyLabel?: string;
+	},
+): string[] {
+	const { perMetric, cost, sessions, total, labelHeader, labelWidth, emptyLabel } = options;
 	const valueWidth = kind === "tokens" ? 10 : 8;
-	const modelWidth = Math.min(52, Math.max("model".length, ...rows.map((r) => r.key.length)));
 
 	const lines: string[] = [];
-	lines.push(`${padRight("model", modelWidth)}  ${padLeft(label, valueWidth)}  ${padLeft("cost", 10)}  ${padLeft("cost/s", 8)}  ${padLeft("share", 6)}`);
-	lines.push(`${"-".repeat(modelWidth)}  ${"-".repeat(valueWidth)}  ${"-".repeat(10)}  ${"-".repeat(8)}  ${"-".repeat(6)}`);
+	lines.push(`${padRight(labelHeader, labelWidth)}  ${padLeft(kind, valueWidth)}  ${padLeft("cost", 10)}  ${padLeft("cost/s", 8)}  ${padLeft("share", 6)}`);
+	lines.push(`${"-".repeat(labelWidth)}  ${"-".repeat(valueWidth)}  ${"-".repeat(10)}  ${"-".repeat(8)}  ${"-".repeat(6)}`);
 
-	for (const r of rows) {
-		const value = perModel.get(r.key) ?? 0;
-		const cost = modelCost.get(r.key) ?? 0;
-		const sess = modelSessions.get(r.key) ?? 0;
-		const costPerSession = sess > 0 ? formatUsd(cost / sess) : "-";
+	for (const row of rows) {
+		const value = perMetric.get(row.key) ?? 0;
+		const rowCost = cost.get(row.key) ?? 0;
+		const sess = sessions.get(row.key) ?? 0;
+		const costPerSession = sess > 0 ? formatUsd(rowCost / sess) : "-";
 		const share = total > 0 ? `${Math.round((value / total) * 100)}%` : "0%";
 		lines.push(
-			`${padRight(r.key.slice(0, modelWidth), modelWidth)}  ${padLeft(formatCount(value), valueWidth)}  ${padLeft(formatUsd(cost), 10)}  ${padLeft(costPerSession, 8)}  ${padLeft(share, 6)}`,
+			`${padRight(row.label.slice(0, labelWidth), labelWidth)}  ${padLeft(formatCount(value), valueWidth)}  ${padLeft(formatUsd(rowCost), 10)}  ${padLeft(costPerSession, 8)}  ${padLeft(share, 6)}`,
 		);
 	}
 
-	if (sorted.length === 0) {
-		lines.push(dim("(no model data found)"));
+	// `perMetric`, not `rows`: the old per-table check was `sorted.length === 0`,
+	// which is the whole map, before `maxRows` slices it. Testing `rows` would
+	// print "no data" for a range that has data but was asked for zero rows.
+	if (perMetric.size === 0 && emptyLabel) {
+		lines.push(dim(emptyLabel));
 	}
 
 	return lines;
 }
 
+function renderModelTable(range: RangeAgg, mode: MeasurementMode, maxRows = 8, groupProviders = false): string[] {
+	const kind = graphMetricForRange(range, mode).kind;
+	const { perMetric: perModel, total } = metricForKind(
+		kind,
+		{
+			tokens: groupProviders ? range.groupedModelTokens : range.modelTokens,
+			messages: groupProviders ? range.groupedModelMessages : range.modelMessages,
+			sessions: groupProviders ? range.groupedModelSessions : range.modelSessions,
+		},
+		{ tokens: range.totalTokens, messages: range.totalMessages, sessions: range.sessions },
+	);
+
+	const rows = sortMapByValueDesc(perModel)
+		.slice(0, maxRows)
+		.map((r) => ({ key: r.key, label: r.key }));
+	const labelWidth = Math.min(52, Math.max("model".length, ...rows.map((r) => r.label.length)));
+
+	return renderMetricTable(rows, kind, {
+		perMetric: perModel,
+		cost: groupProviders ? range.groupedModelCost : range.modelCost,
+		sessions: groupProviders ? range.groupedModelSessions : range.modelSessions,
+		total,
+		labelHeader: "model",
+		labelWidth,
+		emptyLabel: "(no model data found)",
+	});
+}
+
 function renderCwdTable(range: RangeAgg, mode: MeasurementMode, maxRows = 8): string[] {
-	const metric = graphMetricForRange(range, mode);
-	const kind = metric.kind;
+	const kind = graphMetricForRange(range, mode).kind;
+	const { perMetric: perCwd, total } = metricForKind(
+		kind,
+		{ tokens: range.cwdTokens, messages: range.cwdMessages, sessions: range.cwdSessions },
+		{ tokens: range.totalTokens, messages: range.totalMessages, sessions: range.sessions },
+	);
 
-	let perCwd: Map<CwdKey, number>;
-	let total = 0;
-	let label = kind;
+	const rows = sortMapByValueDesc(perCwd)
+		.slice(0, maxRows)
+		.map((r) => ({ key: r.key, label: abbreviatePath(r.key, 40) }));
+	const labelWidth = Math.min(42, Math.max("directory".length, ...rows.map((r) => r.label.length)));
 
-	if (kind === "tokens") {
-		perCwd = range.cwdTokens;
-		total = range.totalTokens;
-	} else if (kind === "messages") {
-		perCwd = range.cwdMessages;
-		total = range.totalMessages;
-	} else {
-		perCwd = range.cwdSessions;
-		total = range.sessions;
-	}
-
-	const sorted = sortMapByValueDesc(perCwd);
-	const rows = sorted.slice(0, maxRows);
-
-	const valueWidth = kind === "tokens" ? 10 : 8;
-	const displayPaths = rows.map((r) => abbreviatePath(r.key, 40));
-	const cwdWidth = Math.min(42, Math.max("directory".length, ...displayPaths.map((p) => p.length)));
-
-	const lines: string[] = [];
-	lines.push(`${padRight("directory", cwdWidth)}  ${padLeft(label, valueWidth)}  ${padLeft("cost", 10)}  ${padLeft("cost/s", 8)}  ${padLeft("share", 6)}`);
-	lines.push(`${"-".repeat(cwdWidth)}  ${"-".repeat(valueWidth)}  ${"-".repeat(10)}  ${"-".repeat(8)}  ${"-".repeat(6)}`);
-
-	for (let i = 0; i < rows.length; i++) {
-		const r = rows[i];
-		const value = perCwd.get(r.key) ?? 0;
-		const cost = range.cwdCost.get(r.key) ?? 0;
-		const sess = range.cwdSessions.get(r.key) ?? 0;
-		const costPerSession = sess > 0 ? formatUsd(cost / sess) : "-";
-		const share = total > 0 ? `${Math.round((value / total) * 100)}%` : "0%";
-		lines.push(
-			`${padRight(displayPaths[i].slice(0, cwdWidth), cwdWidth)}  ${padLeft(formatCount(value), valueWidth)}  ${padLeft(formatUsd(cost), 10)}  ${padLeft(costPerSession, 8)}  ${padLeft(share, 6)}`,
-		);
-	}
-
-	if (sorted.length === 0) {
-		lines.push(dim("(no directory data found)"));
-	}
-
-	return lines;
+	return renderMetricTable(rows, kind, {
+		perMetric: perCwd,
+		cost: range.cwdCost,
+		sessions: range.cwdSessions,
+		total,
+		labelHeader: "directory",
+		labelWidth,
+		emptyLabel: "(no directory data found)",
+	});
 }
 
 function dowMetricForRange(
 	range: RangeAgg,
 	mode: MeasurementMode,
 ): { kind: "sessions" | "messages" | "tokens"; perDow: Map<DowKey, number>; total: number } {
-	const metric = graphMetricForRange(range, mode);
-	const kind = metric.kind;
-
-	if (kind === "tokens") {
-		return { kind, perDow: range.dowTokens, total: range.totalTokens };
-	}
-	if (kind === "messages") {
-		return { kind, perDow: range.dowMessages, total: range.totalMessages };
-	}
-	return { kind, perDow: range.dowSessions, total: range.sessions };
+	const kind = graphMetricForRange(range, mode).kind;
+	const { perMetric: perDow, total } = metricForKind(
+		kind,
+		{ tokens: range.dowTokens, messages: range.dowMessages, sessions: range.dowSessions },
+		{ tokens: range.totalTokens, messages: range.totalMessages, sessions: range.sessions },
+	);
+	return { kind, perDow, total };
 }
 
 function renderDowDistributionLines(
@@ -1447,66 +1459,35 @@ function renderDowDistributionLines(
 
 function renderDowTable(range: RangeAgg, mode: MeasurementMode): string[] {
 	const { kind, perDow, total } = dowMetricForRange(range, mode);
-	const valueWidth = kind === "tokens" ? 10 : 8;
-	const dowWidth = 5; // "day  "
-
-	const lines: string[] = [];
-	lines.push(`${padRight("day", dowWidth)}  ${padLeft(kind, valueWidth)}  ${padLeft("cost", 10)}  ${padLeft("cost/s", 8)}  ${padLeft("share", 6)}`);
-	lines.push(`${"-".repeat(dowWidth)}  ${"-".repeat(valueWidth)}  ${"-".repeat(10)}  ${"-".repeat(8)}  ${"-".repeat(6)}`);
-
 	// Always show in Mon–Sun order
-	for (const dow of DOW_NAMES) {
-		const value = perDow.get(dow) ?? 0;
-		const cost = range.dowCost.get(dow) ?? 0;
-		const sess = range.dowSessions.get(dow) ?? 0;
-		const costPerSession = sess > 0 ? formatUsd(cost / sess) : "-";
-		const share = total > 0 ? `${Math.round((value / total) * 100)}%` : "0%";
-		lines.push(
-			`${padRight(dow, dowWidth)}  ${padLeft(formatCount(value), valueWidth)}  ${padLeft(formatUsd(cost), 10)}  ${padLeft(costPerSession, 8)}  ${padLeft(share, 6)}`,
-		);
-	}
-
-	return lines;
+	const rows = DOW_NAMES.map((dow) => ({ key: dow, label: dow }));
+	return renderMetricTable(rows, kind, {
+		perMetric: perDow,
+		cost: range.dowCost,
+		sessions: range.dowSessions,
+		total,
+		labelHeader: "day",
+		labelWidth: 5, // "day  "
+	});
 }
 
 function renderTodTable(range: RangeAgg, mode: MeasurementMode): string[] {
-	const metric = graphMetricForRange(range, mode);
-	const kind = metric.kind;
-
-	let perTod: Map<TodKey, number>;
-	let total = 0;
-
-	if (kind === "tokens") {
-		perTod = range.todTokens;
-		total = range.totalTokens;
-	} else if (kind === "messages") {
-		perTod = range.todMessages;
-		total = range.totalMessages;
-	} else {
-		perTod = range.todSessions;
-		total = range.sessions;
-	}
-
-	const valueWidth = kind === "tokens" ? 10 : 8;
-	const todWidth = 22; // widest label
-
-	const lines: string[] = [];
-	lines.push(`${padRight("time of day", todWidth)}  ${padLeft(kind, valueWidth)}  ${padLeft("cost", 10)}  ${padLeft("cost/s", 8)}  ${padLeft("share", 6)}`);
-	lines.push(`${"-".repeat(todWidth)}  ${"-".repeat(valueWidth)}  ${"-".repeat(10)}  ${"-".repeat(8)}  ${"-".repeat(6)}`);
-
+	const kind = graphMetricForRange(range, mode).kind;
+	const { perMetric: perTod, total } = metricForKind(
+		kind,
+		{ tokens: range.todTokens, messages: range.todMessages, sessions: range.todSessions },
+		{ tokens: range.totalTokens, messages: range.totalMessages, sessions: range.sessions },
+	);
 	// Always show in chronological order
-	for (const b of TOD_BUCKETS) {
-		const value = perTod.get(b.key) ?? 0;
-		const cost = range.todCost.get(b.key) ?? 0;
-		const sess = range.todSessions.get(b.key) ?? 0;
-		const costPerSession = sess > 0 ? formatUsd(cost / sess) : "-";
-		const share = total > 0 ? `${Math.round((value / total) * 100)}%` : "0%";
-		lines.push(
-			`${padRight(b.label, todWidth)}  ${padLeft(formatCount(value), valueWidth)}  ${padLeft(formatUsd(cost), 10)}  ${padLeft(costPerSession, 8)}  ${padLeft(share, 6)}`,
-		);
-	}
-
-	return lines;
+	const rows = TOD_BUCKETS.map((b) => ({ key: b.key, label: b.label }));
+	return renderMetricTable(rows, kind, {
+		perMetric: perTod,
+		cost: range.todCost,
+		sessions: range.todSessions,
+		total,
+		labelHeader: "time of day",
+		labelWidth: 22, // widest label
+	});
 }
 
 // LOCAL PATCH 3 (ours): say what was excluded, next to the number. Two decisions
@@ -2126,14 +2107,21 @@ export default function sessionBreakdownExtension(pi: ExtensionAPI) {
 //
 // Upstream exports only the extension factory, so its 1.8k lines of
 // aggregation could not be tested without a terminal. These are the pieces the
-// tests assert on: the roots, the lineage resolution, the per-file parser and the
-// whole-scan aggregation. Nothing here is used at runtime.
+// tests assert on: the roots, the lineage resolution, the per-file parser, the
+// whole-scan aggregation, and the metric tables and palettes. Nothing here is
+// used at runtime.
 export const __test__ = {
 	BreakdownComponent,
+	chooseCwdPaletteFromLast30Days,
+	choosePaletteFromLast30Days,
 	computeBreakdown,
 	defaultSessionRoots,
 	inheritedNote,
 	readEntryIds,
 	readSessionHeader,
+	renderCwdTable,
+	renderDowTable,
+	renderModelTable,
+	renderTodTable,
 	resolveInheritedIds,
 };

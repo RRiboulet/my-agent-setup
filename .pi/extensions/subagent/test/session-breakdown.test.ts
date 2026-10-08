@@ -27,7 +27,7 @@ import { after, test } from "node:test";
 import { __test__ } from "../../session-breakdown.ts";
 import { withEnv } from "./helpers.ts";
 
-const { BreakdownComponent, computeBreakdown, defaultSessionRoots, inheritedNote, readEntryIds, readSessionHeader, resolveInheritedIds } = __test__;
+const { BreakdownComponent, chooseCwdPaletteFromLast30Days, choosePaletteFromLast30Days, computeBreakdown, defaultSessionRoots, inheritedNote, readEntryIds, readSessionHeader, renderCwdTable, renderDowTable, renderModelTable, renderTodTable, resolveInheritedIds } = __test__;
 
 const MODEL_CHANGE = { type: "model_change", id: "mc1", parentId: null, provider: "openrouter", modelId: "test/model" };
 
@@ -879,5 +879,209 @@ test("cost/session column and provider grouping come from the aggregation", asyn
 		).render(160);
 		assert.ok(rendered.length > 0);
 		assert.match(rendered.join("\n"), /vendor\/foo/, "the grouped model reaches the rendered table");
+	});
+});
+
+// --- the metric tables and palettes (dedup, 2026-10-08) ----------------------
+//
+// The four tables used to be four near-identical renderers and the two palettes
+// two near-identical choosers. They now share `renderMetricTable`/`choosePalette`,
+// and these assertions are the pre-refactor output, written out by hand so the
+// collapse is provably byte-identical. The headers were not asserted anywhere
+// before, which is exactly the gap that let the column widths drift unnoticed.
+
+test("the model and directory tables keep their exact layout", async () => {
+	await withFixtureDir(async (dir) => {
+		const sessions = path.join(dir, "sessions");
+		await writeSession(path.join(sessions, `${stamp()}_a.jsonl`), [
+			header("a"),
+			modelChange("openrouter", "vendor/foo", "a-mc"),
+			assistantAs("openrouter", "vendor/foo", { totalTokens: 100, cost: 0.1 }, "a-mc"),
+		]);
+		await writeSession(path.join(sessions, `${stamp()}_b.jsonl`), [
+			{ ...header("b"), cwd: "/home/user/work/alpha-project" },
+			modelChange("anthropic", "vendor/bar", "b-mc"),
+			assistantAs("anthropic", "vendor/bar", { totalTokens: 300, cost: 0.3 }, "b-mc"),
+		]);
+
+		const data = await computeBreakdown(undefined, undefined, { roots: [sessions] });
+		const range = data.ranges.get(30)!;
+
+		// Tokens mode: value width 10, label width from the longest model key.
+		assert.deepEqual(renderModelTable(range, "tokens"), [
+			"model                      tokens        cost    cost/s   share",
+			"---------------------  ----------  ----------  --------  ------",
+			"anthropic/vendor/bar          300      $0.300    $0.300     75%",
+			"openrouter/vendor/foo         100      $0.100    $0.100     25%",
+		]);
+		// Sessions mode: value width 8, and a tie at 1 session keeps insertion order.
+		assert.deepEqual(renderModelTable(range, "sessions"), [
+			"model                  sessions        cost    cost/s   share",
+			"---------------------  --------  ----------  --------  ------",
+			"openrouter/vendor/foo         1      $0.100    $0.100     50%",
+			"anthropic/vendor/bar          1      $0.300    $0.300     50%",
+		]);
+		// The directory label is the abbreviated path, and the width follows it.
+		assert.deepEqual(renderCwdTable(range, "tokens"), [
+			"directory                          tokens        cost    cost/s   share",
+			"-----------------------------  ----------  ----------  --------  ------",
+			"/home/user/work/alpha-project         300      $0.300    $0.300     75%",
+			"/tmp/fixture                          100      $0.100    $0.100     25%",
+		]);
+		assert.deepEqual(renderCwdTable(range, "sessions"), [
+			"directory                      sessions        cost    cost/s   share",
+			"-----------------------------  --------  ----------  --------  ------",
+			"/tmp/fixture                          1      $0.100    $0.100     50%",
+			"/home/user/work/alpha-project         1      $0.300    $0.300     50%",
+		]);
+	});
+});
+
+test("an empty range keeps the no-data line and the dow/tod fixed order", async () => {
+	await withFixtureDir(async (dir) => {
+		const empty = await computeBreakdown(undefined, undefined, { roots: [path.join(dir, "sessions")] });
+		const range = empty.ranges.get(30)!;
+		const dim = (text: string) => `\u001b[2m${text}\u001b[0m`;
+
+		assert.deepEqual(renderModelTable(range, "sessions"), [
+			"model  sessions        cost    cost/s   share",
+			"-----  --------  ----------  --------  ------",
+			dim("(no model data found)"),
+		]);
+		assert.deepEqual(renderCwdTable(range, "sessions"), [
+			"directory  sessions        cost    cost/s   share",
+			"---------  --------  ----------  --------  ------",
+			dim("(no directory data found)"),
+		]);
+		// dow and tod are never sorted and never empty: every key gets a row.
+		assert.deepEqual(renderDowTable(range, "sessions"), [
+			"day    sessions        cost    cost/s   share",
+			"-----  --------  ----------  --------  ------",
+			"Mon           0     $0.0000         -      0%",
+			"Tue           0     $0.0000         -      0%",
+			"Wed           0     $0.0000         -      0%",
+			"Thu           0     $0.0000         -      0%",
+			"Fri           0     $0.0000         -      0%",
+			"Sat           0     $0.0000         -      0%",
+			"Sun           0     $0.0000         -      0%",
+		]);
+		assert.deepEqual(renderTodTable(range, "sessions"), [
+			"time of day             sessions        cost    cost/s   share",
+			"----------------------  --------  ----------  --------  ------",
+			"After midnight (0–5)           0     $0.0000         -      0%",
+			"Morning (6–11)                 0     $0.0000         -      0%",
+			"Afternoon (12–16)              0     $0.0000         -      0%",
+			"Evening (17–21)                0     $0.0000         -      0%",
+			"Night (22–23)                  0     $0.0000         -      0%",
+		]);
+	});
+});
+
+test("the model and directory palettes pick the same top keys and colours", async () => {
+	await withFixtureDir(async (dir) => {
+		const sessions = path.join(dir, "sessions");
+		await writeSession(path.join(sessions, `${stamp()}_a.jsonl`), [
+			header("a"),
+			modelChange("openrouter", "vendor/foo", "a-mc"),
+			assistantAs("openrouter", "vendor/foo", { totalTokens: 100, cost: 0.1 }, "a-mc"),
+		]);
+		await writeSession(path.join(sessions, `${stamp()}_b.jsonl`), [
+			{ ...header("b"), cwd: "/home/user/work/alpha-project" },
+			modelChange("anthropic", "vendor/bar", "b-mc"),
+			assistantAs("anthropic", "vendor/bar", { totalTokens: 300, cost: 0.3 }, "b-mc"),
+		]);
+
+		const data = await computeBreakdown(undefined, undefined, { roots: [sessions] });
+		const range = data.ranges.get(30)!;
+		const model = choosePaletteFromLast30Days(range);
+		const cwd = chooseCwdPaletteFromLast30Days(range);
+		const other = { r: 160, g: 160, b: 160 };
+
+		assert.deepEqual(model.orderedModels, ["anthropic/vendor/bar", "openrouter/vendor/foo"]);
+		assert.deepEqual([...model.modelColors.entries()], [
+			["anthropic/vendor/bar", { r: 64, g: 196, b: 99 }],
+			["openrouter/vendor/foo", { r: 47, g: 129, b: 247 }],
+		]);
+		assert.deepEqual(model.otherColor, other);
+
+		assert.deepEqual(cwd.orderedCwds, ["/home/user/work/alpha-project", "/tmp/fixture"]);
+		assert.deepEqual([...cwd.cwdColors.entries()], [
+			["/home/user/work/alpha-project", { r: 64, g: 196, b: 99 }],
+			["/tmp/fixture", { r: 47, g: 129, b: 247 }],
+		]);
+		assert.deepEqual(cwd.otherColor, other);
+	});
+});
+
+
+test("long directory labels, maxRows and the palette fallback keep their shape", async () => {
+	// Closes the gaps the 2026-10-08 review found: no fixture label exceeded the
+	// width cap, no fixture path was shortened by abbreviatePath, nothing passed
+	// maxRows, and every palette fixture had cost > 0 — so the truncation, the
+	// empty-slice case and the tokens tier of the fallback were all unpinned.
+	await withFixtureDir(async (dir) => {
+		const sessions = path.join(dir, "sessions");
+		await writeSession(path.join(sessions, `${stamp()}_a.jsonl`), [
+			{ ...header("a"), cwd: "/home/user/work/alpha-project-with-a-very-long-name" },
+			modelChange("openrouter", "vendor/foo", "a-mc"),
+			assistantAs("openrouter", "vendor/foo", { totalTokens: 100, cost: 0 }, "a-mc"),
+		]);
+		await writeSession(path.join(sessions, `${stamp()}_b.jsonl`), [
+			{ ...header("b"), cwd: "/tmp/b" },
+			modelChange("anthropic", "vendor/bar", "b-mc"),
+			assistantAs("anthropic", "vendor/bar", { totalTokens: 300, cost: 0 }, "b-mc"),
+		]);
+
+		const data = await computeBreakdown(undefined, undefined, { roots: [sessions] });
+		const range = data.ranges.get(30)!;
+
+		// The path is abbreviated to `home/…/…`, and the column is exactly 42 wide.
+		assert.deepEqual(renderCwdTable(range, "tokens"), [
+			"directory                                       tokens        cost    cost/s   share",
+			"------------------------------------------  ----------  ----------  --------  ------",
+			"/tmp/b                                             300     $0.0000   $0.0000     75%",
+			"home/…/alpha-project-with-a-very-long-name         100     $0.0000   $0.0000     25%",
+		]);
+
+		// maxRows bounds the body. Widths come from the ROWS, so a zero-row table
+		// falls back to the header's own width, exactly as before the dedup.
+		assert.deepEqual(renderModelTable(range, "tokens", 1), [
+			"model                     tokens        cost    cost/s   share",
+			"--------------------  ----------  ----------  --------  ------",
+			"anthropic/vendor/bar         300     $0.0000   $0.0000     75%",
+		]);
+		// A range WITH data asked for zero rows must NOT print the no-data line:
+		// the condition is the full map's emptiness, not the sliced rows'.
+		assert.deepEqual(renderModelTable(range, "tokens", 0), [
+			"model      tokens        cost    cost/s   share",
+			"-----  ----------  ----------  --------  ------",
+		]);
+
+		// cost is 0 everywhere, so the fallback must rank by tokens, not cost.
+		assert.deepEqual(choosePaletteFromLast30Days(range).orderedModels, ["anthropic/vendor/bar", "openrouter/vendor/foo"]);
+	});
+});
+
+test("the palette fallback ranks by messages when nothing cost or used tokens", async () => {
+	await withFixtureDir(async (dir) => {
+		const sessions = path.join(dir, "sessions");
+		await writeSession(path.join(sessions, `${stamp()}_a.jsonl`), [
+			header("a"),
+			modelChange("openrouter", "vendor/foo", "a-mc"),
+			assistantAs("openrouter", "vendor/foo", { totalTokens: 0, cost: 0 }, "a-mc"),
+		]);
+		await writeSession(path.join(sessions, `${stamp()}_b.jsonl`), [
+			header("b"),
+			modelChange("anthropic", "vendor/bar", "b-mc"),
+			assistantAs("anthropic", "vendor/bar", { totalTokens: 0, cost: 0 }, "b-mc"),
+			assistantAs("anthropic", "vendor/bar", { totalTokens: 0, cost: 0 }, "b-mc"),
+		]);
+
+		const data = await computeBreakdown(undefined, undefined, { roots: [sessions] });
+		const range = data.ranges.get(30)!;
+		assert.equal(range.totalTokens, 0);
+		assert.ok(range.totalMessages > 0, "the messages tier is reachable");
+		// Two messages for `bar`, one for `foo`.
+		assert.deepEqual(choosePaletteFromLast30Days(range).orderedModels, ["anthropic/vendor/bar", "openrouter/vendor/foo"]);
 	});
 });
