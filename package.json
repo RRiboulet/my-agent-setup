@@ -21,6 +21,7 @@
     "skills": [
       ".pi/skills/commit",
       ".pi/skills/github",
+      ".pi/skills/librarian",
       ".pi/skills/native-web-search",
       ".pi/skills/tmux",
       ".pi/skills/update-changelog"
