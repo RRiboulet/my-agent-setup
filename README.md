@@ -75,6 +75,7 @@ inactive. Installed packages are loaded regardless of project trust.
 | `.pi/extensions/native-web-search.ts` | Native web search tool — **ours**, not upstream: it registers the `web_search` tool. Ships with `.pi/skills/native-web-search/`, which *is* vendored |
 | `.pi/extensions/opencode-go-provider/` | An `opencode-go` provider for `/model`: fast GLM, Kimi, MiniMax, Qwen, DeepSeek and Grok models via opencode.ai's Go API, with the correct wire protocol per model (Anthropic, OpenAI Completions, Responses) and a per-account usage-budget widget below the editor. **Vendored** from [monotykamary/pi-opencode-go-provider](https://github.com/monotykamary/pi-opencode-go-provider) (MIT), byte-identical to upstream — see below |
 | `.pi/skills/native-web-search/` | Script + docs for the above. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/native-web-search/`, with three local OpenRouter patches. The two must travel together |
+| `.pi/skills/tmux/` | Drive interactive CLIs (python, gdb, lldb, psql, …) over a private tmux socket: literal `send-keys`, `capture-pane -J`, prompt polling, and `find-sessions.sh`/`wait-for-text.sh`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/tmux/`, with local adaptations — `PI_TMUX_SOCKET_DIR`/`pi-*` naming, an explicit split from the subagent extension's socket and reserved `pi-agent-*` sessions, `-S`/`-L` support in `wait-for-text.sh`, and two format-string fixes in `find-sessions.sh` |
 | `.pi/skills/commit/` | Conventional Commits subjects, and the branch-per-change rule from `AGENTS.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/commit/SKILL.md`, with two local adaptations |
 | `.pi/skills/github/` | gh CLI usage: PRs, CI runs, `gh api`, structured JSON. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/github/SKILL.md`, with four local adaptations — this repo's `GH_CONFIG_DIR` auth setup, the AGENTS.md squash workflow, the token rule, and the credential-helper note |
 | `.pi/skills/update-changelog/` | Writes `CHANGELOG.md`'s `Unreleased` section from the commits since the last tag. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/update-changelog/SKILL.md`, with one local adaptation |
@@ -85,7 +86,7 @@ inactive. Installed packages are loaded regardless of project trust.
 
 - `@earendil-works/pi-coding-agent` **1.0.x**
 - **Node 24+** — the tests execute TypeScript directly, with no build step
-- **tmux** — the subagent extension creates one tmux session per run
+- **tmux** — the subagent extension creates one tmux session per run, and the `tmux` skill drives interactive CLIs on a separate private socket
 - An OpenRouter key, e.g. `export OPENROUTER_API_KEY=...`
 
 The `.devcontainer/` provides all of these.

@@ -4,6 +4,33 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Added:
+
+- **`.pi/skills/tmux/` — a vendored skill for driving interactive CLIs
+  (python, gdb, lldb, psql, …) over a private tmux socket.** Interactive
+  processes are the one thing a one-shot bash call cannot do: they need a
+  persistent TTY, a prompt to wait for, and keystrokes sent over time. The skill
+  documents the socket discipline (`-S` everywhere, never `-L` — they address
+  different servers), literal `send-keys`, `capture-pane -J`, prompt polling,
+  and recipes for the Python REPL and gdb. Vendored from
+  [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/tmux/`
+  (Apache-2.0, commit `0865c84`) with the socket names moved from
+  `CLAUDE_TMUX_SOCKET_DIR`/`claude-*` to `PI_TMUX_SOCKET_DIR`/`pi-*`, the
+  `license: Vibecoded` frontmatter corrected to `Apache-2.0`, and upstream's
+  `wait-for-text.sh` given `-S`/`-L`: it always called bare `tmux`, so on the
+  very private socket the skill requires it could not see the pane and would
+  only ever time out. `find-sessions.sh` needed two more format-string fixes —
+  upstream's `'\t'` sat inside single quotes, so tmux printed the literal two
+  characters and every row lost its attached/created columns, and
+  `#{session_created_string}` is not a tmux variable, so the start time was
+  always blank. The subagent reconciliation the todo asked for is the
+  `pi-agent-*` reservation: `.pi/extensions/subagent/` keeps its own socket
+  (`<agent dir>/tmux-subagents.sock`) and its own session names, the skill's
+  helper scripts scan only `PI_TMUX_SOCKET_DIR`, and the skill documents both
+  the socket and the name space as off-limits so neither `find-sessions.sh --all`
+  nor a `kill-server` can reach a running child. A README row and the
+  `package.json` manifest entry travel with it.
+
 Maintenance:
 
 - **The devcontainer builds on pi 1.1.0, not 1.0.0.** `ARG PI_AGENT_VERSION`

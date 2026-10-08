@@ -350,6 +350,13 @@ function readNonNegativeIntEnv(name: string, fallback: number): number {
 	return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 }
 
+// This extension owns its own tmux server: one socket in the agent dir, and the
+// reserved `pi-agent-*` session-name space. The vendored tmux skill
+// (.pi/skills/tmux/) drives interactive CLIs on a SEPARATE socket under
+// PI_TMUX_SOCKET_DIR (default ${TMPDIR:-/tmp}/pi-tmux-sockets) with `pi-<slug>`
+// names, and documents this socket and name space as off-limits. Keep the two
+// sockets distinct: sharing one would let the skill's `kill-server` take down
+// every running child.
 function tmuxSocketPath(): string {
 	return path.join(getAgentDir(), "tmux-subagents.sock");
 }

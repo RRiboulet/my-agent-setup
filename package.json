@@ -22,6 +22,7 @@
       ".pi/skills/commit",
       ".pi/skills/github",
       ".pi/skills/native-web-search",
+      ".pi/skills/tmux",
       ".pi/skills/update-changelog"
     ]
   }
