@@ -18,22 +18,61 @@ Added:
 
   The Go path searches through opencode.ai's Anthropic-compatible
   `/zen/go/v1/messages` endpoint with the native `web_search_20250305` tool, on
-  `claude-haiku-5-5` — a real Anthropic model the Go plan serves, and the one
-  model there that carries the server-side search tool. Two details the
-  endpoint dictates: it rejects a request with no `x-opencode-session` header
-  (`400 MissingSessionID`), so the script stamps a per-run session id and an
-  `x-opencode-client`; and `temperature` is rejected as deprecated for this
-  model, so the script omits it on the Go path while leaving the direct
-  Anthropic call at `0`. The key resolves as `auth.json` under `opencode-go`,
-  then the `OPENCODE_API_KEY` environment variable, matching what the
-  `opencode-go` provider extension documents. The script's provider resolution
-  is pinned by tests: the default is `opencode-go`, an explicit argument beats
-  the environment override, and no model is sent unless one is requested.
+  `claude-haiku-5-5` — an Anthropic model the Go plan serves, and the one
+  verified to carry the server-side search tool (the repo's vendored Go
+  catalogue lists other Anthropic-protocol titles, none of them Claude). Two
+  details the endpoint dictates: it rejects a request with no
+  `x-opencode-session` header (`400 MissingSessionID`), so the script stamps a
+  per-run session id and an `x-opencode-client`; and `temperature` is rejected
+  as deprecated for this model, so the script omits it for `claude-haiku-5-5` on
+  any provider while leaving the direct Anthropic default at `0`. The key
+  resolves as `auth.json` under `opencode-go`, then the `OPENCODE_API_KEY`
+  environment variable, matching what the `opencode-go` provider extension
+  documents. Provider resolution and the Go request shape are pinned by tests:
+  the precedence chain above, the endpoint, the two session headers, the
+  `temperature` rule, and that no model is sent unless one is requested.
 
-  Note for a session already running when this lands: the extension resolves
-  the default in memory at load, so `web_search` keeps passing `--provider
-  openrouter` until pi is reloaded. The script's own `auth.json` order only
-  decides the call when the extension is not the one invoking it.
+  Note for a session already running when this lands: the extension's code is
+  loaded at start, so `web_search` keeps the old forced-provider behaviour until
+  pi is reloaded.
+
+Fixed:
+
+- **Two defects an adversarial review found in the `opencode-go` web-search
+  default, both in the seam between the extension and the script.** The tool
+  forced `--provider opencode-go` on every call, so the script's
+  `defaultProvider`/`auth.json` resolution was unreachable through `web_search`:
+  a machine whose only credential was OpenRouter got a hard "No credentials for
+  provider 'opencode-go'" instead of falling back (the case where
+  `settings.defaultProvider` is unset; if it names a provider you have no
+  credential for, the hard error is the documented order doing its job). The
+  extension now omits
+  `--provider` unless the caller named one or set `PI_WEB_SEARCH_PROVIDER`, and
+  the script reads that variable itself, so the documented precedence holds on
+  both paths. Separately, an unrecognized `--provider` value — a typo — used to
+  fall through and quietly spend whichever plan's credential existed; it now
+  fails with a clear message. The review also showed that the claim the Go path
+  was "pinned by tests" was false — nothing imported `search.mjs` — so the
+  script grew a direct-invocation guard, a `__test__` export and a pure
+  `buildAnthropicRequest`, and the suite now covers provider precedence, the
+  extension's argv construction (`--provider` present only when requested), the
+  endpoint, the session headers, the `temperature` rule, the header-clobber
+  ordering and the `OPENCODE_API_KEY` fallback.
+- **`temperature` is omitted for the whole Go path, and for `claude-haiku-5-5`
+  on any provider.** The first follow-up keyed the omission on the model alone,
+  which would have started sending `temperature: 0` to non-search Go models
+  (`qwen3.8-max`, say) on the assumption that the endpoint's rejection is
+  model-level — unverified, and a regression if it is endpoint-level. Omitting
+  temperature is always safe (the API default applies), so the Go path omits it
+  wholesale and the model set covers the direct Anthropic API, where
+  `claude-haiku-5-5` rejects it too. `buildAnthropicHeaders` also spreads
+  provider headers before the auth headers now, so a provider header cannot
+  clobber authentication — pinned by a test that passes a conflicting
+  `x-api-key`/`authorization`.
+- **`SKILL.md` no longer claims upstream "required an explicit provider".**
+  Upstream `0865c84` already resolved `--provider` → `settings.defaultProvider`
+  → auth fallback; this repo's patch extends the provider set, it does not
+  introduce the resolver.
 
 ## v1.3.0 — 2026-10-08
 

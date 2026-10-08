@@ -70,15 +70,43 @@ function clampTimeout(value: number | undefined): number {
 	return Math.min(Math.max(Math.floor(value), 1_000), MAX_TIMEOUT_MS);
 }
 
-/** Provider precedence: explicit argument > env override > opencode-go default. */
-function resolveProvider(requested: WebSearchInput["provider"]): string {
-	const override = process.env[PROVIDER_ENV_VAR]?.trim();
-	return requested?.trim() || override || DEFAULT_PROVIDER;
+/**
+ * Provider precedence is the script's: this forwards only an explicitly
+ * requested provider. Leaving it undefined makes `runSearch` omit --provider, so
+ * the script applies `PI_WEB_SEARCH_PROVIDER`, then `defaultProvider` in
+ * settings.json, then the first credential in auth.json (preferring
+ * opencode-go). Reading the env var here too would double-handle it and make the
+ * script's own order and error message unreachable.
+ */
+function resolveProvider(requested: WebSearchInput["provider"]): string | undefined {
+	return requested?.trim() || undefined;
 }
 
 /** Model precedence: explicit argument > env override > script default for the provider. */
 function resolveModel(requested: string | undefined): string | undefined {
 	return requested?.trim() || process.env[MODEL_ENV_VAR]?.trim() || undefined;
+}
+
+interface SearchArgs {
+	script: string;
+	query: string;
+	purpose?: string;
+	provider?: string;
+	model?: string;
+	timeoutMs: number;
+}
+
+/**
+ * Pure argv builder, so the seam that decides whether --provider is sent is
+ * testable. --provider is omitted when nothing explicit was requested, which is
+ * what lets the script resolve settings.defaultProvider/auth.json itself.
+ */
+function buildSearchArgs({ script, query, purpose, provider, model, timeoutMs }: SearchArgs): string[] {
+	const args = [script, query, "--json", "--timeout", String(timeoutMs)];
+	if (provider) args.push("--provider", provider);
+	if (purpose?.trim()) args.push("--purpose", purpose.trim());
+	if (model) args.push("--model", model);
+	return args;
 }
 
 interface SearchResult {
@@ -98,10 +126,14 @@ async function runSearch(input: WebSearchInput, signal?: AbortSignal): Promise<S
 	const script = resolveScriptPath();
 	const timeoutMs = clampTimeout(input.timeout_ms);
 
-	const args = [script, query, "--json", "--provider", resolveProvider(input.provider), "--timeout", String(timeoutMs)];
-	if (input.purpose?.trim()) args.push("--purpose", input.purpose.trim());
-	const model = resolveModel(input.model);
-	if (model) args.push("--model", model);
+	const args = buildSearchArgs({
+		script,
+		query,
+		purpose: input.purpose,
+		provider: resolveProvider(input.provider),
+		model: resolveModel(input.model),
+		timeoutMs,
+	});
 
 	const { stdout, stderr, code } = await new Promise<{ stdout: string; stderr: string; code: number | null }>(
 		(resolvePromise, rejectPromise) => {
@@ -207,7 +239,7 @@ export default function (pi: ExtensionAPI) {
 			),
 			provider: Type.Optional(
 				StringEnum(["opencode-go", "openrouter", "openai-codex", "anthropic"] as const, {
-					description: `Search provider; defaults to ${DEFAULT_PROVIDER} (override globally with ${PROVIDER_ENV_VAR})`,
+					description: `Search provider; unset resolves settings.defaultProvider, then the first auth.json credential (preferring ${DEFAULT_PROVIDER}); override globally with ${PROVIDER_ENV_VAR}`,
 				}),
 			),
 			model: Type.Optional(
@@ -267,4 +299,5 @@ export const __test__ = {
 	scriptCandidates,
 	resolveProvider,
 	resolveModel,
+	buildSearchArgs,
 };

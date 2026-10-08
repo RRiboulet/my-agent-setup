@@ -6,16 +6,23 @@
 // Licensed under the Apache License, Version 2.0.
 // Upstream: mitsupi v1.6.0, commit 0865c84.
 //
-// One LOCAL PATCH, and it is most of the file: provider support beyond
-// upstream's `openai-codex` and `anthropic`. This adds `openrouter` via its
-// `web` plugin, and `opencode-go` via the Go API's Anthropic-compatible
-// `/messages` endpoint (native `web_search_20250305`), plus
-// `runOpenRouterSearch`, `opencodeGoHeaders`, `defaultModelId` and
-// `defaultBaseUrl`, and a resolver
-// that picks a provider from the --provider flag, then `defaultProvider` in
-// settings.json, then whichever credential exists in auth.json (preferring
-// opencode-go over openrouter). See the LOCAL PATCH hunks listed in SKILL.md
-// beside this file.
+// LOCAL PATCHES, most of the file: provider support beyond upstream's
+// `openai-codex` and `anthropic`, plus a test seam. In short:
+//   - `openrouter` via its `web` plugin, and `opencode-go` via the Go API's
+//     Anthropic-compatible `/messages` endpoint (native `web_search_20250305`),
+//     with `runOpenRouterSearch`, `opencodeGoHeaders`, `defaultModelId` and
+//     `defaultBaseUrl` added;
+//   - `pickProvider` extended with the opencode-go/openrouter credentials and
+//     `PI_WEB_SEARCH_PROVIDER`, and made to reject an unrecognized explicit
+//     provider instead of silently falling through to another plan;
+//   - `normalizeProvider`, `buildAnthropicHeaders`, `runAnthropicSearch` and
+//     `resolveApiKey` modified (exact-id matching, non-clobbering extra headers,
+//     a testable request builder, the OPENCODE_API_KEY fallback);
+//   - a direct-invocation guard and a `__test__` export at the bottom, so
+//     importing the module for tests does not run a search.
+// The body is indented with spaces; upstream uses tabs, so a plain diff against
+// upstream is not meaningful — compare with `diff -w`. See the LOCAL PATCH
+// hunks listed in SKILL.md beside this file.
 //
 // Verified against upstream 0865c84: no upstream function was removed.
 
@@ -138,17 +145,40 @@ function getAgentDir() {
 function normalizeProvider(provider) {
     if (!provider) return undefined;
     const p = String(provider).toLowerCase().trim();
+    // Exact provider ids first, so a composite string cannot be captured by a
+    // substring meant for a different provider.
+    if (p === "opencode-go" || p === "opencode") return "opencode-go";
+    if (p === "openrouter") return "openrouter";
+    if (p === "openai-codex" || p === "openai" || p === "codex") return "openai-codex";
+    if (p === "anthropic") return "anthropic";
+    // Then model-shaped strings (`claude-haiku-5-5`, `openai/gpt-4o-mini:online`).
+    if (p.includes("opencode")) return "opencode-go";
     if (p.includes("anthropic") || p.includes("claude")) return "anthropic";
     if (p.includes("openrouter") || p.includes("sonar")) return "openrouter";
-    if (p.includes("opencode")) return "opencode-go";
-    if (p.includes("codex") || p === "openai" || p.startsWith("openai")) return "openai-codex";
+    if (p.includes("codex") || p.startsWith("openai")) return "openai-codex";
     return undefined;
 }
 
 function pickProvider(argProvider, settings, auth) {
     const forced = normalizeProvider(argProvider);
     if (forced) return forced;
+    // An explicit provider that cannot be mapped is a typo, not a reason to
+    // fall through to whatever credential happens to exist: silently spending
+    // another plan's budget is worse than failing.
+    if (argProvider && String(argProvider).trim()) {
+        throw new Error(`Unknown provider '${argProvider}'. Use opencode-go|openrouter|openai-codex|anthropic`);
+    }
 
+    const fromEnv = normalizeProvider(process.env.PI_WEB_SEARCH_PROVIDER);
+    if (fromEnv) return fromEnv;
+    if (process.env.PI_WEB_SEARCH_PROVIDER && String(process.env.PI_WEB_SEARCH_PROVIDER).trim()) {
+        throw new Error(
+            `Unknown provider in PI_WEB_SEARCH_PROVIDER: '${process.env.PI_WEB_SEARCH_PROVIDER}'. Use opencode-go|openrouter|openai-codex|anthropic`,
+        );
+    }
+
+    // settings.defaultProvider may name an unrelated pi provider (a local model
+    // server, say), so an unknown value is ignored rather than fatal.
     const fromSettings = normalizeProvider(settings?.defaultProvider);
     if (fromSettings) return fromSettings;
 
@@ -340,6 +370,15 @@ function defaultBaseUrl(provider) {
     if (provider === "openai-codex") return "https://chatgpt.com/backend-api";
     if (provider === "opencode-go") return "https://opencode.ai/zen/go";
     return "https://api.anthropic.com";
+}
+
+// Newer Anthropic-protocol models reject `temperature` as deprecated — on the Go
+// plan and on the direct API alike. Add a model id here when one starts
+// rejecting it; the Go path omits temperature wholesale regardless, because
+// omitting it is always safe.
+const MODELS_WITHOUT_TEMPERATURE = new Set(["claude-haiku-5-5"]);
+function supportsTemperature(model) {
+    return !MODELS_WITHOUT_TEMPERATURE.has(String(model || "").trim());
 }
 
 // The Go API routes on a stable session header and rejects a request without
@@ -646,8 +685,10 @@ async function runOpenRouterSearch({ model, apiKey, baseUrl, query, purpose, tim
 
 function buildAnthropicHeaders(apiKey, extraHeaders = {}) {
     const oauthToken = typeof apiKey === "string" && apiKey.includes("sk-ant-oat");
+    // extraHeaders first, so a provider header can never clobber authentication.
     if (oauthToken) {
         return {
+            ...extraHeaders,
             authorization: `Bearer ${apiKey}`,
             "anthropic-version": "2023-06-01",
             "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,web-search-2025-03-05",
@@ -655,22 +696,23 @@ function buildAnthropicHeaders(apiKey, extraHeaders = {}) {
             accept: "application/json",
             "x-app": "cli",
             "user-agent": "claude-cli/1.0.72 (external, cli)",
-            ...extraHeaders,
         };
     }
     return {
+        ...extraHeaders,
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
         "anthropic-beta": "web-search-2025-03-05",
         "content-type": "application/json",
         accept: "application/json",
-        ...extraHeaders,
     };
 }
 
-// Serves both the direct Anthropic API and opencode-go's Anthropic-compatible
-// endpoint; the caller passes the base URL and any provider headers.
-async function runAnthropicSearch({ model, apiKey, query, purpose, timeoutMs, baseUrl, extraHeaders, dropTemperature }) {
+// Pure request builder, so tests can pin the endpoint, headers and body without
+// a network call. Serves the direct Anthropic API and opencode-go's
+// Anthropic-compatible endpoint; the caller passes the base URL and any
+// provider headers.
+function buildAnthropicRequest({ model, apiKey, query, purpose, baseUrl, extraHeaders, omitTemperature }) {
     const body = {
         model,
         max_tokens: 1800,
@@ -678,16 +720,26 @@ async function runAnthropicSearch({ model, apiKey, query, purpose, timeoutMs, ba
         tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }],
         messages: [{ role: "user", content: buildUserPrompt(query, purpose) }],
     };
-    // opencode-go's newer Anthropic-protocol models reject `temperature` as
-    // deprecated; the direct Anthropic API still accepts it.
-    if (!dropTemperature) body.temperature = 0;
+    // Omitting temperature is always safe — the API default applies — so it is
+    // omitted for the whole Go path (that endpoint rejected it for the search
+    // model) as well as for any model known to reject it on the direct API.
+    if (!omitTemperature && supportsTemperature(model)) body.temperature = 0;
+
+    return {
+        endpoint: `${String(baseUrl || defaultBaseUrl("anthropic")).replace(/\/+$/, "")}/v1/messages`,
+        headers: buildAnthropicHeaders(apiKey, extraHeaders),
+        body,
+    };
+}
+
+async function runAnthropicSearch({ model, apiKey, query, purpose, timeoutMs, baseUrl, extraHeaders, omitTemperature }) {
+    const { endpoint, headers, body } = buildAnthropicRequest({ model, apiKey, query, purpose, baseUrl, extraHeaders, omitTemperature });
 
     const signal = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(timeoutMs) : undefined;
-    const endpoint = `${String(baseUrl || defaultBaseUrl("anthropic")).replace(/\/+$/, "")}/v1/messages`;
 
     const res = await fetch(endpoint, {
         method: "POST",
-        headers: buildAnthropicHeaders(apiKey, extraHeaders),
+        headers,
         body: JSON.stringify(body),
         signal,
     });
@@ -765,7 +817,7 @@ async function main() {
                       timeoutMs: args.timeoutMs,
                       baseUrl: model.baseUrl,
                       extraHeaders: provider === "opencode-go" ? opencodeGoHeaders() : undefined,
-                      dropTemperature: provider === "opencode-go",
+                      omitTemperature: provider === "opencode-go",
                   });
 
     if (args.json) {
@@ -791,7 +843,40 @@ async function main() {
     console.log(text);
 }
 
-main().catch((err) => {
-    console.error(`Error: ${err?.message || err}`);
-    process.exit(1);
-});
+// Run only when invoked as a script, so a test can import the pure helpers
+// below without a search firing. The entry path is compared literally and via
+// realpath, because a symlinked install resolves import.meta.url while
+// process.argv[1] keeps whatever path was typed (and --preserve-symlinks flips
+// that around).
+const invokedDirectly = (() => {
+    const entry = process.argv[1];
+    if (!entry) return false;
+    const candidates = new Set([pathToFileURL(resolve(entry)).href]);
+    try {
+        candidates.add(pathToFileURL(realpathSync(entry)).href);
+    } catch {
+        // A path that cannot be resolved still gets the literal comparison above.
+    }
+    return candidates.has(import.meta.url);
+})();
+
+if (invokedDirectly) {
+    main().catch((err) => {
+        console.error(`Error: ${err?.message || err}`);
+        process.exit(1);
+    });
+}
+
+export const __test__ = {
+    parseArgs,
+    normalizeProvider,
+    pickProvider,
+    defaultModelId,
+    defaultBaseUrl,
+    supportsTemperature,
+    opencodeGoHeaders,
+    pickFastModel,
+    buildAnthropicHeaders,
+    buildAnthropicRequest,
+    resolveApiKey,
+};
