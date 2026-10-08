@@ -4,6 +4,37 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Added:
+
+- **Web search now defaults to the `opencode-go` plan instead of OpenRouter.**
+  The `web_search` tool and the `native-web-search` skill resolve providers in
+  this order: `--provider`, then `PI_WEB_SEARCH_PROVIDER`, then `defaultProvider`
+  in `settings.json`, then the first credential in `auth.json` — and that last
+  fallback now prefers `opencode-go` over `openrouter`. The Go plan is where the
+  request lands as soon as its key exists, so a machine that kept an OpenRouter
+  credential around no longer pays for search on it by accident. An explicit
+  `--provider openrouter` (or `PI_WEB_SEARCH_PROVIDER=openrouter`) still works;
+  nothing about the OpenRouter path changed.
+
+  The Go path searches through opencode.ai's Anthropic-compatible
+  `/zen/go/v1/messages` endpoint with the native `web_search_20250305` tool, on
+  `claude-haiku-5-5` — a real Anthropic model the Go plan serves, and the one
+  model there that carries the server-side search tool. Two details the
+  endpoint dictates: it rejects a request with no `x-opencode-session` header
+  (`400 MissingSessionID`), so the script stamps a per-run session id and an
+  `x-opencode-client`; and `temperature` is rejected as deprecated for this
+  model, so the script omits it on the Go path while leaving the direct
+  Anthropic call at `0`. The key resolves as `auth.json` under `opencode-go`,
+  then the `OPENCODE_API_KEY` environment variable, matching what the
+  `opencode-go` provider extension documents. The script's provider resolution
+  is pinned by tests: the default is `opencode-go`, an explicit argument beats
+  the environment override, and no model is sent unless one is requested.
+
+  Note for a session already running when this lands: the extension resolves
+  the default in memory at load, so `web_search` keeps passing `--provider
+  openrouter` until pi is reloaded. The script's own `auth.json` order only
+  decides the call when the extension is not the one invoking it.
+
 ## v1.3.0 — 2026-10-08
 
 Added:

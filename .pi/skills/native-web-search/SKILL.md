@@ -9,16 +9,21 @@ description: "Trigger native web search. Use when you need quick internet resear
      Licensed under the Apache License, Version 2.0.
      Upstream: mitsupi v1.6.0, commit 0865c84.
 
-     Three LOCAL PATCH hunks, all of them OpenRouter support, since this machine
-     authenticates through OpenRouter and not through either upstream provider:
-       1. `openrouter` added as a third --provider value, invoked through
-          OpenRouter's `web` plugin, with `openai/gpt-4o-mini:online` as its
-          default model id.
-       2. A provider-precedence resolver: the --provider flag, then
+     Four LOCAL PATCH hunks, all provider support beyond upstream's two, since
+     this machine authenticates through opencode-go and OpenRouter rather than
+     through either upstream provider:
+       1. `openrouter` added as a --provider value, invoked through OpenRouter's
+          `web` plugin, with `openai/gpt-4o-mini:online` as its default model id.
+       2. `opencode-go` added as the default --provider value, invoked through
+          the Go API's Anthropic-compatible `/messages` endpoint (native
+          `web_search_20250305`), with `claude-haiku-5-5` as its default model
+          id and the `x-opencode-session`/`x-opencode-client` headers the Go API
+          requires (a request without a session header is rejected outright).
+       3. A provider-precedence resolver: the --provider flag, then
           `defaultProvider` in settings.json, then the first credential present
-          in auth.json (openrouter, openai-codex, anthropic). Upstream required
-          an explicit provider.
-       3. Notes that OpenRouter only actually searches with a web-enabled model
+          in auth.json (opencode-go, openrouter, openai-codex, anthropic).
+          Upstream required an explicit provider.
+       4. Notes that OpenRouter only actually searches with a web-enabled model
           id (`:online` suffix, Perplexity Sonar); any other id silently loses
           web access — a failure that looks like a working call returning nothing.
      Plus one behaviour note that is ours and not a patch: if the `web_search`
@@ -26,8 +31,9 @@ description: "Trigger native web search. Use when you need quick internet resear
      manual fallback.
 
      Verified against upstream 0865c84 on 2026-10-05: every function upstream
-     defines is still defined here, and the three added are `runOpenRouterSearch`,
-     `defaultModelId` and `defaultBaseUrl`. Nothing upstream was dropped. -->
+     defines is still defined here, and the four added are
+     `runOpenRouterSearch`, `opencodeGoHeaders`, `defaultModelId` and
+     `defaultBaseUrl`. Nothing upstream was dropped. -->
 
 # Native Web Search
 
@@ -52,19 +58,29 @@ Examples:
 ```bash
 node search.mjs "latest python release" --purpose "update dependency notes"
 node search.mjs "vite 7 breaking changes" --purpose "prepare migration checklist"
-node search.mjs "rust async runtime status" --provider perplexity/sonar --model perplexity/sonar-pro
+node search.mjs "rust async runtime status" --provider openrouter --model perplexity/sonar-pro
+node search.mjs "rust async runtime status" --provider opencode-go --model claude-haiku-5-5
 ```
 
 Optional flags:
 
-- `--provider openrouter|openai-codex|anthropic` (defaults to the first provider found in `settings.json`/`auth.json`, preferring `openrouter`)
-- `--model <model-id>` (OpenRouter default: `openai/gpt-4o-mini:online`)
+- `--provider opencode-go|openrouter|openai-codex|anthropic` (defaults to the first provider found in `settings.json`/`auth.json`, preferring `opencode-go`)
+- `--model <model-id>` (opencode-go default: `claude-haiku-5-5`; OpenRouter default: `openai/gpt-4o-mini:online`)
 - `--timeout <ms>`
 - `--json`
 
 ## Providers
 
-- `openrouter` (default when credentials exist): native web search via the OpenRouter `web` plugin; requires a web-enabled model id such as `openai/gpt-4o-mini:online` or `perplexity/sonar`.
+- `opencode-go` (default when credentials exist): native `web_search_20250305`
+  through opencode.ai's Go API (`https://opencode.ai/zen/go/v1/messages`),
+  billed against the Go plan. Requires a Go API key in `auth.json` under
+  `opencode-go` or `OPENCODE_API_KEY` in the environment, and uses a
+  web-capable Anthropic-protocol model (`claude-haiku-5-5` by default). The Go
+  API rejects a request without an `x-opencode-session` header; the script
+  sends one per run.
+- `openrouter`: native web search via the OpenRouter `web` plugin; requires a
+  web-enabled model id such as `openai/gpt-4o-mini:online` or
+  `perplexity/sonar`.
 - `openai-codex`: native `web_search` tool through the ChatGPT backend.
 - `anthropic`: native `web_search_20250305` tool (OAuth or API key).
 
@@ -80,8 +96,9 @@ The script instructs the model to:
 ## Notes
 
 - No extra npm install is required.
-- Provider precedence: `--provider` flag > `defaultProvider` in `settings.json` > first available credential in `auth.json` (`openrouter`, then `openai-codex`, then `anthropic`).
+- Provider precedence: `--provider` flag > `defaultProvider` in `settings.json` > first available credential in `auth.json` (`opencode-go`, then `openrouter`, then `openai-codex`, then `anthropic`).
 - OpenRouter only works with web-enabled model ids (`:online` suffix, Perplexity Sonar models); other model ids silently lose web access.
+- opencode-go searches with an Anthropic-protocol model; an OpenAI-Completions model id from that provider will not have the tool and the call will fail rather than silently answer from memory.
 - If module resolution fails, set `PI_AI_MODULE_PATH` to `@earendil-works/pi-ai`'s `dist/index.js` path.
 - If OAuth helper resolution fails, set `PI_AI_OAUTH_MODULE_PATH` to `@earendil-works/pi-ai`'s `dist/oauth.js` path.
 - For OAuth providers, the script can fall back to a still-valid cached `access` token from `~/.pi/agent/auth.json`.
