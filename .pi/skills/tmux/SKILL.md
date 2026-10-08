@@ -1,6 +1,6 @@
 ---
 name: tmux
-description: "Drive interactive CLIs (python, gdb, lldb, psql, node, ...) by sending keystrokes and scraping pane output, on a private pi tmux socket. Use when a process needs a persistent TTY that a one-shot bash call cannot provide."
+description: "Drive interactive CLIs (python, gdb, psql) over a private tmux socket. Use when a process needs a persistent TTY that a one-shot bash call cannot provide."
 license: Apache-2.0
 ---
 
@@ -10,7 +10,8 @@ license: Apache-2.0
      Licensed under the Apache License, Version 2.0.
      Upstream: mitsupi v1.6.0, commit 0865c84.
 
-     LOCAL ADAPTATIONS below, each marked in place:
+     LOCAL ADAPTATIONS below (each noted here, marked in place where the file
+     allows):
        A. socket naming: CLAUDE_TMUX_SOCKET_DIR / claude-* / claude.sock become
           PI_TMUX_SOCKET_DIR / pi-* / pi.sock, and the socket flag is made
           consistent (-S everywhere; upstream mixed -S and -L, which address
@@ -21,12 +22,20 @@ license: Apache-2.0
           vendored copy is Apache-2.0.
        D. scripts/wait-for-text.sh gains -S/-L so it can reach the private
           socket the rest of the skill requires (upstream's helper silently
-          used the default tmux server).
+          used the default tmux server). -L is kept only for parity with
+          find-sessions.sh; this skill always uses -S.
        E. the quickstart sets PYTHON_BASIC_REPL=1 on its python, which the
           skill's own "Spawning Processes" section calls mandatory; upstream's
           example omitted it.
+       F. scripts/find-sessions.sh fixes: a real tab and #{t:session_created}
+          in the -F format (upstream printed a literal '\t' and used the
+          nonexistent #{session_created_string}, so every row lost its
+          attached/created columns); -q now matches the session name, as
+          documented, instead of the whole tab-joined row; and the
+          attached/detached label treats #{session_attached} as the client
+          count it is, not a boolean.
      Both scripts are executable and keep their upstream logic; see the
-     attribution header in each. -->
+     attribution header in each, which refers back to the letters above. -->
 
 # tmux Skill
 
@@ -49,6 +58,9 @@ tmux -S "$SOCKET" kill-session -t "$SESSION"                   # clean up
      "$SOCKET_DIR/claude.sock" and session names like claude-python. Those names
      are now pi's; the socket discipline (one private path, passed with -S on
      every call) is unchanged. -->
+
+<!-- LOCAL ADAPTATION E: the python line sets PYTHON_BASIC_REPL=1, which the
+     "Spawning Processes" section below calls mandatory; upstream omitted it. -->
 
 After starting a session ALWAYS tell the user how to monitor the session by giving them a command to copy paste:
 
@@ -79,6 +91,7 @@ This must ALWAYS be printed right after a session was started and once again at 
 
 - Do **not** create sessions on the subagent socket, and do **not** `kill-session` a `pi-agent-*` session — the extension still believes it owns that run.
 - This skill's sessions belong on `PI_TMUX_SOCKET_DIR` (`.../pi-tmux-sockets`), which is a different directory from the agent dir, so the two sockets cannot collide by default.
+- The helpers warn when given neither `-S` nor `-L`, because a bare `tmux` follows `$TMUX` when it is set — inside a subagent shell that is the subagent socket. Always pass `-S`; the warning is the guard rail.
 - Names on the skill socket are `pi-<slug>` (`pi-python`, `pi-lldb`). `pi-agent-` is reserved for subagents; treat it as a name space this skill does not use.
 - To inspect or steer a *subagent* session, use the extension's own tools (`subagent_status`, the attach command it prints), not this skill.
 
@@ -90,8 +103,9 @@ This must ALWAYS be printed right after a session was started and once again at 
 
 ## Finding sessions
 
-- List sessions on your active socket with metadata: `./scripts/find-sessions.sh -S "$SOCKET"`; add `-q partial-name` to filter.
+- List sessions on your active socket with metadata: `./scripts/find-sessions.sh -S "$SOCKET"`; add `-q partial-name` to filter on the session name (case-insensitive substring).
 - Scan all sockets under the shared directory: `./scripts/find-sessions.sh --all` (uses `PI_TMUX_SOCKET_DIR` or `${TMPDIR:-/tmp}/pi-tmux-sockets`).
+- Always pass `-S`. With neither `-S` nor `-L` the script uses the ambient socket (`$TMUX` when set — the subagent socket inside a subagent) and warns; `--all` is exempt because it scans only `PI_TMUX_SOCKET_DIR`.
 
 ## Sending input safely
 
@@ -142,8 +156,8 @@ Some special rules for processes:
 ./scripts/wait-for-text.sh -S SOCKET -t session:0.0 -p 'pattern' [-F] [-T 20] [-i 0.5] [-l 2000]
 ```
 
-- `-S`/`--socket-path` socket path (required for a private socket; omitted falls back to the default tmux server)
-- `-L`/`--socket-name` tmux socket name, instead of `-S`
+- `-S`/`--socket-path` socket path. Always pass this; with it omitted the helper uses the ambient socket (`$TMUX` when set — the subagent socket inside a subagent) and warns.
+- `-L`/`--socket-name` tmux socket name, instead of `-S`. Parity with `find-sessions.sh`; this skill always uses `-S`.
 - `-t`/`--target` pane target (required)
 - `-p`/`--pattern` regex to match (required); add `-F` for fixed string
 - `-T` timeout seconds (integer, default 15)

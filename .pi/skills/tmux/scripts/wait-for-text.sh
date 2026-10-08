@@ -11,6 +11,7 @@ set -euo pipefail
 # `tmux`, so against the private socket the skill requires it could never find
 # the pane. Added -S/--socket-path and -L/--socket-name, threaded through to
 # every tmux call, with the same mutual-exclusion rule find-sessions.sh uses.
+# -L is kept only for parity with find-sessions.sh; the skill always uses -S.
 # The polling loop and its options are otherwise upstream's.
 
 usage() {
@@ -19,9 +20,13 @@ Usage: wait-for-text.sh -t target -p pattern [options]
 
 Poll a tmux pane for text and exit when found.
 
+With neither -S nor -L this uses tmux's ambient socket -- the one in $TMUX
+when set, which inside a pi/subagent session is the subagent socket --
+otherwise tmux's default. Pass -S for the skill's private socket.
+
 Options:
   -S, --socket-path  tmux socket path (passed to tmux -S)
-  -L, --socket-name  tmux socket name (passed to tmux -L)
+  -L, --socket-name  tmux socket name (passed to tmux -L); parity only, the skill uses -S
   -t, --target    tmux target (session:window.pane), required
   -p, --pattern   regex pattern to look for, required
   -F, --fixed     treat pattern as a fixed string (grep -F)
@@ -42,16 +47,25 @@ lines=1000
 socket_name=""
 socket_path=""
 
+# A value-taking option followed by nothing would otherwise make `shift 2` hit
+# `set -e` and exit 1 with no message.
+require_value() {
+  if [[ $# -lt 2 ]]; then
+    echo "Option $1 requires a value" >&2
+    exit 1
+  fi
+}
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -S|--socket-path) socket_path="${2-}"; shift 2 ;;
-    -L|--socket-name) socket_name="${2-}"; shift 2 ;;
-    -t|--target)   target="${2-}"; shift 2 ;;
-    -p|--pattern)  pattern="${2-}"; shift 2 ;;
+    -S|--socket-path) require_value "$@"; socket_path="$2"; shift 2 ;;
+    -L|--socket-name) require_value "$@"; socket_name="$2"; shift 2 ;;
+    -t|--target)   require_value "$@"; target="$2"; shift 2 ;;
+    -p|--pattern)  require_value "$@"; pattern="$2"; shift 2 ;;
     -F|--fixed)    grep_flag="-F"; shift ;;
-    -T|--timeout)  timeout="${2-}"; shift 2 ;;
-    -i|--interval) interval="${2-}"; shift 2 ;;
-    -l|--lines)    lines="${2-}"; shift 2 ;;
+    -T|--timeout)  require_value "$@"; timeout="$2"; shift 2 ;;
+    -i|--interval) require_value "$@"; interval="$2"; shift 2 ;;
+    -l|--lines)    require_value "$@"; lines="$2"; shift 2 ;;
     -h|--help)     usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; usage; exit 1 ;;
   esac
@@ -81,6 +95,13 @@ fi
 if ! command -v tmux >/dev/null 2>&1; then
   echo "tmux not found in PATH" >&2
   exit 1
+fi
+
+# Keep the skill's socket discipline from being broken by omission: a bare tmux
+# follows $TMUX when it is set, which inside a pi/subagent shell is the subagent
+# socket.
+if [[ -z "$socket_name" && -z "$socket_path" && -n "${TMUX:-}" ]]; then
+  echo "Warning: no -S/-L given; tmux will use \$TMUX (${TMUX%%,*}), which inside a pi/subagent session is the subagent socket. Pass -S explicitly." >&2
 fi
 
 # LOCAL ADAPTATION D: build the socket prefix once and reuse it for every poll.
