@@ -4,6 +4,15 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Maintenance:
+
+- **The devcontainer builds on pi 1.1.0, not 1.0.0.** `ARG PI_AGENT_VERSION`
+  in `.devcontainer/Dockerfile` is what the image's `npm install -g` bakes in,
+  so it — not a runtime `npm install -g @latest` — decides which pi a rebuild
+  gets. The image was one release behind, and a container running 1.0.0 that is
+  updated by hand reverts on the next rebuild: the pin is the only place the
+  version is durable. Bumped to match current upstream.
+
 ## v1.2.0 — 2026-10-07
 
 Added:

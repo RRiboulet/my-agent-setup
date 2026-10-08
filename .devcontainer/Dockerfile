@@ -42,7 +42,7 @@ RUN curl -fsSL -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && gh --version \
     && test "${GH_CONFIG_DIR#/home/vscode/.pi}" = "/gh"
 
-ARG PI_AGENT_VERSION=1.0.0
+ARG PI_AGENT_VERSION=1.1.0
 RUN npm cache clean --force \
     && npm install -g --no-audit --no-fund "@earendil-works/pi-coding-agent@${PI_AGENT_VERSION}" \
     && pi --version
