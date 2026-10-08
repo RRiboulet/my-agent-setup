@@ -17,18 +17,18 @@ Added:
   (Apache-2.0, commit `0865c84`) with the socket names moved from
   `CLAUDE_TMUX_SOCKET_DIR`/`claude-*` to `PI_TMUX_SOCKET_DIR`/`pi-*`, the
   `license: Vibecoded` frontmatter corrected to `Apache-2.0`, and upstream's
-  `wait-for-text.sh` given `-S`/`-L`: it always called bare `tmux`, so on the
+  `wait-for-text.sh` given `-S`: it always called bare `tmux`, so on the
   very private socket the skill requires it could not see the pane and would
-  only ever time out. `find-sessions.sh` needed four more fixes: upstream's
+  only ever time out. `find-sessions.sh` needed four fixes: upstream's
   `'\t'` sat inside single quotes, so tmux printed the literal two characters
   and every row lost its attached/created columns; `#{session_created_string}`
   is not a tmux variable, so the start time was always blank; `-q` grepped the
   whole tab-joined row rather than the session name, so `-q Thu` matched a
   session created on a Thursday; and `#{session_attached}` is a client count,
-  so a session with two clients printed as detached. Both helpers also warn
-  when they are given neither `-S` nor `-L`, because a bare `tmux` follows
-  `$TMUX` when it is set — which inside a subagent shell is the subagent
-  socket — and a static guard test pins the two sockets apart. The subagent
+  so a session with two clients printed as detached. The helpers also warn
+  when no socket is given and `$TMUX` is set, because a bare `tmux` then
+  follows `$TMUX` — which inside a subagent shell is the subagent socket — and
+  a static guard test pins the two sockets apart. The subagent
   reconciliation the todo asked for is the
   `pi-agent-*` reservation: `.pi/extensions/subagent/` keeps its own socket
   (`<agent dir>/tmux-subagents.sock`) and its own session names, the skill's

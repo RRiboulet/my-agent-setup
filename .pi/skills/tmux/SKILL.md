@@ -1,6 +1,6 @@
 ---
 name: tmux
-description: "Drive interactive CLIs (python, gdb, psql) over a private tmux socket. Use when a process needs a persistent TTY that a one-shot bash call cannot provide."
+description: "Drive interactive CLIs (python, gdb, lldb, psql) over a private tmux socket. Use when a process needs a persistent TTY that a one-shot bash call cannot provide."
 license: Apache-2.0
 ---
 
@@ -20,10 +20,10 @@ license: Apache-2.0
           socket and the pi-agent-* name space, both off-limits to this skill.
        C. the license frontmatter: upstream says "license: Vibecoded"; the
           vendored copy is Apache-2.0.
-       D. scripts/wait-for-text.sh gains -S/-L so it can reach the private
-          socket the rest of the skill requires (upstream's helper silently
-          used the default tmux server). -L is kept only for parity with
-          find-sessions.sh; this skill always uses -S.
+       D. scripts/wait-for-text.sh gains -S so it can reach the private socket
+          the rest of the skill requires (upstream's helper silently used the
+          default tmux server). It deliberately does not offer -L: the skill's
+          socket convention is -S everywhere.
        E. the quickstart sets PYTHON_BASIC_REPL=1 on its python, which the
           skill's own "Spawning Processes" section calls mandatory; upstream's
           example omitted it.
@@ -34,7 +34,7 @@ license: Apache-2.0
           documented, instead of the whole tab-joined row; and the
           attached/detached label treats #{session_attached} as the client
           count it is, not a boolean.
-     Both scripts are executable and keep their upstream logic; see the
+     Both scripts are executable and keep their upstream structure; see the
      attribution header in each, which refers back to the letters above. -->
 
 # tmux Skill
@@ -91,7 +91,7 @@ This must ALWAYS be printed right after a session was started and once again at 
 
 - Do **not** create sessions on the subagent socket, and do **not** `kill-session` a `pi-agent-*` session — the extension still believes it owns that run.
 - This skill's sessions belong on `PI_TMUX_SOCKET_DIR` (`.../pi-tmux-sockets`), which is a different directory from the agent dir, so the two sockets cannot collide by default.
-- The helpers warn when given neither `-S` nor `-L`, because a bare `tmux` follows `$TMUX` when it is set — inside a subagent shell that is the subagent socket. Always pass `-S`; the warning is the guard rail.
+- The helpers warn when no socket is given and `$TMUX` is set, because a bare `tmux` then follows `$TMUX` — inside a subagent shell that is the subagent socket. Always pass `-S`; the warning is the guard rail.
 - Names on the skill socket are `pi-<slug>` (`pi-python`, `pi-lldb`). `pi-agent-` is reserved for subagents; treat it as a name space this skill does not use.
 - To inspect or steer a *subagent* session, use the extension's own tools (`subagent_status`, the attach command it prints), not this skill.
 
@@ -157,7 +157,6 @@ Some special rules for processes:
 ```
 
 - `-S`/`--socket-path` socket path. Always pass this; with it omitted the helper uses the ambient socket (`$TMUX` when set — the subagent socket inside a subagent) and warns.
-- `-L`/`--socket-name` tmux socket name, instead of `-S`. Parity with `find-sessions.sh`; this skill always uses `-S`.
 - `-t`/`--target` pane target (required)
 - `-p`/`--pattern` regex to match (required); add `-F` for fixed string
 - `-T` timeout seconds (integer, default 15)
@@ -165,6 +164,6 @@ Some special rules for processes:
 - `-l` history lines to search from the pane (integer, default 1000)
 - Exits 0 on first match, 1 on timeout. On failure prints the last captured text to stderr to aid debugging.
 
-<!-- LOCAL ADAPTATION D: -S/-L above are ours. Upstream's helper accepted only
+<!-- LOCAL ADAPTATION D: -S above is ours. Upstream's helper accepted only
      -t/-p/-F/-T/-i/-l and always called bare `tmux`, so on the very socket the
      skill tells you to use it would find no server and time out. -->

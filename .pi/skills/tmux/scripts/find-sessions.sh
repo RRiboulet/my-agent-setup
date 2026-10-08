@@ -95,7 +95,7 @@ list_sessions() {
   # printed, the tab-splitting `read` below saw a single field, and every row
   # lost its attached/created columns. Use a real tab. Also, #{session_created_string}
   # is not a tmux variable; #{t:session_created} is the formatted creation time.
-  local tab=$'\t'
+  local tab=$'\t' sessions
   if ! sessions="$("${tmux_cmd[@]}" list-sessions -F "#{session_name}${tab}#{session_attached}${tab}#{t:session_created}" 2>/dev/null)"; then
     echo "No tmux server found on $label" >&2
     return 1
@@ -105,8 +105,9 @@ list_sessions() {
     # Match the session NAME (field 1), not the whole tab-joined row: grepping
     # the row made `-q Thu` match a session created on a Thursday and `-q .`
     # match everything, though the option is documented as a substring of the
-    # name. A case-folded literal index(), so regex metacharacters are inert.
-    sessions="$(printf '%s\n' "$sessions" | awk -F'\t' -v q="$query" 'index(tolower($1), tolower(q))')"
+    # name. A case-folded literal index(), with the query read from the
+    # environment so awk does not decode backslash escapes in it.
+    sessions="$(printf '%s\n' "$sessions" | q="$query" awk -F'\t' 'index(tolower($1), tolower(ENVIRON["q"]))')"
   fi
 
   if [[ -z "$sessions" ]]; then

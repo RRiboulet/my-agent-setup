@@ -17,14 +17,15 @@ import { test } from "node:test";
 const REPO_ROOT = path.resolve(new URL("../../../..", import.meta.url).pathname);
 const SKILL_DIR = path.join(REPO_ROOT, ".pi/skills/tmux");
 const script = readFileSync(path.join(SKILL_DIR, "scripts/find-sessions.sh"), "utf8");
+const waitScript = readFileSync(path.join(SKILL_DIR, "scripts/wait-for-text.sh"), "utf8");
 const skill = readFileSync(path.join(SKILL_DIR, "SKILL.md"), "utf8");
 const extension = readFileSync(path.join(REPO_ROOT, ".pi/extensions/subagent/index.ts"), "utf8");
 
 test("the skill's sessions live under PI_TMUX_SOCKET_DIR, not the agent dir", () => {
 	assert.ok(script.includes("PI_TMUX_SOCKET_DIR"), "the skill socket dir must be env-overridable");
 	assert.ok(script.includes("pi-tmux-sockets"), "the skill's default dir must be its own");
-	assert.ok(!script.includes("tmux-subagents.sock"), "the skill script must never address the subagent socket");
-	assert.ok(!script.includes("getAgentDir"), "the skill script is standalone bash, not extension-aware");
+	assert.ok(!script.includes("tmux-subagents.sock"), "find-sessions.sh must never address the subagent socket");
+	assert.ok(!waitScript.includes("tmux-subagents.sock"), "wait-for-text.sh must never address the subagent socket");
 });
 
 test("the extension keeps its own socket and pi-agent-* namespace", () => {
@@ -36,7 +37,7 @@ test("SKILL.md fences the subagent socket off", () => {
 	assert.ok(skill.includes("pi-agent-"), "the reserved namespace must be named");
 	assert.match(
 		skill,
-		/Do \*\*not\*\* create sessions on the subagent socket/,
+		/do\s+\*{0,2}not\*{0,2}\s+create sessions on the subagent socket/i,
 		"the skill must say outright not to create sessions there",
 	);
 });
