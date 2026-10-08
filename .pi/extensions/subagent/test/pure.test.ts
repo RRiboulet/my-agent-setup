@@ -227,7 +227,6 @@ test("observationFromRead is the only bridge from an activity read to an observa
 			activeScope: "tool",
 			activeSince: T0 + 1_000,
 			toolName: "bash",
-			latestEvent: "tool_execution_start",
 		},
 	);
 

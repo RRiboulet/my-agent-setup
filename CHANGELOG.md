@@ -46,6 +46,20 @@ Maintenance:
   only its extra `drainQueue()`. The order is unchanged, and the comment about
   notifying before refreshing (a display problem must not swallow the completion
   message) moved with the code. Found in the 2026-10-05 code review.
+- **`subagent/status.ts` no longer carries state nothing reads.** Three dead
+  things went. `latestEvent` was plumbed from the child's activity snapshot
+  through `StatusObservation`, `SubagentStatusState` and
+  `observationFromActivity`, but never read — the activity recorder keeps its own
+  `latestEvent`, and that is the one the parent uses. `advanceStatusState`
+  computed and returned a `SubagentStatusTransition` that its only production
+  caller discarded (the comment said so outright: "deliberately ignored"). And
+  `StatusSnapshot` exposed raw `elapsedMs` / `activeSinceMs` / `waitingSinceMs`
+  for an aggregator that does not exist: the widget and `subagent_status` both
+  render the `*Text` form. The comment asserting that aggregator was wrong, so
+  the fields went with it. The stall/recovery edge is still observable through
+  `currentKind`, which is what `classifyProblemState` reads, and
+  `classifier.test.ts` now pins that instead of the removed transition. Found in
+  the 2026-10-05 code review.
 
 ## v1.2.0 — 2026-10-07
 
