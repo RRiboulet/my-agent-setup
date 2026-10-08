@@ -37,6 +37,21 @@ Added:
   nor a `kill-server` can reach a running child. A README row and the
   `package.json` manifest entry travel with it.
 
+- **`.pi/skills/librarian/` — a vendored skill that caches remote git
+  repositories under the pi agent dir, so repeated references reuse a local
+  checkout.** `checkout.sh` parses `owner/repo`, host-qualified and full-URL
+  forms (plus GitHub-style deep links), partial-clones with
+  `--filter=blob:none`, and on later calls throttled-fetches (default 300s) and
+  fast-forwards when the checkout is clean and has an upstream; `--force-update`
+  skips the throttle and `--path-only` prints just the path. Vendored from
+  [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
+  `skills/librarian/` (Apache-2.0, commit `0865c84`) with the cache root moved
+  from `~/.cache/checkouts` to `<agent dir>/cache/checkouts`: on this
+  devcontainer `~/.cache` is container-local and discarded on every rebuild,
+  while the agent dir is the persistent `pi-agent-config` volume, so the cache
+  now survives one. `LIBRARIAN_CACHE_ROOT` still overrides it. A README row and
+  the `package.json` manifest entry travel with it.
+
 Maintenance:
 
 - **The devcontainer builds on pi 1.1.0, not 1.0.0.** `ARG PI_AGENT_VERSION`
