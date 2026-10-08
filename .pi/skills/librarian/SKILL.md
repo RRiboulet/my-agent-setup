@@ -84,7 +84,7 @@ bash ./checkout.sh <repo> --force-update --path-only
 
 ## Recommended workflow
 
-1. Resolve repository path via `checkout.sh --path-only`.
+1. Resolve repository path via `./checkout.sh --path-only`.
 2. Use that path for searching, reading, and analysis.
 3. On later references to the same repo, call `checkout.sh` again; it will find and update the cached checkout.
 
@@ -95,6 +95,9 @@ Prefer not to edit directly in the shared cache. Create a separate worktree or c
 ## Notes
 
 - `owner/repo` defaults to `github.com`.
+- The fetch throttle is stamped in `<checkout>/.git/librarian-last-fetch`;
+  that stamp (plus the checkout itself) is the only state the script writes, so
+  nothing outside the cache root is touched.
 - The clone is partial (`--filter=blob:none`), so a server without partial-clone
   support makes the clone fail rather than fall back to a full clone.
   `LIBRARIAN_CACHE_ROOT` and `LIBRARIAN_DEFAULT_HOST` override the cache root
