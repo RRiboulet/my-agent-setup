@@ -18,12 +18,47 @@ import { join, resolve, sep } from "node:path";
 
 import { __test__ } from "../../native-web-search.ts";
 
-const { resolveScriptPath, scriptCandidates } = __test__;
+const { resolveScriptPath, scriptCandidates, resolveProvider, resolveModel } = __test__;
 
 function restoreEnv(saved: string | undefined): void {
 	if (saved === undefined) delete process.env.PI_NATIVE_WEB_SEARCH_SCRIPT;
 	else process.env.PI_NATIVE_WEB_SEARCH_SCRIPT = saved;
 }
+
+function withEnv(name: string, value: string | undefined, run: () => void): void {
+	const saved = process.env[name];
+	if (value === undefined) delete process.env[name];
+	else process.env[name] = value;
+	try {
+		run();
+	} finally {
+		if (saved === undefined) delete process.env[name];
+		else process.env[name] = saved;
+	}
+}
+
+test("the default web-search provider is opencode-go, not OpenRouter", () => {
+	withEnv("PI_WEB_SEARCH_PROVIDER", undefined, () => {
+		assert.equal(resolveProvider(undefined), "opencode-go");
+	});
+});
+
+test("an explicit provider argument wins over the environment override", () => {
+	withEnv("PI_WEB_SEARCH_PROVIDER", "anthropic", () => {
+		assert.equal(resolveProvider("openrouter"), "openrouter");
+		assert.equal(resolveProvider(undefined), "anthropic");
+	});
+});
+
+test("no model is sent unless explicitly requested, so the script default applies", () => {
+	withEnv("PI_WEB_SEARCH_MODEL", undefined, () => {
+		assert.equal(resolveModel(undefined), undefined);
+	});
+	withEnv("PI_WEB_SEARCH_MODEL", "claude-haiku-5-5", () => {
+		assert.equal(resolveModel(undefined), "claude-haiku-5-5");
+		assert.equal(resolveModel("openai/gpt-4o-mini:online"), "openai/gpt-4o-mini:online");
+	});
+});
 
 test("the candidate list pins the repo and installed-package layouts", () => {
 	const here = join("proj", ".pi", "extensions");

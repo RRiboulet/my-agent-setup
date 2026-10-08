@@ -20,14 +20,14 @@ import { StringEnum } from "@earendil-works/pi-ai";
 const SCRIPT_ENV_VAR = "PI_NATIVE_WEB_SEARCH_SCRIPT";
 const PROVIDER_ENV_VAR = "PI_WEB_SEARCH_PROVIDER";
 const MODEL_ENV_VAR = "PI_WEB_SEARCH_MODEL";
-const DEFAULT_PROVIDER = "openrouter";
+const DEFAULT_PROVIDER = "opencode-go";
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
 
 export interface WebSearchInput {
 	query: string;
 	purpose?: string;
-	provider?: "openrouter" | "openai-codex" | "anthropic";
+	provider?: "opencode-go" | "openrouter" | "openai-codex" | "anthropic";
 	model?: string;
 	timeout_ms?: number;
 }
@@ -70,7 +70,7 @@ function clampTimeout(value: number | undefined): number {
 	return Math.min(Math.max(Math.floor(value), 1_000), MAX_TIMEOUT_MS);
 }
 
-/** Provider precedence: explicit argument > env override > OpenRouter default. */
+/** Provider precedence: explicit argument > env override > opencode-go default. */
 function resolveProvider(requested: WebSearchInput["provider"]): string {
 	const override = process.env[PROVIDER_ENV_VAR]?.trim();
 	return requested?.trim() || override || DEFAULT_PROVIDER;
@@ -192,8 +192,8 @@ export default function (pi: ExtensionAPI) {
 		label: "Web Search",
 		description:
 			"Search the internet with a fast, web-enabled model. Returns a concise research summary (3-7 findings) " +
-			"with full canonical source URLs, tailored to a stated purpose. Uses OpenRouter by default; pass provider " +
-			"to use openai-codex or anthropic instead. Use for current facts, documentation, release notes, and any " +
+			"with full canonical source URLs, tailored to a stated purpose. Uses opencode-go by default; pass provider " +
+			"to use OpenRouter, openai-codex or anthropic instead. Use for current facts, documentation, release notes, and any " +
 			"question that needs external information.",
 		promptSnippet: "Search the internet and return a concise summary with full source URLs",
 		promptGuidelines: [
@@ -206,7 +206,7 @@ export default function (pi: ExtensionAPI) {
 				Type.String({ description: "Why the information is needed, so the summary is scoped" }),
 			),
 			provider: Type.Optional(
-				StringEnum(["openrouter", "openai-codex", "anthropic"] as const, {
+				StringEnum(["opencode-go", "openrouter", "openai-codex", "anthropic"] as const, {
 					description: `Search provider; defaults to ${DEFAULT_PROVIDER} (override globally with ${PROVIDER_ENV_VAR})`,
 				}),
 			),
@@ -265,4 +265,6 @@ export default function (pi: ExtensionAPI) {
 export const __test__ = {
 	resolveScriptPath,
 	scriptCandidates,
+	resolveProvider,
+	resolveModel,
 };
