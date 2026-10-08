@@ -20,9 +20,13 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 export default function (pi: ExtensionAPI) {
 	pi.registerCommand("explore", {
 		description: "Browse a branch's files (v1: browse + print file to transcript)",
-		handler: async (args: string, ctx) => {
-			if (!ctx.hasUI) {
-				ctx.ui.notify("repo-explorer requires interactive mode", "error");
+		handler: async (args, ctx) => {
+			// Guarded on mode, not hasUI: RPC reports hasUI too, but the whole v1 flow
+			// includes a file browser driven by ctx.ui.custom(), which RPC silently
+			// drops (see the comment at the top of .pi/extensions/subagent/index.ts,
+			// and pi's rpc-extension-ui.md).
+			if (ctx.mode !== "tui") {
+				ctx.ui.notify("repo-explorer requires interactive TUI mode", "error");
 				return;
 			}
 
