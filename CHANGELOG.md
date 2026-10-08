@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.3.0 — 2026-10-08
+
 Added:
 
 - **`.pi/skills/tmux/` — a vendored skill for driving interactive CLIs
