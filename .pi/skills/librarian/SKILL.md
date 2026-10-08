@@ -17,7 +17,11 @@ license: Apache-2.0
           pi-agent-config volume. LIBRARIAN_CACHE_ROOT still overrides it.
        B. the command path: checkout.sh is invoked as ./checkout.sh, which pi
           resolves against this skill's directory, instead of a bare name that
-          only works from inside that directory. -->
+          only works from inside that directory.
+       C. checkout.sh only: a repository argument that fails to parse now exits
+          1 at once. Upstream read its parser through process substitution,
+          which swallowed the non-zero exit, so a bad reference fell through to
+          `git clone` and surfaced as git's exit 128 plus a second error. -->
 
 Use this skill when the user points you to a remote git repository (GitHub/GitLab/Bitbucket URLs, `git@...`, or `owner/repo` shorthand).
 

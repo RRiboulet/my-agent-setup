@@ -13,10 +13,10 @@ set -euo pipefail
 #      because on this devcontainer ~/.cache is container-local and discarded
 #      on rebuild, while the agent dir is the persistent pi-agent-config
 #      volume. LIBRARIAN_CACHE_ROOT still overrides.
-#   B. this script only: a repository argument that fails to parse now exits 1
-#      at once; upstream read parse_repo through process substitution, which
-#      swallows its non-zero exit, so a bad reference fell through to
-#      `git clone` and surfaced as git's exit 128 plus a second error.
+#   C. this script only (SKILL.md C): a repository argument that fails to parse
+#      now exits 1 at once; upstream read parse_repo through process
+#      substitution, which swallows its non-zero exit, so a bad reference fell
+#      through to `git clone` and surfaced as git's exit 128 plus a second error.
 # Everything else is upstream's.
 
 usage() {
@@ -199,7 +199,7 @@ while IFS= read -r line; do
   parsed_index=$((parsed_index + 1))
 done < <(parse_repo "$repo_input")
 
-# LOCAL ADAPTATION B: parse_repo's non-zero exit is swallowed by the process
+# LOCAL ADAPTATION C: parse_repo's non-zero exit is swallowed by the process
 # substitution above, so a bad reference used to fall through to `git clone` and
 # emerge as git's exit 128 plus a second, confusing error. parse_repo has
 # already printed the reason, so just stop.
