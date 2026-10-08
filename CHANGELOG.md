@@ -12,6 +12,32 @@ Maintenance:
   gets. The image was one release behind, and a container running 1.0.0 that is
   updated by hand reverts on the next rebuild: the pin is the only place the
   version is durable. Bumped to match current upstream.
+- **The `todo` tool's six id-taking actions no longer each repeat the same
+  guard/validate/`existsSync`/result-shape block.** `get`, `update`, `append`,
+  `delete`, `claim` and `release` spelled out the same lines by hand; they now
+  share `resolveExistingTodo` (validate + existence in one step, carrying both
+  the text shown and the `details.error` stored, which differ on the not-found
+  path) and the `todoToolResult` / `todoToolError` builders. The module-level
+  mutators (`updateTodoStatus`, `claimTodoAssignment`, `releaseTodoAssignment`,
+  `deleteTodo`) deliberately keep their own resolution: their not-found message
+  echoes the caller's id case, while the tool paths lower-case it, and that
+  pre-existing inconsistency is now pinned by a test rather than quietly
+  harmonised. Found in the 2026-10-05 code review.
+- **`todos.ts` loads under a strict ESM loader again, which exposed a real
+  import bug the old exclusion had been hiding.** The extension used a
+  TypeScript parameter property (`private onQuickAction?`), which node's
+  strip-only loader rejects, so `extension-load.test.ts` left it out of the
+  guard. Converting that to a field and adding it surfaced the actual problem:
+  `TUI` is a *type-only* export of `@earendil-works/pi-tui` and was imported as
+  a value. pi's jiti loader tolerated the mismatch; the real ESM linker does
+  not, so the module would have failed the moment its top level was evaluated
+  under one. Both are fixed and `todos.ts` now joins the strict-ESM guard.
+- **New `todos-tool.test.ts`.** It drives the real `todo` tool over a throwaway
+  `PI_TODO_PATH`: every action's missing-id, malformed-id and not-found
+  response (`text` and `details`, including the `"not found"`-vs-full-message
+  split and the id-case split above), plus a
+  create→get→update→append→claim→release→delete round trip. Verified by
+  mutation — changing the not-found `details.error` turns the table red.
 
 ## v1.2.0 — 2026-10-07
 
