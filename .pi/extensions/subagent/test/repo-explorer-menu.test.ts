@@ -285,20 +285,36 @@ test("a git failure listing branches propagates for the handler to report", asyn
 // The command handler — the wiring between the pieces
 // ---------------------------------------------------------------------------
 
-/** Load the extension and hand back the registered /explore handler. */
-async function loadExploreHandler(): Promise<(args: string, ctx: Record<string, unknown>) => Promise<void>> {
+/**
+ * Load the extension and hand back the registered /explore handler plus what
+ * its pi calls captured: a message renderer registration and any transcript
+ * messages it sent.
+ */
+async function loadExplore(): Promise<{
+	handler: (args: string, ctx: Record<string, unknown>) => Promise<void>;
+	sent: { customType: string; content: string; display: boolean; details: unknown }[];
+	renderers: string[];
+}> {
 	const module = (await import("../../repo-explorer/index.ts")) as {
 		default: (pi: Record<string, unknown>) => void;
 	};
 	const registered: Record<string, { handler: (args: string, ctx: Record<string, unknown>) => Promise<void> }> = {};
+	const sent: { customType: string; content: string; display: boolean; details: unknown }[] = [];
+	const renderers: string[] = [];
 	module.default({
 		registerCommand: (name: string, options: { handler: (args: string, ctx: Record<string, unknown>) => Promise<void> }) => {
 			registered[name] = options;
 		},
+		registerMessageRenderer: (customType: string) => {
+			renderers.push(customType);
+		},
+		sendMessage: (message: { customType: string; content: string; display: boolean; details: unknown }) => {
+			sent.push(message);
+		},
 	});
 	const handler = registered.explore?.handler;
 	assert.equal(typeof handler, "function");
-	return handler as (args: string, ctx: Record<string, unknown>) => Promise<void>;
+	return { handler: handler as (args: string, ctx: Record<string, unknown>) => Promise<void>, sent, renderers };
 }
 
 /** A stand-in for pi's Theme: `fg`/`bold` return the text unchanged, so assertions stay readable. */
@@ -350,7 +366,7 @@ function makeCtx(cwd: string, overrides: Record<string, unknown> = {}) {
 }
 
 test("/explore opens the menu, then hands the picked branch's files to the browser", async () => {
-	const handler = await loadExploreHandler();
+	const { handler } = await loadExplore();
 	const { ctx, notes, menus, browsers, answerWith } = makeCtx(menuRoot);
 	answerWith("feature");
 
@@ -368,31 +384,49 @@ test("/explore opens the menu, then hands the picked branch's files to the brows
 	assert.deepEqual(notes, [], "a cancelled browser reports nothing");
 });
 
-test("/explore reports the file the browser picked", async () => {
-	const handler = await loadExploreHandler();
-	const { ctx, notes, answerWith, pickInBrowser } = makeCtx(menuRoot);
-	answerWith("main (current)");
-	pickInBrowser({ path: "README.md" });
+test("/explore prints the picked file into the transcript", async () => {
+	const { handler, sent, renderers } = await loadExplore();
+	const { ctx, answerWith, pickInBrowser } = makeCtx(menuRoot);
+	answerWith("feature");
+	pickInBrowser({ path: "note.txt" });
 
 	await handler("", ctx);
 
-	assert.deepEqual(notes, ["info: repo-explorer: README.md selected — printing it is the next step"]);
+	assert.ok(renderers.includes("repo-explorer-file"), "the file renderer is registered with pi");
+	assert.equal(sent.length, 1);
+	const message = sent[0];
+	assert.equal(message.customType, "repo-explorer-file");
+	assert.equal(message.display, true, "the message is shown in the transcript");
+	assert.match(message.content, /^Explore feature › note\.txt/);
+	assert.match(message.content, /1 │ feature note/, "the file body is numbered");
+	assert.deepEqual(message.details, {
+		branch: "feature",
+		path: "note.txt",
+		note: undefined,
+		shownLines: 1,
+		totalLines: 1,
+		sizeBytes: 13,
+	});
 });
 
-test("/explore sanitizes a control-byte path before it reaches the notify", async () => {
-	const handler = await loadExploreHandler();
+test("/explore sanitizes a control-byte path in the error it reports", async () => {
+	// A missing file is the cheapest way to drive the notify with a hostile
+	// path: readFile raises `not-found`, whose message embeds the path.
+	const { handler, sent } = await loadExplore();
 	const { ctx, notes, answerWith, pickInBrowser } = makeCtx(menuRoot);
 	answerWith("main (current)");
 	pickInBrowser({ path: "evil\u001b[2J.txt" });
 
 	await handler("", ctx);
 
-	assert.deepEqual(notes, ["info: repo-explorer: evil^[[2J.txt selected — printing it is the next step"]);
+	assert.equal(sent.length, 0, "nothing is printed for a file that cannot be read");
+	assert.equal(notes.length, 1);
+	assert.match(notes[0], /^error: repo-explorer: Not found in .*evil\^\[\[2J\.txt/);
 	assert.ok(!notes[0].includes("\u001b"), "no raw escape reaches the notification");
 });
 
 test("/explore with arguments warns about the missing quick-open and still opens the menu", async () => {
-	const handler = await loadExploreHandler();
+	const { handler } = await loadExplore();
 	const { ctx, notes, answerWith } = makeCtx(menuRoot);
 	answerWith("main (current)");
 
@@ -403,7 +437,7 @@ test("/explore with arguments warns about the missing quick-open and still opens
 });
 
 test("/explore outside TUI mode refuses before touching git", async () => {
-	const handler = await loadExploreHandler();
+	const { handler } = await loadExplore();
 	const { ctx, notes, menus, browsers } = makeCtx(menuRoot, { mode: "rpc" });
 
 	await handler("", ctx);
@@ -414,7 +448,7 @@ test("/explore outside TUI mode refuses before touching git", async () => {
 });
 
 test("/explore outside a repository reports the plumbing's not-a-repo kind", async () => {
-	const handler = await loadExploreHandler();
+	const { handler } = await loadExplore();
 	const { ctx, notes, browsers } = makeCtx(tmpdir());
 
 	await handler("", ctx);
@@ -425,7 +459,7 @@ test("/explore outside a repository reports the plumbing's not-a-repo kind", asy
 });
 
 test("/explore with a cancelled menu stops without reporting an error", async () => {
-	const handler = await loadExploreHandler();
+	const { handler } = await loadExplore();
 	const { ctx, notes, answerWith, browsers } = makeCtx(menuRoot);
 	answerWith(undefined);
 

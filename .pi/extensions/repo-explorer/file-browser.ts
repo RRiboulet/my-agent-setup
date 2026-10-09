@@ -48,6 +48,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+import { sanitizeDisplay } from "./sanitize.ts";
 /** One row of a directory listing: a file, or a directory synthesized from path prefixes. */
 export interface BrowserEntry {
 	/** Basename, as it should be shown (folders get a trailing "/" in the list, not here). */
@@ -109,35 +110,6 @@ export function listDirectory(files: string[], dir: string): BrowserEntry[] {
 export function parentPath(dir: string): string {
 	const slash = dir.lastIndexOf("/");
 	return slash === -1 ? "" : dir.slice(0, slash);
-}
-
-/**
- * Make an untrusted string safe to put in front of a terminal.
- *
- * Git path names may contain any byte except NUL and `/`, so a branch anyone
- * can push can carry a filename holding ESC, BEL, a lone LF, an OSC 52, or a
- * C1 control — and pi-tui's `truncateToWidth` deliberately passes recognized
- * escape sequences through and prices C0 bytes at zero width, so none of them
- * is visible to `visibleWidth` and a width assertion cannot catch them. Left
- * raw they reach the terminal on every render: a screen wipe, a clipboard
- * overwrite (OSC 52), a window-title set, or a stray byte that desynchronizes
- * pi's differential render bookkeeping.
- *
- * The bytes are shown in caret notation rather than deleted, so a hostile name
- * is still readable (and selectable) while being inert. Display only: the
- * entry's `path` stays byte-faithful, because `activate` resolves git
- * operations from it and `readFile` must get the real path.
- */
-export function sanitizeDisplay(text: string): string {
-	let safe = "";
-	for (const character of text) {
-		const code = character.codePointAt(0) ?? 0;
-		if (code === 0x7f) safe += "^?";
-		else if (code < 0x20) safe += `^${String.fromCharCode(code + 64)}`;
-		else if (code >= 0x80 && code <= 0x9f) safe += `\\u${code.toString(16).padStart(4, "0")}`;
-		else safe += character;
-	}
-	return safe;
 }
 
 /**

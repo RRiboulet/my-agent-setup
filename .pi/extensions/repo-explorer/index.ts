@@ -18,25 +18,36 @@
 // The git layer lives in git.ts — listBranches / listFiles (tip-keyed cache) /
 // readFile (binary, size and 2000-line caps), all read-only, and pinned by
 // .pi/extensions/subagent/test/repo-explorer-git.test.ts against a real
-// repository. Three more modules sit between it and the UI: runner.ts is the
-// one place a process is spawned (it deliberately bypasses pi.exec to keep
-// stdout byte-faithful), branch-menu.ts owns the ordering, labelling and
-// ambiguity of the branch list, and file-browser.ts is the directory-by-
-// directory browser component. Runner and branch-menu are pinned by
-// .pi/extensions/subagent/test/repo-explorer-menu.test.ts, the browser by
-// .pi/extensions/subagent/test/repo-explorer-browser.test.ts.
+// repository. Four more modules sit between it and the UI: runner.ts is the one
+// place a process is spawned (it deliberately bypasses pi.exec to keep stdout
+// byte-faithful), branch-menu.ts owns the ordering, labelling and ambiguity of
+// the branch list, file-browser.ts is the directory-by-directory browser
+// component, and file-transcript.ts formats and renders the picked file's
+// message. sanitize.ts is the display boundary all three UI-facing modules use
+// (a repository can hand back control bytes). Runner and branch-menu are pinned
+// by .pi/extensions/subagent/test/repo-explorer-menu.test.ts, the browser by
+// repo-explorer-browser.test.ts, the transcript and the sanitizers by
+// repo-explorer-transcript.test.ts.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { chooseBranch, type ExploreBranchState } from "./branch-menu.ts";
-import { FileBrowser, sanitizeDisplay, type FileBrowserResult } from "./file-browser.ts";
+import { FileBrowser, type FileBrowserResult } from "./file-browser.ts";
+import { FILE_MESSAGE_TYPE, fileMessageRenderer, formatFileTranscript } from "./file-transcript.ts";
 import { openGit, RepoGitError } from "./git.ts";
 import { makeGitRunner } from "./runner.ts";
+import { sanitizeDisplay } from "./sanitize.ts";
 
 export default function (pi: ExtensionAPI) {
 	// The branch the user last picked, kept for the steps that follow: the file
 	// browser's title and the `/explore <path>` quick-open default
-	// (TODO-da336cab, TODO-bfdd2343) both read this instead of asking again.
+	// (TODO-bfdd2343) both read this instead of asking again.
 	const lastBranch: ExploreBranchState = {};
+
+	// A picked file prints itself into the transcript, and this renderer is what
+	// makes that safe for the terminal: the default renderer would run the file
+	// through Markdown and pass control bytes through untouched (see
+	// file-transcript.ts).
+	pi.registerMessageRenderer(FILE_MESSAGE_TYPE, fileMessageRenderer);
 
 	pi.registerCommand("explore", {
 		description: "Browse a branch's files (v1: browse + print file to transcript)",
@@ -76,17 +87,23 @@ export default function (pi: ExtensionAPI) {
 				);
 				if (!picked) return;
 
-				// TODO(repo-explorer): print the picked file into the transcript
-				// (TODO-a4e734e5) instead of naming it here. The path is sanitized for
-				// display — a git path may carry control bytes — while the raw path
-				// is what the print step must pass to readFile.
-				ctx.ui.notify(`repo-explorer: ${sanitizeDisplay(picked.path)} selected — printing it is the next step`, "info");
+				// The file is printed into the transcript, not shown in an overlay:
+				// it lands in tmux scrollback, survives the browse, can be selected and
+				// copied with phone gestures, and the agent reads it in the next turn's
+				// context (a custom message becomes `role: "user"`). `display: true`
+				// shows it; no `triggerTurn`, so viewing a file does not prompt the
+				// agent.
+				const file = await git.readFile(choice.refname, picked.path);
+				const { content, details } = formatFileTranscript(file, choice.label, picked.path);
+				pi.sendMessage({ customType: FILE_MESSAGE_TYPE, content, display: true, details });
 			} catch (err) {
 				// Branch on kind, never on message text: git.ts's kinds
 				// (not-a-repo, unknown-branch, not-found, not-a-file, binary,
-				// mojibake, too-large, git-failed) are the contract.
+				// mojibake, too-large, git-failed) are the contract. The message is
+				// sanitized for display: it embeds the path (and sometimes git's own
+				// stderr), either of which may carry control bytes.
 				if (err instanceof RepoGitError) {
-					ctx.ui.notify(`repo-explorer: ${err.message}`, "error");
+					ctx.ui.notify(`repo-explorer: ${sanitizeDisplay(err.message)}`, "error");
 					return;
 				}
 				throw err;

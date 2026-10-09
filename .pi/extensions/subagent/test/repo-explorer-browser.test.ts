@@ -26,7 +26,6 @@ import {
 	FileBrowser,
 	listDirectory,
 	parentPath,
-	sanitizeDisplay,
 	type FileBrowserResult,
 } from "../../repo-explorer/file-browser.ts";
 
@@ -250,15 +249,6 @@ const HOSTILE_FILES = [
 	"escape-tail\u001b.txt",
 	"café-🔥.md",
 ];
-
-test("sanitizeDisplay makes control bytes inert and leaves real text alone", () => {
-	assert.equal(sanitizeDisplay("\u001b[2J"), "^[[2J");
-	assert.equal(sanitizeDisplay("a\u0007b"), "a^Gb");
-	assert.equal(sanitizeDisplay("l1\nl2"), "l1^Jl2");
-	assert.equal(sanitizeDisplay("del\u007f"), "del^?");
-	assert.equal(sanitizeDisplay("c1\u0085x"), "c1\\u0085x");
-	assert.equal(sanitizeDisplay("café-🔥.md"), "café-🔥.md", "legitimate non-ASCII is not touched");
-});
 
 test("no rendered line carries a control byte, even for a hostile listing", () => {
 	const { component } = browser(HOSTILE_FILES);
