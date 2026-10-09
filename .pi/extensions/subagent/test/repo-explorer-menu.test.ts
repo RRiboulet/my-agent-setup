@@ -28,7 +28,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, chmod, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, chmod, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, before, test } from "node:test";
@@ -65,6 +65,8 @@ let shadowRoot = "";
 let soloRoot = "";
 /** No commit at all: no refs, so there is nothing to browse. */
 let emptyRoot = "";
+/** A nested tree with a second branch whose `src/a.ts` differs, for the quick-open handler tests. */
+let quickRoot = "";
 
 before(async () => {
 	menuRoot = await initRepo("menu");
@@ -95,11 +97,26 @@ before(async () => {
 	gitIn(soloRoot, "commit", "-q", "-m", "initial");
 
 	emptyRoot = await initRepo("empty");
+
+	quickRoot = await initRepo("quick");
+	await writeFile(path.join(quickRoot, "README.md"), "quick root\n");
+	await mkdir(path.join(quickRoot, "src"));
+	await writeFile(path.join(quickRoot, "src", "a.ts"), "export const a = 1;\n");
+	await writeFile(path.join(quickRoot, "src", "b.ts"), "export const b = 2;\n");
+	gitIn(quickRoot, "add", "-A");
+	gitIn(quickRoot, "commit", "-q", "-m", "initial");
+	// A branch whose src/a.ts differs, so "the branch argument picked the right
+	// tree" is provable from the printed content.
+	gitIn(quickRoot, "checkout", "-q", "-b", "feature");
+	await writeFile(path.join(quickRoot, "src", "a.ts"), "export const a = 'feature';\n");
+	gitIn(quickRoot, "add", "-A");
+	gitIn(quickRoot, "commit", "-q", "-m", "feature change");
+	gitIn(quickRoot, "checkout", "-q", "main");
 });
 
 after(async () => {
 	await Promise.all(
-		[menuRoot, shadowRoot, soloRoot, emptyRoot].map((dir) => rm(dir, { recursive: true, force: true })),
+		[menuRoot, shadowRoot, soloRoot, emptyRoot, quickRoot].map((dir) => rm(dir, { recursive: true, force: true })),
 	);
 });
 
@@ -430,15 +447,132 @@ test("/explore sanitizes a control-byte path in the error it reports", async () 
 	assert.ok(!notes[0].includes("\u001b"), "no raw escape reaches the notification");
 });
 
-test("/explore with arguments warns about the missing quick-open and still opens the menu", async () => {
-	const { handler } = await loadExplore();
-	const { ctx, notes, answerWith } = makeCtx(menuRoot);
-	answerWith("main (current)");
+// ---------------------------------------------------------------------------
+// Quick-open arguments — `/explore <path> [branch]`, no menu
+// ---------------------------------------------------------------------------
 
-	await handler("src/main.ts", ctx);
+test("/explore <path> prints the file on the current branch, skipping the menu and the browser", async () => {
+	const { handler, sent } = await loadExplore();
+	const { ctx, notes, menus, browsers } = makeCtx(quickRoot);
+
+	await handler("src/a.ts", ctx);
+
+	assert.equal(menus.length, 0, "quick-open never opens the branch menu");
+	assert.equal(browsers.length, 0, "a file path prints directly, it does not browse");
+	assert.equal(sent.length, 1);
+	assert.match(sent[0].content, /^Explore main \(current\) › src\/a\.ts/);
+	assert.match(sent[0].content, /1 │ export const a = 1;/, "the body is the main tree's file, numbered");
+	assert.deepEqual(notes, [], "a successful quick-open reports nothing");
+});
+
+test("/explore <path> <branch> and /explore <branch>:<path> both read the named branch", async () => {
+	const positional = await loadExplore();
+	const positionalCtx = makeCtx(quickRoot);
+	await positional.handler("src/a.ts feature", positionalCtx.ctx);
+	assert.equal(positional.sent.length, 1);
+	assert.match(positional.sent[0].content, /^Explore feature › src\/a\.ts/);
+	assert.match(positional.sent[0].content, /export const a = 'feature';/, "the chosen branch's tree, not the current one");
+
+	const colon = await loadExplore();
+	const colonCtx = makeCtx(quickRoot);
+	await colon.handler("feature:src/a.ts", colonCtx.ctx);
+	assert.equal(colon.sent.length, 1);
+	assert.match(colon.sent[0].content, /^Explore feature › src\/a\.ts/);
+	assert.match(colon.sent[0].content, /export const a = 'feature';/);
+});
+
+test("/explore <dir> opens the browser pre-positioned at that directory", async () => {
+	const { handler, sent } = await loadExplore();
+	const { ctx, notes, browsers } = makeCtx(quickRoot);
+
+	await handler("src", ctx);
+
+	assert.equal(browsers.length, 1, "a tree path opens the browser");
+	const view = browsers[0].render(80).join("\n");
+	assert.match(view, /Explore main \(current\) › src/, "the header names the requested directory");
+	assert.match(view, /a\.ts/);
+	assert.match(view, /b\.ts/);
+	assert.ok(!view.includes("README.md"), "only the requested directory's contents are listed");
+	assert.equal(sent.length, 0, "browsing alone prints nothing");
+	assert.deepEqual(notes, []);
+});
+
+test("/explore <dir> can then pick a file that prints", async () => {
+	const { handler, sent } = await loadExplore();
+	const { ctx, pickInBrowser } = makeCtx(quickRoot);
+	pickInBrowser({ path: "src/b.ts" });
+
+	await handler("src", ctx);
+
+	assert.equal(sent.length, 1);
+	assert.match(sent[0].content, /^Explore main \(current\) › src\/b\.ts/);
+	assert.match(sent[0].content, /1 │ export const b = 2;/);
+});
+
+test("/explore . opens the browser at the repository root", async () => {
+	const { handler } = await loadExplore();
+	const { ctx, browsers } = makeCtx(quickRoot);
+
+	await handler(".", ctx);
+
+	assert.equal(browsers.length, 1);
+	const view = browsers[0].render(80).join("\n");
+	assert.match(view, /Explore main \(current\) › \./);
+	assert.match(view, /src\//);
+});
+
+test("/explore <path> reuses the branch the menu last picked", async () => {
+	const { handler, sent } = await loadExplore();
+	const { ctx, answerWith } = makeCtx(quickRoot);
+	answerWith("feature");
+
+	await handler("", ctx); // the menu flow remembers `feature`
+	assert.equal(sent.length, 0, "the browser was cancelled, so nothing printed");
+
+	await handler("src/a.ts", ctx); // no branch argument
+	assert.equal(sent.length, 1);
+	assert.match(sent[0].content, /^Explore feature › src\/a\.ts/, "the remembered pick, not HEAD");
+	assert.match(sent[0].content, /export const a = 'feature';/);
+});
+
+test("/explore with a missing path or unknown branch reports the plumbing's kind", async () => {
+	const missingPath = await loadExplore();
+	const missingPathCtx = makeCtx(quickRoot);
+	await missingPath.handler("src/nope.ts", missingPathCtx.ctx);
+	assert.equal(missingPath.sent.length, 0);
+	assert.equal(missingPathCtx.notes.length, 1);
+	assert.match(missingPathCtx.notes[0], /^error: repo-explorer: Not found in "refs\/heads\/main": src\/nope\.ts/);
+
+	const unknownBranch = await loadExplore();
+	const unknownBranchCtx = makeCtx(quickRoot);
+	await unknownBranch.handler("src/a.ts no-such-branch", unknownBranchCtx.ctx);
+	assert.equal(unknownBranch.sent.length, 0);
+	assert.equal(unknownBranchCtx.notes.length, 1);
+	assert.match(unknownBranchCtx.notes[0], /^error: repo-explorer: Unknown branch "no-such-branch"/);
+	assert.equal(unknownBranchCtx.browsers.length, 0, "a failed branch resolution never reaches the browser");
+});
+
+test("/explore reports an argument parse error before touching git", async () => {
+	const { handler } = await loadExplore();
+	const { ctx, notes, menus, browsers } = makeCtx(quickRoot);
+
+	await handler("a b c", ctx);
 
 	assert.equal(notes.length, 1);
-	assert.match(notes[0], /^warning: repo-explorer: arguments are not supported yet \("src\/main\.ts"\)/);
+	assert.match(notes[0], /^error: repo-explorer: too many arguments/);
+	assert.equal(menus.length, 0);
+	assert.equal(browsers.length, 0);
+});
+
+test("/explore sanitizes a control byte in a parse error", async () => {
+	const { handler } = await loadExplore();
+	const { ctx, notes } = makeCtx(quickRoot);
+
+	await handler("/evil\u001b[2J", ctx);
+
+	assert.equal(notes.length, 1);
+	assert.match(notes[0], /absolute paths are not supported/);
+	assert.ok(!notes[0].includes("\u001b"), "no raw escape reaches the notification");
 });
 
 test("/explore outside TUI mode refuses before touching git", async () => {

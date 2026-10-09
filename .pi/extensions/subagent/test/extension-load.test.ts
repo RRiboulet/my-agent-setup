@@ -42,6 +42,7 @@ const MODULES: Record<string, string[]> = {
 	"../../repo-explorer/git.ts": ["openGit", "RepoGitError"],
 	"../../repo-explorer/runner.ts": ["makeGitRunner"],
 	"../../repo-explorer/branch-menu.ts": ["buildBranchMenu", "resolveBranchChoice", "chooseBranch"],
+	"../../repo-explorer/quick-open.ts": ["parseExploreArgs", "resolveQuickBranch", "normalizeRepoPath", "tokenizeArgs"],
 	"../../repo-explorer/file-browser.ts": ["FileBrowser", "listDirectory", "parentPath"],
 	"../../repo-explorer/file-transcript.ts": ["formatFileTranscript", "numberLines", "fileMessageRenderer"],
 	"../../repo-explorer/sanitize.ts": ["sanitizeDisplay", "sanitizeFileContent"],
