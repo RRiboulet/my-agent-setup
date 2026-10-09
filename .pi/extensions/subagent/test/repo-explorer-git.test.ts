@@ -21,7 +21,7 @@ import { after, before, test } from "node:test";
 import { promisify } from "node:util";
 
 import type { GitRunResult, GitRunner } from "../../repo-explorer/git.ts";
-import { LINE_CAP, MAX_BLOB_BYTES, openGit, RepoGitError } from "../../repo-explorer/git.ts";
+import { LINE_CAP, MAX_BLOB_BYTES, MAX_TEXT_BYTES, openGit, RepoGitError } from "../../repo-explorer/git.ts";
 
 const execFileP = promisify(execFileCb);
 
@@ -73,6 +73,12 @@ before(async () => {
 	await writeFile(path.join(baseRoot, "docs/café América.txt"), "unicode path\n");
 	await writeFile(path.join(baseRoot, "big.txt"), `${Array.from({ length: 3000 }, (_, i) => `line ${i + 1}`).join("\n")}\n`);
 	await writeFile(path.join(baseRoot, "empty.txt"), "");
+	await writeFile(path.join(baseRoot, "corrupt.txt"), `before ${"\uFFFD"} after\n`);
+	await writeFile(path.join(baseRoot, "minified.js"), "A".repeat(MAX_TEXT_BYTES + 1024));
+	await writeFile(
+		path.join(baseRoot, "wide.txt"),
+		`${"A".repeat(MAX_TEXT_BYTES - 128)}\n${"B".repeat(MAX_TEXT_BYTES - 128)}\n`,
+	);
 	await writeFile(path.join(baseRoot, "assets/logo.png"), Buffer.from([0x89, 0x50, 0x00, 0x4e, 0x47, 0x00]));
 	gitIn(baseRoot, "add", "-A", "-f");
 	gitIn(baseRoot, "commit", "-q", "-m", "initial");
@@ -89,7 +95,9 @@ before(async () => {
 	gitIn(baseRoot, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
 
 	// A second, minimal repo for the too-large refusal: 17 MiB so nothing is
-	// fetched even with a generous buffer.
+	// fetched even with a generous buffer; the byte-cap work rides in the base
+	// fixture, where a one-line page and a two-line one exceed MAX_TEXT_BYTES
+	// by construction.
 	bigRoot = await mkdtemp(path.join(tmpdir(), "repo-explorer-git-big-"));
 	gitIn(bigRoot, "init", "-b", "main", "-q");
 	gitIn(bigRoot, "config", "user.name", "Test Harness");
@@ -107,7 +115,7 @@ test("openGit refuses a directory that is not a repository", async () => {
 	const { run } = makeRunner();
 	await assert.rejects(
 		openGit(run, tmpdir()),
-		(err: unknown) => err instanceof RepoGitError && err.kind === "not-a-repo" && err.message.includes("Not a git repository"),
+		(err: unknown) => err instanceof RepoGitError && err.kind === "not-a-repo" && err.message.includes("Not a git work-tree"),
 	);
 });
 
@@ -120,12 +128,12 @@ test("openGit resolves the repository root and lists branches with HEAD flagged"
 	assert.deepEqual(
 		list.branches,
 		[
-			{ name: "feature", isRemote: false, isCurrent: false },
-			{ name: "main", isRemote: false, isCurrent: true },
-			{ name: "origin/feature", isRemote: true, isCurrent: false },
-			{ name: "origin/main", isRemote: true, isCurrent: false },
+			{ refname: "refs/heads/feature", name: "feature", isRemote: false, isCurrent: false },
+			{ refname: "refs/heads/main", name: "main", isRemote: false, isCurrent: true },
+			{ refname: "refs/remotes/origin/feature", name: "origin/feature", isRemote: true, isCurrent: false },
+			{ refname: "refs/remotes/origin/main", name: "origin/main", isRemote: true, isCurrent: false },
 		],
-		"locals first in refname order, remotes as <remote>/<name>, origin/HEAD (a symref) left out, HEAD flagged",
+		"locals first in refname order, remotes as <remote>/<name>, every entry carries its full refname, origin/HEAD (a symref) left out, HEAD flagged",
 	);
 	assert.equal(list.current, "main");
 	assert.equal(list.detachedTip, undefined);
@@ -155,10 +163,13 @@ test("listFiles is recursive, directory-free and byte-faithful (unquoted via -z)
 		"README.md",
 		"assets/logo.png",
 		"big.txt",
+		"corrupt.txt",
 		"docs/café América.txt",
 		"empty.txt",
+		"minified.js",
 		"src/lib/depth.ts",
 		"src/main.ts",
+		"wide.txt",
 	]);
 	const content = await repo.readFile("main", "docs/café América.txt");
 	assert.equal(content.text, "unicode path\n");
@@ -208,7 +219,7 @@ test("readFile clips at LINE_CAP with banner-ready metadata and the real blob si
 	assert.equal(big.totalLines, 3000);
 	assert.equal(big.shownLines, LINE_CAP);
 	assert.equal(big.truncated, true);
-	assert.equal(big.note, `truncated: showing the first ${LINE_CAP} of 3000 lines`);
+	assert.ok(big.note?.includes(`first ${LINE_CAP}`) && big.note?.includes("3000"), `note: ${big.note}`);
 	assert.equal(lines[0], "line 1");
 	assert.equal(lines[lines.length - 1], "", "the file's terminator is restored on the clip");
 	assert.equal(lines[lines.length - 2], `line ${LINE_CAP}`);
@@ -230,9 +241,58 @@ test("readFile refuses blobs above MAX_BLOB_BYTES before fetching them", async (
 	const repo = await openGit(run, bigRoot);
 	await assert.rejects(
 		repo.readFile("main", "huge.txt"),
-		(err: unknown) => err instanceof RepoGitError && err.kind === "too-large" && err.message.includes("MB"),
+		(err: unknown) => err instanceof RepoGitError && err.kind === "too-large" && err.message.includes("-byte cap"),
 	);
 	assert.equal(count("show"), 0, "the blob body must never be piped out for a too-large file");
+});
+
+test("readFile refuses a page whose first line alone exceeds the byte cap", async () => {
+	const { run } = makeRunner();
+	const repo = await openGit(run, baseRoot);
+	await assert.rejects(
+		repo.readFile("main", "minified.js"),
+		(err: unknown) => err instanceof RepoGitError && err.kind === "too-large" && err.message.includes("page cap"),
+	);
+});
+
+test("readFile byte-caps the page and cuts at a complete line", async () => {
+	const { run } = makeRunner();
+	const repo = await openGit(run, baseRoot);
+	const wide = await repo.readFile("main", "wide.txt");
+	const firstLine = `${"A".repeat(MAX_TEXT_BYTES - 128)}\n`;
+	assert.equal(wide.totalLines, 2);
+	assert.equal(wide.shownLines, 1);
+	assert.equal(wide.truncated, true);
+	assert.ok(wide.note?.includes("KB") && wide.note?.includes("1 of 2 lines"), `note: ${wide.note}`);
+	assert.equal(wide.text, firstLine, "only the first line survives, restored with its terminator");
+	assert.equal(wide.sizeBytes, 2 * (MAX_TEXT_BYTES - 128) + 2);
+});
+
+test("readFile refuses mojibake-corrupted output rather than serving it", async () => {
+	const { run } = makeRunner();
+	const repo = await openGit(run, baseRoot);
+	await assert.rejects(
+		repo.readFile("main", "corrupt.txt"),
+		(err: unknown) => err instanceof RepoGitError && err.kind === "mojibake" && err.message.includes("U+FFFD"),
+	);
+});
+
+test("listFiles refuses a mojibake-corrupted listing", async () => {
+	// node's execFile decodes stdout in one shot, so the real runner can never
+	// produce this; the refusal is exercised against a runner that returns a
+	// hand-mangled listing, the shape pi.exec's chunked decode could give.
+	const ok = (stdout = ""): GitRunResult => ({ stdout, stderr: "", code: 0, killed: false });
+	const run: GitRunner = async (args) => {
+		if (args[0] === "ls-tree") return ok(`caf${"\uFFFD"}.doc\0f.txt\0`);
+		if (args[0] === "rev-parse" && args[1] === "--show-toplevel") return ok("/repo\n");
+		if (args[0] === "rev-parse") return ok("a1b2c3\n");
+		throw new Error(`unexpected argv: ${args.join(" ")}`);
+	};
+	const repo = await openGit(run, "/repo");
+	await assert.rejects(
+		repo.listFiles("main"),
+		(err: unknown) => err instanceof RepoGitError && err.kind === "mojibake",
+	);
 });
 
 test("listFiles reuses the cache while the branch tip holds", async () => {
@@ -253,8 +313,9 @@ test("listFiles invalidates the cache when the branch tip moves", async () => {
 	assert.equal(count("ls-tree"), 1);
 	assert.ok(!before.includes("moved.txt"));
 
-	// Move the tip the ordinary way, then hand the ref back so later tests see
-	// the original branch.
+	// Move the tip the ordinary way, then restore the ref so the fixture is
+	// left as found. Defensive only — this is the file's last test and after()
+	// deletes the repo — but node:test may grow or reorder this file later.
 	try {
 		gitIn(baseRoot, "checkout", "-q", "feature");
 		await writeFile(path.join(baseRoot, "moved.txt"), "moved\n");

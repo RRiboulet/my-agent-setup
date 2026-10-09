@@ -9,14 +9,27 @@
 //
 // Contracts the rest of the flow relies on, all of them pinned by tests:
 //  - listBranches() lists ref/heads first, then remote-tracking refs as
-//    "<remote>/<name>"; the branch HEAD points at is flagged isCurrent, and a
-//    detached HEAD comes back as detachedTip instead.
+//    "<remote>/<name>"; every entry carries its full refname (a local branch
+//    literally named like a remote ref is possible — update-ref allows it);
+//    the branch HEAD points at is flagged isCurrent, and a detached HEAD
+//    comes back as detachedTip instead.
 //  - listFiles(branch) caches the tree per branch name and keys the cache on
-//    the branch tip: an unchanged tip reuses it, a new commit refetches.
-//  - readFile(branch, path) never puts binary or oversized pages into text:
-//    a NUL byte inside the first BINARY_SNIFF_BYTES refuses the read, a blob
-//    above MAX_BLOB_BYTES is refused before it is fetched, and text is
-//    clipped at LINE_CAP with a `note` meant for the print banner.
+//    the branch tip: an unchanged tip reuses it, a new commit refetches. A
+//    listing that arrives mojibake-corrupted is refused whole rather than
+//    served with filenames that can never be re-opened.
+//  - readFile(branch, path) never puts binary, mojibake or oversized pages
+//    into text: a NUL byte inside the first BINARY_SNIFF_BYTES refuses the
+//    read (git's own binary heuristic), U+FFFD refuses it too (a multi-byte
+//    UTF-8 sequence was split while the executor accumulated stdout — wire
+//    pi.exec through a Buffer-accumulating runner, not per-chunk
+//    toString()), a blob above MAX_BLOB_BYTES is refused before it is
+//    fetched, text is clipped at LINE_CAP lines and MAX_TEXT_BYTES bytes,
+//    and every cut leaves text an exact byte prefix of the blob. The `note`
+//    field carries the banner phrasing of whichever cut engaged.
+//  - Symlink gitlinks list and read as the symlink's target path in TEXT
+//    (the entry is stored as a blob of the literal path), and submodule
+//    gitlinks refuse as not-found — their commit lives in the submodule's
+//    own object store.
 
 export type GitErrorKind =
 	| "not-a-repo"
@@ -24,6 +37,7 @@ export type GitErrorKind =
 	| "not-found"
 	| "not-a-file"
 	| "binary"
+	| "mojibake"
 	| "too-large"
 	| "git-failed";
 
@@ -37,7 +51,7 @@ export class RepoGitError extends Error {
 	}
 }
 
-/** Same shape as pi's `exec` result, so `pi.exec("git", args, { cwd })` fits GitRunner directly. */
+/** Result shape is pi's `ExecResult`; index.ts supplies the runner itself as the one-liner `(args, cwd) => pi.exec("git", args, { cwd })`. */
 export interface GitRunResult {
 	stdout: string;
 	stderr: string;
@@ -48,7 +62,9 @@ export interface GitRunResult {
 export type GitRunner = (args: string[], cwd: string) => Promise<GitRunResult>;
 
 export interface GitBranch {
-	/** Local branches by short name ("main"), remote-tracking refs as "<remote>/<name>" ("origin/main"). */
+	/** Full refname ("refs/remotes/origin/main") — the only unambiguous handle when a local branch is literally named like a remote-tracking one (update-ref allows "refs/heads/origin/main"); pass this to listFiles/readFile. */
+	refname: string;
+	/** Display name: short name for locals ("main"), "<remote>/<name>" for remote-tracking refs ("origin/main"). Collides with refname="refs/heads/origin/main"; refname disambiguates. */
 	name: string;
 	isRemote: boolean;
 	/** True for the branch HEAD points at (local branches only). */
@@ -64,14 +80,15 @@ export interface BranchList {
 }
 
 export interface FileRead {
-	/** Blob content, at most LINE_CAP lines (text only — see the header), always an exact prefix of the blob. */
+	/** Blob content, at most LINE_CAP lines and MAX_TEXT_BYTES bytes (text only — see the header), always an exact prefix of the blob. */
 	text: string;
 	totalLines: number;
 	shownLines: number;
+	/** True when either clip (lines or bytes) engaged. */
 	truncated: boolean;
 	/** Banner-ready phrasing of the truncation, set when truncated. */
 	note?: string;
-	/** Full blob size in bytes, from `cat-file -s` — content-visible size after clipping. */
+	/** Full blob size in bytes, from `cat-file -s` — NOT reduced by the line/byte clip (the clip shows a prefix of these bytes). */
 	sizeBytes: number;
 }
 
@@ -81,6 +98,8 @@ export const LINE_CAP = 2000;
 export const BINARY_SNIFF_BYTES = 8000;
 /** Blobs above this are refused without fetching; pi.exec buffers whole stdout, so refuse before the pipe. */
 export const MAX_BLOB_BYTES = 16 * 1024 * 1024;
+/** Bytes a page may occupy on top of the LINE_CAP line count — huge single lines (minified JS, base64 dumps) slip past the line cap otherwise. Cuts at the last complete line inside the budget; a first line beyond it refuses the read. */
+export const MAX_TEXT_BYTES = 256 * 1024;
 
 export interface RepoGit {
 	/** Absolute repository root every call runs from. */
@@ -91,15 +110,18 @@ export interface RepoGit {
 }
 
 const firstLine = (text: string): string => text.trim().split("\n")[0] ?? "";
-const mb = (n: number): string => `${(n / (1024 * 1024)).toFixed(1)} MB`;
+const fmt = (n: number): string => (n >= 1024 * 1024 ? `${(n / (1024 * 1024)).toFixed(1)} MB` : `${Math.ceil(n / 1024)} KB`);
 
 export async function openGit(run: GitRunner, cwd: string): Promise<RepoGit> {
 	const rootRes = await run(["rev-parse", "--show-toplevel"], cwd);
 	const root = rootRes.stdout.trim();
 	if (rootRes.code !== 0 || !root) {
+		// "work-tree", not "repository": a bare repository lands here too and
+		// is genuinely a repository — it just has nothing to browse. git's own
+		// stderr (appended) tells the two cases apart.
 		throw new RepoGitError(
 			"not-a-repo",
-			`Not a git repository (cwd: ${cwd || "(empty)"})${firstLine(rootRes.stderr) ? ` — ${firstLine(rootRes.stderr)}` : ""}`,
+			`Not a git work-tree (cwd: ${cwd || "(empty)"})${firstLine(rootRes.stderr) ? ` — ${firstLine(rootRes.stderr)}` : ""}`,
 		);
 	}
 
@@ -134,14 +156,16 @@ export async function openGit(run: GitRunner, cwd: string): Promise<RepoGit> {
 		const branches: GitBranch[] = [];
 		for (const line of res.stdout.split("\n")) {
 			if (line.length === 0) continue;
-			const [refname, head, symref] = line.split("\t");
+			const [fullRefname, head, symref] = line.split("\t");
 			// A symref (refs/remotes/origin/HEAD) is a pointer to another ref
 			// that is listed in its own right; keeping it would duplicate
 			// "origin/main" in the menu.
 			if (symref) continue;
-			const isRemote = refname.startsWith("refs/remotes/");
-			const name = isRemote ? refname.slice("refs/remotes/".length) : refname.slice("refs/heads/".length);
-			branches.push({ name, isRemote, isCurrent: head.trim() === "*" });
+			const isRemote = fullRefname.startsWith("refs/remotes/");
+			const name = isRemote
+				? fullRefname.slice("refs/remotes/".length)
+				: fullRefname.slice("refs/heads/".length);
+			branches.push({ refname: fullRefname, name, isRemote, isCurrent: head.trim() === "*" });
 		}
 
 		const list: BranchList = { branches };
@@ -172,6 +196,16 @@ export async function openGit(run: GitRunner, cwd: string): Promise<RepoGit> {
 		if (res.code !== 0) {
 			throw new RepoGitError("git-failed", `git ls-tree failed for "${branch}" — ${firstLine(res.stderr)}`);
 		}
+		// The listing shares readFile's mojibake hazard, and one UTF-8 filename
+		// split at an executor chunk boundary becomes a name that can never be
+		// re-opened. A corrupted listing is refused whole rather than served
+		// quietly with broken entries.
+		if (res.stdout.includes("\uFFFD")) {
+			throw new RepoGitError(
+				"mojibake",
+				`git ls-tree output for "${branch}" arrived corrupted (U+FFFD present) — the executor decoded it chunk-wise; refusing to serve broken filenames`,
+			);
+		}
 		const files = res.stdout.split("\0").filter((p) => p.length > 0);
 		cache.set(branch, { tip, files });
 		return files.slice();
@@ -196,11 +230,19 @@ export async function openGit(run: GitRunner, cwd: string): Promise<RepoGit> {
 		}
 
 		const sizeRes = await run(["cat-file", "-s", ref], root);
-		const sizeBytes = Number.parseInt(sizeRes.stdout.trim(), 10) || 0;
+		if (sizeRes.code !== 0) {
+			throw new RepoGitError("git-failed", `git cat-file -s failed for "${ref}" — ${firstLine(sizeRes.stderr)}`);
+		}
+		// No `|| 0` fallback: a failed size read must fail the read, not pass
+		// the cap check as 0 bytes and surface later as an opaque show error.
+		const sizeBytes = Number.parseInt(sizeRes.stdout.trim(), 10);
+		if (!Number.isInteger(sizeBytes)) {
+			throw new RepoGitError("git-failed", `git cat-file -s returned no size for "${ref}"`);
+		}
 		if (sizeBytes > MAX_BLOB_BYTES) {
 			throw new RepoGitError(
 				"too-large",
-				`"${branch}:${path}" is too large to display: ${mb(sizeBytes)} exceeds the ${mb(MAX_BLOB_BYTES)} cap`,
+				`"${branch}:${path}" is too large to display: ${sizeBytes.toLocaleString("en-US")} bytes exceeds the ${MAX_BLOB_BYTES.toLocaleString("en-US")}-byte cap`,
 			);
 		}
 
@@ -214,11 +256,23 @@ export async function openGit(run: GitRunner, cwd: string): Promise<RepoGit> {
 		if (contentRes.stdout.slice(0, BINARY_SNIFF_BYTES).includes("\0")) {
 			throw new RepoGitError("binary", `"${branch}:${path}" is binary and cannot be displayed`);
 		}
+		// U+FFFD in git's own output means a multi-byte UTF-8 sequence was
+		// split while the executor accumulated stdout (pi.exec decodes chunk
+		// by chunk); the blob on disk is intact, what reached us is not, and
+		// what prints would look like the file's real content. Refuse rather
+		// than serve mojibake. A file that legitimately contains U+FFFD is
+		// refused too — ambiguous either way — and the durable fix is wiring
+		// the runner through Buffer accumulation (see index.ts's TODO).
+		if (contentRes.stdout.includes("\uFFFD")) {
+			throw new RepoGitError(
+				"mojibake",
+				`"${branch}:${path}" arrived corrupted (U+FFFD present) — the executor decoded it chunk-wise; refusing to display mojibake`,
+			);
+		}
 
-		// Split on "\n"; a trailing "" after the file's terminator is not a line,
-		// interior ""s are real blank lines. `text` is always an exact prefix of
-		// the blob: uncut it is the file back verbatim (terminator included),
-		// cut it is the first LINE_CAP lines with the terminator restored. The
+		// Split on "\n"; a trailing "" after the file's terminator is not a
+		// line, interior ""s are real blank lines. `text` is always an exact
+		// byte prefix of the blob — both cuts below preserve that, and the
 		// banner text rides in `note`, never inside `text`.
 		const lines = contentRes.stdout.length > 0 ? contentRes.stdout.split("\n") : [];
 		let terminator = false;
@@ -227,16 +281,55 @@ export async function openGit(run: GitRunner, cwd: string): Promise<RepoGit> {
 			terminator = true;
 		}
 
-		const truncated = lines.length > LINE_CAP;
-		let text = truncated ? lines.slice(0, LINE_CAP).join("\n") : lines.join("\n");
-		if (terminator && (truncated || lines.length > 0)) text += "\n";
+		// Cut 1 — lines: the model-facing line count.
+		const lineTruncated = lines.length > LINE_CAP;
+		let selected = lineTruncated ? lines.slice(0, LINE_CAP) : lines;
+
+		// Cut 2 — bytes: huge single lines (minified JS, base64 dumps) slip
+		// past the line cap, so the page also obeys MAX_TEXT_BYTES. Cut at the
+		// last complete line inside the budget; if not even the first line
+		// fits, refuse — a fragment of an unknown-language monster line is
+		// worse than knowing how big it is.
+		let byteTruncated = false;
+		if (sizeBytes > MAX_TEXT_BYTES) {
+			let acc = 0;
+			let fit = -1;
+			for (let i = 0; i < selected.length; i++) {
+				// The +1 reserves the "\n" that closes the cut: a following
+				// line, or the blob's own terminator, carries it.
+				acc += Buffer.byteLength(selected[i], "utf8") + (i > 0 ? 1 : 0);
+				if (acc + 1 > MAX_TEXT_BYTES) {
+					byteTruncated = true;
+					break;
+				}
+				fit = i;
+			}
+			if (fit < 0) {
+				throw new RepoGitError(
+					"too-large",
+					`"${branch}:${path}" — its first line alone is ${fmt(Buffer.byteLength(selected[0] ?? "", "utf8"))}, beyond the ${fmt(MAX_TEXT_BYTES)} page cap`,
+				);
+			}
+			selected = selected.slice(0, fit + 1);
+		}
+
+		// A line-bounded cut is followed by a "\n" that exists in the blob (a
+		// later line or the terminator carries it), so the prefix property
+		// holds; the untouched page likewise keeps its own terminator.
+		const pageCut = selected.length < lines.length;
+		let text = selected.join("\n");
+		if (pageCut || (!pageCut && terminator)) text += "\n";
 
 		return {
 			text,
 			totalLines: lines.length,
-			shownLines: truncated ? LINE_CAP : lines.length,
-			truncated,
-			note: truncated ? `truncated: showing the first ${LINE_CAP} of ${lines.length} lines` : undefined,
+			shownLines: selected.length,
+			truncated: pageCut || byteTruncated,
+			note: byteTruncated
+				? `truncated at ${fmt(MAX_TEXT_BYTES)}: showing ${selected.length} of ${lines.length} lines`
+				: pageCut
+					? `truncated: showing the first ${LINE_CAP} of ${lines.length} lines`
+					: undefined,
 			sizeBytes,
 		};
 	}

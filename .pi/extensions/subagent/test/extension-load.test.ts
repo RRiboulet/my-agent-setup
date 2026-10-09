@@ -35,8 +35,12 @@ const EXTENSIONS = [
 ] as const;
 
 // Extension tree files that are not entry points themselves but get imported
-// by one at runtime; same rationale, they must link under the real ESM loader.
-const MODULES = ["../../repo-explorer/git.ts"] as const;
+// by one at runtime; same rationale, they must link under the real ESM
+// loader. The exports an importer will use are named, so an accidental drop
+// of one fails here instead of at wiring time.
+const MODULES: Record<string, string[]> = {
+	"../../repo-explorer/git.ts": ["openGit", "RepoGitError"],
+};
 
 for (const relative of EXTENSIONS) {
 	test(`extension ${relative} loads under strict ESM`, async () => {
@@ -46,10 +50,12 @@ for (const relative of EXTENSIONS) {
 	});
 }
 
-for (const relative of MODULES) {
+for (const [relative, exports] of Object.entries(MODULES)) {
 	test(`module ${relative} loads under strict ESM`, async () => {
 		const specifier = new URL(relative, import.meta.url).href;
 		const module = (await import(specifier)) as Record<string, unknown>;
-		assert.notEqual(Object.keys(module).length, 0, `${relative} must export something`);
+		for (const name of exports) {
+			assert.equal(typeof module[name], "function", `${relative} must export ${name}`);
+		}
 	});
 }

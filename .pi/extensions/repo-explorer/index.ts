@@ -38,7 +38,12 @@ export default function (pi: ExtensionAPI) {
 			// TODO(repo-explorer): branch selection menu (TODO-937a1b91),
 			// fuzzy file browser (TODO-da336cab), print to transcript
 			// (TODO-a4e734e5), argument parsing (TODO-bfdd2343) — the git
-			// plumbing they consume is openGit() in git.ts.
+			// plumbing they consume is openGit() in git.ts. Wire GitRunner as
+			// `(args, cwd) => pi.exec("git", args, { cwd })` BUT accumulate
+			// stdout in a Buffer before one final decode, not per-chunk
+			// `data.toString()`: pi.exec splits multi-byte UTF-8 sequences at
+			// chunk boundaries into U+FFFD, and the plumbing deliberately
+			// refuses mojibake output instead of serving it.
 			ctx.ui.notify(`repo-explorer: not implemented yet${args ? ` (args: ${args})` : ""}`, "info");
 		},
 	});
