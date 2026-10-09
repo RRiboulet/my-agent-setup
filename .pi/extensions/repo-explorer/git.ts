@@ -225,7 +225,7 @@ export async function openGit(run: GitRunner, cwd: string): Promise<RepoGit> {
 		if (res.stdout.includes("\uFFFD")) {
 			throw new RepoGitError(
 				"mojibake",
-				`git ls-tree output for "${branch}" arrived corrupted (U+FFFD present) — the executor decoded it chunk-wise; refusing to serve broken filenames`,
+				`git ls-tree output for "${branch}" contains U+FFFD — a genuinely invalid filename, or corruption in transit; refusing to serve a listing whose names may not re-open`,
 			);
 		}
 		const files = res.stdout.split("\0").filter((p) => p.length > 0);
@@ -288,7 +288,7 @@ export async function openGit(run: GitRunner, cwd: string): Promise<RepoGit> {
 		if (contentRes.stdout.includes("\uFFFD")) {
 			throw new RepoGitError(
 				"mojibake",
-				`"${branch}:${path}" arrived corrupted (U+FFFD present) — the executor decoded it chunk-wise; refusing to display mojibake`,
+				`"${branch}:${path}" contains U+FFFD — either the blob really holds the character or it was corrupted in transit; refusing to display it`,
 			);
 		}
 

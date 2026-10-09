@@ -184,7 +184,10 @@ export function resolveQuickBranch(
 		const byName = list.branches.filter((branch) => branch.name === explicit);
 		if (byName.length === 1) {
 			const entry = menu.entries.find((candidate) => candidate.refname === byName[0].refname);
-			return { choice: entry ?? { refname: byName[0].refname, label: byName[0].name }, listed: true };
+			// buildBranchMenu emits one entry per branch, so this cannot be absent;
+			// fail loudly rather than minting an unqualified label if that changes.
+			if (!entry) return { error: `internal: no menu row for branch "${byName[0].refname}"` };
+			return { choice: entry, listed: true };
 		}
 		if (byName.length > 1) {
 			const labels = byName.map((branch) => menu.entries.find((candidate) => candidate.refname === branch.refname)?.label ?? branch.refname);
@@ -210,5 +213,9 @@ export function resolveQuickBranch(
 		return { error: "no branch to browse — the repository has no commits and no branches" };
 	}
 	const entry = menu.entries.find((candidate) => candidate.refname === menu.defaultRef);
-	return { choice: entry ?? { refname: menu.defaultRef, label: menu.defaultRef }, listed: true, ...(fellBack ? { fellBack: true } : {}) };
+	// defaultRef is a listed branch's refname or the detached tip, both of which
+	// have a row; fail loudly rather than minting an unlabelled fallback if that
+	// invariant ever breaks.
+	if (!entry) return { error: `internal: no menu row for the default ref "${menu.defaultRef}"` };
+	return { choice: entry, listed: true, ...(fellBack ? { fellBack: true } : {}) };
 }
