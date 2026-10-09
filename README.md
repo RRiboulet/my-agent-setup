@@ -10,10 +10,11 @@ pi install git:github.com/RRiboulet/my-agent-setup          # for me, every proj
 pi install --local git:github.com/RRiboulet/my-agent-setup  # pin for one project only
 ```
 
-Verified on a clean agent dir and an empty project: both install the seven
-extensions and the three skills. The clean-dir check ran before `review.ts`
-was added; the seventh extension is covered by the strict-ESM load test under
-Tests.
+Verified on a clean agent dir and an empty project: both install the ten
+extensions and the six skills the `pi` manifest below lists. That check predates
+`review.ts`, `continue.ts`, `opencode-go-provider/` and `repo-explorer/`; the
+manifest is kept honest by `test/package-manifest.test.ts`, and every entry
+point by the strict-ESM load test under Tests.
 
 The one non-obvious part is that this needs the `pi` manifest in
 `package.json`. A git-sourced package is discovered either from that manifest or
@@ -27,8 +28,11 @@ each entry point explicitly:
 "pi": {
   "extensions": [
     ".pi/extensions/answer.ts",
+    ".pi/extensions/continue.ts",
     ".pi/extensions/goal.ts",
     ".pi/extensions/native-web-search.ts",
+    ".pi/extensions/opencode-go-provider/index.ts",
+    ".pi/extensions/repo-explorer/index.ts",
     ".pi/extensions/review.ts",
     ".pi/extensions/session-breakdown.ts",
     ".pi/extensions/todos.ts",
@@ -36,7 +40,10 @@ each entry point explicitly:
   ],
   "skills": [
     ".pi/skills/commit",
+    ".pi/skills/github",
+    ".pi/skills/librarian",
     ".pi/skills/native-web-search",
+    ".pi/skills/tmux",
     ".pi/skills/update-changelog"
   ]
 }
@@ -73,6 +80,7 @@ inactive. Installed packages are loaded regardless of project trust.
 | `.pi/extensions/goal.ts` | `/goal` and the `get_goal`/`create_goal`/`update_goal` tools: a long-running objective that auto-continues across turns with an optional token budget, its state appended to the session log and reconstructed on reload/tree navigation. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with two local changes — see below |
 | `.pi/extensions/session-breakdown.ts` | `/session-breakdown`: sessions, messages, tokens and cost per day over 7/30/90, model breakdown, contributions-style calendar. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with four local patches — see below |
 | `.pi/extensions/native-web-search.ts` | Native web search tool — **ours**, not upstream: it registers the `web_search` tool. Ships with `.pi/skills/native-web-search/`, which *is* vendored |
+| `.pi/extensions/repo-explorer/` | `/explore`: browse a branch's file tree with a directory-by-directory fuzzy filter and print a file into the transcript, or quick-open `/explore <path> [branch]` / `<branch>:<path>` to skip the menus. Read-only git resolved against the session cwd; the process runner, branch menu, browser, transcript renderer, display sanitizer and argument grammar are separate internals. **Ours** |
 | `.pi/extensions/opencode-go-provider/` | An `opencode-go` provider for `/model`: fast GLM, Kimi, MiniMax, Qwen, DeepSeek and Grok models via opencode.ai's Go API, with the correct wire protocol per model (Anthropic, OpenAI Completions, Responses) and a per-account usage-budget widget below the editor. **Vendored** from [monotykamary/pi-opencode-go-provider](https://github.com/monotykamary/pi-opencode-go-provider) (MIT), byte-identical to upstream — see below |
 | `.pi/skills/native-web-search/` | Script + docs for the above. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/native-web-search/`, with local provider patches: OpenRouter support, an `opencode-go` default through the Go API's Anthropic-compatible endpoint, unknown-provider rejection, and a test seam (`__test__` + direct-invocation guard). The two must travel together |
 | `.pi/skills/commit/` | Conventional Commits subjects, and the branch-per-change rule from `AGENTS.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/commit/SKILL.md`, with two local adaptations |
