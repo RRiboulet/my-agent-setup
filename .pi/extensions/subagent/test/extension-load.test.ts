@@ -27,16 +27,41 @@ const EXTENSIONS = [
 	"../../goal.ts",
 	"../../native-web-search.ts",
 	"../../opencode-go-provider/index.ts",
+	"../../repo-explorer/index.ts",
 	"../../review.ts",
 	"../../session-breakdown.ts",
 	"../../todos.ts",
 	"../index.ts",
 ] as const;
 
+// Extension tree files that are not entry points themselves but get imported
+// by one at runtime; same rationale, they must link under the real ESM
+// loader. The exports an importer will use are named, so an accidental drop
+// of one fails here instead of at wiring time.
+const MODULES: Record<string, string[]> = {
+	"../../repo-explorer/git.ts": ["openGit", "RepoGitError"],
+	"../../repo-explorer/runner.ts": ["makeGitRunner"],
+	"../../repo-explorer/branch-menu.ts": ["buildBranchMenu", "resolveBranchChoice", "chooseBranch"],
+	"../../repo-explorer/quick-open.ts": ["parseExploreArgs", "resolveQuickBranch", "normalizeRepoPath", "tokenizeArgs"],
+	"../../repo-explorer/file-browser.ts": ["FileBrowser", "listDirectory", "parentPath"],
+	"../../repo-explorer/file-transcript.ts": ["formatFileTranscript", "numberLines", "fileMessageRenderer"],
+	"../../repo-explorer/sanitize.ts": ["sanitizeDisplay", "sanitizeFileContent"],
+};
+
 for (const relative of EXTENSIONS) {
 	test(`extension ${relative} loads under strict ESM`, async () => {
 		const specifier = new URL(relative, import.meta.url).href;
 		const module = (await import(specifier)) as { default?: unknown };
 		assert.equal(typeof module.default, "function", `${relative} must export a default extension factory`);
+	});
+}
+
+for (const [relative, exports] of Object.entries(MODULES)) {
+	test(`module ${relative} loads under strict ESM`, async () => {
+		const specifier = new URL(relative, import.meta.url).href;
+		const module = (await import(specifier)) as Record<string, unknown>;
+		for (const name of exports) {
+			assert.equal(typeof module[name], "function", `${relative} must export ${name}`);
+		}
 	});
 }

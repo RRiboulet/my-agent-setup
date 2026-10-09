@@ -35,6 +35,45 @@ Added:
   Note for a session already running when this lands: the extension's code is
   loaded at start, so `web_search` keeps the old forced-provider behaviour until
   pi is reloaded.
+- **Added `/explore`, a read-only browser for the current repository's git
+  history, built for working from a phone over tmux where the working tree is on
+  a machine you cannot open an editor on.** `/explore` lists the repository's
+  branches — the detached-HEAD tip first, then locals in refname order, then
+  remote-tracking refs, the current branch marked, and a local branch named like
+  a remote-tracking ref disambiguated rather than silently shadowing it — then
+  opens a directory-by-directory browser: type to filter the current directory,
+  Enter opens a folder or finishes on a file, ⌫/← walk up, Esc filters/backs
+  out. The picked file is printed into the transcript with a numbered,
+  width-bounded body and a truncation note rather than into an ephemeral
+  overlay, so it lands in tmux scrollback and the agent reads it in the next
+  turn's context. `/explore <path>` is the quick-open: it resolves the branch
+  (explicit argument, the branch the menu last picked, else HEAD), prints a file
+  path straight to the transcript, and opens the browser at a directory path;
+  `/explore <path> <branch>` and `/explore <branch>:<path>` name the branch
+  explicitly. Nothing is checked out or written.
+
+  Two plumbing choices are load-bearing. The single process runner
+  (`repo-explorer/runner.ts`) deliberately does not use `pi.exec`: that executor
+  decodes stdout chunk-wise, so a multi-byte UTF-8 sequence straddling a 64 KiB
+  stream boundary arrives as U+FFFD (measured: two replacements per chunk versus
+  zero when stdout Buffers are accumulated and decoded once), which would make a
+  large non-ASCII file unreadable. `readFile` then refuses binary (a NUL in the
+  first 8 KB), mojibake (U+FFFD, left as a tripwire for real corruption), and
+  blobs over 16 MiB before fetching them, and clips text at 2000 lines / 256 KiB
+  with the result always an exact byte prefix of the blob. Every
+  repository-derived string that reaches the terminal goes through
+  `repo-explorer/sanitize.ts` — C0/C1 control bytes, DEL and the bidi/reordering
+  format characters become caret or `\uXXXX` notation — because a branch name or
+  a log file can otherwise wipe the screen, overwrite the clipboard, or display
+  reversed; the file's real bytes are kept in the model-facing message, and a
+  custom renderer draws the transcript copy without running it through Markdown.
+  The quick-open argument grammar and branch resolution live in a pure module and
+  are unit-tested without a terminal; an adversarial review before it shipped
+  also drove two fixes: a branch argument is remembered only after git has
+  resolved it (a typo no longer poisons every later bare `/explore <path>`), and
+  the branch menu now sanitizes its repository name and options and matches back
+  in that displayed form. v1 is browse and view; `git blame` and inter-branch
+  diff navigation are deferred.
 
 Fixed:
 
