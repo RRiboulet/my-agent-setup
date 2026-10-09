@@ -95,7 +95,13 @@ export default function (pi: ExtensionAPI) {
 				// agent.
 				const file = await git.readFile(choice.refname, picked.path);
 				const { content, details } = formatFileTranscript(file, choice.label, picked.path);
-				pi.sendMessage({ customType: FILE_MESSAGE_TYPE, content, display: true, details });
+				// triggerTurn: false is load-bearing, not tidiness. Without it,
+				// `sendCustomMessage`'s `isStreaming && options?.triggerTurn !== false`
+				// branch sees `undefined !== false` and STEERS the page into the
+				// running turn — the agent would be prompted by an act of browsing.
+				// Explicit false routes a streaming send through the deferred queue
+				// (flushed in order at turn end) and an idle one to a plain append.
+				pi.sendMessage({ customType: FILE_MESSAGE_TYPE, content, display: true, details }, { triggerTurn: false });
 			} catch (err) {
 				// Branch on kind, never on message text: git.ts's kinds
 				// (not-a-repo, unknown-branch, not-found, not-a-file, binary,

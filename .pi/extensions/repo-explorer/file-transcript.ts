@@ -3,15 +3,24 @@
 // rendering that message safely.
 //
 // Two surfaces, one string. `content` is what the model reads, so it carries the
-// file's own bytes (tabs, line endings) with line numbers and a header naming
-// the branch and path — the agent should see the file as it is. The terminal is
-// a different consumer, and `fileMessageRenderer` draws it differently: every
-// line is emitted directly (no Markdown, so a file full of ``` or `*` is not
-// reinterpreted as markup and a stray list marker cannot restructure the view),
-// truncated to the viewport width, and run through `sanitizeFileContent` first,
-// because the file may be a log holding ESC or a lone `\r`. That keeps the
-// injection class the browser's review found out of this surface too, without
-// making the model read caret notation.
+// file's own bytes (tabs and line structure) with line numbers and a header
+// naming the branch and path — the agent should see the file as it is. The
+// terminal is a different consumer, and `fileMessageRenderer` draws it
+// differently: every line is emitted directly (no Markdown, so a file full of
+// ``` or `*` is not reinterpreted as markup and a stray list marker cannot
+// restructure the view), truncated to the viewport width, and run through
+// `sanitizeFileContent` first, because the file may be a log holding ESC or a
+// lone `\r`. That keeps the injection class the browser's review found out of
+// this surface too, without making the model read caret notation.
+//
+// Two limits are recorded rather than solved. Every view appends up to a page
+// (2000 lines / 256 KiB) to the session as a user-role message, so N views
+// accumulate N pages with no total budget or dedup — compaction is the only
+// relief. And the safety of a *replayed* message depends on this renderer
+// loading: pi's CustomMessageComponent falls back to the plain Markdown
+// renderer, which neither sanitizes nor avoids reinterpreting markup, if the
+// registered renderer is missing or throws. The renderer must therefore stay
+// total (see its test).
 
 import type { MessageRenderer, Theme } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
@@ -24,9 +33,9 @@ export const FILE_MESSAGE_TYPE = "repo-explorer-file";
 export interface FileTranscriptDetails {
 	/** The branch's menu label, for the header. */
 	branch: string;
-	/** Repo-relative path, raw — the value `readFile` was given. */
+	/** Repo-relative path, raw — the value `readFile` was given, and the handle a later "re-open" or "copy path" needs. */
 	path: string;
-	/** readFile's truncation phrase, when a cap engaged. */
+	/** readFile's truncation phrase, when a cap engaged. Raw, for the record; `content` carries the sanitized copy that is actually shown. */
 	note?: string;
 	shownLines: number;
 	totalLines: number;
@@ -37,10 +46,18 @@ export interface FileTranscriptDetails {
  * Line-number the page, right-aligning to the widest number so the rule stays
  * straight. `readFile.text` is an exact prefix of the blob, so a single trailing
  * `""` is the blob's own terminator rather than a line of its own.
+ *
+ * CRLF is normalized before splitting, which is not cosmetic: the terminator
+ * pop consumes the `\n` of a final `\r\n`, and the orphaned `\r` would then
+ * survive the renderer's `\r\n` normalization and show as a `^M` on the last
+ * line of every Windows-authored file. Doing it here (rather than only in the
+ * renderer) keeps `numberLines` correct on its own; the model-facing `content`
+ * consequently carries LF endings, a fidelity concession this display rule is
+ * worth.
  */
 export function numberLines(text: string): string {
-	const lines = text.length > 0 ? text.split("\n") : [];
-	if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+	const lines = text.replace(/\r\n/g, "\n").split("\n");
+	if (lines[lines.length - 1] === "") lines.pop();
 	const width = String(lines.length).length;
 	return lines.map((line, index) => `${String(index + 1).padStart(width)} │ ${line}`).join("\n");
 }

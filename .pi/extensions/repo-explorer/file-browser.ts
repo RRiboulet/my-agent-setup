@@ -48,6 +48,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
+
 import { sanitizeDisplay } from "./sanitize.ts";
 /** One row of a directory listing: a file, or a directory synthesized from path prefixes. */
 export interface BrowserEntry {

@@ -292,14 +292,14 @@ test("a git failure listing branches propagates for the handler to report", asyn
  */
 async function loadExplore(): Promise<{
 	handler: (args: string, ctx: Record<string, unknown>) => Promise<void>;
-	sent: { customType: string; content: string; display: boolean; details: unknown }[];
+	sent: { customType: string; content: string; display: boolean; details: unknown; options: unknown }[];
 	renderers: string[];
 }> {
 	const module = (await import("../../repo-explorer/index.ts")) as {
 		default: (pi: Record<string, unknown>) => void;
 	};
 	const registered: Record<string, { handler: (args: string, ctx: Record<string, unknown>) => Promise<void> }> = {};
-	const sent: { customType: string; content: string; display: boolean; details: unknown }[] = [];
+	const sent: { customType: string; content: string; display: boolean; details: unknown; options: unknown }[] = [];
 	const renderers: string[] = [];
 	module.default({
 		registerCommand: (name: string, options: { handler: (args: string, ctx: Record<string, unknown>) => Promise<void> }) => {
@@ -308,8 +308,8 @@ async function loadExplore(): Promise<{
 		registerMessageRenderer: (customType: string) => {
 			renderers.push(customType);
 		},
-		sendMessage: (message: { customType: string; content: string; display: boolean; details: unknown }) => {
-			sent.push(message);
+		sendMessage: (message: { customType: string; content: string; display: boolean; details: unknown }, options: unknown) => {
+			sent.push({ ...message, options });
 		},
 	});
 	const handler = registered.explore?.handler;
@@ -397,6 +397,11 @@ test("/explore prints the picked file into the transcript", async () => {
 	const message = sent[0];
 	assert.equal(message.customType, "repo-explorer-file");
 	assert.equal(message.display, true, "the message is shown in the transcript");
+	assert.deepEqual(
+		message.options,
+		{ triggerTurn: false },
+		"without triggerTurn:false, a streaming send would steer the page into the running turn",
+	);
 	assert.match(message.content, /^Explore feature › note\.txt/);
 	assert.match(message.content, /1 │ feature note/, "the file body is numbered");
 	assert.deepEqual(message.details, {

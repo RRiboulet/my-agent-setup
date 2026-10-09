@@ -59,6 +59,18 @@ test("sanitizeDisplay makes control bytes inert and leaves real text alone", () 
 	assert.equal(sanitizeDisplay("café-🔥.md"), "café-🔥.md", "legitimate non-ASCII is not touched");
 });
 
+test("bidi and format controls are notated, but shaping characters are left alone", () => {
+	// The reordering class: invisible, zero-width, and able to display a line
+	// reversed while its bytes say something else.
+	assert.equal(sanitizeDisplay("a\u202eb"), "a\\u202eb");
+	assert.equal(sanitizeFileContent("x\u202e\u2066y\u2069"), "x\\u202e\\u2066y\\u2069");
+	assert.equal(sanitizeDisplay("\u200f\u061c\ufeff"), "\\u200f\\u061c\\ufeff");
+	// ZWJ/ZWNJ/ZWSP shape legitimate text (emoji sequences, Indic scripts) and
+	// cannot reorder anything, so they stay.
+	assert.equal(sanitizeFileContent("👩\u200d💻"), "👩\u200d💻");
+	assert.equal(sanitizeFileContent("a\u200bb"), "a\u200bb");
+});
+
 test("sanitizeFileContent keeps tab and newline, normalizes CRLF, notates the rest", () => {
 	assert.equal(sanitizeFileContent("a\tb"), "a\tb", "a tab is the file's own formatting");
 	assert.equal(sanitizeFileContent("a\nb"), "a\nb");
@@ -75,6 +87,15 @@ test("line numbers are right-aligned and survive a missing terminator", () => {
 	assert.equal(numberLines("a\nb\nc\n"), "1 │ a\n2 │ b\n3 │ c");
 	assert.equal(numberLines("a\nb\nc"), "1 │ a\n2 │ b\n3 │ c", "the numbering does not depend on a trailing newline");
 	assert.equal(numberLines("only"), "1 │ only");
+});
+
+test("CRLF is normalized before numbering, so no ^M is orphaned onto the last line", () => {
+	// The terminator pop eats the final "\n", which would leave the last "\r"
+	// unmatched by the renderer's CRLF normalization — a ^M on every
+	// Windows-authored file's last line.
+	assert.equal(numberLines("a\r\nb\r\n"), "1 │ a\n2 │ b");
+	assert.equal(numberLines("a\r\nb"), "1 │ a\n2 │ b", "an unterminated CRLF file is clean too");
+	assert.equal(numberLines("a\r\nb\r\n").includes("\r"), false);
 });
 
 test("the number column widens with the line count", () => {
@@ -183,9 +204,61 @@ test("tabs survive rendering and every line is bounded by the width", () => {
 	assert.match(renderMessage(content, {}, 20)[3] as string, /…/, "a long line ends in an ellipsis, not an overflow");
 });
 
-test("an empty or non-string content does not throw", () => {
-	assert.doesNotThrow(() => renderMessage("", {}, 40));
-	assert.doesNotThrow(() =>
-		fileMessageRenderer({ content: [], customType: FILE_MESSAGE_TYPE, display: true } as never, { expanded: false, outputPad: 1 } as never, mark),
+test("a CRLF file renders without a stray ^M — the composition, not the sanitizer alone", () => {
+	// The unit tests above exercise `sanitizeFileContent` on already-paired CRLF;
+	// this drives the real path (`read.text` → `numberLines` → renderer), which is
+	// where the orphaned final `\r` lived.
+	const { content } = formatFileTranscript(
+		read({ text: "a\r\nb\r\n", totalLines: 2, shownLines: 2, sizeBytes: 6 }),
+		"main",
+		"crlf.txt",
 	);
+	assert.equal(content.includes("\r"), false);
+	const lines = renderMessage(content, {}, 80);
+	assert.equal(lines[2], "1 │ a");
+	assert.equal(lines[3], "2 │ b");
+	assert.equal(lines.join("\n").includes("^M"), false);
+});
+
+test("a bidi control in a file body is inert on screen", () => {
+	const content = "Explore main › log.txt\n\n1 │ a\u202eb";
+	const lines = renderMessage(content, {}, 80);
+	assert.equal(lines[2], "1 │ a\\u202eb");
+	assert.ok(!lines.join("\n").includes("\u202e"), "the raw reordering byte never reaches the terminal");
+});
+
+test("degenerate widths are bounded and do not throw", () => {
+	const content = `Explore main › x\n\n1 │ ${"y".repeat(50)}`;
+	for (const width of [0, 1, 2, 3]) {
+		const lines = renderMessage(content, {}, width);
+		for (const line of lines) {
+			assert.ok(visibleWidth(line) <= width, `width ${width}: ${JSON.stringify(line)} is ${visibleWidth(line)} cells`);
+		}
+	}
+});
+
+test("a hostile body stays inert even when the line is truncated", () => {
+	const content = `Explore main › log.txt\n\n1 │ \u001b[2J${"z".repeat(40)}`;
+	const lines = renderMessage(content, {}, 12);
+	// truncateToWidth legitimately appends its own style resets; strip those and
+	// require the rest to be free of the attacker's bytes.
+	const cleaned = lines.join("\n").replace(/\u001b\[(?:0|7|27)m/g, "");
+	assert.equal(cleaned.includes("\u001b"), false, "no raw escape survives truncation");
+	assert.equal(cleaned.includes("^[[2J"), true, "the escape is shown, not hidden");
+});
+
+test("the renderer is total: no exotic content makes it throw or return falsy", () => {
+	// pi's CustomMessageComponent falls back to the plain (unsanitized) Markdown
+	// renderer when this renderer throws or returns undefined, so staying total
+	// is a safety property, not tidiness.
+	const cases: unknown[] = ["", [], 42, { toString: () => { throw new Error("boom"); } }, null, undefined];
+	for (const [index, content] of cases.entries()) {
+		const component = fileMessageRenderer(
+			{ content, customType: FILE_MESSAGE_TYPE, display: true } as never,
+			{ expanded: false, outputPad: 1 } as never,
+			mark,
+		);
+		assert.ok(component, `case ${index} must still yield a component`);
+		assert.doesNotThrow(() => component.render(40));
+	}
 });
