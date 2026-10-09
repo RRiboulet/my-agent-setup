@@ -74,7 +74,14 @@ export interface GitBranch {
 
 export interface BranchList {
 	branches: GitBranch[];
-	/** Name of the branch HEAD points at; absent when detached or unresolved. */
+	/**
+	 * What HEAD points at, when the flow can name it: the short name of a local
+	 * branch ("main"), or the full refname when HEAD is aimed at a listed
+	 * non-local ref. (A symref to refs/remotes/... is unusual but legal — git
+	 * accepts it and `for-each-ref` flags that ref as current, so the menu marks
+	 * it and defaultRef points at it.) Absent when HEAD is detached, unborn, or
+	 * aimed at a ref outside the listing.
+	 */
 	current?: string;
 	/** Tip sha when HEAD is detached; the branch arg for listFiles too. */
 	detachedTip?: string;
@@ -184,7 +191,9 @@ export async function openGit(run: GitRunner, cwd: string): Promise<RepoGit> {
 			// form of refs/heads/HEAD is "heads/HEAD" (its own disambiguation),
 			// which is not the branch's name. The existence check keeps an unborn
 			// HEAD (fresh `git init`, which does symref refs/heads/main before
-			// any commit exists) from reporting a branch that is not there.
+			// any commit exists) from reporting a branch that is not there, and a
+			// target outside the listing (a deliberate symref to refs/stash)
+			// leaves both fields unset rather than inventing a detached tip.
 			list.current = full.startsWith("refs/heads/") ? full.slice("refs/heads/".length) : full;
 		} else if (!full) {
 			// Detached (or HEAD unreadable): no branch to flag; hand the flow the
