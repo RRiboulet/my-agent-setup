@@ -23,9 +23,10 @@ import { test } from "node:test";
 import { getKeybindings, visibleWidth } from "@earendil-works/pi-tui";
 
 import {
-	createFileBrowser,
+	FileBrowser,
 	listDirectory,
 	parentPath,
+	sanitizeDisplay,
 	type FileBrowserResult,
 } from "../../repo-explorer/file-browser.ts";
 
@@ -53,7 +54,7 @@ const FILES = [
 
 function browser(files: string[] = FILES, initialDir?: string) {
 	const results: FileBrowserResult[] = [];
-	const component = createFileBrowser(tui, theme, keybindings, { branchLabel: "main", files, initialDir }, (result) =>
+	const component = new FileBrowser(tui, theme, keybindings, { branchLabel: "main", files, initialDir }, (result) =>
 		results.push(result),
 	);
 	return { component, results, render: (width = 80): string => component.render(width).join("\n") };
@@ -232,6 +233,80 @@ test("the component is focusable, so the filter's cursor can be placed", () => {
 	assert.equal(component.focused, true);
 	component.focused = false;
 	assert.equal(component.focused, false);
+});
+
+// ---------------------------------------------------------------------------
+// Hostile names: the display boundary
+// ---------------------------------------------------------------------------
+
+// Legal git path names may contain any byte except NUL and `/`. These are the
+// injections an attacker-pushed branch can carry.
+const HOSTILE_FILES = [
+	"\u0007bel.txt",
+	"\u001b[2Jclearme.txt",
+	"\u001b]0;pwned\u0007title.txt",
+	"\u001b]52;c;Q09ERTA\u0007clipboard.txt",
+	"line1\nline2.txt",
+	"escape-tail\u001b.txt",
+	"café-🔥.md",
+];
+
+test("sanitizeDisplay makes control bytes inert and leaves real text alone", () => {
+	assert.equal(sanitizeDisplay("\u001b[2J"), "^[[2J");
+	assert.equal(sanitizeDisplay("a\u0007b"), "a^Gb");
+	assert.equal(sanitizeDisplay("l1\nl2"), "l1^Jl2");
+	assert.equal(sanitizeDisplay("del\u007f"), "del^?");
+	assert.equal(sanitizeDisplay("c1\u0085x"), "c1\\u0085x");
+	assert.equal(sanitizeDisplay("café-🔥.md"), "café-🔥.md", "legitimate non-ASCII is not touched");
+});
+
+test("no rendered line carries a control byte, even for a hostile listing", () => {
+	const { component } = browser(HOSTILE_FILES);
+	for (const width of [20, 80]) {
+		for (const line of component.render(width)) {
+			// pi's Input draws its placeholder with reverse-video CSI, and
+			// SelectList/truncateToWidth append a style reset after a truncated
+			// row; those are the only trusted escapes in these lines, so strip
+			// them and require the rest to be free of control bytes. The raw
+			// attacker bytes are not in that allowlist, so removing the
+			// sanitizer makes this fail. `visibleWidth` cannot see the class at
+			// all (it prices C0 bytes at zero), which is why the assertion is on
+			// the raw bytes.
+			const cleaned = line.replace(/\u001b\[(?:0|7|27)m/g, "");
+			assert.doesNotMatch(cleaned, /[\u0000-\u001f\u007f-\u009f]/, `width ${width}: ${JSON.stringify(line)}`);
+		}
+	}
+});
+
+test("a hostile directory name is sanitized in the breadcrumb too", () => {
+	const { component, render } = browser(["evil\u001b[2Jdir/file.txt"]);
+	component.handleInput(ENTER); // the only entry, so it is selected: drill in
+	const view = render(60);
+	assert.match(view, /evil\^\[\[2Jdir/);
+	assert.ok(!view.includes("evil\u001b[2Jdir"), "the raw name never reaches the terminal");
+});
+
+test("the byte-faithful path is what a selection resolves to", () => {
+	const hostile = "weird\u001b[31m.txt";
+	const { component, results } = browser([hostile]);
+	component.handleInput(ENTER);
+	assert.deepEqual(results, [{ path: hostile }], "sanitization is display-only, not a rewrite of the path");
+});
+
+test("rendering survives degenerate widths without exceeding them", () => {
+	// pi's own components set the floor: SelectList always emits a 2-cell "→ "
+	// prefix and DynamicBorder a 1-cell rule, so 0–1 columns is out of scope for
+	// any pi screen. 2 is the narrowest width the browser has to survive, and at
+	// it the header/hint (which the fix made width-aware) must not exceed.
+	const { component } = browser(HOSTILE_FILES, "docs");
+	for (const width of [2, 3, 4, 5]) {
+		for (const line of component.render(width)) {
+			assert.ok(
+				visibleWidth(line) <= width,
+				`width ${width}: ${JSON.stringify(line)} is ${visibleWidth(line)} cells`,
+			);
+		}
+	}
 });
 
 test("Ctrl+C takes Esc's path: up from a subdirectory, cancel at the root", () => {

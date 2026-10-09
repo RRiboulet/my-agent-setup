@@ -48,7 +48,6 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@earendil-works/pi-tui";
-
 /** One row of a directory listing: a file, or a directory synthesized from path prefixes. */
 export interface BrowserEntry {
 	/** Basename, as it should be shown (folders get a trailing "/" in the list, not here). */
@@ -113,19 +112,56 @@ export function parentPath(dir: string): string {
 }
 
 /**
+ * Make an untrusted string safe to put in front of a terminal.
+ *
+ * Git path names may contain any byte except NUL and `/`, so a branch anyone
+ * can push can carry a filename holding ESC, BEL, a lone LF, an OSC 52, or a
+ * C1 control — and pi-tui's `truncateToWidth` deliberately passes recognized
+ * escape sequences through and prices C0 bytes at zero width, so none of them
+ * is visible to `visibleWidth` and a width assertion cannot catch them. Left
+ * raw they reach the terminal on every render: a screen wipe, a clipboard
+ * overwrite (OSC 52), a window-title set, or a stray byte that desynchronizes
+ * pi's differential render bookkeeping.
+ *
+ * The bytes are shown in caret notation rather than deleted, so a hostile name
+ * is still readable (and selectable) while being inert. Display only: the
+ * entry's `path` stays byte-faithful, because `activate` resolves git
+ * operations from it and `readFile` must get the real path.
+ */
+export function sanitizeDisplay(text: string): string {
+	let safe = "";
+	for (const character of text) {
+		const code = character.codePointAt(0) ?? 0;
+		if (code === 0x7f) safe += "^?";
+		else if (code < 0x20) safe += `^${String.fromCharCode(code + 64)}`;
+		else if (code >= 0x80 && code <= 0x9f) safe += `\\u${code.toString(16).padStart(4, "0")}`;
+		else safe += character;
+	}
+	return safe;
+}
+
+/**
  * A single-line, width-exact, themed line that re-reads its text every render.
  *
  * pi's `TruncatedText` is the nearest built-in, but it is immutable and this
  * line changes with the directory and the theme, so the getter form is both
  * shorter and immune to stale colour strings after a theme change (tui.md's
  * "stateless components" guidance).
+ *
+ * The width arithmetic below is not cosmetic: pi-tui throws (and writes a crash
+ * log) when a rendered line is wider than the viewport, so a degenerate resize
+ * to 0–2 columns has to yield a short line, not a 3-cell one. The side padding
+ * is clamped to the width first and the result truncated again after, which is
+ * what keeps the invariant at every width rather than only at ≥3.
  */
 function singleLine(get: () => string, paddingX = 1): Component {
 	return {
 		render: (width: number): string[] => {
-			const available = Math.max(1, width - paddingX * 2);
-			const line = `${" ".repeat(paddingX)}${truncateToWidth(get(), available)}${" ".repeat(paddingX)}`;
-			return [line + " ".repeat(Math.max(0, width - visibleWidth(line)))];
+			const spacing = " ".repeat(Math.max(0, Math.min(paddingX, width)));
+			const available = Math.max(0, width - visibleWidth(spacing) * 2);
+			const line = spacing + truncateToWidth(get(), available) + spacing;
+			const bounded = visibleWidth(line) > width ? truncateToWidth(line, Math.max(0, width)) : line;
+			return [bounded + " ".repeat(Math.max(0, width - visibleWidth(bounded)))];
 		},
 		invalidate: () => undefined,
 	};
@@ -146,6 +182,8 @@ export class FileBrowser extends Container implements Focusable {
 	/** The current directory's full listing; `activate` resolves a selected path against it. */
 	private entries: BrowserEntry[] = [];
 	private list: SelectList | undefined;
+	/** The dir `entries` was computed for; `files` is immutable, so this is the only invalidation key. */
+	private listingDir: string | undefined;
 	private closed = false;
 	private _focused = false;
 
@@ -193,11 +231,13 @@ export class FileBrowser extends Container implements Focusable {
 	}
 
 	private headerLine(): string {
-		return this.theme.fg("accent", this.theme.bold(`Explore ${this.branchLabel} › ${this.dir || "."}`));
+		return this.theme.fg("accent", this.theme.bold(`Explore ${sanitizeDisplay(this.branchLabel)} › ${sanitizeDisplay(this.dir || ".")}`));
 	}
 
 	private emptyMessage(): string {
-		return this.entries.length === 0 ? "(empty directory)" : `no match for "${this.query.getValue()}"`;
+		return this.entries.length === 0
+			? "(empty directory)"
+			: `no match for "${sanitizeDisplay(this.query.getValue())}"`;
 	}
 
 	/** The list theme, as closures over `this.theme`, so a theme change is picked up on the next render. */
@@ -213,7 +253,14 @@ export class FileBrowser extends Container implements Focusable {
 
 	/** Recompute the listing for the current directory and filter, and swap the list child. */
 	private rebuild(): void {
-		this.entries = listDirectory(this.files, this.dir);
+		// `files` never changes for one browser, so the directory listing is worth
+		// keeping until the directory does: without this the whole flat list is
+		// rescanned on every filter keystroke (measurably tens of ms on a repo
+		// with hundreds of thousands of paths).
+		if (this.listingDir !== this.dir) {
+			this.entries = listDirectory(this.files, this.dir);
+			this.listingDir = this.dir;
+		}
 		const query = this.query.getValue();
 		const shown = query.length > 0 ? fuzzyFilter(this.entries, query, (entry) => entry.name) : this.entries;
 
@@ -224,8 +271,9 @@ export class FileBrowser extends Container implements Focusable {
 			return;
 		}
 		const items: SelectItem[] = shown.map((entry) => ({
+			// Display is sanitized; `value` stays the byte-faithful path.
 			value: entry.path,
-			label: entry.isDir ? `${entry.name}/` : entry.name,
+			label: sanitizeDisplay(entry.isDir ? `${entry.name}/` : entry.name),
 		}));
 		const list = new SelectList(items, Math.min(items.length, MAX_VISIBLE), this.selectTheme());
 		list.onSelect = (item) => this.activate(item.value);
@@ -251,27 +299,25 @@ export class FileBrowser extends Container implements Focusable {
 
 	/** Esc / Ctrl+C: drop the filter, then walk up, then cancel. */
 	private back(): void {
-		if (this.clearFilter()) return;
-		if (this.walkUp()) return;
+		if (this.query.getValue().length > 0) {
+			this.query.setValue("");
+			this.rebuild();
+			this.tui.requestRender();
+			return;
+		}
+		if (this.dir !== "") {
+			this.walkUp();
+			return;
+		}
 		this.finish(null);
 	}
 
-	/** Clear a non-empty filter; returns whether there was one. */
-	private clearFilter(): boolean {
-		if (this.query.getValue().length === 0) return false;
-		this.query.setValue("");
-		this.rebuild();
-		this.tui.requestRender();
-		return true;
-	}
-
-	/** Move to the parent directory; false at the root, where there is none. */
-	private walkUp(): boolean {
-		if (this.dir === "") return false;
+	/** Move to the parent directory; a no-op at the root, where there is none. */
+	private walkUp(): void {
+		if (this.dir === "") return;
 		this.dir = parentPath(this.dir);
 		this.rebuild();
 		this.tui.requestRender();
-		return true;
 	}
 
 	private finish(result: FileBrowserResult): void {
@@ -308,15 +354,4 @@ export class FileBrowser extends Container implements Focusable {
 		this.rebuild();
 		this.tui.requestRender();
 	}
-}
-
-/** Build the browser for a `ctx.ui.custom` factory. */
-export function createFileBrowser(
-	tui: TUI,
-	theme: Theme,
-	keybindings: KeyMatcher,
-	options: FileBrowserOptions,
-	done: (result: FileBrowserResult) => void,
-): FileBrowser {
-	return new FileBrowser(tui, theme, keybindings, options, done);
 }

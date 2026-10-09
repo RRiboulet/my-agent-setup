@@ -28,7 +28,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { chooseBranch, type ExploreBranchState } from "./branch-menu.ts";
-import { createFileBrowser, type FileBrowserResult } from "./file-browser.ts";
+import { FileBrowser, sanitizeDisplay, type FileBrowserResult } from "./file-browser.ts";
 import { openGit, RepoGitError } from "./git.ts";
 import { makeGitRunner } from "./runner.ts";
 
@@ -72,13 +72,15 @@ export default function (pi: ExtensionAPI) {
 				// acceptable for v1, and the one place to add a loader if it bites.
 				const files = await git.listFiles(choice.refname);
 				const picked = await ctx.ui.custom<FileBrowserResult>((tui, theme, keybindings, done) =>
-					createFileBrowser(tui, theme, keybindings, { branchLabel: choice.label, files }, done),
+					new FileBrowser(tui, theme, keybindings, { branchLabel: choice.label, files }, done),
 				);
 				if (!picked) return;
 
 				// TODO(repo-explorer): print the picked file into the transcript
-				// (TODO-a4e734e5) instead of naming it here.
-				ctx.ui.notify(`repo-explorer: ${picked.path} selected — printing it is the next step`, "info");
+				// (TODO-a4e734e5) instead of naming it here. The path is sanitized for
+				// display — a git path may carry control bytes — while the raw path
+				// is what the print step must pass to readFile.
+				ctx.ui.notify(`repo-explorer: ${sanitizeDisplay(picked.path)} selected — printing it is the next step`, "info");
 			} catch (err) {
 				// Branch on kind, never on message text: git.ts's kinds
 				// (not-a-repo, unknown-branch, not-found, not-a-file, binary,

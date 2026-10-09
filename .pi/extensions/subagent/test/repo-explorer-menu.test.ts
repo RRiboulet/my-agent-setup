@@ -379,6 +379,18 @@ test("/explore reports the file the browser picked", async () => {
 	assert.deepEqual(notes, ["info: repo-explorer: README.md selected — printing it is the next step"]);
 });
 
+test("/explore sanitizes a control-byte path before it reaches the notify", async () => {
+	const handler = await loadExploreHandler();
+	const { ctx, notes, answerWith, pickInBrowser } = makeCtx(menuRoot);
+	answerWith("main (current)");
+	pickInBrowser({ path: "evil\u001b[2J.txt" });
+
+	await handler("", ctx);
+
+	assert.deepEqual(notes, ["info: repo-explorer: evil^[[2J.txt selected — printing it is the next step"]);
+	assert.ok(!notes[0].includes("\u001b"), "no raw escape reaches the notification");
+});
+
 test("/explore with arguments warns about the missing quick-open and still opens the menu", async () => {
 	const handler = await loadExploreHandler();
 	const { ctx, notes, answerWith } = makeCtx(menuRoot);

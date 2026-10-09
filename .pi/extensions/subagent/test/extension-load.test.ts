@@ -42,7 +42,7 @@ const MODULES: Record<string, string[]> = {
 	"../../repo-explorer/git.ts": ["openGit", "RepoGitError"],
 	"../../repo-explorer/runner.ts": ["makeGitRunner"],
 	"../../repo-explorer/branch-menu.ts": ["buildBranchMenu", "resolveBranchChoice", "chooseBranch"],
-	"../../repo-explorer/file-browser.ts": ["createFileBrowser", "listDirectory", "parentPath"],
+	"../../repo-explorer/file-browser.ts": ["FileBrowser", "listDirectory", "parentPath", "sanitizeDisplay"],
 };
 
 for (const relative of EXTENSIONS) {
