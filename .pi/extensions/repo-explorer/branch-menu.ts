@@ -22,6 +22,7 @@
 
 import { basename } from "node:path";
 import type { BranchList, RepoGit } from "./git.ts";
+import { sanitizeDisplay } from "./sanitize.ts";
 
 /** The branch the user picked: the argument listFiles/readFile take, plus the label their title reuses. */
 export interface BranchChoice {
@@ -132,7 +133,13 @@ export function buildBranchMenu(list: BranchList): BranchMenu {
 /** Map a ctx.ui.select result back to its row. Undefined (cancelled) and an unrecognized label both yield undefined. */
 export function resolveBranchChoice(menu: BranchMenu, choice: string | undefined): BranchChoice | undefined {
 	if (choice === undefined) return undefined;
-	return menu.entries.find((entry) => entry.label === choice);
+	// The options are sanitized for display (see chooseBranch), so the answer is
+	// matched in the same form. For valid UTF-8 this is injective — C0/DEL, `\`,
+	// `^` and space are forbidden in a refname, so the caret/`\uXXXX` notations
+	// cannot be spelled literally. Refnames with invalid UTF-8 can still collapse
+	// at listBranches' decode (pre-existing), leaving two indistinguishable rows;
+	// that is not a wrong-tree read, because tipOf then refuses both.
+	return menu.entries.find((entry) => sanitizeDisplay(entry.label) === choice);
 }
 
 /** Record the pick so later steps reuse it, and hand it back. */
@@ -156,13 +163,18 @@ function remember(state: ExploreBranchState, choice: BranchChoice): BranchChoice
  */
 export async function chooseBranch(git: RepoGit, ui: BranchMenuUI, state: ExploreBranchState): Promise<BranchChoice | undefined> {
 	const menu = buildBranchMenu(await git.listBranches());
+	// The repository name comes from the filesystem and the labels from refnames;
+	// either can carry control or bidi bytes, so they cross the display boundary
+	// here, where they become pixels. The raw labels stay in `menu`, and
+	// resolveBranchChoice matches in the same sanitized form.
+	const repoName = sanitizeDisplay(basename(git.root) || git.root);
 	if (menu.entries.length === 0) {
-		ui.notify(`repo-explorer: no branches to browse in ${basename(git.root) || git.root}`, "warning");
+		ui.notify(`repo-explorer: no branches to browse in ${repoName}`, "warning");
 		return undefined;
 	}
 	if (menu.entries.length === 1) return remember(state, menu.entries[0]);
 
-	const choice = await ui.select(`Explore ${basename(git.root) || git.root} — pick a branch`, menu.entries.map((entry) => entry.label));
+	const choice = await ui.select(`Explore ${repoName} — pick a branch`, menu.entries.map((entry) => sanitizeDisplay(entry.label)));
 	const picked = resolveBranchChoice(menu, choice);
 	if (!picked) {
 		ui.notify("repo-explorer: no branch selected", "info");

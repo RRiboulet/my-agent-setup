@@ -11,9 +11,9 @@
 //   /explore <branch>:<path>   — git's own rev spelling, branch first
 // A path that names a blob prints directly; a path that names a tree opens the
 // fuzzy browser at that directory; a bad path is refused (`not-found` for a
-// missing one, `not-a-file` for a gitlink the browser cannot enter). That split
-// is why the browser can stay a small navigator (see file-browser.ts's header):
-// deep files never need it.
+// missing path or a gitlink, `not-a-file` for anything else the browser cannot
+// enter). That split is why the browser can stay a small navigator (see
+// file-browser.ts's header): deep files never need it.
 //
 // Two deliberate readings of the todo, both recorded because a refresh should
 // not silently reverse them:
@@ -29,12 +29,14 @@
 //
 // Everything here is pure over `args` / a `BranchList` / the remembered state,
 // so the grammar and the refname rule are unit-testable without a terminal or a
-// repository. The one git call the handler adds on top is `listBranches`, for
-// the explicit-branch match; a tag or sha that matches no listed branch falls
-// through to `tipOf` in git.ts, which is what raises `unknown-branch`.
+// repository. The git call the handler adds on top is `listBranches`, both to
+// match an explicit branch and to re-validate the remembered pick; a tag or sha
+// that matches no listed branch falls through to `tipOf` in git.ts, which is
+// what raises `unknown-branch`.
 
 import { buildBranchMenu, type BranchChoice, type ExploreBranchState } from "./branch-menu.ts";
 import type { BranchList } from "./git.ts";
+import { sanitizeDisplay } from "./sanitize.ts";
 
 /** Everything `/explore` arguments can ask for. `path` is undefined only when no path was given; an empty string is the repository root. */
 export interface ExploreArgs {
@@ -98,11 +100,20 @@ export function tokenizeArgs(value: string): string[] {
  * function's.
  */
 export function normalizeRepoPath(raw: string): string {
-	let path = raw;
-	while (path.startsWith("./")) path = path.slice(2);
-	path = path.replace(/\/{2,}/g, "/");
-	if (path.length > 1 && path.endsWith("/")) path = path.slice(0, -1);
-	return path === "." ? "" : path;
+	// Split and rejoin so empty segments ("a//b") and "." components ("a/./b")
+	// fold away together; git rejects "." as a tree path, so a file that exists
+	// must not be reported missing because of how it was spelled. ".." segments
+	// are left for git to refuse. A leading "/" is preserved so the caller can
+	// reject an absolute path rather than silently treating it as relative.
+	const segments = raw.split("/").filter((segment) => segment.length > 0 && segment !== ".");
+	return raw.startsWith("/") ? `/${segments.join("/")}` : segments.join("/");
+}
+
+/** Normalize a path token and reject the one form that cannot be repo-relative. */
+function pathArg(raw: string): ExploreArgs {
+	const path = normalizeRepoPath(raw);
+	if (path.startsWith("/")) return { error: `absolute paths are not supported: "${path}"` };
+	return { path };
 }
 
 /** Interpret the raw argument string. */
@@ -122,19 +133,16 @@ export function parseExploreArgs(args: string | undefined): ExploreArgs {
 		// always be written unambiguously as the first of two tokens.
 		const colon = token.indexOf(":");
 		if (colon > 0) {
-			const branch = token.slice(0, colon);
-			const path = normalizeRepoPath(token.slice(colon + 1));
-			if (path.startsWith("/")) return { error: `absolute paths are not supported: "${path}"` };
-			return { path, branch };
+			const path = pathArg(token.slice(colon + 1));
+			if (path.error) return path;
+			return { path: path.path, branch: token.slice(0, colon) };
 		}
-		const path = normalizeRepoPath(token);
-		if (path.startsWith("/")) return { error: `absolute paths are not supported: "${path}"` };
-		return { path };
+		return pathArg(token);
 	}
 
-	const path = normalizeRepoPath(tokens[0]);
-	if (path.startsWith("/")) return { error: `absolute paths are not supported: "${path}"` };
-	return { path, branch: tokens[1] };
+	const path = pathArg(tokens[0]);
+	if (path.error) return path;
+	return { path: path.path, branch: tokens[1] };
 }
 
 /**
@@ -146,40 +154,61 @@ export function parseExploreArgs(args: string | undefined): ExploreArgs {
  * both a local branch and a remote-tracking ref is refused rather than guessed —
  * that is the `origin/main` collision branch-menu.ts exists to make visible, and
  * picking the wrong side here would silently read the wrong tree. An argument
- * that matches nothing is handed back raw: it may be a tag or a sha, and
- * git.ts's `tipOf` is what knows whether that resolves.
+ * that matches nothing is handed back raw (`listed: false`): it may be a tag or
+ * a sha, and git.ts's `tipOf` is what knows whether that resolves.
+ *
+ * The result flags that ride alongside the choice let the handler act without
+ * re-deriving them:
+ *  - `listed` is true when the choice is a ref the listing carries (a branch or
+ *    the detached tip). The handler remembers the branch only then, so a
+ *    one-off tag/sha read does not become the "last branch".
+ *  - `fellBack` is true when a remembered ref was not in the fresh listing and
+ *    the default was substituted, so the handler can announce the switch.
  */
 export function resolveQuickBranch(
 	list: BranchList,
 	last: ExploreBranchState,
 	explicit?: string,
-): { choice?: BranchChoice; error?: string } {
+): { choice?: BranchChoice; error?: string; listed?: boolean; fellBack?: boolean } {
 	const menu = buildBranchMenu(list);
 
 	if (explicit) {
 		const byRefname = menu.entries.find((entry) => entry.refname === explicit);
-		if (byRefname) return { choice: byRefname };
+		if (byRefname) return { choice: byRefname, listed: true };
 
-		const byLabel = menu.entries.find((entry) => entry.label === explicit);
-		if (byLabel) return { choice: byLabel };
+		// Compared in display form: the menu offers `sanitizeDisplay(entry.label)`,
+		// so a user pasting a label the menu showed must match here too.
+		const byLabel = menu.entries.find((entry) => sanitizeDisplay(entry.label) === explicit);
+		if (byLabel) return { choice: byLabel, listed: true };
 
 		const byName = list.branches.filter((branch) => branch.name === explicit);
 		if (byName.length === 1) {
 			const entry = menu.entries.find((candidate) => candidate.refname === byName[0].refname);
-			return { choice: entry ?? { refname: byName[0].refname, label: byName[0].name } };
+			return { choice: entry ?? { refname: byName[0].refname, label: byName[0].name }, listed: true };
 		}
 		if (byName.length > 1) {
 			const labels = byName.map((branch) => menu.entries.find((candidate) => candidate.refname === branch.refname)?.label ?? branch.refname);
 			return { error: `branch "${explicit}" is ambiguous (matches ${labels.join(", ")}) — use the full refname` };
 		}
-		return { choice: { refname: explicit, label: explicit } };
+		return { choice: { refname: explicit, label: explicit }, listed: false };
 	}
 
-	if (last.refname) return { choice: { refname: last.refname, label: last.label ?? last.refname } };
+	let fellBack = false;
+	if (last.refname) {
+		// Re-check the remembered pick against the fresh listing: a branch deleted
+		// since it was picked must fall back to the default rather than become a
+		// sticky failure. A listed ref returns its fresh entry, so the label carries
+		// the current `(current)` marker and collision qualification rather than a
+		// stale copy. A remembered tag/sha is not in the listing (it is never
+		// remembered now, but state could be older) and falls back too.
+		const remembered = menu.entries.find((candidate) => candidate.refname === last.refname);
+		if (remembered) return { choice: remembered, listed: true };
+		fellBack = true;
+	}
 
 	if (!menu.defaultRef) {
 		return { error: "no branch to browse — the repository has no commits and no branches" };
 	}
 	const entry = menu.entries.find((candidate) => candidate.refname === menu.defaultRef);
-	return { choice: entry ?? { refname: menu.defaultRef, label: menu.defaultRef } };
+	return { choice: entry ?? { refname: menu.defaultRef, label: menu.defaultRef }, listed: true, ...(fellBack ? { fellBack: true } : {}) };
 }

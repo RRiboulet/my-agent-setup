@@ -118,23 +118,40 @@ export default function (pi: ExtensionAPI) {
 					const quickPath = parsed.path;
 					// Quick-open: no menu. Resolve the branch — explicit argument, last
 					// pick, else HEAD — then print a file path or open the browser at a
-					// directory path. `listBranches` is only needed to resolve the branch,
-					// and a tag or sha falls through it to tipOf's `unknown-branch`.
+					// directory path. `listBranches` re-validates the remembered pick and
+					// matches an explicit one; a tag or sha falls through it to tipOf's
+					// `unknown-branch`.
 					const resolved = resolveQuickBranch(await git.listBranches(), lastBranch, parsed.branch);
 					if (!resolved.choice) {
 						ctx.ui.notify(`repo-explorer: ${sanitizeDisplay(resolved.error ?? "could not resolve a branch")}`, "error");
 						return;
 					}
 					const choice = resolved.choice;
-					// An explicit branch becomes the last pick too, so the next
-					// `/explore <path>` reuses it. chooseBranch remembers its own pick.
-					lastBranch.refname = choice.refname;
-					lastBranch.label = choice.label;
+					// A remembered branch that is gone is announced, not silently swapped:
+					// the user is told which branch was used instead.
+					if (resolved.fellBack) {
+						ctx.ui.notify(
+							`repo-explorer: the remembered branch "${sanitizeDisplay(lastBranch.refname ?? "")}" is gone — using ${sanitizeDisplay(choice.label)}`,
+							"info",
+						);
+					}
+					// Remember the pick only once git has proven the ref: printFile and
+					// listFiles both resolve it, so a typo throws before this runs and
+					// cannot stick as the default. Only a listed branch or the detached
+					// tip is remembered — a one-off tag/sha read must not become the
+					// "last branch" (resolveQuickBranch's `listed` flag). chooseBranch
+					// remembers its own pick.
+					const remember = (): void => {
+						if (!resolved.listed) return;
+						lastBranch.refname = choice.refname;
+						lastBranch.label = choice.label;
+					};
 
 					// "" is the repository root — a directory by construction, so skip
 					// readFile and go straight to the browser.
 					if (quickPath === "") {
 						await browse(choice, "");
+						remember();
 						return;
 					}
 
@@ -142,16 +159,19 @@ export default function (pi: ExtensionAPI) {
 						await printFile(choice, quickPath);
 					} catch (err) {
 						// A tree path is not an error: it is where the browser should open.
-						// Only a path with children is a directory this browser can enter —
-						// a gitlink/submodule lists as a leaf, so it stays `not-a-file`.
+						// Only a path with children is a directory this browser can enter;
+						// a gitlink has none and stays refused (usually `not-found`, since
+						// its commit lives in the submodule's object store).
 						if (err instanceof RepoGitError && err.kind === "not-a-file") {
 							const files = await git.listFiles(choice.refname);
 							if (!files.some((file) => file.startsWith(`${quickPath}/`))) throw err;
 							await browse(choice, quickPath);
+							remember();
 							return;
 						}
 						throw err;
 					}
+					remember();
 					return;
 				}
 

@@ -37,7 +37,7 @@ import { getKeybindings } from "@earendil-works/pi-tui";
 
 import { buildBranchMenu, chooseBranch, resolveBranchChoice, type ExploreBranchState } from "../../repo-explorer/branch-menu.ts";
 import type { FileBrowserResult } from "../../repo-explorer/file-browser.ts";
-import type { BranchList, GitRunner } from "../../repo-explorer/git.ts";
+import type { BranchList, GitRunner, RepoGit } from "../../repo-explorer/git.ts";
 import { openGit, RepoGitError } from "../../repo-explorer/git.ts";
 import { makeGitRunner } from "../../repo-explorer/runner.ts";
 
@@ -215,6 +215,34 @@ test("resolveBranchChoice returns undefined for a cancel and for an unrecognized
 	const menu = buildBranchMenu({ branches: [{ refname: "refs/heads/main", name: "main", isRemote: false, isCurrent: true }] });
 	assert.equal(resolveBranchChoice(menu, undefined), undefined, "Esc cancels the flow");
 	assert.equal(resolveBranchChoice(menu, "no-such-label"), undefined, "a label the menu never offered stays refused");
+});
+
+test("chooseBranch sanitizes a hostile refname for the selector and still resolves the pick", async () => {
+	// A bidi override is legal in a refname and invisible to a width check; the
+	// menu must show it as notation, and the answer it returns must map back to
+	// the same row (the label it displayed), not a raw/reordered string.
+	const list: BranchList = {
+		branches: [
+			{ refname: "refs/heads/main", name: "main", isRemote: false, isCurrent: true },
+			{ refname: "refs/heads/evil\u202ename", name: "evil\u202ename", isRemote: false, isCurrent: false },
+		],
+		current: "main",
+	};
+	const git = { root: "/repo", listBranches: async () => list } as unknown as RepoGit;
+	let offered: string[] = [];
+	const ui = {
+		async select(_title: string, options: string[]): Promise<string | undefined> {
+			offered = options;
+			return options.find((option) => option.includes("evil"));
+		},
+		notify(): void {},
+	};
+
+	const choice = await chooseBranch(git, ui, {});
+
+	assert.equal(choice?.refname, "refs/heads/evil\u202ename", "the sanitized label resolves to the real refname");
+	assert.ok(offered.includes("evil\\u202ename"), "the option is sanitized notation");
+	assert.ok(!offered.some((option) => option.includes("\u202e")), "no raw reordering char reaches the selector");
 });
 
 // ---------------------------------------------------------------------------
@@ -573,6 +601,86 @@ test("/explore sanitizes a control byte in a parse error", async () => {
 	assert.equal(notes.length, 1);
 	assert.match(notes[0], /absolute paths are not supported/);
 	assert.ok(!notes[0].includes("\u001b"), "no raw escape reaches the notification");
+});
+
+test("/explore a bad explicit branch does not poison the next bare quick-open", async () => {
+	// The earlier review's repro: remembering a typo before git proved it made
+	// every later `/explore <path>` fail on the typo. The pick is remembered only
+	// after readFile/listFiles resolve it.
+	const { handler, sent } = await loadExplore();
+	const { ctx, notes } = makeCtx(quickRoot);
+
+	await handler("src/a.ts no-such-branch", ctx);
+	assert.match(notes[0], /^error: repo-explorer: Unknown branch "no-such-branch"/);
+
+	await handler("src/a.ts", ctx);
+	assert.equal(sent.length, 1, "the bare call still prints");
+	assert.match(sent[0].content, /^Explore main \(current\) › src\/a\.ts/, "it fell back to HEAD, not the typo");
+});
+
+test("/explore remembers an explicit branch for the next bare quick-open", async () => {
+	const { handler, sent } = await loadExplore();
+	const { ctx } = makeCtx(quickRoot);
+
+	await handler("src/a.ts feature", ctx);
+	await handler("src/b.ts", ctx);
+
+	assert.equal(sent.length, 2);
+	assert.match(sent[1].content, /^Explore feature › src\/b\.ts/, "the explicit branch was remembered");
+});
+
+test("/explore does not remember a one-off tag or sha as the last branch", async () => {
+	// resolveQuickBranch flags an unlisted ref `listed: false`; remembering it
+	// would silently reuse a tag on the next bare call.
+	const featureSha = gitIn(quickRoot, "rev-parse", "feature").trim();
+	const { handler, sent } = await loadExplore();
+	const { ctx } = makeCtx(quickRoot);
+
+	await handler("src/a.ts feature", ctx); // a listed branch is remembered
+	await handler(`src/a.ts ${featureSha}`, ctx); // a raw sha read is not
+	await handler("src/b.ts", ctx);
+
+	assert.equal(sent.length, 3);
+	assert.match(sent[1].content, /^Explore [0-9a-f]+ › src\/a\.ts/, "the sha read used the raw argument as its label");
+	assert.match(sent[2].content, /^Explore feature › src\/b\.ts/, "the sha did not displace the remembered branch");
+});
+
+test("/explore reports when a remembered branch is gone and falls back", async () => {
+	// A dedicated repo so deleting the branch cannot disturb the shared fixtures.
+	const root = await initRepo("gone");
+	try {
+		await writeFile(path.join(root, "f.txt"), "f\n");
+		gitIn(root, "add", "-A");
+		gitIn(root, "commit", "-q", "-m", "initial");
+		gitIn(root, "branch", "temp");
+
+		const { handler, sent } = await loadExplore();
+		const { ctx, notes } = makeCtx(root);
+		await handler("f.txt temp", ctx); // remember temp
+		gitIn(root, "branch", "-D", "temp");
+		await handler("f.txt", ctx); // bare call: temp is gone
+
+		assert.equal(sent.length, 2);
+		assert.match(sent[1].content, /^Explore main \(current\) › f\.txt/);
+		assert.ok(
+			notes.some((note) => /remembered branch ".*temp" is gone/.test(note)),
+			`the substitution is announced (got ${JSON.stringify(notes)})`,
+		);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("/explore in a branchless repository reports the resolution error", async () => {
+	const { handler, sent } = await loadExplore();
+	const { ctx, notes, browsers } = makeCtx(emptyRoot);
+
+	await handler("README.md", ctx);
+
+	assert.equal(sent.length, 0);
+	assert.equal(browsers.length, 0);
+	assert.equal(notes.length, 1);
+	assert.match(notes[0], /^error: repo-explorer: no branch to browse/);
 });
 
 test("/explore outside TUI mode refuses before touching git", async () => {
