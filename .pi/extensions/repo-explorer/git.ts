@@ -170,16 +170,28 @@ export async function openGit(run: GitRunner, cwd: string): Promise<RepoGit> {
 		}
 
 		const list: BranchList = { branches };
-		const headRes = await run(["rev-parse", "--abbrev-ref", "HEAD"], root);
-		if (headRes.code !== 0) return list;
-		const ref = headRes.stdout.trim();
-		if (ref === "HEAD") {
-			// Detached: no branch to flag; hand the flow the fixed tip instead,
-			// which listFiles and readFile accept as a branch argument.
+		// `symbolic-ref`, not `rev-parse --abbrev-ref HEAD`: a branch literally
+		// named HEAD is plumbing-legal (`git update-ref refs/heads/HEAD`), and it
+		// makes HEAD an ambiguous refname — on the git tested, `rev-parse
+		// --abbrev-ref HEAD` then exits 0 with EMPTY stdout and only a warning on
+		// stderr, which reads as "unresolved" and silently drops the detached
+		// tip. Reading the symref itself is unambiguous: exit 0 with the full
+		// refname when HEAD is on a branch, exit 1 when it is detached.
+		const headRes = await run(["symbolic-ref", "-q", "HEAD"], root);
+		const full = headRes.code === 0 ? headRes.stdout.trim() : "";
+		if (full && branches.some((branch) => branch.refname === full)) {
+			// Strip the prefix here rather than asking for --short: git's short
+			// form of refs/heads/HEAD is "heads/HEAD" (its own disambiguation),
+			// which is not the branch's name. The existence check keeps an unborn
+			// HEAD (fresh `git init`, which does symref refs/heads/main before
+			// any commit exists) from reporting a branch that is not there.
+			list.current = full.startsWith("refs/heads/") ? full.slice("refs/heads/".length) : full;
+		} else if (!full) {
+			// Detached (or HEAD unreadable): no branch to flag; hand the flow the
+			// fixed tip instead, which listFiles and readFile accept as a branch
+			// argument.
 			const tipRes = await run(["rev-parse", "HEAD"], root);
 			if (tipRes.code === 0) list.detachedTip = tipRes.stdout.trim();
-		} else {
-			list.current = ref;
 		}
 		return list;
 	}

@@ -15,7 +15,10 @@
 // pi's executor decodes stdout per stream chunk and a 64 KiB boundary inside a
 // multi-byte UTF-8 sequence becomes U+FFFD — which git.ts's readFile would then
 // refuse, turning a perfectly readable large non-ASCII file into an error. The
-// straddle test below is that case end to end, against a real `git`.
+// straddle test below is that case end to end, against a real `git`. The
+// runner's two shutdown bounds are pinned the same way, with a shim `git`: a
+// silent descendant holding the pipe must not hold the call open, and a git
+// that ignores SIGTERM must die at the grace period rather than hang.
 //
 // Third, the handler tests drive the real extension factory with a fake
 // ExtensionAPI, which is what proves the wiring: that the branch step is
@@ -24,7 +27,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, chmod, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, before, test } from "node:test";
@@ -121,14 +124,13 @@ test("the menu lists the detached tip first, then locals, then remotes, and mark
 	assert.deepEqual(
 		menu.entries,
 		[
-			{ refname: "refs/heads/feature", label: "feature", isRemote: false },
-			{ refname: "refs/heads/main", label: "main (current)", isRemote: false },
-			{ refname: "refs/remotes/origin/feature", label: "origin/feature", isRemote: true },
-			{ refname: "refs/remotes/origin/main", label: "origin/main", isRemote: true },
+			{ refname: "refs/heads/feature", label: "feature" },
+			{ refname: "refs/heads/main", label: "main (current)" },
+			{ refname: "refs/remotes/origin/feature", label: "origin/feature" },
+			{ refname: "refs/remotes/origin/main", label: "origin/main" },
 		],
 		"locals in refname order before remotes, only the current branch marked, origin/HEAD (a symref) not offered",
 	);
-	assert.deepEqual(menu.labels, ["feature", "main (current)", "origin/feature", "origin/main"]);
 	assert.equal(menu.defaultRef, "refs/heads/main", "the default is the current branch's full refname, not its short name");
 });
 
@@ -140,15 +142,15 @@ test("a local branch named like a remote-tracking ref keeps both rows, qualified
 	assert.deepEqual(
 		menu.entries,
 		[
-			{ refname: "refs/heads/main", label: "main (current)", isRemote: false },
+			{ refname: "refs/heads/main", label: "main (current)" },
 			// Both members of the colliding set are qualified, not just the
 			// second: a bare "origin/main" next to "origin/main [remote]" would
 			// read as if the local one were the tracking ref.
-			{ refname: "refs/heads/origin/main", label: "origin/main [local]", isRemote: false },
-			{ refname: "refs/remotes/origin/main", label: "origin/main [remote]", isRemote: true },
+			{ refname: "refs/heads/origin/main", label: "origin/main [local]" },
+			{ refname: "refs/remotes/origin/main", label: "origin/main [remote]" },
 		],
 	);
-	assert.equal(new Set(menu.labels).size, menu.labels.length, "every label maps back to exactly one row");
+	assert.equal(new Set(menu.entries.map((entry) => entry.label)).size, menu.entries.length, "every label maps back to exactly one row");
 	assert.equal(resolveBranchChoice(menu, "origin/main [local]")?.refname, "refs/heads/origin/main");
 	assert.equal(resolveBranchChoice(menu, "origin/main [remote]")?.refname, "refs/remotes/origin/main");
 });
@@ -169,7 +171,7 @@ test("a branch named like an already-qualified label is settled by its refname",
 		current: "origin/main",
 	};
 	const menu = buildBranchMenu(list);
-	assert.equal(new Set(menu.labels).size, menu.labels.length, "labels stay unique");
+	assert.equal(new Set(menu.entries.map((entry) => entry.label)).size, menu.entries.length, "labels stay unique");
 	for (const entry of menu.entries) {
 		assert.equal(resolveBranchChoice(menu, entry.label)?.refname, entry.refname, `${entry.label} resolves to its own refname`);
 	}
@@ -200,7 +202,7 @@ test("picking a row returns its full refname, which listFiles then accepts", asy
 
 	const choice = await chooseBranch(repo, ui, state);
 
-	assert.deepEqual(choice, { refname: "refs/remotes/origin/main", label, isRemote: true });
+	assert.deepEqual(choice, { refname: "refs/remotes/origin/main", label });
 	assert.deepEqual(state, { refname: "refs/remotes/origin/main", label }, "the pick is remembered for the later steps");
 	// The refname, not the display name: `listFiles "origin/main"` would work
 	// by luck here, but only the full refname is unambiguous in every repo.
@@ -234,7 +236,7 @@ test("a single candidate is not a choice: the menu is not shown at all", async (
 	const choice = await chooseBranch(repo, ui, state);
 
 	assert.equal(asked.length, 0, "no select call for a one-branch repository");
-	assert.deepEqual(choice, { refname: "refs/heads/main", label: "main (current)", isRemote: false });
+	assert.deepEqual(choice, { refname: "refs/heads/main", label: "main (current)" });
 	assert.deepEqual(state, { refname: "refs/heads/main", label: "main (current)" });
 });
 
@@ -400,7 +402,7 @@ test("a GIT_DIR inherited from the shell does not redirect the reads", async () 
 		const repo = await openGit(makeGitRunner(), menuRoot);
 		assert.equal(repo.root, menuRoot, "the root still comes from the session cwd");
 		const menu = buildBranchMenu(await repo.listBranches());
-		assert.ok(menu.labels.includes("main (current)"));
+		assert.ok(menu.entries.some((entry) => entry.label === "main (current)"));
 	} finally {
 		if (previous === undefined) delete process.env.GIT_DIR;
 		else process.env.GIT_DIR = previous;
@@ -423,4 +425,52 @@ test("a failing git call reports its exit code and stderr instead of throwing", 
 	assert.equal(result.code, 128, "git's own fatal exit code is passed through, not flattened to 1");
 	assert.match(result.stderr, /^fatal:/, "stderr carries git's own first line");
 	assert.equal(result.killed, false);
+});
+
+/** Put an executable shim named `git` first on PATH for the duration of `body`. */
+async function withShimGit(script: string, body: (dir: string) => Promise<void>): Promise<void> {
+	const dir = await realpath(await mkdtemp(path.join(tmpdir(), "repo-explorer-shim-")));
+	const shim = path.join(dir, "git");
+	await writeFile(shim, script);
+	await chmod(shim, 0o755);
+	const previous = process.env.PATH;
+	try {
+		// makeGitRunner copies the environment when it is constructed, so the
+		// PATH must be in place before the runner is built, inside `body`.
+		process.env.PATH = `${dir}${path.delimiter}${previous ?? ""}`;
+		await body(dir);
+	} finally {
+		process.env.PATH = previous;
+		await rm(dir, { recursive: true, force: true });
+	}
+}
+
+test("a quiet descendant holding the pipe does not hold the call open", async () => {
+	// The shim exits at once but leaves a silent forked `sleep` holding the
+	// stdout pipe. Without the post-exit drain, "close" never fires and this
+	// call waits the descendant's whole lifetime — the timeout would not bound
+	// anything.
+	await withShimGit("#!/bin/sh\necho hello\nsleep 30 &\nexit 0\n", async (dir) => {
+		const runner = makeGitRunner({ timeoutMs: 30_000 });
+		const started = Date.now();
+		const result = await runner(["anything"], dir);
+		const elapsed = Date.now() - started;
+		assert.equal(result.code, 0);
+		assert.equal(result.stdout, "hello\n", "output written before the fork is kept");
+		assert.ok(elapsed < 5_000, `settled in ${elapsed}ms, not the descendant's 30s sleep`);
+	});
+});
+
+test("a git that ignores SIGTERM is killed after the grace period", async () => {
+	// Ignores SIGTERM so only the escalation can end it: the call must settle
+	// at timeout + KILL_GRACE (~5.2s here), never hang, and never at the
+	// descendant's 30s.
+	await withShimGit("#!/bin/sh\ntrap '' TERM\nexec sleep 30\n", async (dir) => {
+		const runner = makeGitRunner({ timeoutMs: 200 });
+		const started = Date.now();
+		const result = await runner(["anything"], dir);
+		const elapsed = Date.now() - started;
+		assert.equal(result.killed, true);
+		assert.ok(elapsed >= 5_000 && elapsed < 8_000, `escalated at ${elapsed}ms (expected ~5.2s, never unbounded)`);
+	});
 });

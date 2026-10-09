@@ -27,10 +27,8 @@ import type { BranchList, RepoGit } from "./git.ts";
 export interface BranchChoice {
 	/** Full refname ("refs/remotes/origin/main"), or the detached-HEAD tip sha. */
 	refname: string;
-	/** The row the user picked, already collision-disambiguated. */
+	/** The row the user picked, already collision-disambiguated. Labelling is kind-aware; the row's remote-ness is not needed downstream, and derivable from the refname when it is. */
 	label: string;
-	/** True for a remote-tracking ref. False for locals and for the detached tip. */
-	isRemote: boolean;
 }
 
 /**
@@ -45,10 +43,8 @@ export interface ExploreBranchState {
 }
 
 export interface BranchMenu {
-	/** Rows in display order; one per candidate, labels unique. */
+	/** Rows in display order; one per candidate, labels unique. The labels passed to ctx.ui.select are `entries.map((entry) => entry.label)`. */
 	entries: BranchChoice[];
-	/** Labels for ctx.ui.select, one per entry, same order. */
-	labels: string[];
 	/** What the flow falls back to when no menu is shown: HEAD's branch, else the detached tip. Absent when neither resolves. */
 	defaultRef?: string;
 }
@@ -69,8 +65,8 @@ interface Row {
 }
 
 /** Suffix that tells two colliding rows apart in the list. */
-const KIND_TAG = { local: "local", remote: "remote", detached: "detached" } as const;
-const kindTag = (row: Row): string => (row.detached ? KIND_TAG.detached : row.isRemote ? KIND_TAG.remote : KIND_TAG.local);
+const kindTag = (row: Row): "local" | "remote" | "detached" =>
+	row.detached ? "detached" : row.isRemote ? "remote" : "local";
 
 const shortSha = (sha: string): string => sha.slice(0, 7);
 
@@ -122,18 +118,13 @@ function qualifyLabels(rows: Row[]): string[] {
 export function buildBranchMenu(list: BranchList): BranchMenu {
 	const rows = buildRows(list);
 	const labels = qualifyLabels(rows);
-	const entries: BranchChoice[] = rows.map((row, index) => ({
-		refname: row.refname,
-		label: labels[index],
-		isRemote: row.isRemote,
-	}));
+	const entries: BranchChoice[] = rows.map((row, index) => ({ refname: row.refname, label: labels[index] }));
 	// The refname, not list.current's short name: a local branch literally
 	// named "origin/main" has current="origin/main", and the short name would
 	// resolve to the remote-tracking ref instead.
 	const current = list.branches.find((branch) => branch.isCurrent);
 	return {
 		entries,
-		labels,
 		defaultRef: current?.refname ?? list.detachedTip,
 	};
 }
@@ -141,8 +132,7 @@ export function buildBranchMenu(list: BranchList): BranchMenu {
 /** Map a ctx.ui.select result back to its row. Undefined (cancelled) and an unrecognized label both yield undefined. */
 export function resolveBranchChoice(menu: BranchMenu, choice: string | undefined): BranchChoice | undefined {
 	if (choice === undefined) return undefined;
-	const index = menu.labels.indexOf(choice);
-	return index >= 0 ? menu.entries[index] : undefined;
+	return menu.entries.find((entry) => entry.label === choice);
 }
 
 /** Record the pick so later steps reuse it, and hand it back. */
@@ -157,10 +147,12 @@ function remember(state: ExploreBranchState, choice: BranchChoice): BranchChoice
  *
  * Returns undefined when the user cancelled, when there is nothing to browse,
  * or when git refused to list branches — the last of those as a thrown
- * RepoGitError, which the command handler turns into one notify (it owns the
- * kind-based message, so this stays free of UI policy). A single candidate is
- * not a choice and skips the menu: a fresh repository, or a detached HEAD with
- * no local branches, should not make the user confirm the obvious.
+ * RepoGitError, which the command handler turns into one notify. Only what
+ * belongs to the menu itself is notified here (an empty listing, a cancelled
+ * choice); the failure message stays the handler's, because that is where the
+ * error kinds are known. A single candidate is not a choice and skips the
+ * menu: a fresh repository, or a detached HEAD with no local branches, should
+ * not make the user confirm the obvious.
  */
 export async function chooseBranch(git: RepoGit, ui: BranchMenuUI, state: ExploreBranchState): Promise<BranchChoice | undefined> {
 	const menu = buildBranchMenu(await git.listBranches());
@@ -170,7 +162,7 @@ export async function chooseBranch(git: RepoGit, ui: BranchMenuUI, state: Explor
 	}
 	if (menu.entries.length === 1) return remember(state, menu.entries[0]);
 
-	const choice = await ui.select(`Explore ${basename(git.root) || git.root} — pick a branch`, menu.labels);
+	const choice = await ui.select(`Explore ${basename(git.root) || git.root} — pick a branch`, menu.entries.map((entry) => entry.label));
 	const picked = resolveBranchChoice(menu, choice);
 	if (!picked) {
 		ui.notify("repo-explorer: no branch selected", "info");

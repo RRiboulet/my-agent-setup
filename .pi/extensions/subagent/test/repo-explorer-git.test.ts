@@ -156,6 +156,49 @@ test("a detached HEAD reports the tip instead of a current branch, still browsab
 	}
 });
 
+test("a branch literally named HEAD does not corrupt HEAD detection", async () => {
+	const { run } = makeRunner();
+	// `git update-ref refs/heads/HEAD` is plumbing-legal (only `git branch
+	// HEAD` refuses), and it makes HEAD an ambiguous refname: on the git
+	// tested, `rev-parse --abbrev-ref HEAD` then exits 0 with EMPTY stdout and
+	// only a warning on stderr, which read as "unresolved" — dropping the
+	// detached tip, the one row whose point is browsing where HEAD actually is.
+	gitIn(baseRoot, "update-ref", "refs/heads/HEAD", mainTip);
+	try {
+		// On a branch: the branch HEAD is on, not "" and not the ref named HEAD.
+		let list = await (await openGit(run, baseRoot)).listBranches();
+		assert.equal(list.current, "main");
+		assert.equal(list.detachedTip, undefined);
+		assert.ok(
+			list.branches.some((branch) => branch.refname === "refs/heads/HEAD"),
+			"the branch named HEAD is still listed",
+		);
+
+		// Detached: the tip must still come through.
+		gitIn(baseRoot, "checkout", "-q", "--detach");
+		try {
+			list = await (await openGit(run, baseRoot)).listBranches();
+			assert.equal(list.current, undefined);
+			assert.equal(list.detachedTip, mainTip, "the detached tip survives an ambiguous HEAD");
+		} finally {
+			gitIn(baseRoot, "checkout", "-q", "main");
+		}
+
+		// HEAD itself pointing at the branch named HEAD: the name comes back
+		// intact, because the full refname is read and stripped here — git's own
+		// --short form of refs/heads/HEAD is "heads/HEAD", its disambiguation.
+		gitIn(baseRoot, "symbolic-ref", "HEAD", "refs/heads/HEAD");
+		try {
+			list = await (await openGit(run, baseRoot)).listBranches();
+			assert.equal(list.current, "HEAD");
+		} finally {
+			gitIn(baseRoot, "checkout", "-q", "main");
+		}
+	} finally {
+		gitIn(baseRoot, "update-ref", "-d", "refs/heads/HEAD");
+	}
+});
+
 test("listFiles is recursive, directory-free and byte-faithful (unquoted via -z)", async () => {
 	const { run } = makeRunner();
 	const repo = await openGit(run, baseRoot);
