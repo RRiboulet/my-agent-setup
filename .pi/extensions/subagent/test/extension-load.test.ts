@@ -34,10 +34,22 @@ const EXTENSIONS = [
 	"../index.ts",
 ] as const;
 
+// Extension tree files that are not entry points themselves but get imported
+// by one at runtime; same rationale, they must link under the real ESM loader.
+const MODULES = ["../../repo-explorer/git.ts"] as const;
+
 for (const relative of EXTENSIONS) {
 	test(`extension ${relative} loads under strict ESM`, async () => {
 		const specifier = new URL(relative, import.meta.url).href;
 		const module = (await import(specifier)) as { default?: unknown };
 		assert.equal(typeof module.default, "function", `${relative} must export a default extension factory`);
+	});
+}
+
+for (const relative of MODULES) {
+	test(`module ${relative} loads under strict ESM`, async () => {
+		const specifier = new URL(relative, import.meta.url).href;
+		const module = (await import(specifier)) as Record<string, unknown>;
+		assert.notEqual(Object.keys(module).length, 0, `${relative} must export something`);
 	});
 }

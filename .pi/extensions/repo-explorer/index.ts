@@ -14,6 +14,11 @@
 //
 // Flow: /explore [path] — pick a branch, browse its files with type-to-filter,
 // Enter opens a file. Path and branch arguments skip menu steps they fill in.
+//
+// The git layer lives in git.ts — listBranches / listFiles (tip-keyed cache) /
+// readFile (binary, size and 2000-line caps), all read-only, and pinned by
+// .pi/extensions/subagent/test/repo-explorer-git.test.ts against a real
+// repository.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
@@ -32,7 +37,8 @@ export default function (pi: ExtensionAPI) {
 
 			// TODO(repo-explorer): branch selection menu (TODO-937a1b91),
 			// fuzzy file browser (TODO-da336cab), print to transcript
-			// (TODO-a4e734e5), argument parsing (TODO-bfdd2343).
+			// (TODO-a4e734e5), argument parsing (TODO-bfdd2343) — the git
+			// plumbing they consume is openGit() in git.ts.
 			ctx.ui.notify(`repo-explorer: not implemented yet${args ? ` (args: ${args})` : ""}`, "info");
 		},
 	});
