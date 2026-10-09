@@ -40,6 +40,8 @@ const EXTENSIONS = [
 // of one fails here instead of at wiring time.
 const MODULES: Record<string, string[]> = {
 	"../../repo-explorer/git.ts": ["openGit", "RepoGitError"],
+	"../../repo-explorer/runner.ts": ["makeGitRunner"],
+	"../../repo-explorer/branch-menu.ts": ["buildBranchMenu", "resolveBranchChoice", "chooseBranch"],
 };
 
 for (const relative of EXTENSIONS) {

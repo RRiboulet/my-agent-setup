@@ -1,9 +1,10 @@
 // repo-explorer/git.ts — read-only git plumbing behind the /explore flow.
 //
 // No UI here on purpose: this is the only layer that shells out to git, and
-// the executor arrives as a parameter — repo-explorer's index.ts wires
-// `pi.exec`, the unit tests wire a real `git` binary against a temporary
-// repository (subagent/test/repo-explorer-git.test.ts, the repo's test home).
+// the executor arrives as a parameter — repo-explorer's runner.ts supplies the
+// production one (Buffer-accumulating, so stdout stays byte-faithful), the unit
+// tests wire a real `git` binary against a temporary repository
+// (subagent/test/repo-explorer-git.test.ts, the repo's test home).
 // Everything is read-only — no checkout, no mutation — and everything resolves
 // against the repository root found from the session cwd at openGit() time.
 //
@@ -20,12 +21,12 @@
 //  - readFile(branch, path) never puts binary, mojibake or oversized pages
 //    into text: a NUL byte inside the first BINARY_SNIFF_BYTES refuses the
 //    read (git's own binary heuristic), U+FFFD refuses it too (a multi-byte
-//    UTF-8 sequence was split while the executor accumulated stdout — wire
-//    pi.exec through a Buffer-accumulating runner, not per-chunk
-//    toString()), a blob above MAX_BLOB_BYTES is refused before it is
-//    fetched, text is clipped at LINE_CAP lines and MAX_TEXT_BYTES bytes,
-//    and every cut leaves text an exact byte prefix of the blob. The `note`
-//    field carries the banner phrasing of whichever cut engaged.
+//    UTF-8 sequence was split while the executor accumulated stdout — the
+//    production runner accumulates Buffers instead, see runner.ts), a blob
+//    above MAX_BLOB_BYTES is refused before it is fetched, text is clipped at
+//    LINE_CAP lines and MAX_TEXT_BYTES bytes, and every cut leaves text an
+//    exact byte prefix of the blob. The `note` field carries the banner
+//    phrasing of whichever cut engaged.
 //  - Symlink gitlinks list and read as the symlink's target path in TEXT
 //    (the entry is stored as a blob of the literal path), and submodule
 //    gitlinks refuse as not-found — their commit lives in the submodule's
@@ -51,7 +52,7 @@ export class RepoGitError extends Error {
 	}
 }
 
-/** Result shape is pi's `ExecResult`; index.ts supplies the runner itself as the one-liner `(args, cwd) => pi.exec("git", args, { cwd })`. */
+/** Result shape is pi's `ExecResult`; the extension supplies the runner — see runner.ts for why it is not `pi.exec` itself. */
 export interface GitRunResult {
 	stdout: string;
 	stderr: string;
@@ -96,7 +97,7 @@ export interface FileRead {
 export const LINE_CAP = 2000;
 /** First-byte window scanned for a NUL, git's own binary heuristic. */
 export const BINARY_SNIFF_BYTES = 8000;
-/** Blobs above this are refused without fetching; pi.exec buffers whole stdout, so refuse before the pipe. */
+/** Blobs above this are refused without fetching; the runner buffers whole stdout, so refuse before the pipe. */
 export const MAX_BLOB_BYTES = 16 * 1024 * 1024;
 /** Bytes a page may occupy on top of the LINE_CAP line count — huge single lines (minified JS, base64 dumps) slip past the line cap otherwise. Cuts at the last complete line inside the budget; a first line beyond it refuses the read. */
 export const MAX_TEXT_BYTES = 256 * 1024;
@@ -257,12 +258,12 @@ export async function openGit(run: GitRunner, cwd: string): Promise<RepoGit> {
 			throw new RepoGitError("binary", `"${branch}:${path}" is binary and cannot be displayed`);
 		}
 		// U+FFFD in git's own output means a multi-byte UTF-8 sequence was
-		// split while the executor accumulated stdout (pi.exec decodes chunk
-		// by chunk); the blob on disk is intact, what reached us is not, and
-		// what prints would look like the file's real content. Refuse rather
-		// than serve mojibake. A file that legitimately contains U+FFFD is
-		// refused too — ambiguous either way — and the durable fix is wiring
-		// the runner through Buffer accumulation (see index.ts's TODO).
+		// split while the executor accumulated stdout (a per-chunk decode splits
+		// them at stream boundaries); the blob on disk is intact, what reached us
+		// is not, and what prints would look like the file's real content. Refuse
+		// rather than serve mojibake. A file that legitimately contains U+FFFD is
+		// refused too — ambiguous either way — and the production runner avoids
+		// the whole class by accumulating Buffers (see runner.ts).
 		if (contentRes.stdout.includes("\uFFFD")) {
 			throw new RepoGitError(
 				"mojibake",
