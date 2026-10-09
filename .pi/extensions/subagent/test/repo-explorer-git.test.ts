@@ -119,6 +119,19 @@ test("openGit refuses a directory that is not a repository", async () => {
 	);
 });
 
+test("openGit reports a spawn failure as git-unavailable, not not-a-repo", async () => {
+	// The runner returns 127 when the child never ran (git absent from PATH, an
+	// unreadable cwd); openGit must not lump that in with a directory that is
+	// merely not a repository, or the headline diagnosis is wrong and the kind
+	// cannot be reacted to.
+	const run: GitRunner = async () => ({ stdout: "", stderr: "spawn git ENOENT", code: 127, killed: false });
+	await assert.rejects(
+		openGit(run, "/does/not/matter"),
+		(err: unknown) =>
+			err instanceof RepoGitError && err.kind === "git-unavailable" && err.message.includes("git is not available"),
+	);
+});
+
 test("openGit resolves the repository root and lists branches with HEAD flagged", async () => {
 	const { run } = makeRunner();
 	const repo = await openGit(run, baseRoot);

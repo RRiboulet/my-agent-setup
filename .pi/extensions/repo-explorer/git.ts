@@ -34,6 +34,7 @@
 
 export type GitErrorKind =
 	| "not-a-repo"
+	| "git-unavailable"
 	| "unknown-branch"
 	| "not-found"
 	| "not-a-file"
@@ -123,6 +124,15 @@ const fmt = (n: number): string => (n >= 1024 * 1024 ? `${(n / (1024 * 1024)).to
 export async function openGit(run: GitRunner, cwd: string): Promise<RepoGit> {
 	const rootRes = await run(["rev-parse", "--show-toplevel"], cwd);
 	const root = rootRes.stdout.trim();
+	// The runner maps a spawn failure (git absent, cwd unreadable) to 127 rather
+	// than git's own exit codes, so the two are distinguishable here: a git that
+	// never ran is not the same condition as a directory that is not a repo.
+	if (rootRes.code === 127) {
+		throw new RepoGitError(
+			"git-unavailable",
+			`git is not available (cwd: ${cwd || "(empty)"})${firstLine(rootRes.stderr) ? ` — ${firstLine(rootRes.stderr)}` : ""}`,
+		);
+	}
 	if (rootRes.code !== 0 || !root) {
 		// "work-tree", not "repository": a bare repository lands here too and
 		// is genuinely a repository — it just has nothing to browse. git's own

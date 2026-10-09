@@ -777,6 +777,17 @@ test("a failing git call reports its exit code and stderr instead of throwing", 
 	assert.equal(result.killed, false);
 });
 
+test("a spawn failure reports the command-not-found code, not git's own", async () => {
+	// A cwd that cannot exist makes `spawn` fail with ENOENT before git runs.
+	// The code must stay distinct from git's own non-zero exits so openGit can
+	// tell "git is not available" from "this is not a repository".
+	const runner = makeGitRunner();
+	const result = await runner(["rev-parse", "--show-toplevel"], path.join(tmpdir(), "repo-explorer-no-such-dir"));
+	assert.equal(result.code, 127, "conventional command-not-found, not flattened into git's range");
+	assert.equal(result.killed, false);
+	assert.match(result.stderr, /ENOENT/, "the spawn error itself is still carried in stderr");
+});
+
 /** Put an executable shim named `git` first on PATH for the duration of `body`. */
 async function withShimGit(script: string, body: (dir: string) => Promise<void>): Promise<void> {
 	const dir = await realpath(await mkdtemp(path.join(tmpdir(), "repo-explorer-shim-")));

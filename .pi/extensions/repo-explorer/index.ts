@@ -180,8 +180,8 @@ export default function (pi: ExtensionAPI) {
 				await browse(choice, "");
 			} catch (err) {
 				// Branch on kind, never on message text: git.ts's kinds
-				// (not-a-repo, unknown-branch, not-found, not-a-file, binary,
-				// mojibake, too-large, git-failed) are the contract. The message is
+				// (not-a-repo, git-unavailable, unknown-branch, not-found, not-a-file,
+				// binary, mojibake, too-large, git-failed) are the contract. The message is
 				// sanitized for display: it embeds the path (and sometimes git's own
 				// stderr), either of which may carry control bytes.
 				if (err instanceof RepoGitError) {

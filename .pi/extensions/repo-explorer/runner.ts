@@ -129,7 +129,10 @@ export function makeGitRunner(options: GitRunnerOptions = {}): GitRunner {
 			const [code] = (await once(child, "close")) as [number | null];
 			return { stdout: decode(stdout), stderr: decode(stderr), code: code ?? 1, killed };
 		} catch (err) {
-			return { stdout: "", stderr: err instanceof Error ? err.message : String(err), code: 1, killed };
+			// 127 is the conventional "command not found": a spawn failure (git
+			// missing from PATH, an unreadable cwd) must not look like git's own
+			// non-zero exit, or openGit would misreport it as "not a repo".
+			return { stdout: "", stderr: err instanceof Error ? err.message : String(err), code: 127, killed };
 		} finally {
 			clearTimeout(timer);
 			if (escalate) clearTimeout(escalate);

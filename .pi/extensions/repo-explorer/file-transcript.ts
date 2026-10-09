@@ -96,16 +96,26 @@ export function formatFileTranscript(
  * Render the message as plain, width-bounded lines.
  *
  * The header (line 0) and the truncation note (line 1, only when there is one)
- * are the coloured lines; the body is verbatim after sanitization. The returned
- * component caches nothing, so a theme change is picked up on the next render.
+ * are the coloured lines; the body is verbatim after sanitization.
+ *
+ * The width-truncated lines are cached per width. pi-tui re-renders the whole
+ * transcript on every paint (no virtualization), and every numbered body line
+ * carries the `│` separator, which puts it off pi-tui's ASCII fast path and into
+ * grapheme segmentation — up to LINE_CAP lines, per viewed file, per frame.
+ * `invalidate` drops the cache, so a theme change (which rebuilds this
+ * component) still takes effect.
  */
 export const fileMessageRenderer: MessageRenderer<FileTranscriptDetails> = (message, _options, theme) => {
 	const content = typeof message.content === "string" ? message.content : "";
 	const hasNote = Boolean(message.details?.note);
 	const lines = sanitizeFileContent(content).split("\n");
+	let cachedWidth: number | undefined;
+	let cachedLines: string[] | undefined;
 	return {
-		render: (width: number): string[] =>
-			lines.map((line, index) => {
+		render: (width: number): string[] => {
+			if (cachedWidth === width && cachedLines) return cachedLines;
+			cachedWidth = width;
+			cachedLines = lines.map((line, index) => {
 				const styled =
 					index === 0
 						? theme.fg("accent", theme.bold(line))
@@ -113,7 +123,12 @@ export const fileMessageRenderer: MessageRenderer<FileTranscriptDetails> = (mess
 							? theme.fg("warning", line)
 							: line;
 				return truncateToWidth(styled, width, "…");
-			}),
-		invalidate: () => undefined,
+			});
+			return cachedLines;
+		},
+		invalidate: () => {
+			cachedWidth = undefined;
+			cachedLines = undefined;
+		},
 	};
 };

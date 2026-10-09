@@ -262,3 +262,29 @@ test("the renderer is total: no exotic content makes it throw or return falsy", 
 		assert.doesNotThrow(() => component.render(40));
 	}
 });
+
+test("the width-truncated lines are cached per width and dropped by invalidate", () => {
+	// Every viewed file is a permanent transcript component and pi-tui repaints
+	// the whole transcript each frame, so an uncached renderer re-truncates up to
+	// LINE_CAP lines per file per frame. The cache is the fix; `invalidate` is
+	// what keeps a theme change from serving lines styled with the old theme.
+	const content = `Explore main › big.txt\n\n1 │ ${"x".repeat(50)}`;
+	const component = fileMessageRenderer(
+		{ content, customType: FILE_MESSAGE_TYPE, display: true, details: {} } as never,
+		{ expanded: false, outputPad: 1 } as never,
+		mark,
+	);
+	assert.ok(component);
+
+	const wide = component.render(40);
+	assert.equal(component.render(40), wide, "the same width reuses the cached array");
+
+	const narrow = component.render(10);
+	assert.notEqual(narrow, wide, "a different width recomputes");
+	assert.match(narrow[2] as string, /…/, "and is still truncated");
+
+	component.invalidate();
+	const afterInvalidate = component.render(40);
+	assert.notEqual(afterInvalidate, wide, "invalidate drops the cache");
+	assert.deepEqual(afterInvalidate, wide, "and the recomputed lines are identical");
+});
