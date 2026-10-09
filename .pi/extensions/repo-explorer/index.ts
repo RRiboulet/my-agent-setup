@@ -18,14 +18,17 @@
 // The git layer lives in git.ts — listBranches / listFiles (tip-keyed cache) /
 // readFile (binary, size and 2000-line caps), all read-only, and pinned by
 // .pi/extensions/subagent/test/repo-explorer-git.test.ts against a real
-// repository. Two more modules sit between it and the UI: runner.ts is the one
-// place a process is spawned (it deliberately bypasses pi.exec to keep stdout
-// byte-faithful), and branch-menu.ts owns the ordering, labelling and
-// ambiguity of the branch list. Both are pinned by
-// .pi/extensions/subagent/test/repo-explorer-menu.test.ts.
+// repository. Three more modules sit between it and the UI: runner.ts is the
+// one place a process is spawned (it deliberately bypasses pi.exec to keep
+// stdout byte-faithful), branch-menu.ts owns the ordering, labelling and
+// ambiguity of the branch list, and file-browser.ts is the directory-by-
+// directory browser component. Runner and branch-menu are pinned by
+// .pi/extensions/subagent/test/repo-explorer-menu.test.ts, the browser by
+// .pi/extensions/subagent/test/repo-explorer-browser.test.ts.
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { chooseBranch, type ExploreBranchState } from "./branch-menu.ts";
+import { createFileBrowser, type FileBrowserResult } from "./file-browser.ts";
 import { openGit, RepoGitError } from "./git.ts";
 import { makeGitRunner } from "./runner.ts";
 
@@ -61,9 +64,21 @@ export default function (pi: ExtensionAPI) {
 				const git = await openGit(makeGitRunner({ signal: ctx.signal }), ctx.cwd);
 				const choice = await chooseBranch(git, ctx.ui, lastBranch);
 				if (!choice) return;
-				// TODO(repo-explorer): the fuzzy file browser (TODO-da336cab) takes
-				// over here, then printing the picked file (TODO-a4e734e5).
-				ctx.ui.notify(`repo-explorer: browsing ${choice.label} — the file browser is the next step`, "info");
+
+				// The tree is listed before the browser opens, because the browser's
+				// whole model is the flat path list: it synthesizes directories from
+				// the prefixes itself and never calls git. A very large repo makes
+				// this the slow step, with the menu already closed and no spinner —
+				// acceptable for v1, and the one place to add a loader if it bites.
+				const files = await git.listFiles(choice.refname);
+				const picked = await ctx.ui.custom<FileBrowserResult>((tui, theme, keybindings, done) =>
+					createFileBrowser(tui, theme, keybindings, { branchLabel: choice.label, files }, done),
+				);
+				if (!picked) return;
+
+				// TODO(repo-explorer): print the picked file into the transcript
+				// (TODO-a4e734e5) instead of naming it here.
+				ctx.ui.notify(`repo-explorer: ${picked.path} selected — printing it is the next step`, "info");
 			} catch (err) {
 				// Branch on kind, never on message text: git.ts's kinds
 				// (not-a-repo, unknown-branch, not-found, not-a-file, binary,

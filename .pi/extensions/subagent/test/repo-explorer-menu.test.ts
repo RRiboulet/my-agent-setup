@@ -1,6 +1,7 @@
 // Behavior tests for the branch-selection step of /explore: branch-menu.ts's
 // row ordering, labelling and ambiguity resolution, runner.ts's child
-// handling, and the /explore handler's wiring of the two.
+// handling, and the /explore handler's wiring of the menu, the file list and
+// the browser.
 //
 // Three things are worth the reader's attention.
 //
@@ -32,7 +33,10 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, before, test } from "node:test";
 
+import { getKeybindings } from "@earendil-works/pi-tui";
+
 import { buildBranchMenu, chooseBranch, resolveBranchChoice, type ExploreBranchState } from "../../repo-explorer/branch-menu.ts";
+import type { FileBrowserResult } from "../../repo-explorer/file-browser.ts";
 import type { BranchList, GitRunner } from "../../repo-explorer/git.ts";
 import { openGit, RepoGitError } from "../../repo-explorer/git.ts";
 import { makeGitRunner } from "../../repo-explorer/runner.ts";
@@ -67,7 +71,13 @@ before(async () => {
 	await writeFile(path.join(menuRoot, "README.md"), "menu root\n");
 	gitIn(menuRoot, "add", "-A");
 	gitIn(menuRoot, "commit", "-q", "-m", "initial");
-	gitIn(menuRoot, "branch", "feature");
+	// A commit that exists only on `feature`, so a test can prove the picked
+	// branch's tree (not merely some tree) is what reached the file list.
+	gitIn(menuRoot, "checkout", "-q", "-b", "feature");
+	await writeFile(path.join(menuRoot, "note.txt"), "feature note\n");
+	gitIn(menuRoot, "add", "-A");
+	gitIn(menuRoot, "commit", "-q", "-m", "feature change");
+	gitIn(menuRoot, "checkout", "-q", "main");
 	gitIn(menuRoot, "update-ref", "refs/remotes/origin/main", gitIn(menuRoot, "rev-parse", "main").trim());
 	gitIn(menuRoot, "update-ref", "refs/remotes/origin/feature", gitIn(menuRoot, "rev-parse", "feature").trim());
 	gitIn(menuRoot, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
@@ -291,11 +301,24 @@ async function loadExploreHandler(): Promise<(args: string, ctx: Record<string, 
 	return handler as (args: string, ctx: Record<string, unknown>) => Promise<void>;
 }
 
-/** A command context whose UI records notifications and answers the menu from the labels offered. */
+/** A stand-in for pi's Theme: `fg`/`bold` return the text unchanged, so assertions stay readable. */
+const uiTheme = { fg: (_color: string, text: string) => text, bold: (text: string) => text } as never;
+
+/**
+ * A command context whose UI records notifications, answers the menu from the
+ * labels offered, and stands in for `ctx.ui.custom`.
+ *
+ * The fake custom builds the *real* browser component (so the wiring is
+ * exercised, not mocked) and resolves with a canned pick. The built component
+ * is handed back so a test can render it and see the branch label and the file
+ * list that reached it.
+ */
 function makeCtx(cwd: string, overrides: Record<string, unknown> = {}) {
 	const notes: string[] = [];
 	const menus: string[][] = [];
+	const browsers: { render(width: number): string[] }[] = [];
 	let answer: string | undefined = "";
+	let picked: FileBrowserResult = null;
 	const ctx = {
 		cwd,
 		mode: "tui",
@@ -306,22 +329,54 @@ function makeCtx(cwd: string, overrides: Record<string, unknown> = {}) {
 				menus.push(options);
 				return answer;
 			},
+			custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (r: FileBrowserResult) => void) => unknown) => {
+				const component = (await factory({ requestRender: () => undefined }, uiTheme, getKeybindings(), () => undefined)) as {
+					render(width: number): string[];
+				};
+				browsers.push(component);
+				return picked;
+			},
 		},
 		...overrides,
 	};
-	return { ctx, notes, menus, answerWith: (pick: string | undefined) => (answer = pick) };
+	return {
+		ctx,
+		notes,
+		menus,
+		browsers,
+		answerWith: (pick: string | undefined) => (answer = pick),
+		pickInBrowser: (result: FileBrowserResult) => (picked = result),
+	};
 }
 
-test("/explore opens the menu and reports the branch it picked", async () => {
+test("/explore opens the menu, then hands the picked branch's files to the browser", async () => {
 	const handler = await loadExploreHandler();
-	const { ctx, notes, menus, answerWith } = makeCtx(menuRoot);
+	const { ctx, notes, menus, browsers, answerWith } = makeCtx(menuRoot);
 	answerWith("feature");
 
 	await handler("", ctx);
 
-	assert.deepEqual(notes, ["info: repo-explorer: browsing feature — the file browser is the next step"]);
 	assert.equal(menus.length, 1, "the menu is shown once");
 	assert.ok(menus[0].includes("feature"), "the menu offers the branches of this repository");
+	assert.equal(browsers.length, 1, "the browser is built with the picked branch");
+	// The rendered view proves the whole chain: the branch label became the
+	// breadcrumb, the refname reached listFiles, and its file list reached the
+	// component (note.txt exists only on `feature`).
+	const view = browsers[0].render(80).join("\n");
+	assert.match(view, /Explore feature › \./);
+	assert.match(view, /note\.txt/);
+	assert.deepEqual(notes, [], "a cancelled browser reports nothing");
+});
+
+test("/explore reports the file the browser picked", async () => {
+	const handler = await loadExploreHandler();
+	const { ctx, notes, answerWith, pickInBrowser } = makeCtx(menuRoot);
+	answerWith("main (current)");
+	pickInBrowser({ path: "README.md" });
+
+	await handler("", ctx);
+
+	assert.deepEqual(notes, ["info: repo-explorer: README.md selected — printing it is the next step"]);
 });
 
 test("/explore with arguments warns about the missing quick-open and still opens the menu", async () => {
@@ -331,39 +386,41 @@ test("/explore with arguments warns about the missing quick-open and still opens
 
 	await handler("src/main.ts", ctx);
 
-	assert.equal(notes.length, 2);
+	assert.equal(notes.length, 1);
 	assert.match(notes[0], /^warning: repo-explorer: arguments are not supported yet \("src\/main\.ts"\)/);
-	assert.match(notes[1], /^info: repo-explorer: browsing main \(current\)/);
 });
 
 test("/explore outside TUI mode refuses before touching git", async () => {
 	const handler = await loadExploreHandler();
-	const { ctx, notes, menus } = makeCtx(menuRoot, { mode: "rpc" });
+	const { ctx, notes, menus, browsers } = makeCtx(menuRoot, { mode: "rpc" });
 
 	await handler("", ctx);
 
 	assert.deepEqual(notes, ["error: repo-explorer requires interactive TUI mode"]);
 	assert.equal(menus.length, 0, "no git call, no menu");
+	assert.equal(browsers.length, 0, "and no browser");
 });
 
 test("/explore outside a repository reports the plumbing's not-a-repo kind", async () => {
 	const handler = await loadExploreHandler();
-	const { ctx, notes } = makeCtx(tmpdir());
+	const { ctx, notes, browsers } = makeCtx(tmpdir());
 
 	await handler("", ctx);
 
 	assert.equal(notes.length, 1);
 	assert.match(notes[0], /^error: repo-explorer: Not a git work-tree/);
+	assert.equal(browsers.length, 0);
 });
 
 test("/explore with a cancelled menu stops without reporting an error", async () => {
 	const handler = await loadExploreHandler();
-	const { ctx, notes, answerWith } = makeCtx(menuRoot);
+	const { ctx, notes, answerWith, browsers } = makeCtx(menuRoot);
 	answerWith(undefined);
 
 	await handler("", ctx);
 
 	assert.deepEqual(notes, ["info: repo-explorer: no branch selected"]);
+	assert.equal(browsers.length, 0, "no branch means no browser");
 });
 
 // ---------------------------------------------------------------------------
