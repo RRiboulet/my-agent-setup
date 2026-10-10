@@ -128,7 +128,7 @@ project it is serving.
 | `PI_POCKET_TOKEN` | unset | operator token. Empty means unset |
 | `PI_POCKET_JOURNAL_MAX` | `2000` | records kept per session |
 | `PI_POCKET_RESPAWN_MAX` | `3` | consecutive respawns before giving up |
-| `PI_POCKET_REQUEST_TIMEOUT_MS` | `30000` | timeout on one RPC round trip |
+| `PI_POCKET_REQUEST_TIMEOUT_MS` | `120000` | timeout on one RPC round trip |
 | `PI_POCKET_PI_BIN` | `pi` | which pi the children run as |
 | `PI_POCKET_NTFY_TOPIC` | unset | ntfy.sh topic for push notifications |
 | `PI_POCKET_NTFY_SERVER` | `https://ntfy.sh` | push server |
@@ -205,12 +205,15 @@ that asked a numbered question.
 /pocket serve          # start the daemon detached, print its URL and token
 /pocket pair           # mint the one-time pairing code a phone needs
 /pocket sessions       # what exists, and what is running
-/pocket new <name> <cwd>   # start a project session
+/pocket new <project directory> [name...] [-m provider/model]   # start a session
 /pocket attach <id>    # start its child; /pocket detach <id> stops it
 /pocket url            # where the client is
 /pocket status         # what is running
 /pocket devices        # paired phones; /pocket revoke <id> removes one
 ```
+
+The name is optional and defaults to the directory's basename; the flags come
+after the positionals, because a name may contain spaces and a flag never does.
 
 Or start the daemon directly, which is what a systemd unit or a test does:
 
