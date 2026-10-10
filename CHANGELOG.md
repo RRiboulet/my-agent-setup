@@ -6,6 +6,114 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
+- **pocket, a gateway that keeps project sessions alive when the phone goes
+  away.** Working from a phone is not a smaller laptop: the connection is the
+  unreliable part, while the work is still running. pocket is one detached daemon
+  that owns an agent child per project session, and the child is treated as
+  expendable — if it dies for any reason other than being asked to stop, a
+  replacement starts and resumes the recorded session file, so a cellular
+  handoff, a locked screen or a reboot costs nothing. Nothing in the design
+  depends on a client being connected: the daemon holds journal listeners for
+  live streaming, and nothing else.
+
+  Each session is one `pi --mode rpc` child spawned with the project directory as
+  its cwd. The session file belongs to pi, not to pocket: it is whatever path the
+  child names through `get_state`, recorded in the registry, and passed back as
+  `--session <path>` when the next child starts. pocket keeps its own record
+  beside it — a bounded per-session journal of framework events (child exits,
+  respawns, dialogs, settle notifications) — sized for replay, capped per record,
+  trimmed from the front, with a sidecar holding the sequence number of the first
+  surviving record so a restart knows where its survivors start. The
+  conversation is never duplicated into that journal; it is read from the file,
+  which is what a terminal resume does. `--session-id` and `--session` are two
+  modes, never both, because passing both exits code 1 against the installed pi.
+
+  A phone reconnects by sending back the last sequence number it saw. Behind the
+  surviving window means new records then live; below the start of the survivors
+  means a reset event with the current cursor and then what is left; ahead of the
+  journal means a reset, because a sequence the journal never handed out cannot
+  be replayed. That contract is verified against a running daemon — `?cursor=1`
+  returns records 2 and 3 and leaves the cursor at 3 without a reset, `?cursor=0`
+  returns all three, `?cursor=99` resets — as well as in the unit tests.
+
+  A non-loopback bind is allowed, which is why there is any authentication at
+  all: an agent running as this user holds that user's credentials, home
+  directory and SSH agent. So there is no token without a token — the daemon
+  refuses to bind off loopback unconfigured — and with one, `/api/pair` hands a
+  phone a revocable device credential whose hash is the only thing on disk.
+  Pairing codes are one-time with a TTL, an attempt countdown and a per-address
+  rate limit; devices are revoked individually. Every route that carries a
+  session id validates it first, because it becomes a URL path segment and a
+  directory name, so a traversal has to be impossible rather than unfashionable.
+
+  The client is a small PWA served from the daemon: installable, offline manifest
+  and service worker, SSE streaming on the cursor above, dialogs rendered as
+  answerable blocks rather than text to transcribe, and a prompt path that is
+  idempotent by key — a phone that sent a prompt, lost the response, and retries
+  gets the answer it already had instead of telling the agent the same thing
+  twice. Zero npm dependencies, matching the rest of the repository.
+
+  Three projects were read before any of this was written, and the README records
+  what was taken from each: pi-web's daemon behind a private socket and its
+  insistence that history is pi's own JSONL; collie's masked, revocable pairing
+  token and its reading of history off the transcript rather than the screen;
+  Codeman's server-side registry of pending prompts, which is what makes a
+  notification button and a reconnecting phone land on the same question rather
+  than a ghost.
+
+Fixed:
+
+- **An empty token counted as a token.** `PI_POCKET_TOKEN=` satisfied the
+  "is one configured" check, so an operator who commented out a token by
+  emptying it got a bind that believed it was credentialed and a request
+  authentication as the operator with an empty bearer string.
+  `effectiveToken()` collapses the empty string to the absence of a token at the
+  environment boundary, and every branch that asks — the bind check, the request
+  handler, the client's own header — asks it that way, so a caller building the
+  config object directly gets the same rule rather than a second place to get it
+  wrong.
+- **A write to a child that had already exited took the daemon down.** The
+  stdin pipe emits `EPIPE` both to the write's callback and to the stream as an
+  unhandled `error` event; with no listener on the stream, a phone's prompt to a
+  just-died child crashed the gateway instead of reporting a failure. The
+  callback already rejected the request that owned the write; the listener keeps
+  the tail that ends up in the record.
+- **A prompt that never reached the agent left no trace.** The failure was thrown
+  to the caller and journaled nowhere, so the phone sat on a spinner forever and
+  a reconnect had nothing to show. Prompt failures are recorded as
+  `prompt_failed` gateway events carrying the reason, which is what the phone's
+  next reconnect reads.
+
+Maintenance:
+
+- **Tests that pin process behaviour, against a real child.**
+  `pocket-fake-pi.ts` is a subprocess speaking the subset of the RPC protocol
+  pocket uses: it writes its session file lazily on the first prompt exactly as
+  pi does, restores a file it is resumed against, answers `get_state` and
+  `get_messages`, and exits cleanly on a signal. Exit codes, signals, pids and
+  argv are process facts and cannot be mocked, so the supervisor tests do not
+  mock them: a child is SIGKILLed and the replacement is asserted to resume the
+  same conversation, a session is parked and the next simulated boot is asserted
+  to leave it down, and a binary that is not there is asserted to be reported as
+  a spawn failure rather than respawned until the logs fill.
+
+  Five bugs were found writing them, each pinned now. Sequence numbers were
+  assigned before appends were queued, so 25 concurrent appends all reported
+  sequence 1. The per-record byte cap lived outside the journal, so directly
+  appended records were unbounded, and it replaced the whole record, so a capped
+  record lost the `kind` that says what it was. The record count was derived
+  from surviving lines, so a restarted journal believed a trimmed buffer was the
+  whole history. Journal recovery awaited a read on every miss, so concurrent
+  appends each built a private serialization chain and the sequencing still
+  interleaved. And the fake's own `--session-dir` default — the one argument the
+  product correctly does not pass in resume mode — made every resumed child die
+  on a missing directory, the harness failing the case it was written to cover.
+
+  The extension runs at 87 tests with no build step and no new dependency; the
+  repository's full suite is unchanged in shape and green at 573.
+
+Added:
+
 - **Web search now defaults to the `opencode-go` plan instead of OpenRouter.**
   The `web_search` tool and the `native-web-search` skill resolve providers in
   this order: `--provider`, then `PI_WEB_SEARCH_PROVIDER`, then `defaultProvider`

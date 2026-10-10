@@ -27,6 +27,7 @@ const EXTENSIONS = [
 	"../../goal.ts",
 	"../../native-web-search.ts",
 	"../../opencode-go-provider/index.ts",
+	"../../pocket/index.ts",
 	"../../repo-explorer/index.ts",
 	"../../review.ts",
 	"../../session-breakdown.ts",
@@ -39,6 +40,13 @@ const EXTENSIONS = [
 // loader. The exports an importer will use are named, so an accidental drop
 // of one fails here instead of at wiring time.
 const MODULES: Record<string, string[]> = {
+	"../../pocket/config.ts": ["readPocketConfig", "isLoopbackHost", "checkAccessibleHost", "generateToken"],
+	"../../pocket/store.ts": ["SessionStore", "assertSafeSessionId", "generateSessionId", "PocketConfigError"],
+	"../../pocket/journal.ts": ["SessionJournal"],
+	"../../pocket/rpc.ts": ["PiRpcProcess", "splitFrames"],
+	"../../pocket/daemon.ts": ["startDaemon", "runDaemon"],
+	"../../pocket/supervisor.ts": ["Supervisor"],
+	"../../pocket/auth.ts": ["AuthStore", "mask", "maskValue", "hashToken"],
 	"../../repo-explorer/git.ts": ["openGit", "RepoGitError"],
 	"../../repo-explorer/runner.ts": ["makeGitRunner"],
 	"../../repo-explorer/branch-menu.ts": ["buildBranchMenu", "resolveBranchChoice", "chooseBranch"],
