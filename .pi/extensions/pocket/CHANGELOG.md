@@ -98,3 +98,9 @@ Maintenance:
 
   Each is pinned now, and the whole extension runs at 87 tests with no npm
   dependency and no build step.
+- **The supervisor tests no longer leave a directory behind.** The fake pi child
+  is reached through a shell wrapper written once per test file, and its temp
+  directory was created and never removed, so each suite run added one to `/tmp`
+  with nothing watching. The module-level `after` hook — the one that already
+  shuts the supervisors down — remembers it and removes it, so a file that fails
+  part-way through does not leave it either.

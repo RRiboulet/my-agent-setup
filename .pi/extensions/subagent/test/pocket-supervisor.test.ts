@@ -35,9 +35,12 @@ const FAKE_PI = fileURLToPath(new URL("./pocket-fake-pi.ts", import.meta.url));
  * a TypeScript file with — so write one, once, in this test's own temp tree.
  */
 let wrapperPromise: Promise<string> | undefined;
+/** The wrapper's temp directory, once there is one, so it can be removed again. */
+let wrapperDir: string | undefined;
 async function fakePiBin(): Promise<string> {
 	wrapperPromise ??= (async () => {
 		const directory = await mkdtemp(path.join(tmpdir(), "pocket-pi-"));
+		wrapperDir = directory;
 		const script = path.join(directory, "pi");
 		await writeFile(script, `#!/bin/sh\nexec ${process.execPath} --experimental-strip-types ${JSON.stringify(FAKE_PI)} "$@"\n`, { mode: 0o755 });
 		await chmod(script, 0o755);
@@ -55,6 +58,10 @@ function testConfig(overrides: Partial<PocketConfig> = {}): PocketConfig {
 const supervisors: Supervisor[] = [];
 after(async () => {
 	for (const supervisor of supervisors) await supervisor.shutdown().catch(() => undefined);
+	// The fake child's wrapper directory is the one thing a test does not own
+	// individually: it is written once per file and shared, so it goes when the
+	// file does. A suite run must not leave a directory behind in /tmp.
+	if (wrapperDir !== undefined) await rm(wrapperDir, { recursive: true, force: true, retryDelay: 50 }).catch(() => undefined);
 });
 
 async function boot(dataRoot: string, overrides: Partial<PocketConfig> = {}): Promise<{ store: SessionStore; journal: SessionJournal; supervisor: Supervisor }> {
