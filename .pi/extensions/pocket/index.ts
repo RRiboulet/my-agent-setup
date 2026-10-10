@@ -292,7 +292,12 @@ function gatewayInfo(config: ReturnType<typeof readPocketConfig>): GatewayInfo {
 	// The port file is the authority on the port; fall back to the configured one
 	// so the printed URL is still right when the daemon has not started yet.
 	const url = `http://${config.host === DEFAULT_HOST ? "127.0.0.1" : config.host}:${port ?? config.port}`;
-	return { url, token: config.token, pid, dataRoot: config.dataRoot };
+	// The token the daemon is actually using. `serve` mints one into the data
+	// root when PI_POCKET_TOKEN is unset, so reading only the environment left
+	// every master command — pair, devices, revoke, new — sending no
+	// Authorization and getting 401 from the daemon it had just started.
+	const token = effectiveToken(config.token) ?? readOperatorToken(config.dataRoot);
+	return { url, token, pid, dataRoot: config.dataRoot };
 }
 
 /** The last line of a log file, so a failure can carry its own reason. */
@@ -372,24 +377,27 @@ async function readSessions(config: ReturnType<typeof readPocketConfig>): Promis
  * reboot talk to the same daemon with the same credentials.
  */
 function loadOrCreateOperatorToken(dataRoot: string): string {
-	const file = paths.tokenFile(dataRoot);
-	try {
-		if (existsSync(file)) {
-			const existing = readFileSync(file, "utf8").trim();
-			if (existing !== "") return existing;
-		}
-	} catch {
-		// fall through and mint a new one
-	}
+	const existing = readOperatorToken(dataRoot);
+	if (existing !== undefined) return existing;
 	const token = generateToken();
 	try {
-		writeFileSync(file, `${token}\n`, { mode: 0o600 });
+		writeFileSync(paths.tokenFile(dataRoot), `${token}\n`, { mode: 0o600 });
 	} catch {
 		// The file is a convenience for the next run; if the data root is not
 		// writable the daemon still starts, just with a token that must be read
 		// from PI_POCKET_TOKEN.
 	}
 	return token;
+}
+
+/** The saved operator token, or undefined when none has been minted. */
+function readOperatorToken(dataRoot: string): string | undefined {
+	try {
+		const existing = readFileSync(paths.tokenFile(dataRoot), "utf8").trim();
+		return existing === "" ? undefined : existing;
+	} catch {
+		return undefined;
+	}
 }
 
 function sleep(ms: number): Promise<void> {
