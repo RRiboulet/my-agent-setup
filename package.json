@@ -2,7 +2,7 @@
   "name": "my-agent-setup",
   "version": "0.0.0",
   "private": true,
-  "description": "Personal pi extensions and skills: subagent delegation, todos, /answer, /session-breakdown, native web search, changelog and commit workflow skills.",
+  "description": "Personal pi extensions and skills: subagent delegation, todos, /answer, /session-breakdown, native web search, pocket phone gateway, changelog and commit workflow skills.",
   "keywords": [
     "pi-package"
   ],
@@ -13,6 +13,7 @@
       ".pi/extensions/goal.ts",
       ".pi/extensions/native-web-search.ts",
       ".pi/extensions/opencode-go-provider/index.ts",
+      ".pi/extensions/pocket/index.ts",
       ".pi/extensions/repo-explorer/index.ts",
       ".pi/extensions/review.ts",
       ".pi/extensions/session-breakdown.ts",

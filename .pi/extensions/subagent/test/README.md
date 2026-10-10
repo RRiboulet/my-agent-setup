@@ -14,6 +14,10 @@ in the loop, so type errors are not caught here.
 
 # 2. Run the suite from the repository root
 node --test .pi/extensions/subagent/test/*.test.ts
+
+# ... or one extension on its own. The pocket tests spawn real child
+# processes, so they are slower than the rest but need no credentials.
+node --test .pi/extensions/subagent/test/pocket-*.test.ts
 ```
 
 No `--test-force-exit` is needed: `session_shutdown` sets a `shuttingDown` flag
@@ -51,6 +55,14 @@ test.
 | `repo-explorer-browser.test.ts` | the sibling `.pi/extensions/repo-explorer/file-browser.ts`: the directory model (`listDirectory`'s folder-first ordering, nested-folder synthesis, a directory that is only a prefix of a sibling, `parentPath`) and the real component driven by pi's key sequences — drill-in and file completion with the full repo-relative path, arrow wraparound, the ⌫/←-walks-up-only-while-the-filter-is-empty rule, Esc's clear-then-up-then-cancel order, fuzzy filtering, an empty directory, and width-bounded rendering; plus the display boundary in use (a byte-level assertion that no rendered line carries a raw control byte for a hostile listing, the breadcrumb sanitized, and the byte-faithful path still what a selection resolves to) and degenerate widths down to pi's 2-column floor |
 | `repo-explorer-transcript.test.ts` | the sibling `.pi/extensions/repo-explorer/file-transcript.ts` and `sanitize.ts`: the numbering (right-aligned, terminator-aware, blank lines preserved), `formatFileTranscript` (header, truncation note, empty-file case, hostile path sanitized while `details` keep it raw), `fileMessageRenderer` (the two coloured lines, a hostile body made inert, tabs preserved, CRLF normalized, width-bounded lines, the per-width render cache and its invalidate, non-string content tolerated), and `sanitizeDisplay`/`sanitizeFileContent`'s differing policies |
 | `repo-explorer-quick-open.test.ts` | the sibling `.pi/extensions/repo-explorer/quick-open.ts`: the `/explore <path>` argument grammar (`tokenizeArgs`, `normalizeRepoPath`, `parseExploreArgs` — the single-token-is-a-path rule, `branch:path` vs `<path> <branch>`, quotes, the absolute-path and too-many-tokens errors) and `resolveQuickBranch`'s refname rule (explicit refname / short name / menu label, the unlisted tag-or-sha fallthrough, the ambiguous `origin/main` refusal, and the last-pick and HEAD defaults) |
+| `pocket-config.test.ts` | the sibling `.pi/extensions/pocket/config.ts`: defaults and env parsing (`PI_POCKET_HOST`/`PORT`/`JOURNAL_MAX`/`RESPAWN_MAX`/`REQUEST_TIMEOUT_MS`, the strict-integer rule, an empty value meaning "unset"), the bind rule (`checkAccessibleHost` refusing non-loopback with no token — and an empty token counting as none), `isLoopbackHost`'s spellings, `generateToken`, the paths, and `assertSafeSessionId` rejecting the ids that would escape a directory |
+| `pocket-journal.test.ts` | the sibling `.pi/extensions/pocket/journal.ts`: sequencing (including sequence numbers assigned inside the queue, which is the only way 25 concurrent appends are distinct), the cursor cases, the trim and the drop, the per-record byte cap (bounded, and keeping the kind/`event.type` that identifies the record), the `.start` sidecar a restart reads its count from, and recovery memoized as one in-flight promise so concurrent appends share a chain |
+| `pocket-framing.test.ts` | the LF-only frame split in `pocket/rpc.ts`: U+2028/U+2029 inside strings, a frame carried across chunks, CRLF, a lone CR, blank lines dropped inside the splitter, and byte-at-a-time arrival being equivalent to a single read |
+| `pocket-spawn-args.test.ts` | the sibling `.pi/extensions/pocket/spawn-args.ts`: the naming-vs-resume choice, `--mode rpc` first, model/thinking as separate argv, no `--cwd` anywhere, values with spaces kept whole, and falling back to naming when the recorded file no longer exists |
+| `pocket-auth.test.ts` | the sibling `.pi/extensions/pocket/auth.ts`: `hashToken`, one-time pairing-code consumption, `deviceForToken`, that the token is never on disk (only the hash), the attempt countdown, the TTL, the per-address rate limit, case/whitespace tolerance, the unnamed-device label, revoke, restart durability, and `mask`/`maskValue` by shape (bearer, `ghp_`, PEM, `sk-`) |
+| `pocket-store.test.ts` | the sibling `.pi/extensions/pocket/store.ts`: create/update/remove against the real API, concurrent creates and updates, the atomic registry, `sessionDir` containment, and a rejected traversal leaving the registry byte-identical |
+| `pocket-supervisor.test.ts` | the sibling `.pi/extensions/pocket/supervisor.ts`, against the real subprocess below: attach/idempotence, the child-named session file being recorded, `get_messages` on an empty history, prompt delivery, idempotent replay by key, SIGKILL → respawn → resume with the transcript intact, the respawn journalled with the signal, a detach that is not respawned, a parked session staying down across a simulated daemon restart, `reviveAll` re-attaching everything that wants it, subscriber records matching the journal, and two spawn-failure paths reported rather than respawned forever |
+| `pocket-fake-pi.ts` | not a test: a stand-in `pi --mode rpc` child the supervisor tests spawn through a `#!/bin/sh exec` wrapper. It parses `--session-dir`/`--session-id`/`--session`, restores the transcript it is resumed against, writes its session file lazily on the first prompt exactly as pi does, answers `get_state`/`get_messages`/`prompt`, emits `ready`/`agent_start`/`agent_settled`, and exits 0 on SIGTERM/SIGINT. Process facts — an exit code, a signal, a pid changing, argv — cannot be mocked, so the supervisor tests do not mock them |
 | `helpers.ts` | env/temp-dir isolation and polling helpers |
 
 `lifecycle.test.ts` drives the real extension factory with a fake
@@ -83,6 +95,16 @@ size:
 - **long-poll behaviour** — the fake always reports `pane_dead = "1"`, so
   "pane still alive, keep waiting" is untested; `pi.exec`'s `timeout` option is
   ignored by the fake, so no timeout or abort path runs.
+
+The pocket tests cover the supervisor's process behaviour with a real child, but
+two things stay out of the suite: **the phone client** (`pocket/client/*.js` is
+plain browser JavaScript served by the daemon, exercised by hand) and **a real
+model turn** — `PI_POCKET_PI_BIN` can only point at the fake child, and this
+container has no provider credentials, so a prompt against the real `pi` fails
+with "No API key found" and the smoke test asserts the failure is reported, not
+that an answer arrives. The SSE cursor contract (records-then-live, the reset
+cases) is additionally verified against a live daemon by hand rather than in a
+test.
 
 Anything requiring a live child pi process — real context handoff on resume, key
 delivery for `subagent_interrupt` against a real TUI, and liveness when a child
