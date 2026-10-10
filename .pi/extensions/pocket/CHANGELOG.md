@@ -83,6 +83,17 @@ Fixed:
   mangled a bracketed IPv6 Host — `[::1]:8787` was read as `:`, because the
   trailing-`:port` strip ate the address's last group — so an IPv6 bind rejected
   its own clients; the bracket is now parsed before any port is removed.
+- **The CLI sent no operator token after `serve` minted one.** The daemon
+  authenticates against `PI_POCKET_TOKEN` when it is set and otherwise against
+  the token `serve` mints into `daemon.token`; `gatewayInfo`, the function every
+  CLI command uses to address the daemon, read only the environment. A pi
+  session that never set `PI_POCKET_TOKEN` therefore had `serve` hand the minted
+  token to the daemon and then send no `Authorization` header itself: `pair`,
+  `devices`, `revoke` and `new` all got 401 from the gateway they had just
+  started, and the minted file was never read back on the client side.
+  `gatewayInfo` now falls back to the saved token, exactly as `serve` falls back
+  to minting one, so the environment still wins when it is set and the file is
+  the shared secret when it is not.
 
 Maintenance:
 
