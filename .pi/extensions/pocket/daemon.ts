@@ -242,12 +242,39 @@ async function dispatch(
  * while the browser believes it is same-origin. Refusing unknown hosts costs one
  * comparison and closes that whole attack path.
  */
-function hostAllowed(host: string | undefined, config: PocketConfig): boolean {
+export function hostAllowed(host: string | undefined, config: { host: string }): boolean {
 	if (host === undefined) return true; // HTTP/1.0 from a local tool: no browser involved
-	const hostname = host.replace(/^\[/, "").replace(/\].*$/, "").replace(/:\d+$/, "").toLowerCase();
+	const hostname = hostnameOf(host);
 	if (hostname === "") return false;
+	// A wildcard bind means every interface, and checkAccessibleHost refuses one
+	// without a token, so the Host header cannot narrow what the bind already
+	// opened. Comparing it against the literal "0.0.0.0" only rejected the
+	// address the phone dialled — the one request the bind exists to serve. The
+	// rebinding attack this check closes needs a loopback bind, which is never a
+	// wildcard.
+	if (isWildcardHost(config.host)) return true;
 	if (hostname === config.host.toLowerCase()) return true;
 	return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname.endsWith(".localhost");
+}
+
+/**
+ * The hostname part of a Host header, lowercased, with any port removed.
+ *
+ * An IPv6 literal is bracketed and its colons are part of the address, so
+ * stripping a trailing `:port` from it eats the last group instead (`[::1]`
+ * became `:`). Bracket first; only an unbracketed host has a colon that can be
+ * a port.
+ */
+function hostnameOf(host: string): string {
+	const bracketed = /^\[([^\]]*)\]/.exec(host);
+	if (bracketed !== null) return bracketed[1].toLowerCase();
+	return host.replace(/:\d+$/, "").toLowerCase();
+}
+
+/** True for the bind addresses that name no single host, so no Host can match them. */
+function isWildcardHost(host: string): boolean {
+	const normalized = host.replace(/^\[|\]$/g, "");
+	return normalized === "0.0.0.0" || normalized === "::";
 }
 
 function originAllowed(req: IncomingMessage, url: URL): boolean {
