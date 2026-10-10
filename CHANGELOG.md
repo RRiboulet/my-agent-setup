@@ -110,7 +110,14 @@ Maintenance:
   on a missing directory, the harness failing the case it was written to cover.
 
   The extension runs at 87 tests with no build step and no new dependency; the
-  repository's full suite is unchanged in shape and green at 573.
+  repository's full suite is unchanged in shape and green at 575.
+- **The supervisor tests no longer leave a directory behind.** The fake pi child
+  is reached through a shell wrapper written once per test file, and that
+  wrapper's temp directory was created and never removed — so every run of the
+  suite added a directory to `/tmp`, and the only signal that it had happened
+  was a directory count that nobody looks at. It is tracked and removed by the
+  same module-level `after` hook that shuts the supervisors down, which also
+  means a file that fails part-way through does not leave it either.
 
 Added:
 
