@@ -69,6 +69,20 @@ Fixed:
   reconnect had nothing to show. Every prompt failure is now recorded as a
   `prompt_failed` gateway event carrying the reason, which is what the phone's
   next reconnect reads instead.
+- **A wildcard bind answered `421` to the address it was bound to serve.**
+  `hostAllowed` compared the request's Host header against `PI_POCKET_HOST`, so a
+  daemon started with `PI_POCKET_HOST=0.0.0.0` — the same-Wi-Fi path in the
+  tutorial, and the only option behind a container or NAT — accepted only
+  `localhost` and rejected `192.168.1.50`, `100.106.10.25` and every other
+  address a phone could dial, with `unknown host: refusing to answer`. `0.0.0.0`
+  names no single host, so there was nothing for a concrete Host to match. A
+  wildcard bind now accepts any Host, which is what that bind already means:
+  `checkAccessibleHost` refuses a non-loopback bind without a token, so
+  authentication is still the gate, and the DNS rebinding this check exists to
+  stop needs a loopback bind, which is never a wildcard. The same function
+  mangled a bracketed IPv6 Host — `[::1]:8787` was read as `:`, because the
+  trailing-`:port` strip ate the address's last group — so an IPv6 bind rejected
+  its own clients; the bracket is now parsed before any port is removed.
 
 Maintenance:
 

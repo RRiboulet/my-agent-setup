@@ -10,6 +10,13 @@ services:
       # pi at an empty volume and appear to lose every past session.
       - pi-config:/home/vscode/.pi
     command: sleep infinity
+    # A phone reaches the pocket gateway through the host's tailnet or LAN
+    # address, so the container's bind has to be published: without this,
+    # 100.106.10.25:8787 is closed on the host no matter what the daemon does.
+    # 8787 is PI_POCKET_PORT's default. Scope the host side ("100.x.y.z:8787:8787")
+    # where the platform allows it and the LAN is not trusted.
+    ports:
+      - "8787:8787"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     user: vscode
