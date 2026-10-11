@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.4.0 — 2026-10-11
+
 Added:
 
 - **Web search now defaults to the `opencode-go` plan instead of OpenRouter.**
