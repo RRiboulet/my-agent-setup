@@ -6,16 +6,28 @@
 // Licensed under the Apache License, Version 2.0.
 // Upstream: mitsupi v1.6.0, commit 0865c84.
 //
-// One LOCAL PATCH, and it is most of the file: OpenRouter support. Upstream
-// speaks `openai-codex` and `anthropic`; this adds `openrouter` via its `web`
-// plugin, plus `runOpenRouterSearch`, `defaultModelId` and `defaultBaseUrl`, and
-// a resolver that picks a provider from the --provider flag, then
-// `defaultProvider` in settings.json, then whichever credential exists in
-// auth.json. See the LOCAL PATCH hunks listed in SKILL.md beside this file.
+// LOCAL PATCHES, most of the file: provider support beyond upstream's
+// `openai-codex` and `anthropic`, plus a test seam. In short:
+//   - `openrouter` via its `web` plugin, and `opencode-go` via the Go API's
+//     Anthropic-compatible `/messages` endpoint (native `web_search_20250305`),
+//     with `runOpenRouterSearch`, `opencodeGoHeaders`, `defaultModelId` and
+//     `defaultBaseUrl` added;
+//   - `pickProvider` extended with the opencode-go/openrouter credentials and
+//     `PI_WEB_SEARCH_PROVIDER`, and made to reject an unrecognized explicit
+//     provider instead of silently falling through to another plan;
+//   - `normalizeProvider`, `buildAnthropicHeaders`, `runAnthropicSearch` and
+//     `resolveApiKey` modified (exact-id matching, non-clobbering extra headers,
+//     a testable request builder, the OPENCODE_API_KEY fallback);
+//   - a direct-invocation guard and a `__test__` export at the bottom, so
+//     importing the module for tests does not run a search.
+// The body is indented with spaces; upstream uses tabs, so a plain diff against
+// upstream is not meaningful — compare with `diff -w`. See the LOCAL PATCH
+// hunks listed in SKILL.md beside this file.
 //
 // Verified against upstream 0865c84: no upstream function was removed.
 
 import { existsSync, readFileSync, writeFileSync, realpathSync } from "fs";
+import { randomUUID } from "crypto";
 import { spawnSync, execSync } from "child_process";
 import { homedir } from "os";
 import { dirname, isAbsolute, join, resolve } from "path";
@@ -84,12 +96,12 @@ function parseArgs(argv) {
 
 function usage() {
     return `Usage:
-  node search.mjs "<query>" [--purpose "<why>"] [--provider openai-codex|anthropic|openrouter] [--model <id>] [--json]
+  node search.mjs "<query>" [--purpose "<why>"] [--provider opencode-go|openai-codex|anthropic|openrouter] [--model <id>] [--json]
 
 Examples:
   node search.mjs "latest python release" --purpose "update dependency notes"
   node search.mjs "HTTP/3 browser support 2026" --provider openai-codex
-  node search.mjs "vite 7 breaking changes" --provider openrouter --json`;
+  node search.mjs "vite 7 breaking changes" --provider opencode-go --json`;
 }
 
 function readJson(path, fallback = {}) {
@@ -133,24 +145,51 @@ function getAgentDir() {
 function normalizeProvider(provider) {
     if (!provider) return undefined;
     const p = String(provider).toLowerCase().trim();
+    // Exact provider ids first, so a composite string cannot be captured by a
+    // substring meant for a different provider.
+    if (p === "opencode-go" || p === "opencode") return "opencode-go";
+    if (p === "openrouter") return "openrouter";
+    if (p === "openai-codex" || p === "openai" || p === "codex") return "openai-codex";
+    if (p === "anthropic") return "anthropic";
+    // Then model-shaped strings (`claude-haiku-5-5`, `openai/gpt-4o-mini:online`).
+    if (p.includes("opencode")) return "opencode-go";
     if (p.includes("anthropic") || p.includes("claude")) return "anthropic";
     if (p.includes("openrouter") || p.includes("sonar")) return "openrouter";
-    if (p.includes("codex") || p === "openai" || p.startsWith("openai")) return "openai-codex";
+    if (p.includes("codex") || p.startsWith("openai")) return "openai-codex";
     return undefined;
 }
 
 function pickProvider(argProvider, settings, auth) {
     const forced = normalizeProvider(argProvider);
     if (forced) return forced;
+    // An explicit provider that cannot be mapped is a typo, not a reason to
+    // fall through to whatever credential happens to exist: silently spending
+    // another plan's budget is worse than failing.
+    if (argProvider && String(argProvider).trim()) {
+        throw new Error(`Unknown provider '${argProvider}'. Use opencode-go|openrouter|openai-codex|anthropic`);
+    }
 
+    const fromEnv = normalizeProvider(process.env.PI_WEB_SEARCH_PROVIDER);
+    if (fromEnv) return fromEnv;
+    if (process.env.PI_WEB_SEARCH_PROVIDER && String(process.env.PI_WEB_SEARCH_PROVIDER).trim()) {
+        throw new Error(
+            `Unknown provider in PI_WEB_SEARCH_PROVIDER: '${process.env.PI_WEB_SEARCH_PROVIDER}'. Use opencode-go|openrouter|openai-codex|anthropic`,
+        );
+    }
+
+    // settings.defaultProvider may name an unrelated pi provider (a local model
+    // server, say), so an unknown value is ignored rather than fatal.
     const fromSettings = normalizeProvider(settings?.defaultProvider);
     if (fromSettings) return fromSettings;
 
+    // opencode-go first: it is this machine's main provider, and the Go plan is
+    // where the search budget should land when several credentials exist.
+    if (auth?.["opencode-go"] || process.env.OPENCODE_API_KEY) return "opencode-go";
     if (auth?.openrouter) return "openrouter";
     if (auth?.["openai-codex"]) return "openai-codex";
     if (auth?.anthropic) return "anthropic";
 
-    throw new Error("Could not determine provider. Pass --provider openrouter|openai-codex|anthropic");
+    throw new Error("Could not determine provider. Pass --provider opencode-go|openrouter|openai-codex|anthropic");
 }
 
 function decodeJwtAccountId(jwt) {
@@ -321,13 +360,35 @@ function getCachedOAuthAccess(entry, now = Date.now()) {
 function defaultModelId(provider) {
     if (provider === "openrouter") return "openai/gpt-4o-mini:online";
     if (provider === "openai-codex") return "gpt-5.4-mini";
+    // opencode-go's web search runs on the Go plan's Anthropic-protocol model.
+    if (provider === "opencode-go") return "claude-haiku-5-5";
     return "claude-haiku-4-5";
 }
 
 function defaultBaseUrl(provider) {
     if (provider === "openrouter") return "https://openrouter.ai/api/v1";
     if (provider === "openai-codex") return "https://chatgpt.com/backend-api";
+    if (provider === "opencode-go") return "https://opencode.ai/zen/go";
     return "https://api.anthropic.com";
+}
+
+// Newer Anthropic-protocol models reject `temperature` as deprecated — on the Go
+// plan and on the direct API alike. Add a model id here when one starts
+// rejecting it; the Go path omits temperature wholesale regardless, because
+// omitting it is always safe.
+const MODELS_WITHOUT_TEMPERATURE = new Set(["claude-haiku-5-5"]);
+function supportsTemperature(model) {
+    return !MODELS_WITHOUT_TEMPERATURE.has(String(model || "").trim());
+}
+
+// The Go API routes on a stable session header and rejects a request without
+// one (400 MissingSessionID). A one-shot search has no session to pin, so an
+// id per process is enough for routing and prompt caching.
+function opencodeGoHeaders() {
+    return {
+        "x-opencode-session": randomUUID(),
+        "x-opencode-client": "pi-native-web-search",
+    };
 }
 
 function pickFastModel(provider, requestedModel, piAi) {
@@ -342,6 +403,14 @@ function pickFastModel(provider, requestedModel, piAi) {
         const known = models.find((m) => m.id === "perplexity/sonar");
         const id = requestedModel || preferred[0];
         return { id, baseUrl: known?.baseUrl ?? baseUrl };
+    }
+
+    // The Go plan's web-search title is not in pi-ai's catalogue (this runs
+    // standalone, outside pi, so the provider extension is not registered), and
+    // the endpoint carries its own base URL. Resolve it directly rather than
+    // letting a catalogue heuristic pick a model that cannot search.
+    if (provider === "opencode-go") {
+        return { id: requestedModel || defaultModelId(provider), baseUrl };
     }
 
     if (!Array.isArray(models) || models.length === 0) {
@@ -370,7 +439,13 @@ function pickFastModel(provider, requestedModel, piAi) {
 }
 
 async function resolveApiKey(provider, auth, authPath, piAi) {
-    const entry = auth?.[provider];
+    let entry = auth?.[provider];
+    // The opencode-go provider extension documents OPENCODE_API_KEY as an
+    // alternative to auth.json; a web search should not fail just because the
+    // key lives in the environment.
+    if (!entry && provider === "opencode-go" && process.env.OPENCODE_API_KEY) {
+        entry = { type: "api_key", key: "OPENCODE_API_KEY" };
+    }
     if (!entry) {
         throw new Error(`No credentials for provider '${provider}' in ${authPath}`);
     }
@@ -608,10 +683,12 @@ async function runOpenRouterSearch({ model, apiKey, baseUrl, query, purpose, tim
     return citations.length > 0 ? `${text}\n\nSources:\n${citations.map((c) => `- ${c}`).join("\n")}` : text;
 }
 
-function buildAnthropicHeaders(apiKey) {
+function buildAnthropicHeaders(apiKey, extraHeaders = {}) {
     const oauthToken = typeof apiKey === "string" && apiKey.includes("sk-ant-oat");
+    // extraHeaders first, so a provider header can never clobber authentication.
     if (oauthToken) {
         return {
+            ...extraHeaders,
             authorization: `Bearer ${apiKey}`,
             "anthropic-version": "2023-06-01",
             "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,web-search-2025-03-05",
@@ -622,6 +699,7 @@ function buildAnthropicHeaders(apiKey) {
         };
     }
     return {
+        ...extraHeaders,
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
         "anthropic-beta": "web-search-2025-03-05",
@@ -630,21 +708,38 @@ function buildAnthropicHeaders(apiKey) {
     };
 }
 
-async function runAnthropicSearch({ model, apiKey, query, purpose, timeoutMs }) {
+// Pure request builder, so tests can pin the endpoint, headers and body without
+// a network call. Serves the direct Anthropic API and opencode-go's
+// Anthropic-compatible endpoint; the caller passes the base URL and any
+// provider headers.
+function buildAnthropicRequest({ model, apiKey, query, purpose, baseUrl, extraHeaders, omitTemperature }) {
     const body = {
         model,
         max_tokens: 1800,
-        temperature: 0,
         system: buildSystemPrompt(),
         tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }],
         messages: [{ role: "user", content: buildUserPrompt(query, purpose) }],
     };
+    // Omitting temperature is always safe — the API default applies — so it is
+    // omitted for the whole Go path (that endpoint rejected it for the search
+    // model) as well as for any model known to reject it on the direct API.
+    if (!omitTemperature && supportsTemperature(model)) body.temperature = 0;
+
+    return {
+        endpoint: `${String(baseUrl || defaultBaseUrl("anthropic")).replace(/\/+$/, "")}/v1/messages`,
+        headers: buildAnthropicHeaders(apiKey, extraHeaders),
+        body,
+    };
+}
+
+async function runAnthropicSearch({ model, apiKey, query, purpose, timeoutMs, baseUrl, extraHeaders, omitTemperature }) {
+    const { endpoint, headers, body } = buildAnthropicRequest({ model, apiKey, query, purpose, baseUrl, extraHeaders, omitTemperature });
 
     const signal = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(timeoutMs) : undefined;
 
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
+    const res = await fetch(endpoint, {
         method: "POST",
-        headers: buildAnthropicHeaders(apiKey),
+        headers,
         body: JSON.stringify(body),
         signal,
     });
@@ -712,12 +807,17 @@ async function main() {
                       timeoutMs: args.timeoutMs,
                       baseUrl: model.baseUrl,
                   })
+              // opencode-go rides the same Anthropic-shaped call, pointed at the
+              // Go API and carrying its session headers.
               : await runAnthropicSearch({
                       model: model.id,
                       apiKey,
                       query: args.query,
                       purpose: args.purpose,
                       timeoutMs: args.timeoutMs,
+                      baseUrl: model.baseUrl,
+                      extraHeaders: provider === "opencode-go" ? opencodeGoHeaders() : undefined,
+                      omitTemperature: provider === "opencode-go",
                   });
 
     if (args.json) {
@@ -743,7 +843,40 @@ async function main() {
     console.log(text);
 }
 
-main().catch((err) => {
-    console.error(`Error: ${err?.message || err}`);
-    process.exit(1);
-});
+// Run only when invoked as a script, so a test can import the pure helpers
+// below without a search firing. The entry path is compared literally and via
+// realpath, because a symlinked install resolves import.meta.url while
+// process.argv[1] keeps whatever path was typed (and --preserve-symlinks flips
+// that around).
+const invokedDirectly = (() => {
+    const entry = process.argv[1];
+    if (!entry) return false;
+    const candidates = new Set([pathToFileURL(resolve(entry)).href]);
+    try {
+        candidates.add(pathToFileURL(realpathSync(entry)).href);
+    } catch {
+        // A path that cannot be resolved still gets the literal comparison above.
+    }
+    return candidates.has(import.meta.url);
+})();
+
+if (invokedDirectly) {
+    main().catch((err) => {
+        console.error(`Error: ${err?.message || err}`);
+        process.exit(1);
+    });
+}
+
+export const __test__ = {
+    parseArgs,
+    normalizeProvider,
+    pickProvider,
+    defaultModelId,
+    defaultBaseUrl,
+    supportsTemperature,
+    opencodeGoHeaders,
+    pickFastModel,
+    buildAnthropicHeaders,
+    buildAnthropicRequest,
+    resolveApiKey,
+};

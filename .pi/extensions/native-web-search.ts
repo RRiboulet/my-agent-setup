@@ -20,14 +20,14 @@ import { StringEnum } from "@earendil-works/pi-ai";
 const SCRIPT_ENV_VAR = "PI_NATIVE_WEB_SEARCH_SCRIPT";
 const PROVIDER_ENV_VAR = "PI_WEB_SEARCH_PROVIDER";
 const MODEL_ENV_VAR = "PI_WEB_SEARCH_MODEL";
-const DEFAULT_PROVIDER = "openrouter";
+const DEFAULT_PROVIDER = "opencode-go";
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
 
 export interface WebSearchInput {
 	query: string;
 	purpose?: string;
-	provider?: "openrouter" | "openai-codex" | "anthropic";
+	provider?: "opencode-go" | "openrouter" | "openai-codex" | "anthropic";
 	model?: string;
 	timeout_ms?: number;
 }
@@ -70,15 +70,43 @@ function clampTimeout(value: number | undefined): number {
 	return Math.min(Math.max(Math.floor(value), 1_000), MAX_TIMEOUT_MS);
 }
 
-/** Provider precedence: explicit argument > env override > OpenRouter default. */
-function resolveProvider(requested: WebSearchInput["provider"]): string {
-	const override = process.env[PROVIDER_ENV_VAR]?.trim();
-	return requested?.trim() || override || DEFAULT_PROVIDER;
+/**
+ * Provider precedence is the script's: this forwards only an explicitly
+ * requested provider. Leaving it undefined makes `runSearch` omit --provider, so
+ * the script applies `PI_WEB_SEARCH_PROVIDER`, then `defaultProvider` in
+ * settings.json, then the first credential in auth.json (preferring
+ * opencode-go). Reading the env var here too would double-handle it and make the
+ * script's own order and error message unreachable.
+ */
+function resolveProvider(requested: WebSearchInput["provider"]): string | undefined {
+	return requested?.trim() || undefined;
 }
 
 /** Model precedence: explicit argument > env override > script default for the provider. */
 function resolveModel(requested: string | undefined): string | undefined {
 	return requested?.trim() || process.env[MODEL_ENV_VAR]?.trim() || undefined;
+}
+
+interface SearchArgs {
+	script: string;
+	query: string;
+	purpose?: string;
+	provider?: string;
+	model?: string;
+	timeoutMs: number;
+}
+
+/**
+ * Pure argv builder, so the seam that decides whether --provider is sent is
+ * testable. --provider is omitted when nothing explicit was requested, which is
+ * what lets the script resolve settings.defaultProvider/auth.json itself.
+ */
+function buildSearchArgs({ script, query, purpose, provider, model, timeoutMs }: SearchArgs): string[] {
+	const args = [script, query, "--json", "--timeout", String(timeoutMs)];
+	if (provider) args.push("--provider", provider);
+	if (purpose?.trim()) args.push("--purpose", purpose.trim());
+	if (model) args.push("--model", model);
+	return args;
 }
 
 interface SearchResult {
@@ -98,10 +126,14 @@ async function runSearch(input: WebSearchInput, signal?: AbortSignal): Promise<S
 	const script = resolveScriptPath();
 	const timeoutMs = clampTimeout(input.timeout_ms);
 
-	const args = [script, query, "--json", "--provider", resolveProvider(input.provider), "--timeout", String(timeoutMs)];
-	if (input.purpose?.trim()) args.push("--purpose", input.purpose.trim());
-	const model = resolveModel(input.model);
-	if (model) args.push("--model", model);
+	const args = buildSearchArgs({
+		script,
+		query,
+		purpose: input.purpose,
+		provider: resolveProvider(input.provider),
+		model: resolveModel(input.model),
+		timeoutMs,
+	});
 
 	const { stdout, stderr, code } = await new Promise<{ stdout: string; stderr: string; code: number | null }>(
 		(resolvePromise, rejectPromise) => {
@@ -192,8 +224,8 @@ export default function (pi: ExtensionAPI) {
 		label: "Web Search",
 		description:
 			"Search the internet with a fast, web-enabled model. Returns a concise research summary (3-7 findings) " +
-			"with full canonical source URLs, tailored to a stated purpose. Uses OpenRouter by default; pass provider " +
-			"to use openai-codex or anthropic instead. Use for current facts, documentation, release notes, and any " +
+			"with full canonical source URLs, tailored to a stated purpose. Uses opencode-go by default; pass provider " +
+			"to use OpenRouter, openai-codex or anthropic instead. Use for current facts, documentation, release notes, and any " +
 			"question that needs external information.",
 		promptSnippet: "Search the internet and return a concise summary with full source URLs",
 		promptGuidelines: [
@@ -206,8 +238,8 @@ export default function (pi: ExtensionAPI) {
 				Type.String({ description: "Why the information is needed, so the summary is scoped" }),
 			),
 			provider: Type.Optional(
-				StringEnum(["openrouter", "openai-codex", "anthropic"] as const, {
-					description: `Search provider; defaults to ${DEFAULT_PROVIDER} (override globally with ${PROVIDER_ENV_VAR})`,
+				StringEnum(["opencode-go", "openrouter", "openai-codex", "anthropic"] as const, {
+					description: `Search provider; unset resolves settings.defaultProvider, then the first auth.json credential (preferring ${DEFAULT_PROVIDER}); override globally with ${PROVIDER_ENV_VAR}`,
 				}),
 			),
 			model: Type.Optional(
@@ -265,4 +297,7 @@ export default function (pi: ExtensionAPI) {
 export const __test__ = {
 	resolveScriptPath,
 	scriptCandidates,
+	resolveProvider,
+	resolveModel,
+	buildSearchArgs,
 };

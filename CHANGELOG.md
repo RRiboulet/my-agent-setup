@@ -4,6 +4,117 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.4.0 — 2026-10-11
+
+Added:
+
+- **Web search now defaults to the `opencode-go` plan instead of OpenRouter.**
+  The `web_search` tool and the `native-web-search` skill resolve providers in
+  this order: `--provider`, then `PI_WEB_SEARCH_PROVIDER`, then `defaultProvider`
+  in `settings.json`, then the first credential in `auth.json` — and that last
+  fallback now prefers `opencode-go` over `openrouter`. The Go plan is where the
+  request lands as soon as its key exists, so a machine that kept an OpenRouter
+  credential around no longer pays for search on it by accident. An explicit
+  `--provider openrouter` (or `PI_WEB_SEARCH_PROVIDER=openrouter`) still works;
+  nothing about the OpenRouter path changed.
+
+  The Go path searches through opencode.ai's Anthropic-compatible
+  `/zen/go/v1/messages` endpoint with the native `web_search_20250305` tool, on
+  `claude-haiku-5-5` — an Anthropic model the Go plan serves, and the one
+  verified to carry the server-side search tool (the repo's vendored Go
+  catalogue lists other Anthropic-protocol titles, none of them Claude). Two
+  details the endpoint dictates: it rejects a request with no
+  `x-opencode-session` header (`400 MissingSessionID`), so the script stamps a
+  per-run session id and an `x-opencode-client`; and `temperature` is rejected
+  as deprecated for this model, so the script omits it for `claude-haiku-5-5` on
+  any provider while leaving the direct Anthropic default at `0`. The key
+  resolves as `auth.json` under `opencode-go`, then the `OPENCODE_API_KEY`
+  environment variable, matching what the `opencode-go` provider extension
+  documents. Provider resolution and the Go request shape are pinned by tests:
+  the precedence chain above, the endpoint, the two session headers, the
+  `temperature` rule, and that no model is sent unless one is requested.
+
+  Note for a session already running when this lands: the extension's code is
+  loaded at start, so `web_search` keeps the old forced-provider behaviour until
+  pi is reloaded.
+- **Added `/explore`, a read-only browser for the current repository's git
+  history, built for working from a phone over tmux where the working tree is on
+  a machine you cannot open an editor on.** `/explore` lists the repository's
+  branches — the detached-HEAD tip first, then locals in refname order, then
+  remote-tracking refs, the current branch marked, and a local branch named like
+  a remote-tracking ref disambiguated rather than silently shadowing it — then
+  opens a directory-by-directory browser: type to filter the current directory,
+  Enter opens a folder or finishes on a file, ⌫/← walk up, Esc filters/backs
+  out. The picked file is printed into the transcript with a numbered,
+  width-bounded body and a truncation note rather than into an ephemeral
+  overlay, so it lands in tmux scrollback and the agent reads it in the next
+  turn's context. `/explore <path>` is the quick-open: it resolves the branch
+  (explicit argument, the branch the menu last picked, else HEAD), prints a file
+  path straight to the transcript, and opens the browser at a directory path;
+  `/explore <path> <branch>` and `/explore <branch>:<path>` name the branch
+  explicitly. Nothing is checked out or written.
+
+  Two plumbing choices are load-bearing. The single process runner
+  (`repo-explorer/runner.ts`) deliberately does not use `pi.exec`: that executor
+  decodes stdout chunk-wise, so a multi-byte UTF-8 sequence straddling a 64 KiB
+  stream boundary arrives as U+FFFD (measured: two replacements per chunk versus
+  zero when stdout Buffers are accumulated and decoded once), which would make a
+  large non-ASCII file unreadable. `readFile` then refuses binary (a NUL in the
+  first 8 KB), mojibake (U+FFFD, left as a tripwire for real corruption), and
+  blobs over 16 MiB before fetching them, and clips text at 2000 lines / 256 KiB
+  with the result always an exact byte prefix of the blob. Every
+  repository-derived string that reaches the terminal goes through
+  `repo-explorer/sanitize.ts` — C0/C1 control bytes, DEL and the bidi/reordering
+  format characters become caret or `\uXXXX` notation — because a branch name or
+  a log file can otherwise wipe the screen, overwrite the clipboard, or display
+  reversed; the file's real bytes are kept in the model-facing message, and a
+  custom renderer draws the transcript copy without running it through Markdown.
+  The quick-open argument grammar and branch resolution live in a pure module and
+  are unit-tested without a terminal; an adversarial review before it shipped
+  also drove two fixes: a branch argument is remembered only after git has
+  resolved it (a typo no longer poisons every later bare `/explore <path>`), and
+  the branch menu now sanitizes its repository name and options and matches back
+  in that displayed form. v1 is browse and view; `git blame` and inter-branch
+  diff navigation are deferred.
+
+Fixed:
+
+- **Two defects an adversarial review found in the `opencode-go` web-search
+  default, both in the seam between the extension and the script.** The tool
+  forced `--provider opencode-go` on every call, so the script's
+  `defaultProvider`/`auth.json` resolution was unreachable through `web_search`:
+  a machine whose only credential was OpenRouter got a hard "No credentials for
+  provider 'opencode-go'" instead of falling back (the case where
+  `settings.defaultProvider` is unset; if it names a provider you have no
+  credential for, the hard error is the documented order doing its job). The
+  extension now omits
+  `--provider` unless the caller named one or set `PI_WEB_SEARCH_PROVIDER`, and
+  the script reads that variable itself, so the documented precedence holds on
+  both paths. Separately, an unrecognized `--provider` value — a typo — used to
+  fall through and quietly spend whichever plan's credential existed; it now
+  fails with a clear message. The review also showed that the claim the Go path
+  was "pinned by tests" was false — nothing imported `search.mjs` — so the
+  script grew a direct-invocation guard, a `__test__` export and a pure
+  `buildAnthropicRequest`, and the suite now covers provider precedence, the
+  extension's argv construction (`--provider` present only when requested), the
+  endpoint, the session headers, the `temperature` rule, the header-clobber
+  ordering and the `OPENCODE_API_KEY` fallback.
+- **`temperature` is omitted for the whole Go path, and for `claude-haiku-5-5`
+  on any provider.** The first follow-up keyed the omission on the model alone,
+  which would have started sending `temperature: 0` to non-search Go models
+  (`qwen3.8-max`, say) on the assumption that the endpoint's rejection is
+  model-level — unverified, and a regression if it is endpoint-level. Omitting
+  temperature is always safe (the API default applies), so the Go path omits it
+  wholesale and the model set covers the direct Anthropic API, where
+  `claude-haiku-5-5` rejects it too. `buildAnthropicHeaders` also spreads
+  provider headers before the auth headers now, so a provider header cannot
+  clobber authentication — pinned by a test that passes a conflicting
+  `x-api-key`/`authorization`.
+- **`SKILL.md` no longer claims upstream "required an explicit provider".**
+  Upstream `0865c84` already resolved `--provider` → `settings.defaultProvider`
+  → auth fallback; this repo's patch extends the provider set, it does not
+  introduce the resolver.
+
 ## v1.3.0 — 2026-10-08
 
 Added:
