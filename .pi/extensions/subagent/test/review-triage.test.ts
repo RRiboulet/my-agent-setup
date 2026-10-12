@@ -38,9 +38,10 @@ import {
 	buildRangeCommand,
 	collectEvidence,
 	detectSignals,
-	parseNameStatus,
-	parseNumstat,
-	renameDestination,
+	indicatorsFor,
+	parseNumstatZ,
+	parsePathListZ,
+	parseRawZ,
 	type GitExec,
 } from "../../review-triage/evidence.ts";
 import {
@@ -397,17 +398,74 @@ test("catalog: pruning follows the model the band will resolve to", () => {
 // evidence
 // ---------------------------------------------------------------------------
 
-test("evidence: numstat sums churn and keeps paths with tabs", () => {
-	const parsed = parseNumstat("10\t2\tsrc/a.ts\n5\t0\tsrc/b.ts\n-\t-\timage.png\n");
-	assert.deepEqual(parsed.files, ["src/a.ts", "src/b.ts", "image.png"]);
-	assert.equal(parsed.added, 15);
-	assert.equal(parsed.removed, 2);
+test("evidence: numstat -z sums churn and keeps binary files", () => {
+	const parsed = parseNumstatZ("10\t2\tsrc/a.ts\u00005\t0\tsrc/b.ts\u0000-\t-\timage.png\u0000");
+	assert.deepEqual(
+		parsed.map((entry) => entry.path),
+		["src/a.ts", "src/b.ts", "image.png"],
+	);
+	assert.equal(parsed.reduce((sum, entry) => sum + entry.added, 0), 15);
+	assert.equal(parsed.reduce((sum, entry) => sum + entry.removed, 0), 2);
+	assert.equal(parsed[2]?.binary, true, "`-`/`-` marks a binary file");
 });
 
-test("evidence: name-status splits additions and deletions, renames take the destination", () => {
-	const parsed = parseNameStatus("A\tsrc/new.ts\nD\tsrc/old.ts\nM\tsrc/mod.ts\nR100\tsrc/a.ts\tsrc/b.ts\n");
-	assert.deepEqual(parsed.newFiles, ["src/new.ts"]);
-	assert.deepEqual(parsed.deletedFiles, ["src/old.ts"]);
+test("evidence: raw -z splits additions and deletions, renames take the destination", () => {
+	const raw = [
+		":000000 100644 0000000 aaa A\0src/new.ts\0",
+		":100644 000000 aaa 0000000 D\0src/old.ts\0",
+		":100644 100644 aaa bbb M\0src/mod.ts\0",
+		":100644 100644 aaa bbb R100\0src/a.ts\0src/b.ts\0",
+	].join("");
+	const parsed = parseRawZ(raw);
+	assert.deepEqual(
+		parsed.filter((entry) => entry.status.startsWith("A")).map((entry) => entry.path),
+		["src/new.ts"],
+	);
+	assert.deepEqual(
+		parsed.filter((entry) => entry.status.startsWith("D")).map((entry) => entry.path),
+		["src/old.ts"],
+	);
+	const rename = parsed.find((entry) => entry.status.startsWith("R"));
+	assert.equal(rename?.path, "src/b.ts");
+	assert.equal(rename?.oldPath, "src/a.ts");
+});
+
+test("evidence: filenames with spaces, newlines and a leading dash round-trip", () => {
+	const weird = ["sp ace.txt", "new\nline.txt", "-leading.txt"];
+	const numstat = weird.map((path, index) => `${index + 1}\t0\t${path}\0`).join("");
+	assert.deepEqual(
+		parseNumstatZ(numstat).map((entry) => entry.path),
+		weird,
+	);
+	const raw = weird
+		.map((path, index) => `:000000 100644 0000000 aaa${index} A\0${path}\0`)
+		.join("");
+	assert.deepEqual(
+		parseRawZ(raw).map((entry) => entry.path),
+		weird,
+	);
+	assert.deepEqual(parsePathListZ(weird.map((path) => `${path}\0`).join("")), weird);
+});
+
+test("evidence: indicators are derived from modes, status and binary counts", () => {
+	const raw = [
+		":100644 100755 aaa bbb M\0script.sh\0",
+		":100644 120000 aaa bbb T\0link\0",
+		":000000 160000 0000000 bbb A\0sub\0",
+		":100644 000000 aaa 0000000 D\0gone.ts\0",
+		":100644 100644 aaa bbb U\0conflict.ts\0",
+	].join("");
+	const byPath = Object.fromEntries(parseRawZ(raw).map((entry) => [entry.path, entry]));
+	assert.equal(indicatorsFor(byPath["script.sh"]!, false).modeChange, true);
+	assert.equal(indicatorsFor(byPath["link"]!, false).symlink, true);
+	assert.equal(indicatorsFor(byPath["sub"]!, false).submodule, true);
+	assert.equal(indicatorsFor(byPath["gone.ts"]!, false).deletion, true);
+	assert.equal(indicatorsFor(byPath["conflict.ts"]!, false).conflict, true);
+	assert.equal(indicatorsFor(byPath["script.sh"]!, true).binary, true);
+	assert.equal(indicatorsFor(byPath["script.sh"]!, false).deletion, undefined);
+	// A newly-added file has no old mode; that is not a mode change.
+	assert.equal(indicatorsFor(byPath["sub"]!, false).modeChange, undefined);
+	assert.equal(indicatorsFor(byPath["gone.ts"]!, false).modeChange, undefined);
 });
 
 test("evidence: the security path label fires on auth, not on unrelated paths", () => {
@@ -438,18 +496,25 @@ test("evidence: large churn and many files are labelled", () => {
 	assert.ok(signals.some((s) => s.includes("many files")));
 });
 
-test("evidence: a rename's numstat pseudo-path resolves to its destination", () => {
-	assert.equal(renameDestination("src/{util => auth}/helper.ts"), "src/auth/helper.ts");
-	assert.equal(renameDestination("src/a.ts => src/b.ts"), "src/b.ts");
-	const parsed = parseNumstat("0\t0\tsrc/{util => auth}/helper.ts\n");
-	assert.deepEqual(parsed.files, ["src/auth/helper.ts"]);
-	assert.ok(detectSignals(parsed.files, "", 0, 0).some((s) => s.includes("authentication")));
+test("evidence: a -z rename keeps its destination and re-labels the security path", () => {
+	const parsed = parseNumstatZ("0\t0\t\0src/util/helper.ts\0src/auth/helper.ts\0");
+	assert.deepEqual(
+		parsed.map((entry) => entry.path),
+		["src/auth/helper.ts"],
+	);
+	assert.ok(detectSignals(parsed.map((entry) => entry.path), "", 0, 0).some((s) => s.includes("authentication")));
 });
 
-test("evidence: name-status keep-list includes rename destinations", () => {
-	const parsed = parseNameStatus("R100\tsrc/util/helper.ts\tsrc/auth/helper.ts\nA\tsrc/new.ts\n");
-	assert.deepEqual(parsed.renamedFiles, ["src/auth/helper.ts"]);
-	assert.deepEqual(parsed.newFiles, ["src/new.ts"]);
+test("evidence: raw -z keep-list includes rename destinations", () => {
+	const parsed = parseRawZ(":100644 100644 aaa bbb R100\0src/util/helper.ts\0src/auth/helper.ts\0:000000 100644 0000000 ccc A\0src/new.ts\0");
+	assert.deepEqual(
+		parsed.filter((entry) => entry.status.startsWith("R")).map((entry) => entry.path),
+		["src/auth/helper.ts"],
+	);
+	assert.deepEqual(
+		parsed.filter((entry) => entry.status.startsWith("A")).map((entry) => entry.path),
+		["src/new.ts"],
+	);
 });
 
 test("evidence: a file header alone must not manufacture a signal", () => {
@@ -460,16 +525,19 @@ test("evidence: a .sql file triggers the migration label", () => {
 	assert.ok(detectSignals(["queries/orders.sql"], "", 1, 0).some((s) => s.includes("migration")));
 });
 
-test("evidence: collectEvidence folds rename destinations into the file list", async () => {
+test("evidence: collectEvidence takes a -z rename's destination", async () => {
 	const exec: GitExec = async (_command, args) => {
 		const key = args.join(" ");
-		if (key === "diff --numstat HEAD") return { stdout: "0\t0\tsrc/{util => auth}/h.ts\n", stderr: "", code: 0 };
-		if (key === "diff --name-status HEAD") return { stdout: "R100\tsrc/util/h.ts\tsrc/auth/h.ts\n", stderr: "", code: 0 };
-		if (key === "diff --unified=0 HEAD") return { stdout: "", stderr: "", code: 0 };
+		if (key.includes("--numstat")) return { stdout: "0\t0\t\0src/util/h.ts\0src/auth/h.ts\0", stderr: "", code: 0 };
+		if (key.includes("--raw") && !key.includes("--diff-filter=U")) {
+			return { stdout: ":100644 100644 aaa bbb R100\0src/util/h.ts\0src/auth/h.ts\0", stderr: "", code: 0 };
+		}
+		if (key.includes("--unified=0")) return { stdout: "", stderr: "", code: 0 };
 		return { stdout: "", stderr: "", code: 0 };
 	};
 	const evidence = await collectEvidence(exec, { summary: "move a file", target: { kind: "uncommitted" } });
 	assert.deepEqual(evidence.files, ["src/auth/h.ts"]);
+	assert.equal(evidence.indicators["src/auth/h.ts"]?.binary, undefined);
 });
 
 test("evidence: the range command matches the target", () => {
@@ -489,15 +557,17 @@ test("evidence: the range command matches the target", () => {
 	assert.equal(buildRangeCommand({ kind: "branch" }, ["--numstat"]), undefined);
 });
 
-test("evidence: uncommitted collection includes untracked files", async () => {
+test("evidence: uncommitted collection includes NUL-listed untracked files", async () => {
 	const calls: string[] = [];
 	const exec: GitExec = async (_command, args) => {
 		const key = args.join(" ");
 		calls.push(key);
-		if (key === "diff --numstat HEAD") return { stdout: "3\t1\tsrc/a.ts\n", stderr: "", code: 0 };
-		if (key === "diff --name-status HEAD") return { stdout: "M\tsrc/a.ts\n", stderr: "", code: 0 };
-		if (key === "diff --unified=0 HEAD") return { stdout: "+const x = 1;\n", stderr: "", code: 0 };
-		if (key === "ls-files --others --exclude-standard") return { stdout: "src/brand-new.ts\n", stderr: "", code: 0 };
+		if (key.includes("--numstat")) return { stdout: "3\t1\tsrc/a.ts\0", stderr: "", code: 0 };
+		if (key.includes("--raw") && !key.includes("--diff-filter=U")) {
+			return { stdout: ":100644 100644 aaa bbb M\0src/a.ts\0", stderr: "", code: 0 };
+		}
+		if (key.includes("--unified=0")) return { stdout: "+const x = 1;\n", stderr: "", code: 0 };
+		if (key.includes("ls-files")) return { stdout: "src/brand-new.ts\0", stderr: "", code: 0 };
 		return { stdout: "", stderr: "", code: 0 };
 	};
 	const evidence = await collectEvidence(exec, { summary: "add a thing", target: { kind: "uncommitted" } });
@@ -505,6 +575,67 @@ test("evidence: uncommitted collection includes untracked files", async () => {
 	assert.deepEqual(evidence.files, ["src/a.ts", "src/brand-new.ts"]);
 	assert.deepEqual(evidence.newFiles, ["src/brand-new.ts"]);
 	assert.equal(evidence.added, 3);
+	assert.ok(
+		evidence.limitations.some((limitation) => limitation.blocksSkip && limitation.text.includes("untracked file(s)")),
+		"unread untracked content must be recorded and must block skip",
+	);
+});
+
+test("evidence: a failed secondary probe is recorded as a skip-blocking limitation", async () => {
+	const exec: GitExec = async (_command, args) => {
+		const key = args.join(" ");
+		if (key.includes("--numstat")) return { stdout: "1\t0\tsrc/a.ts\0", stderr: "", code: 0 };
+		if (key.includes("--diff-filter=U")) return { stdout: "", stderr: "boom", code: 128 };
+		if (key.includes("--raw")) return { stdout: ":100644 100644 aaa bbb M\0src/a.ts\0", stderr: "", code: 0 };
+		if (key.includes("--unified=0")) return { stdout: "", stderr: "", code: 0 };
+		return { stdout: "", stderr: "", code: 0 };
+	};
+	const evidence = await collectEvidence(exec, { summary: "x", target: { kind: "uncommitted" } });
+	assert.ok(
+		evidence.limitations.some((limitation) => limitation.blocksSkip && limitation.text.includes("conflict probe")),
+		"a failed conflict probe must not read as 'no conflicts'",
+	);
+});
+
+test("evidence: a truncated patch is recorded as a limitation", async () => {
+	const exec: GitExec = async (_command, args) => {
+		const key = args.join(" ");
+		if (key.includes("--numstat")) return { stdout: "1\t0\tsrc/a.ts\0", stderr: "", code: 0 };
+		if (key.includes("--raw") && !key.includes("--diff-filter=U")) {
+			return { stdout: ":100644 100644 aaa bbb M\0src/a.ts\0", stderr: "", code: 0 };
+		}
+		if (key.includes("--unified=0")) return { stdout: "x".repeat(100), stderr: "", code: 0 };
+		return { stdout: "", stderr: "", code: 0 };
+	};
+	const evidence = await collectEvidence(exec, { summary: "x", target: { kind: "uncommitted" }, patchChars: 10 });
+	assert.ok(evidence.limitations.some((limitation) => limitation.text.includes("truncated")));
+});
+
+test("evidence: a phantom empty path from a truncated buffer is dropped", () => {
+	assert.deepEqual(parseNumstatZ("0\t0\t\u0000only\u0000"), []);
+	assert.deepEqual(parseRawZ(":100644 100644 aaa bbb R100\u0000only\u0000"), []);
+});
+
+test("evidence: a content line that starts with pluses is not mistaken for a header", () => {
+	// Adding the text `++fetch(url)` produces the diff line `+++fetch(url)`; the
+	// old filter dropped every line starting `+++`, hiding the signal.
+	const patch = ["+++ b/x.ts", "--- a/x.ts", "+++fetch(url)"].join("\n");
+	assert.ok(detectSignals(["src/x.ts"], patch, 1, 0).some((s) => s.includes("network boundary")));
+});
+
+test("evidence: the collector only issues read-only git commands", async () => {
+	const commands: string[] = [];
+	const exec: GitExec = async (_command, args) => {
+		commands.push(args.join(" "));
+		return { stdout: "", stderr: "", code: 0 };
+	};
+	await collectEvidence(exec, { summary: "x", target: { kind: "uncommitted" } });
+	// A collector that stashed, reset or checked out would change what it is
+	// supposed to be observing; the index must be left exactly as found.
+	const mutating = /(^|\s)(stash|reset|checkout|commit|add|restore|clean|switch)(\s|$)/u;
+	for (const command of commands) {
+		assert.doesNotMatch(command, mutating, `read-only collector issued: ${command}`);
+	}
 });
 
 test("evidence: a git failure degrades to a usable state with the reason attached", async () => {

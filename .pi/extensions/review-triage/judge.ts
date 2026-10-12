@@ -94,6 +94,18 @@ export function buildState(evidence: ChangeEvidence, stateChars: number): Record
 	if (evidence.error) change.inspection_error = evidence.error;
 	if (evidence.patchExcerpt) change.diff_excerpt = evidence.patchExcerpt;
 
+	// Structural facts the collector observed, and the gaps it recorded, so Jev
+	// weighs them rather than inferring them from the patch alone.
+	const flagged = Object.entries(evidence.indicators ?? {}).filter(([, flags]) => Object.keys(flags).length > 0);
+	if (flagged.length > 0) {
+		change.structural_indicators = flagged
+			.slice(0, 40)
+			.map(([path, flags]) => `${path}: ${Object.keys(flags).join(", ")}`);
+	}
+	if ((evidence.limitations ?? []).length > 0) {
+		change.evidence_limitations = evidence.limitations.map((limitation) => limitation.text);
+	}
+
 	const state: Record<string, unknown> = { change };
 	if (JSON.stringify(state).length <= stateChars) return state;
 
@@ -120,6 +132,8 @@ export function buildState(evidence: ChangeEvidence, stateChars: number): Record
 	if (JSON.stringify(state).length > stateChars) {
 		delete change.author_notes;
 		delete change.paths;
+		delete change.structural_indicators;
+		delete change.evidence_limitations;
 	}
 	return state;
 }

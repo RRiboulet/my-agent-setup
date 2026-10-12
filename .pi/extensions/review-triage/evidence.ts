@@ -2,11 +2,20 @@
  * Evidence gathering for review triage.
  *
  * This module is deliberately dumb. It measures the change — files, churn,
- * the added/removed lines — and labels whatever risk-shaped things it can see
- * in the paths and the patch. It does not score them and it does not decide
- * anything: the labelled evidence is serialised into Jev's `state`, and Jev
- * makes the judgement. The prose labels are what Jev reads, so they are written
- * for a reader, not for a threshold table.
+ * the added/removed lines, structural indicators — and labels whatever
+ * risk-shaped things it can see in the paths and the patch. It does not score
+ * them and it does not decide anything: the labelled evidence is serialised
+ * into the dossier, and Jev makes the judgement. The prose labels are what Jev
+ * reads, so they are written for a reader, not for a threshold table.
+ *
+ * Two rules shape the git plumbing:
+ *
+ *   - **Paths are read NUL-separated.** `--numstat -z`, `--raw -z` and
+ *     `ls-files -z` emit one NUL-terminated record per field, so a filename
+ *     containing a newline, a space or a leading `-` round-trips exactly. A
+ *     line-splitting parser silently mangles all three.
+ *   - **Read-only.** The collector never stashes, resets, checks out, commits
+ *     or otherwise touches the index; it only asks git to describe the tree.
  *
  * Every parser in here is pure and exported through `__test__` so the git
  * plumbing can be covered without a repository or a child process.
@@ -22,17 +31,40 @@ export interface TriageTarget {
 	ref?: string;
 }
 
+/** Structural facts about one changed path, independent of its content. */
+export interface ArtifactFlags {
+	binary?: boolean;
+	deletion?: boolean;
+	modeChange?: boolean;
+	symlink?: boolean;
+	submodule?: boolean;
+	conflict?: boolean;
+}
+
+/**
+ * A known gap in the evidence. `blocksSkip` marks a gap serious enough that a
+ * confident "no review" would be unsafe — a failed probe or unread content.
+ */
+export interface EvidenceLimitation {
+	text: string;
+	blocksSkip: boolean;
+}
+
 export interface ChangeEvidence {
 	target: TriageTargetKind;
 	base?: string;
 	ref?: string;
 	isGit: boolean;
-	/** Paths touched, in git's order, deduplicated. */
+	/** Paths touched, deduplicated. */
 	files: string[];
 	added: number;
 	removed: number;
 	newFiles: string[];
 	deletedFiles: string[];
+	/** Structural indicators, keyed by path. */
+	indicators: Record<string, ArtifactFlags>;
+	/** Known gaps, recorded rather than silently assumed away. */
+	limitations: EvidenceLimitation[];
 	/** Human-readable risk labels; Jev reads these, nothing else scores them. */
 	signals: string[];
 	/** Risk the caller declared by hand. */
@@ -70,66 +102,152 @@ export interface CollectOptions {
 
 const DEFAULT_PATCH_CHARS = 8_000;
 
-function splitLines(text: string): string[] {
-	return text.split(/\r?\n/u).filter((line) => line.trim() !== "");
-}
+/**
+ * Fixed git options. `diff.noprefix=false` keeps the `a/`/`b/` prefixes the
+ * patch parser expects; `core.quotePath=false` stops git octal-escaping UTF-8
+ * paths; `--no-ext-diff --no-textconv` stop a user's diff driver or textconv
+ * filter from running (and from changing what the evidence says).
+ */
+const GIT_CONFIG_ARGS = [
+	"-c",
+	"diff.noprefix=false",
+	"-c",
+	"core.quotePath=false",
+	// Rename detection is a repo-local setting; pin it so the same tree gives the
+	// same evidence (and fingerprint) in every checkout.
+	"-c",
+	"diff.renames=true",
+	"-c",
+	"diff.relative=false",
+];
+const DIFF_FLAGS = ["--no-ext-diff", "--no-textconv"];
 
-/** `git diff --numstat` / `git show --numstat`: added, removed, path. */
-export function parseNumstat(stdout: string): { files: string[]; added: number; removed: number } {
-	const files: string[] = [];
-	let added = 0;
-	let removed = 0;
-	for (const line of splitLines(stdout)) {
-		const [rawAdded, rawRemoved, ...rest] = line.split("\t");
-		const rawPath = rest.join("\t").trim();
-		if (!rawPath) continue;
-		files.push(renameDestination(rawPath));
-		// Binary files report "-" for both counts; they still count as changed.
-		const a = Number.parseInt(rawAdded, 10);
-		const r = Number.parseInt(rawRemoved, 10);
-		if (Number.isFinite(a)) added += a;
-		if (Number.isFinite(r)) removed += r;
-	}
-	return { files, added, removed };
+// ---------------------------------------------------------------------------
+// NUL-separated parsers
+// ---------------------------------------------------------------------------
+
+export interface NumstatEntry {
+	path: string;
+	oldPath?: string;
+	added: number;
+	removed: number;
+	binary: boolean;
 }
 
 /**
- * git abbreviates a rename as `src/{old => new}/f.ts`, or `old => new` when the
- * whole path moved — and quotes the whole field when the path has odd bytes.
- * Return the destination, because that is the path the reviewer will look at
- * and the one the signal patterns must test.
+ * `git diff --numstat -z`: `added\tremoved\tpath\0`, or for a rename
+ * `added\tremoved\t\0old\0new\0`. The path is everything after the second tab,
+ * so a filename containing a tab survives; only the first two tabs delimit.
  */
-export function renameDestination(raw: string): string {
-	let path = raw.trim();
-	if (path.startsWith('"') && path.endsWith('"') && path.length > 1) path = path.slice(1, -1);
-	const braced = path.match(/^(.*)\{(.*?) => (.*?)\}(.*)$/u);
-	if (braced) return `${braced[1]}${braced[3]}${braced[4]}`;
-	const arrow = path.indexOf(" => ");
-	if (arrow >= 0) return path.slice(arrow + 4);
-	return path;
+export function parseNumstatZ(stdout: string): NumstatEntry[] {
+	const records = stdout.split("\0");
+	const entries: NumstatEntry[] = [];
+	let index = 0;
+	while (index < records.length) {
+		const record = records[index++];
+		if (record === "") continue;
+		const firstTab = record.indexOf("\t");
+		const secondTab = firstTab >= 0 ? record.indexOf("\t", firstTab + 1) : -1;
+		if (firstTab < 0 || secondTab < 0) continue;
+		const rawAdded = record.slice(0, firstTab);
+		const rawRemoved = record.slice(firstTab + 1, secondTab);
+		const path = record.slice(secondTab + 1);
+		const binary = rawAdded === "-" || rawRemoved === "-";
+		const added = binary ? 0 : Number.parseInt(rawAdded, 10);
+		const removed = binary ? 0 : Number.parseInt(rawRemoved, 10);
+		const entry: NumstatEntry = {
+			path,
+			added: Number.isFinite(added) ? added : 0,
+			removed: Number.isFinite(removed) ? removed : 0,
+			binary,
+		};
+		if (path === "") {
+			// A rename: the empty path field is followed by the old and new paths.
+			const oldPath = records[index++];
+			const newPath = records[index++];
+			entry.oldPath = oldPath;
+			entry.path = newPath ?? "";
+		}
+		// A truncated buffer can leave the rename records missing; drop the
+		// phantom entry rather than let an empty path into the file list.
+		if (entry.path === "") continue;
+		entries.push(entry);
+	}
+	return entries;
 }
 
-/** `git diff --name-status` / `git show --name-status`: status letter + path(s). */
-export function parseNameStatus(stdout: string): {
-	newFiles: string[];
-	deletedFiles: string[];
-	renamedFiles: string[];
-} {
-	const newFiles: string[] = [];
-	const deletedFiles: string[] = [];
-	const renamedFiles: string[] = [];
-	for (const line of splitLines(stdout)) {
-		const parts = line.split("\t");
-		const status = (parts[0] ?? "").trim().charAt(0);
-		// A rename emits "R100\told\tnew"; the destination is the last field.
-		const path = (parts[parts.length - 1] ?? "").trim();
-		if (!path) continue;
-		if (status === "A") newFiles.push(path);
-		else if (status === "D") deletedFiles.push(path);
-		else if (status === "R" || status === "C") renamedFiles.push(path);
-	}
-	return { newFiles, deletedFiles, renamedFiles };
+export interface RawEntry {
+	oldMode: string;
+	newMode: string;
+	oldSha: string;
+	newSha: string;
+	/** Status letter plus optional score, e.g. `M`, `A`, `D`, `R100`, `U`. */
+	status: string;
+	path: string;
+	oldPath?: string;
 }
+
+const RAW_HEADER = /^:(\d{6}) (\d{6}) ([0-9a-f]+) ([0-9a-f]+) ([A-Z]\d*)$/u;
+
+/**
+ * `git diff --raw -z`: `:<oldmode> <newmode> <oldsha> <newsha> <status>\0path\0`,
+ * with `old\0new\0` for a rename or copy. The modes are what make mode changes,
+ * symlinks and submodules visible.
+ */
+export function parseRawZ(stdout: string): RawEntry[] {
+	const records = stdout.split("\0");
+	const entries: RawEntry[] = [];
+	let index = 0;
+	while (index < records.length) {
+		const header = records[index++];
+		if (header === "") continue;
+		const match = RAW_HEADER.exec(header);
+		if (!match) continue;
+		const [, oldMode, newMode, oldSha, newSha, status] = match as unknown as [
+			string,
+			string,
+			string,
+			string,
+			string,
+			string,
+		];
+		const entry: RawEntry = { oldMode, newMode, oldSha, newSha, status, path: "" };
+		if (status.startsWith("R") || status.startsWith("C")) {
+			entry.oldPath = records[index++];
+			entry.path = records[index++] ?? "";
+		} else {
+			entry.path = records[index++] ?? "";
+		}
+		if (entry.path === "") continue;
+		entries.push(entry);
+	}
+	return entries;
+}
+
+/** `git ls-files -z` (any variant): one NUL-terminated path per record. */
+export function parsePathListZ(stdout: string): string[] {
+	return stdout.split("\0").filter((path) => path !== "");
+}
+
+export function indicatorsFor(entry: RawEntry, binary: boolean): ArtifactFlags {
+	const deletion = entry.status.startsWith("D") || entry.newMode === "000000";
+	// A new file has no old mode (`000000`), and a deletion has no new mode; a
+	// mode change is only meaningful when both modes exist and differ.
+	const created = entry.status.startsWith("A") || entry.oldMode === "000000";
+	const modeChange = !deletion && !created && entry.oldMode !== entry.newMode;
+	return {
+		...(binary ? { binary: true } : {}),
+		...(deletion ? { deletion: true } : {}),
+		...(modeChange ? { modeChange: true } : {}),
+		...(entry.newMode === "120000" ? { symlink: true } : {}),
+		...(entry.newMode === "160000" ? { submodule: true } : {}),
+		...(entry.status.startsWith("U") ? { conflict: true } : {}),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Risk labelling
+// ---------------------------------------------------------------------------
 
 /** Path categories shared with the dossier's budget ordering, so the two cannot drift. */
 export const SECURITY_PATH = /(^|\/)(auth|oauth|token|secret|credential|password|passwd|crypto|cipher|permission|acl|rbac|session|cookie|login|signup|billing|payment)/iu;
@@ -142,7 +260,12 @@ const TEST_PATH = /(^|\/)(tests?|spec|__tests__)(\/|$)|\.(test|spec)\.[cm]?[jt]s
 function changedLines(patch: string): string[] {
 	return patch
 		.split(/\r?\n/u)
-		.filter((line) => (line.startsWith("+") || line.startsWith("-")) && !line.startsWith("+++") && !line.startsWith("---"));
+		.filter((line) => {
+			// Only the file headers (`+++ b/...`, `--- a/...`) carry a space; a
+			// content line like `++x` is a real change and must survive.
+			if (/^(?:\+\+\+|---) /u.test(line)) return false;
+			return line.startsWith("+") || line.startsWith("-");
+		});
 }
 
 /**
@@ -188,6 +311,10 @@ export function detectSignals(files: string[], patch: string, added: number, rem
 	return [...signals];
 }
 
+// ---------------------------------------------------------------------------
+// Collection
+// ---------------------------------------------------------------------------
+
 function buildTargetArgs(target: TriageTarget): { range: string[]; show: boolean } | undefined {
 	switch (target.kind) {
 		case "uncommitted":
@@ -226,6 +353,8 @@ export async function collectEvidence(exec: GitExec, options: CollectOptions): P
 		removed: 0,
 		newFiles: [],
 		deletedFiles: [],
+		indicators: {},
+		limitations: [],
 		signals: [],
 		notes: options.notes ?? [],
 		summary: options.summary,
@@ -236,56 +365,109 @@ export async function collectEvidence(exec: GitExec, options: CollectOptions): P
 	if (options.target.kind === "none") return base;
 
 	const execOptions = { cwd: options.cwd, signal: options.signal };
-	const rangeCommand = buildRangeCommand(options.target, ["--numstat"]);
+	// Every command is read-only; the fixed options are prepended so a repo's
+	// diff drivers cannot change the evidence.
+	const run = (args: string[]) => exec("git", [...GIT_CONFIG_ARGS, ...args], execOptions);
+
+	const rangeCommand = buildRangeCommand(options.target, ["--numstat", "-z", ...DIFF_FLAGS]);
 	if (!rangeCommand) {
 		return { ...base, error: "missing base branch or commit ref for the requested target" };
 	}
 
-	const numstat = await exec("git", rangeCommand, execOptions);
+	const numstat = await run(rangeCommand);
 	if (numstat.code !== 0) {
 		return { ...base, error: numstat.stderr.trim() || `git ${rangeCommand.join(" ")} failed` };
 	}
 
-	const nameStatus = await exec("git", buildRangeCommand(options.target, ["--name-status"]) ?? [], execOptions);
-	const patch = await exec(
-		"git",
-		buildRangeCommand(options.target, ["--unified=0"]) ?? [],
-		execOptions,
-	);
+	const rawCommand = buildRangeCommand(options.target, ["--raw", "-z", ...DIFF_FLAGS]);
+	const patchCommand = buildRangeCommand(options.target, ["--unified=0", ...DIFF_FLAGS]);
+	if (!rawCommand || !patchCommand) {
+		return { ...base, error: "missing base branch or commit ref for the requested target" };
+	}
+	const raw = await run(rawCommand);
+	const patch = await run(patchCommand);
+	// Unmerged paths show as `U` only in the working-tree diff, not in `diff HEAD`.
+	const unmerged = await run(["diff", "--diff-filter=U", "--raw", "-z", ...DIFF_FLAGS]);
 
-	const parsed = parseNumstat(numstat.stdout);
-	const status =
-		nameStatus.code === 0
-			? parseNameStatus(nameStatus.stdout)
-			: { newFiles: [], deletedFiles: [], renamedFiles: [] };
+	const limitations: EvidenceLimitation[] = [];
 
-	// A rename's destination is a path the reviewer will open, so fold it in.
-	let files = [...new Set([...parsed.files, ...status.renamedFiles])];
-	let newFiles = [...status.newFiles];
+	const numEntries = parseNumstatZ(numstat.stdout);
+	if (raw.code !== 0) {
+		limitations.push({
+			text: "the raw diff could not be read; file statuses and structural indicators are incomplete",
+			blocksSkip: true,
+		});
+	}
+	const rawEntries = raw.code === 0 ? parseRawZ(raw.stdout) : [];
+	if (unmerged.code !== 0) {
+		// A failed conflict probe reading as "no conflicts" is exactly the silence
+		// that would let an unresolved merge skip review.
+		limitations.push({
+			text: "the conflict probe failed; unresolved conflicts may be undetected",
+			blocksSkip: true,
+		});
+	}
+	const conflictPaths = unmerged.code === 0 ? parseRawZ(unmerged.stdout).map((entry) => entry.path) : [];
+	if (patch.code !== 0) {
+		limitations.push({ text: "the patch could not be read; Jev sees no diff for this change", blocksSkip: true });
+	}
+
+	const binaryByPath = new Map(numEntries.map((entry) => [entry.path, entry.binary]));
+	const indicators: Record<string, ArtifactFlags> = {};
+	for (const entry of rawEntries) {
+		indicators[entry.path] = indicatorsFor(entry, binaryByPath.get(entry.path) ?? false);
+	}
+	for (const path of conflictPaths) {
+		indicators[path] = { ...(indicators[path] ?? {}), conflict: true };
+	}
+
+	const newFiles = rawEntries.filter((entry) => entry.status.startsWith("A")).map((entry) => entry.path);
+	const deletedFiles = rawEntries.filter((entry) => entry.status.startsWith("D")).map((entry) => entry.path);
+
+	let files = [...new Set([...rawEntries.map((entry) => entry.path), ...numEntries.map((entry) => entry.path)])];
 	if (options.target.kind === "uncommitted") {
 		// Untracked files are absent from `git diff HEAD`; a brand-new file is
 		// exactly the case a reviewer should see, so list them explicitly.
-		const untracked = await exec("git", ["ls-files", "--others", "--exclude-standard"], execOptions);
-		if (untracked.code === 0) {
+		const untracked = await run(["ls-files", "-z", "--others", "--exclude-standard"]);
+		if (untracked.code !== 0) {
+			limitations.push({
+				text: "untracked files could not be listed; a brand-new file may be missing from the evidence",
+				blocksSkip: true,
+			});
+		} else {
 			const known = new Set(files);
-			const extras = splitLines(untracked.stdout).filter((path) => !known.has(path));
-			newFiles = [...new Set([...newFiles, ...extras])];
+			const extras = parsePathListZ(untracked.stdout).filter((path) => !known.has(path));
+			newFiles.push(...extras);
 			files = [...files, ...extras];
+			if (extras.length > 0) {
+				// `git diff HEAD` excludes untracked content, so a new file's body is
+				// invisible to the patch and the risk scan; say so rather than pretend.
+				limitations.push({
+					text: `${extras.length} untracked file(s) were listed but their content was not read`,
+					blocksSkip: true,
+				});
+			}
 		}
 	}
 
+	const added = numEntries.reduce((sum, entry) => sum + entry.added, 0);
+	const removed = numEntries.reduce((sum, entry) => sum + entry.removed, 0);
 	const patchText = patch.code === 0 ? patch.stdout : "";
 	const patchCap = options.patchChars ?? DEFAULT_PATCH_CHARS;
 	const truncated = patchText.length > patchCap;
+	if (truncated) {
+		limitations.push({ text: `the patch excerpt was truncated at ${patchCap} characters`, blocksSkip: true });
+	}
 
 	// `git show` suppresses a merge commit's diff by default, so an empty
 	// numstat there reads as "nothing changed". Say why instead of letting an
 	// empty evidence block become a confident "no review".
-	if (options.target.kind === "commit" && parsed.files.length === 0 && patchText.trim() === "") {
+	if (options.target.kind === "commit" && rawEntries.length === 0 && patchText.trim() === "") {
 		return {
 			...base,
 			isGit: true,
-			error: "the commit produced no diff (a merge commit has none by default; use a non-merge commit or a branch target)",
+			error:
+				"the commit produced no per-file diff (a merge commit shows none by default, and an empty commit has none; use a non-merge commit or a branch target)",
 		};
 	}
 
@@ -293,11 +475,13 @@ export async function collectEvidence(exec: GitExec, options: CollectOptions): P
 		...base,
 		isGit: true,
 		files,
-		added: parsed.added,
-		removed: parsed.removed,
-		newFiles,
-		deletedFiles: status.deletedFiles,
-		signals: detectSignals(files, patchText, parsed.added, parsed.removed),
+		added,
+		removed,
+		newFiles: [...new Set(newFiles)],
+		deletedFiles,
+		indicators,
+		limitations,
+		signals: detectSignals(files, patchText, added, removed),
 		patchExcerpt: truncated ? patchText.slice(0, patchCap) : patchText,
 		truncated,
 	};

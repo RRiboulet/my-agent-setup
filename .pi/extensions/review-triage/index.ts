@@ -143,13 +143,14 @@ async function runTriage(
 		removed: evidence.removed,
 		signals: evidence.signals,
 	};
-	// The collector/instability work (§6) will fill these from real signals;
-	// until then the extension is explicit that it assumed the snapshot stable,
-	// and only the collection error is treated as incomplete evidence.
+	// The collector/instability work (§6) will fill `stable` from real signals;
+	// until then the extension is explicit that it assumed the snapshot stable.
+	// Conflicts are read from the collector's per-file flags, and a limitation
+	// that marks evidence as unsafe to skip keeps the review.
 	const gates: PolicyGates = {
 		stable: true,
-		conflicts: false,
-		evidenceComplete: !evidence.error,
+		conflicts: Object.values(evidence.indicators).some((flags) => flags.conflict),
+		evidenceComplete: !evidence.error && !evidence.limitations.some((limitation) => limitation.blocksSkip),
 		mandatoryReview: config.policy.mandatoryReview ?? false,
 	};
 
