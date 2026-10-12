@@ -20,8 +20,11 @@ import {
 	buildDossier,
 	canonicalJson,
 	DEFAULT_MANIFEST_LIMIT,
+	MAX_EXCLUSIONS,
+	MAX_EXCLUSION_CHARS,
 	normalisePath,
 	pathPriority,
+	RedactionError,
 	RISK_RULES_VERSION,
 	type ArtifactChangeItem,
 	type DossierInput,
@@ -248,7 +251,7 @@ test("dossier: a patch over the per-file cap is truncated and recorded", () => {
 	assert.ok(built.dossier.exclusions.some((entry) => entry.includes("patch truncated for src/a.ts")));
 });
 
-test("dossier: an over-budget document drops supplementary then patches, and says so", () => {
+test("dossier: an over-budget document shrinks then drops, least dense first, and says so", () => {
 	const built = buildDossier(
 		input({
 			items: [artifact("src/a.ts", { patch: "p".repeat(500) })],
@@ -261,6 +264,92 @@ test("dossier: an over-budget document drops supplementary then patches, and say
 	assert.deepEqual(built.dossier.artifactEvidence, []);
 	assert.ok(built.dossier.exclusions.some((entry) => entry.includes("supplementary context dropped")));
 	assert.ok(built.dossier.exclusions.some((entry) => entry.includes("artifact evidence dropped")));
+	assert.equal(built.manifestOverflow, true);
+	assert.equal(built.budgetTrimmed, true);
+});
+
+test("dossier: a moderate trim keeps some patches and some notes", () => {
+	const built = buildDossier(
+		input({
+			items: [artifact("src/a.ts", { patch: "p".repeat(3_000) })],
+			supplementary: ["n".repeat(3_000)],
+			budgetChars: 4_000,
+			patchBudgetChars: 3_000,
+		}),
+	);
+	assert.equal(built.dossier.artifactEvidence.length, 1, "a patch survives, shortened");
+	assert.equal(built.dossier.supplementary.length, 1, "the caller's note survives");
+	assert.ok(built.dossier.artifactEvidence[0]?.omitted, "the shortened patch is marked omitted");
+	assert.ok(built.dossier.exclusions.some((entry) => entry.includes("patch(es) shortened")));
+	assert.equal(built.budgetTrimmed, true);
+	assert.equal(built.manifestOverflow, true, "a trimmed dossier refuses a skip");
+});
+
+test("dossier: a large change keeps some patches, the notes and the manifest", () => {
+	const items = Array.from({ length: 120 }, (_, index) =>
+		artifact(`src/dir/file-${index}.ts`, { patch: "x".repeat(200) }),
+	);
+	const built = buildDossier(input({ items, supplementary: ["note one", "note two"], budgetChars: 12_000 }));
+	assert.ok(built.dossier.artifactEvidence.length > 0, "some patches survive");
+	assert.deepEqual(built.dossier.supplementary, ["note one", "note two"], "the caller's notes survive");
+	assert.equal(built.dossier.manifest.entries.length, 120, "the manifest is the last thing to go");
+	assert.ok(built.dossier.exclusions.length <= 40, "the diagnostic list is bounded");
+	assert.equal(built.budgetTrimmed, true);
+	assert.equal(built.manifestOverflow, true, "a trimmed dossier refuses a skip");
+});
+
+test("dossier: the exclusion list is capped, and the count is preserved", () => {
+	const items = Array.from({ length: 60 }, (_, index) =>
+		artifact(`src/file-${index}.ts`, { patch: "p".repeat(50) }),
+	);
+	const built = buildDossier(input({ items, patchBudgetChars: 50 }));
+	assert.ok(built.dossier.exclusions.length <= MAX_EXCLUSIONS);
+	assert.ok(built.dossier.exclusions.some((entry) => entry.includes("more exclusion(s) not listed")));
+});
+
+test("dossier: capping the exclusion list keeps the trim's own records", () => {
+	// The per-file diagnostics alone overflow the cap, which is exactly the case
+	// the trim exists for; its own record must not be what the cap drops.
+	const items = Array.from({ length: 60 }, (_, index) =>
+		artifact(`src/file-${index}.ts`, { patch: "p".repeat(50) }),
+	);
+	const built = buildDossier(
+		input({ items, patchBudgetChars: 50, supplementary: ["n".repeat(5_000)], budgetChars: 1_000 }),
+	);
+	assert.ok(
+		built.dossier.exclusions.some((entry) => entry.includes("character budget")),
+		"the trim's own record survives the cap",
+	);
+	const aggregates = built.dossier.exclusions.filter((entry) => entry.includes("more exclusion(s) not listed"));
+	assert.equal(aggregates.length, 1, "one aggregate line, not two to double-count");
+});
+
+test("dossier: one over-long exclusion line is shortened, not left to outweigh the evidence", () => {
+	const built = buildDossier(
+		input({
+			items: [artifact("x".repeat(30_000), { patch: "p".repeat(100) })],
+			budgetChars: 12_000,
+			patchBudgetChars: 40,
+		}),
+	);
+	assert.ok(built.dossier.exclusions.length > 0);
+	assert.ok(
+		built.dossier.exclusions.every((entry) => entry.length <= MAX_EXCLUSION_CHARS),
+		"a diagnostic line is bounded too",
+	);
+	assert.ok(JSON.stringify(built.dossier).length < 12_000, "the document fits once the line is shortened");
+});
+
+test("dossier: a trim an early stage fixes is still an incomplete document", () => {
+	// The note shrink alone brings this under budget. That is still an omission,
+	// so the document must not report itself complete and allow a skip.
+	const built = buildDossier(
+		input({ items: [artifact("src/a.ts")], supplementary: ["n".repeat(5_000)], budgetChars: 1_000 }),
+	);
+	assert.equal(built.dossier.supplementary[0]?.length, 500);
+	assert.equal(built.budgetTrimmed, true);
+	assert.equal(built.manifestOverflow, true);
+	assert.ok(built.dossier.exclusions.some((entry) => entry.includes("supplementary note(s) shortened")));
 });
 
 test("dossier: a budget that forces the manifest down is also an overflow", () => {
@@ -452,6 +541,36 @@ test("dossier: a mask containing `$&` is inserted literally", () => {
 	);
 	// A `$&` mask must not re-insert the match; it is a literal four-character string.
 	assert.equal(built.dossier.artifactEvidence[0]?.patch, "+secret=$&");
+});
+
+test("dossier: a catastrophically backtracking pattern is refused, not hung", () => {
+	assert.throws(
+		() =>
+			buildDossier(
+				input({
+					items: [artifact("src/a.ts")],
+					supplementary: ["a".repeat(3_000) + "!"],
+					redaction: { patterns: ["(a+)+$"] },
+				}),
+			),
+		(error: unknown) => error instanceof RedactionError,
+		"refusing beats hanging, and beats dropping the rule and publishing the text",
+	);
+});
+
+test("dossier: a pattern a probe's alphabet would miss is still bounded when it runs", () => {
+	// A probe over runs of "a" and "ab" never sees a "b" run, so this pattern
+	// would pass it and then hang the mask; every application is bounded now.
+	assert.throws(
+		() =>
+			buildDossier(
+				input({
+					items: [artifact("src/a.ts", { patch: "b".repeat(3_000) + "x" })],
+					redaction: { patterns: ["(b+b+)+c"] },
+				}),
+			),
+		(error: unknown) => error instanceof RedactionError,
+	);
 });
 
 test("dossier: an invalid redaction pattern is recorded without echoing its source", () => {

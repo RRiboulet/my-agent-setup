@@ -34,6 +34,7 @@ export const POLICY_REASONS = {
 	unstableSnapshot: "unstable-snapshot",
 	unresolvedConflicts: "unresolved-conflicts",
 	incompleteEvidence: "incomplete-evidence",
+	budgetTrimmed: "budget-trimmed",
 	judgeFailure: "judge-failure",
 	noJudgement: "no-judgement",
 	reviewAlternative: "review-alternative",
@@ -60,6 +61,7 @@ const RATIONALE_SENTENCES: Record<string, string> = {
 	[POLICY_REASONS.unstableSnapshot]: "the snapshot was unstable during collection",
 	[POLICY_REASONS.unresolvedConflicts]: "unresolved merge conflicts were present",
 	[POLICY_REASONS.incompleteEvidence]: "the evidence was incomplete",
+	[POLICY_REASONS.budgetTrimmed]: "the dossier was too large for the character budget and was trimmed",
 	[POLICY_REASONS.judgeFailure]: "the judge failed, so a conservative profile was used",
 	[POLICY_REASONS.noJudgement]: "no judgement was available",
 	[POLICY_REASONS.reviewAlternative]: "the judge preferred a review profile",
@@ -90,6 +92,11 @@ export interface PolicyGates {
 	conflicts: boolean;
 	/** Required evidence is present and omissions are within the completeness threshold. */
 	evidenceComplete: boolean;
+	/**
+	 * The character budget — not the manifest limit or a redaction — forced the
+	 * omission. Only a reason code: `evidenceComplete` already refuses the skip.
+	 */
+	budgetTrimmed: boolean;
 	/** Policy forbids skipping this track. */
 	mandatoryReview: boolean;
 }
@@ -216,7 +223,12 @@ export function decidePolicy(input: PolicyInput): PolicyDecision {
 	if (input.gates.mandatoryReview) reasonCodes.push(POLICY_REASONS.mandatoryReview);
 	if (!input.gates.stable) reasonCodes.push(POLICY_REASONS.unstableSnapshot);
 	if (input.gates.conflicts) reasonCodes.push(POLICY_REASONS.unresolvedConflicts);
-	if (!input.gates.evidenceComplete) reasonCodes.push(POLICY_REASONS.incompleteEvidence);
+	if (!input.gates.evidenceComplete) {
+		reasonCodes.push(POLICY_REASONS.incompleteEvidence);
+		// Name the cause when it is the size of the change rather than a failed
+		// collection, so the audit trail says what actually happened.
+		if (input.gates.budgetTrimmed) reasonCodes.push(POLICY_REASONS.budgetTrimmed);
+	}
 
 	const review = resolveReview(input, allowed);
 	return {

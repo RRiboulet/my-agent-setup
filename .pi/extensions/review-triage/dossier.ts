@@ -31,6 +31,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { createContext, Script } from "node:vm";
 import { MIGRATION_PATH, SECURITY_PATH, type ArtifactFlags } from "./evidence.ts";
 
 // ---------------------------------------------------------------------------
@@ -224,6 +225,12 @@ export interface BuiltDossier {
 	 * omission the judge did not see.
 	 */
 	manifestOverflow: boolean;
+	/**
+	 * True when the character budget — rather than the manifest limit or a
+	 * redaction — forced an omission. Published so the plan can say the change was
+	 * large rather than that collection failed.
+	 */
+	budgetTrimmed: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -343,6 +350,96 @@ interface CompiledRedaction {
 }
 
 /**
+ * Thrown when a configured redaction pattern cannot be applied safely. The
+ * build refuses rather than dropping the rule: dropping it would publish the
+ * very text the owner configured it to mask.
+ */
+export class RedactionError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "RedactionError";
+	}
+}
+
+/** Wall-clock budget for one pattern over one field, in milliseconds. */
+export const REGEX_STEP_TIMEOUT_MS = 100;
+/** Total masking budget for one dossier build, in milliseconds. */
+export const REGEX_TOTAL_TIMEOUT_MS = 2_000;
+
+/** One validated pattern with its position, for naming it in an error. */
+interface RedactionPattern {
+	source: string;
+	position: number;
+}
+
+/**
+ * A reused vm context and compiled script, so bounding each replace stays cheap.
+ * The build is synchronous, so there is no interleaving, and a fired timeout
+ * leaves the context usable.
+ */
+const maskRunner = (() => {
+	const context = createContext({ text: "", source: "", flags: "gsu", mask: "" });
+	const script = new Script("text.replace(new RegExp(source, flags), () => mask)");
+	return { context, script };
+})();
+
+function isExecutionTimeout(error: unknown): boolean {
+	return (error as { code?: string } | null)?.code === "ERR_SCRIPT_EXECUTION_TIMEOUT";
+}
+
+/**
+ * Apply one pattern to one field under a wall-clock budget.
+ *
+ * Every pattern runs over every text-bearing field of the document, and the
+ * build is synchronous inside a tool call, where nothing can interrupt it — a
+ * pattern with catastrophic backtracking would hang the call outright. Bounding
+ * the actual replace, not a proxy input, is what makes that impossible: a
+ * pattern that does not finish is refused, and refusing beats hanging or
+ * silently skipping the rule and publishing the text it was meant to mask.
+ *
+ * The message names the pattern by position and never echoes its source, which
+ * may itself be secret-shaped.
+ */
+function boundedReplace(
+	pattern: RedactionPattern,
+	mask: string,
+	text: string,
+	spent: { ms: number },
+): string {
+	if (spent.ms > REGEX_TOTAL_TIMEOUT_MS) {
+		throw new RedactionError(
+			"redaction masking passed its " + REGEX_TOTAL_TIMEOUT_MS + " ms total budget; simplify the patterns",
+		);
+	}
+	const context = maskRunner.context as Record<string, unknown>;
+	context.text = text;
+	context.source = pattern.source;
+	context.flags = "gsu";
+	context.mask = mask;
+	const started = Date.now();
+	try {
+		return maskRunner.script.runInContext(context, { timeout: REGEX_STEP_TIMEOUT_MS }) as string;
+	} catch (error) {
+		if (isExecutionTimeout(error)) {
+			throw new RedactionError(
+				"redaction pattern #" +
+					pattern.position +
+					" did not finish within " +
+					REGEX_STEP_TIMEOUT_MS +
+					" ms on one field, so it looks catastrophically backtracking. Simplify or anchor it, or remove it. " +
+					"(Its source is not repeated here because it may be secret-shaped.)",
+			);
+		}
+		// Never echo the source: a non-timeout vm error can name the pattern text.
+		throw new RedactionError("redaction pattern #" + pattern.position + " could not be applied");
+	} finally {
+		// Do not leave the last field's text sitting in the shared context.
+		context.text = "";
+		spent.ms += Date.now() - started;
+	}
+}
+
+/**
  * Compile the redaction rules. An invalid glob or regex is a policy the owner
  * meant to apply and did not, so it is recorded rather than thrown — a config
  * typo must not take down the build.
@@ -356,21 +453,33 @@ function compileRedaction(config: RedactionConfig | undefined, exclusions: strin
 			exclusions.push("ignored an invalid redaction path glob");
 		}
 	}
-	const patternMatchers: RegExp[] = [];
+	const patterns: RedactionPattern[] = [];
+	let position = 0;
 	for (const source of config?.patterns ?? []) {
+		position += 1;
 		try {
-			patternMatchers.push(new RegExp(source, "gsu"));
+			// Compile here so a syntax error is recorded rather than thrown from
+			// the mask; the source is secret-shaped, so it is never echoed.
+			new RegExp(source, "gsu");
 		} catch {
-			// The pattern source is configuration and may itself be secret-shaped,
-			// so it is not echoed into a record that travels to the judge.
 			exclusions.push("ignored an invalid redaction pattern (source withheld)");
+			continue;
 		}
+		// Valid syntax is not enough: each application is bounded when it runs.
+		patterns.push({ source, position });
 	}
-	const mask = config?.mask ?? "[redacted]";
+	const maskLiteral = config?.mask ?? "[redacted]";
+	const spent = { ms: 0 };
 	return {
 		excludes: (path) => pathMatchers.some((matcher) => matcher.test(path)),
 		// A function replacement keeps `$&`, `$1` etc. in the mask literal.
-		mask: (text) => patternMatchers.reduce((value, matcher) => value.replace(matcher, () => mask), text),
+		// Each pattern gets its own bounded pass, so one that backtracks cannot
+		// hang the build; a function replacement keeps the mask literal literal.
+		mask: (text) => {
+			let value = text;
+			for (const pattern of patterns) value = boundedReplace(pattern, maskLiteral, value, spent);
+			return value;
+		},
 	};
 }
 
@@ -464,78 +573,173 @@ function compareArtifacts(a: ArtifactChangeItem, b: ArtifactChangeItem): number 
 }
 
 /**
- * Last-resort trim so the canonical form fits the budget. The manifest is the
- * last thing to go, and going at all means the document is incomplete: the
- * return value becomes `manifestOverflow`. If even that cannot meet the budget,
- * the overflow is recorded rather than silently returned as complete.
+ * Most exclusion lines carried. A per-file list for a thousand-file change is
+ * diagnostic detail that crowds out the evidence it describes, so past this the
+ * records are aggregated, oldest first, and the count of what was dropped is
+ * kept. Per-file detail is what is lost: every counted omission (a redacted
+ * artifact, a truncated manifest) survives as an aggregate.
+ */
+export const MAX_EXCLUSIONS = 40;
+
+/**
+ * Longest single exclusion line kept. A record can embed a caller-influenced
+ * path, and one 30k-character diagnostic must not outweigh the evidence it
+ * describes — so lines are shortened before the list is.
+ */
+export const MAX_EXCLUSION_CHARS = 200;
+
+/** The line a previous aggregation leaves behind, re-folded so counts stay true. */
+const AGGREGATE_LINE = /^\+(\d+) more exclusion\(s\) not listed$/u;
+
+/**
+ * Bound the diagnostic list in place: shorten each line, fold any previous
+ * aggregate so re-capping cannot double-count, and aggregate past
+ * MAX_EXCLUSIONS while keeping the newest `protectTail` records (the trim's
+ * own, which explain the size). Called before the budget trim so the trim is
+ * not forced to sacrifice evidence to a diagnostic list.
+ */
+function capExclusions(exclusions: string[], protectTail = 0): void {
+	for (let index = 0; index < exclusions.length; index++) {
+		const line = exclusions[index] ?? "";
+		if (line.length > MAX_EXCLUSION_CHARS) {
+			exclusions[index] = line.slice(0, MAX_EXCLUSION_CHARS - 1) + "…";
+		}
+	}
+	let folded = 0;
+	const lines = exclusions.filter((line) => {
+		const match = AGGREGATE_LINE.exec(line);
+		if (!match) return true;
+		folded += Number(match[1]);
+		return false;
+	});
+	exclusions.length = 0;
+	if (lines.length + (folded > 0 ? 1 : 0) <= MAX_EXCLUSIONS) {
+		exclusions.push(...lines);
+		if (folded > 0) exclusions.push("+" + folded + " more exclusion(s) not listed");
+		return;
+	}
+	const tail = Math.min(Math.max(0, protectTail), Math.max(0, MAX_EXCLUSIONS - 2));
+	const tailLines = tail > 0 ? lines.slice(lines.length - tail) : [];
+	const head = lines.slice(0, Math.max(1, MAX_EXCLUSIONS - 1 - tailLines.length));
+	const dropped = lines.length - head.length - tailLines.length + folded;
+	exclusions.push(...head);
+	if (dropped > 0) exclusions.push("+" + dropped + " more exclusion(s) not listed");
+	exclusions.push(...tailLines);
+}
+
+/**
+ * Last-resort trim so the canonical form fits the budget. Sections shrink before
+ * anything is dropped, and the least information-dense bytes go first: a patch
+ * is worth less per character than the caller's own risk note, so patches are
+ * cut before notes and the manifest is touched last. Every change is recorded,
+ * and the result is `true` whenever anything changed — even when a stage happens
+ * to bring the document back under the budget — because an incomplete dossier
+ * must never read as a complete one.
  */
 function trimToBudget(dossier: Dossier, budgetChars: number): boolean {
-	const over = () => canonicalJson(dossier).length > budgetChars;
-	if (!over()) return false;
+	const size = () => canonicalJson(dossier).length;
+	if (size() <= budgetChars) return false;
 
-	const drop = (label: string, count: number, clear: () => void) => {
-		if (count === 0) return;
-		clear();
-		dossier.exclusions.push(`${label} dropped (${count}) to meet the character budget`);
+	/** Per-entry caps the trim applies before it drops anything. */
+	const PATCH_CAP = 400;
+	const NOTE_CAP = 500;
+	const DETAIL_CAP = 300;
+	const TASK_CAP = 400;
+	/**
+	 * Headroom for the records the trim appends. They are collected and pushed at
+	 * the end, so a stage's own message cannot push the document back over the
+	 * target and make the next stage sacrifice something it need not.
+	 */
+	const RECORD_RESERVE = Math.min(400, Math.floor(budgetChars / 20));
+	const target = Math.max(0, budgetChars - RECORD_RESERVE);
+	const over = () => size() > target;
+	const records: string[] = [];
+	const record = (message: string) => records.push(`${message} to meet the character budget`);
+	const finish = (): boolean => {
+		dossier.exclusions.push(...records);
+		// Keep the records the trim just wrote: they are the omissions log the
+		// document promises, and an older per-file diagnostic outranks them.
+		capExclusions(dossier.exclusions, records.length);
+		if (size() > budgetChars) {
+			dossier.exclusions.push("dossier still exceeds the character budget after trimming; marked as overflow");
+		}
+		return true;
 	};
 
-	drop("supplementary context", dossier.supplementary.length, () => {
-		dossier.supplementary = [];
-	});
-	if (!over()) return false;
-
-	drop("artifact evidence", dossier.artifactEvidence.length, () => {
-		dossier.artifactEvidence = [];
-	});
-	if (!over()) return false;
-
-	drop("validation results", dossier.validation.length, () => {
-		dossier.validation = [];
-	});
-	if (!over()) return false;
-
-	drop("limitations", dossier.limitations.length, () => {
-		dossier.limitations = [];
-	});
-	if (!over()) return false;
-
-	drop("task requirements", dossier.task.requirements.length, () => {
-		dossier.task.requirements = [];
-	});
-	if (!over()) return false;
-
-	drop("catalog", dossier.catalog.length, () => {
-		dossier.catalog = [];
-	});
-	if (!over()) return false;
-
-	// Truncate the task text before touching the manifest.
-	const taskCap = 400;
-	if (dossier.task.summary.length > taskCap) {
-		dossier.task.summary = dossier.task.summary.slice(0, taskCap);
-		dossier.exclusions.push(`task summary truncated to ${taskCap} characters to meet the character budget`);
+	// Sections shrink before anything is dropped, and the least information-dense
+	// bytes go first: a patch is worth less per character than the caller's own
+	// risk note, so patches are cut first and the notes keep their heads.
+	let cutPatches = 0;
+	for (const entry of dossier.artifactEvidence) {
+		if (entry.patch.length > PATCH_CAP) {
+			entry.patch = entry.patch.slice(0, PATCH_CAP);
+			entry.omitted = true;
+			cutPatches += 1;
+		}
 	}
-	if (dossier.task.objective && dossier.task.objective.length > taskCap) {
-		dossier.task.objective = dossier.task.objective.slice(0, taskCap);
-		dossier.exclusions.push(`task objective truncated to ${taskCap} characters to meet the character budget`);
-	}
-	if (!over()) return false;
+	if (cutPatches > 0) record(`${cutPatches} patch(es) shortened to ${PATCH_CAP} characters`);
+	if (!over()) return finish();
 
-	let trimmed = false;
+	let cutNotes = 0;
+	for (let index = 0; index < dossier.supplementary.length; index++) {
+		const note = dossier.supplementary[index] ?? "";
+		if (note.length > NOTE_CAP) {
+			dossier.supplementary[index] = note.slice(0, NOTE_CAP);
+			cutNotes += 1;
+		}
+	}
+	if (cutNotes > 0) record(`${cutNotes} supplementary note(s) shortened to ${NOTE_CAP} characters`);
+	if (!over()) return finish();
+
+	let cutDetails = 0;
+	for (const entry of dossier.validation) {
+		if (entry.detail && entry.detail.length > DETAIL_CAP) {
+			entry.detail = entry.detail.slice(0, DETAIL_CAP);
+			cutDetails += 1;
+		}
+	}
+	if (cutDetails > 0) record(`${cutDetails} validation detail(s) shortened to ${DETAIL_CAP} characters`);
+	if (!over()) return finish();
+
+	// Then whole entries go, from the least information-dense section first.
+	const dropTail = (label: string, list: unknown[]): void => {
+		let dropped = 0;
+		while (list.length > 0 && over()) {
+			list.pop();
+			dropped += 1;
+		}
+		if (dropped > 0) record(`${label} dropped (${dropped})`);
+	};
+	dropTail("artifact evidence", dossier.artifactEvidence);
+	dropTail("supplementary context", dossier.supplementary);
+	dropTail("validation results", dossier.validation);
+	dropTail("limitations", dossier.limitations);
+	dropTail("catalog", dossier.catalog);
+	dropTail("task requirements", dossier.task.requirements);
+
+	// The task text, then the manifest last.
+	if (over() && dossier.task.summary.length > TASK_CAP) {
+		dossier.task.summary = dossier.task.summary.slice(0, TASK_CAP);
+		record(`task summary truncated to ${TASK_CAP} characters`);
+	}
+	if (over() && dossier.task.objective && dossier.task.objective.length > TASK_CAP) {
+		dossier.task.objective = dossier.task.objective.slice(0, TASK_CAP);
+		record(`task objective truncated to ${TASK_CAP} characters`);
+	}
+
+	let trimmedManifest = false;
 	while (dossier.manifest.entries.length > 0 && over()) {
 		dossier.manifest.entries.pop();
 		dossier.manifest.omitted += 1;
-		trimmed = true;
+		trimmedManifest = true;
 	}
-	if (trimmed) {
-		dossier.exclusions.push(
-			`manifest trimmed to ${dossier.manifest.entries.length} entries to meet the character budget`,
-		);
-	}
-	if (!over()) return trimmed;
+	if (trimmedManifest) record(`manifest trimmed to ${dossier.manifest.entries.length} entries`);
 
-	dossier.exclusions.push("dossier still exceeds the character budget after trimming; marked as overflow");
-	return true;
+	// Anything below the first size check changed the document, so the result is
+	// always true from here — an early stage that brings the document back under
+	// the budget is still an omission, and the caller turns this into
+	// `manifestOverflow`, which refuses a skip.
+	return finish();
 }
 
 /**
@@ -710,7 +914,10 @@ export function buildDossier(input: DossierInput): BuiltDossier {
 		versions: { ...(input.versions ?? {}), riskRules: RISK_RULES_VERSION },
 	};
 
-	// 7. Total budget. A manifest trim here is an overflow too.
+	// 7. Total budget. The exclusion list is diagnostic, so it is bounded before
+	// the evidence is sacrificed to it; the trim bounds what it appends itself,
+	// keeping its own records. A manifest trim here is an overflow too.
+	capExclusions(dossier.exclusions);
 	const budgetTrimmed = trimToBudget(dossier, budgetChars);
 
 	return {
@@ -719,5 +926,6 @@ export function buildDossier(input: DossierInput): BuiltDossier {
 		// A deliberate path redaction is an omission too: the judge did not see
 		// what was removed, so the document cannot read as "nothing to see".
 		manifestOverflow: overflow || budgetTrimmed || redactedArtifacts > 0,
+		budgetTrimmed,
 	};
 }

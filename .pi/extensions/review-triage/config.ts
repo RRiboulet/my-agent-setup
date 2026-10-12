@@ -196,6 +196,12 @@ export interface TriageConfig {
 	 * is serialised, hashed or sent. The removal is recorded; the value is not.
 	 */
 	redaction?: RedactionConfig;
+	/**
+	 * Redaction rules the config stated but the parser could not honour (a
+	 * non-string entry, a wrong type, a list over the cap). Carried so the gap is
+	 * visible in the judged document, not only in a startup warning.
+	 */
+	redactionNotes?: string[];
 }
 
 export function agentDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -295,21 +301,42 @@ function parsePolicy(value: unknown, base: PolicyConfig): PolicyConfig {
 }
 
 /**
+ * Most rules accepted in one redaction list. Each pattern runs over every text
+ * field under a wall-clock budget, so an unbounded list is both a slow build and
+ * a slow mistake; a longer list is truncated, loudly.
+ */
+export const MAX_REDACTION_RULES = 200;
+
+/**
  * Parse the redaction block. A rule the owner wrote and the parser could not use
  * is worth a warning — a silently dropped rule is a silently disabled guard —
  * while an empty block is `undefined` so it cannot change the fingerprint.
  */
-function parseRedaction(value: unknown, warn?: (message: string) => void): RedactionConfig | undefined {
-	if (!isObject(value)) return undefined;
+function parseRedaction(
+	value: unknown,
+	warn?: (message: string) => void,
+): { redaction?: RedactionConfig; notes: string[] } {
+	const notes: string[] = [];
+	const note = (message: string) => {
+		notes.push(message);
+		warn?.("review-triage: " + message);
+	};
+	if (!isObject(value)) return { notes };
 	const strings = (input: unknown, field: string): string[] | undefined => {
 		if (input === undefined) return undefined;
 		if (!Array.isArray(input)) {
-			warn?.(`review-triage: redaction.${field} is not a list; it was ignored`);
+			note("redaction." + field + " is not a list; it was ignored");
 			return undefined;
 		}
 		const kept = input.filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "");
 		if (kept.length !== input.length) {
-			warn?.(`review-triage: dropped ${input.length - kept.length} non-string redaction.${field} entry(s)`);
+			note("dropped " + (input.length - kept.length) + " non-string redaction." + field + " entry(s)");
+		}
+		if (kept.length > MAX_REDACTION_RULES) {
+			note(
+				"redaction." + field + " has " + kept.length + " entries; keeping the first " + MAX_REDACTION_RULES,
+			);
+			return kept.slice(0, MAX_REDACTION_RULES);
 		}
 		return kept;
 	};
@@ -317,13 +344,16 @@ function parseRedaction(value: unknown, warn?: (message: string) => void): Redac
 	const patterns = strings(value.patterns, "patterns");
 	const mask = str(value.mask);
 	if (value.mask !== undefined && mask === undefined) {
-		warn?.("review-triage: redaction.mask is not a non-empty string; it was ignored");
+		note("redaction.mask is not a non-empty string; it was ignored");
 	}
-	if (paths === undefined && patterns === undefined && mask === undefined) return undefined;
+	if (paths === undefined && patterns === undefined && mask === undefined) return { notes };
 	return {
-		...(paths ? { paths } : {}),
-		...(patterns ? { patterns } : {}),
-		...(mask ? { mask } : {}),
+		redaction: {
+			...(paths ? { paths } : {}),
+			...(patterns ? { patterns } : {}),
+			...(mask ? { mask } : {}),
+		},
+		notes,
 	};
 }
 
@@ -537,8 +567,9 @@ export function loadConfig(options: LoadConfigOptions = {}): TriageConfig {
 		config.stateChars = Math.round(num(file.stateChars, config.stateChars, 1_000, 60_000));
 		config.envFile = str(file.envFile) ?? config.envFile;
 		config.taskBaselineRef = str(file.taskBaselineRef) ?? config.taskBaselineRef;
-		const redaction = parseRedaction(file.redaction, warn);
-		if (redaction) config.redaction = redaction;
+		const parsedRedaction = parseRedaction(file.redaction, warn);
+		if (parsedRedaction.redaction) config.redaction = parsedRedaction.redaction;
+		if (parsedRedaction.notes.length > 0) config.redactionNotes = parsedRedaction.notes;
 	}
 
 	// Environment wins so a one-off run can be redirected without editing files.

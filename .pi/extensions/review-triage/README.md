@@ -94,12 +94,19 @@ validation-result / risk-signal / limitation), `provenance`, `snapshot`,
   fingerprint, so a verdict can be replayed against the evidence that produced
   it. (The fingerprint does not make Jev's answer deterministic.)
 - **Honest about gaps.** Every truncation, redaction and omission is recorded in
-  `exclusions`, and anything that made the document incomplete sets
+  `exclusions` and anything that made the document incomplete sets
   `manifestOverflow`, which refuses a skip: "we could not see everything" must
-  never read as "there was nothing to see".
+  never read as "there was nothing to see". The list is bounded so a per-file
+  diagnostic cannot crowd out the evidence it describes: past 40 lines the
+  records are aggregated, oldest first, and the count of what was dropped is
+  kept — every counted omission survives, per-file detail is what is lost.
 - **Budgeted.** `stateChars` is the total character budget. Patches are
   allocated security and migration paths first, with per-file and total caps;
-  caller-supplied text is capped per field.
+  caller-supplied text is capped per field; each omission line is bounded too,
+  so one long diagnostic cannot outweigh the evidence it describes. Once the
+  trim's own records are counted the cap is best-effort — but any overshoot is
+  flagged, which refuses a skip, so a size miss never becomes a silent
+  assurance.
 - **Redactable.** `redaction.paths` (globs) drops whole artifacts;
   `redaction.patterns` (regex sources) masks matching text everywhere it
   appears, including caller-supplied task and scope strings and the subagent
@@ -107,9 +114,16 @@ validation-result / risk-signal / limitation), `provenance`, `snapshot`,
   not (a path exclusion also records a count). An invalid glob or pattern is
   recorded rather than thrown, and a rule the config file states in a shape the
   parser cannot use warns instead of vanishing — a silently dropped rule is a
-  silently disabled guard. A path rule that actually removes an artifact makes
+  silently disabled guard. A rule the config states in a shape the parser cannot
+  use is also carried into the dossier's limitations, so the gap reaches the
+  judge and the audit rather than only a startup warning. A path rule that
+  actually removes an artifact makes
   the dossier incomplete, so the plan refuses to skip: the judge did not see
-  what was removed.
+  what was removed. A pattern that would backtrack catastrophically is caught in
+  the mask pass itself, each application running under a wall-clock budget: the
+  build fails, naming the pattern's position and never its source, because
+  hanging the call and silently skipping the rule are both worse. A total
+  masking budget covers a config full of merely-slow patterns.
 
 ## Configuration
 

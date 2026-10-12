@@ -27,6 +27,7 @@ import {
 	DEFAULT_THINKING_LADDER,
 	generateCatalog,
 	loadConfig,
+	MAX_REDACTION_RULES,
 	parseProfile,
 	profileKey,
 	profileRank,
@@ -143,7 +144,14 @@ function emptyDossier(): BuiltDossier {
 }
 
 function gates(overrides: Partial<PolicyGates> = {}): PolicyGates {
-	return { stable: true, conflicts: false, evidenceComplete: true, mandatoryReview: false, ...overrides };
+	return {
+		stable: true,
+		conflicts: false,
+		evidenceComplete: true,
+		budgetTrimmed: false,
+		mandatoryReview: false,
+		...overrides,
+	};
 }
 
 function track(overrides: Partial<TrackJudgment> = {}): TrackJudgment {
@@ -260,6 +268,37 @@ test("config: a redaction block is parsed, and a bad rule warns instead of vanis
 		undefined,
 		"no block means nothing to hash differently",
 	);
+});
+
+test("config: a redaction list is capped, loudly", () => {
+	const dir = mkdtempSync(join(tmpdir(), "triage-test-"));
+	const path = join(dir, "review-triage.json");
+	const patterns = Array.from({ length: MAX_REDACTION_RULES + 5 }, (_, index) => `p${index}`);
+	writeFileSync(path, JSON.stringify({ redaction: { patterns } }));
+	const warnings: string[] = [];
+	try {
+		const loaded = loadConfig({ path, env: {}, warn: (message) => warnings.push(message) });
+		assert.equal(loaded.redaction?.patterns?.length, MAX_REDACTION_RULES);
+		assert.ok(warnings.some((warning) => warning.includes("keeping the first")));
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("config: a redaction rule the parser could not use is recorded for the dossier", () => {
+	const dir = mkdtempSync(join(tmpdir(), "triage-test-"));
+	const path = join(dir, "review-triage.json");
+	writeFileSync(path, JSON.stringify({ redaction: { patterns: "AKIA" } }));
+	try {
+		const loaded = loadConfig({ path, env: {}, warn: () => {} });
+		assert.equal(loaded.redaction, undefined, "nothing usable was left");
+		assert.ok(
+			loaded.redactionNotes?.some((note) => note.includes("redaction.patterns is not a list")),
+			"a dropped security rule is worth a note the dossier can carry",
+		);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 test("config: a file merges over defaults field by field", () => {
@@ -1741,6 +1780,32 @@ test("wiring: a path redaction refuses skip even at P(none)=0.99", async () => {
 	assert.ok(details.plan?.adversarial?.reasonCodes?.includes("incomplete-evidence"));
 });
 
+test("wiring: an unusable redaction rule is visible in the plan's limitations", async () => {
+	const { details } = await runPipeline({
+		exec: stableExec().exec,
+		answers: fullAnswers(),
+		config: { candidates: PIPELINE_CANDIDATES, redaction: { patterns: "AKIA" } },
+	});
+	assert.ok(
+		details.plan?.limitations?.some((limitation) => limitation.includes("redaction.patterns is not a list")),
+		"a dropped security rule must be visible where the judge and the audit can see it",
+	);
+});
+
+test("wiring: a catastrophically backtracking pattern fails the run with a clear error", async () => {
+	await assert.rejects(
+		() =>
+			runPipeline({
+				exec: stableExec().exec,
+				answers: fullAnswers(),
+				params: { summary: "a".repeat(3_000) + "!" },
+				config: { candidates: PIPELINE_CANDIDATES, redaction: { patterns: ["(a+)+$"] } },
+			}),
+		(error: unknown) => error instanceof Error && error.name === "RedactionError",
+		"the build refuses rather than hanging the tool call",
+	);
+});
+
 test("wiring: a masked summary is what the rendered task and the entry carry", async () => {
 	const { details, appended } = await runPipeline({
 		exec: stableExec().exec,
@@ -1804,6 +1869,19 @@ test("policy: a high P(none) still cannot skip when any single gate fails", () =
 		assert.equal(decision.status, "recommended", "a refused skip still uses Jev's alternative");
 		assert.equal(decision.profile, "high:max");
 	}
+});
+
+test("policy: a budget-trimmed dossier names the trim as well as the incompleteness", () => {
+	const decision = decidePolicy({
+		judgment: { skipConfidence: 0.99, reviewAlternative: "high:max" },
+		gates: gates({ evidenceComplete: false, budgetTrimmed: true }),
+		config: policyConfig,
+		catalog: [...ALLOWED],
+	});
+	assert.equal(decision.skip, false);
+	assert.ok(decision.reasonCodes.includes(POLICY_REASONS.incompleteEvidence));
+	assert.ok(decision.reasonCodes.includes(POLICY_REASONS.budgetTrimmed), "the audit says what happened");
+	assert.match(rationaleFor(decision.reasonCodes), /character budget/u);
 });
 
 test("policy: a refused skip with no usable alternative falls to the minimum profile", () => {

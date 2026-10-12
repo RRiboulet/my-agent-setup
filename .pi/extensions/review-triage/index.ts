@@ -261,6 +261,7 @@ async function runTriage(
 	const suppliedValidations = Array.isArray(resolved.validations) && resolved.validations.length > 0;
 	const limitations = [
 		...resolved.warnings,
+		...(config.redactionNotes ?? []),
 		...(suppliedValidations ? [] : ["no validation results were supplied for this run"]),
 	];
 	const built = buildDossier({
@@ -319,6 +320,7 @@ async function runTriage(
 			!evidence.error &&
 			!built.manifestOverflow &&
 			!evidence.limitations.some((limitation) => limitation.blocksSkip),
+		budgetTrimmed: built.budgetTrimmed,
 		mandatoryReview: config.policy.mandatoryReview ?? false,
 	};
 

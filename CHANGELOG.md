@@ -143,6 +143,27 @@ Fixes found by reviewing the triage work, before it shipped:
   disabled extension still spent a classifier request per call. The switch is
   honoured now, and a disabled run reports that nothing was judged rather than a
   verdict.
+- **A trimmed dossier could still skip review, and the trim gave up the evidence
+  it should have kept.** The budget trim's early stages each returned "not
+  trimmed" once they had brought the document back under the budget, so a large
+  change whose notes were cut reported itself complete and a high `P(none)`
+  could skip over it. The trim now shrinks before it drops — patches first, then
+  the caller's notes, each keeping its head — so a large change keeps some of
+  both instead of losing everything, and the diagnostic exclusion list is
+  bounded so a per-file list cannot crowd out the evidence it describes, with
+  each line shortened so one long path cannot outweigh it either. It
+  reports "incomplete" whenever it changed anything, and the plan publishes a
+  `budget-trimmed` reason code so the audit says the change was large rather
+  than that collection failed.
+- **A mistyped redaction pattern could hang the review tool.** Patterns are
+  arbitrary regex from the config, run over every text field of the dossier in a
+  synchronous build inside a tool call, where nothing can interrupt them: a
+  pattern with catastrophic backtracking (`(a+)+$`) simply never returned. Every
+  application now runs under a wall-clock budget in an interruptible context,
+  and one that does not finish is refused with its position and never its
+  source — refusing beats hanging, and beats silently skipping the rule and
+  publishing the text it was meant to mask. A total budget bounds a config full
+  of merely-slow patterns, and the list is capped too.
 - Smaller: the reversed Choice questions are sent only when `reverseChoice` is
   on (they were paid for and discarded otherwise); a malformed config file warns
   instead of vanishing; the judge is told to treat the diff as untrusted
