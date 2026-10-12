@@ -81,14 +81,13 @@ Fixes to the triage work, from an adversarial review before it shipped:
   honoured now, and a disabled run reports that nothing was judged rather than
   a verdict.
 - **The candidate field was named `cost` but used as a capability rank**, which
-  is simply wrong for this catalogue: `deepseek-v4.1-flash` and `glm-5.3-flash`
-  cost the same 0.15, and `step-5-preview-free` is free yet the strongest of the
-  three. The field is now `tier`, and a rung's floor is `minTier` — an explicit
-  human judgement the floor is enforced against. Price is still consulted, but
-  only to synthesise a list on a machine with no config, and `tierFromPrice` is
-  named and documented as the coarse guess it is. The reviewed models are thus
-  tiered by strength (`deepseek-v4.1-flash` low, `glm-5.3-flash` medium,
-  `step-5-preview-free` high), not by what they charge.
+  is wrong for this catalogue: two models can share a price and differ in
+  strength (`deepseek-v4.1-flash` and `glm-5.3-flash` both cost 0.15), and a free
+  model can be the strongest one offered. The field is now `tier`, and a rung's
+  floor is `minTier` — an explicit human judgement the floor is enforced
+  against. Price is still consulted, but only to synthesise a list on a machine
+  with no config, and `tierFromPrice` is named and documented as the coarse
+  guess it is.
 - Smaller: the state cap is enforced against a caller-supplied `author_notes`
   of any size and re-checks after every trim; the reversed Choice questions are
   sent only when `reverseChoice` is on (they were paid for and discarded

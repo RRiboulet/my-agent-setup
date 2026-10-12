@@ -40,9 +40,9 @@ and a `.env` beside this file is read for `OPENROUTER_API_KEY`.
     { "provider": "opencode-go", "model": "glm-5.3-flash", "tier": "medium",
       "description": "Strong general reasoner at low cost. A full correctness and edge-case pass on ordinary work.",
       "notFor": "Hostile review of subtle or security-sensitive changes." },
-    { "provider": "opencode-go", "model": "step-5-preview-free", "tier": "high",
-      "description": "The strongest reasoner available. For hostile, exhaustive or security-focused review.",
-      "notFor": "Routine changes a cheaper model handles well." }
+    { "provider": "opencode-go", "model": "glm-5.3", "tier": "high",
+      "description": "The strongest reviewer here, and the most expensive. For hostile, exhaustive or security-focused review.",
+      "notFor": "Routine changes, or anything a flash model already covers well." }
   ],
   "tracks": {
     "adversarial": {
@@ -52,7 +52,7 @@ and a `.env` beside this file is read for `OPENROUTER_API_KEY`.
         { "name": "standard", "minScore": 1.5, "thinking": "medium", "minTier": "medium" },
         { "name": "deep",     "minScore": 2.5, "thinking": "high",   "minTier": "high" }
       ],
-      "fallbackChain": ["opencode-go/glm-5.3-flash", "opencode-go/step-5-preview-free"]
+      "fallbackChain": ["opencode-go/glm-5.3-flash", "opencode-go/glm-5.3"]
     },
     "complexity": {
       "threshold": 0.5,
