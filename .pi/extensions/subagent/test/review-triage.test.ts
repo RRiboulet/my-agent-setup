@@ -1176,6 +1176,26 @@ test("format: a skipped plan says not needed with the skip confidence", () => {
 });
 
 // ---------------------------------------------------------------------------
+// acceptance properties
+// ---------------------------------------------------------------------------
+
+test("acceptance: a filename that looks like an instruction is never copied into a signal", () => {
+	// Signals are fixed labels plus integers; untrusted text must not reach them.
+	const signals = detectSignals(["rm -rf / # export const x = 1"], "", 0, 0);
+	assert.ok(signals.every((signal) => !signal.includes("rm -rf")));
+});
+
+test("acceptance: composing a plan is pure and renders reason codes as plain text", () => {
+	const adversarial = track({ skipConfidence: 0.5, reviewAlternative: "not-in-catalog" });
+	const first = compose({ judgment: judgment({ adversarial }) });
+	const second = compose({ judgment: judgment({ adversarial }) });
+	assert.deepEqual(first, second, "the same judgement yields the same plan");
+	const text = formatPlan(first);
+	assert.match(text, /policy-fallback/);
+	assert.doesNotMatch(text, /\u001b\[/u, "plain text, no escape codes");
+});
+
+// ---------------------------------------------------------------------------
 // command parsing
 // ---------------------------------------------------------------------------
 
