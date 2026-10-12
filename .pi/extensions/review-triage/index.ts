@@ -2,11 +2,11 @@
  * review-triage — a Jev-gated review planner.
  *
  * The agent calls `triage_change` after implementing something. Deterministic
- * code gathers the evidence and packages it; Jev judges whether the change
- * needs adversarial and/or complexity review, how hard each should push, and
- * which of the allowed models should run it; code applies the thresholds, the
- * capability floor, the fallback chains and the thinking level. The result is a plan,
- * not an action — the agent starts the reviews with the `subagent` tool.
+ * code gathers the evidence and packages it; Jev judges, per track, one
+ * distribution over `none` and the allowed profiles (capability band +
+ * thinking level); code applies the skip gate and resolves the chosen profile
+ * to a concrete model. The result is a plan, not an action — the agent starts
+ * the reviews with the `subagent` tool.
  *
  * The whole decision is appended to the session as a `review-triage` entry, so
  * "we skipped review here" is auditable after the fact rather than invisible.
@@ -18,19 +18,26 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
-import { agentDir, applyDotEnv, loadConfig, type Candidate, type TriageConfig } from "./config.ts";
+import {
+	agentDir,
+	applyDotEnv,
+	generateCatalog,
+	loadConfig,
+	type Candidate,
+	type ProfileCatalog,
+	type TriageConfig,
+} from "./config.ts";
 import { collectEvidence, type TriageTarget } from "./evidence.ts";
 import { askJudge, buildState, JudgeError, type Judgment } from "./judge.ts";
 import {
 	composePlan,
-	tierFromPrice,
 	disabledPlan,
 	failOpenPlan,
 	resolveCandidates,
 	type AvailableModel,
-	type ModelRef,
 	type ReviewPlan,
 } from "./compose.ts";
+import type { PolicyGates } from "./policy.ts";
 import { formatPlan } from "./format.ts";
 import { join } from "node:path";
 
@@ -49,6 +56,7 @@ export interface TriageParams {
 interface TriageRun {
 	plan: ReviewPlan;
 	judgment?: Judgment;
+	catalog: ProfileCatalog;
 	evidence: { target: string; files: string[]; added: number; removed: number; signals: string[]; error?: string };
 }
 
@@ -61,12 +69,6 @@ export function resolveTarget(params: TriageParams): TriageTarget {
 		return { kind: "branch", base: params.base?.trim() || "dev" };
 	}
 	return { kind: "uncommitted" };
-}
-
-function currentModel(ctx: ExtensionContext): ModelRef | undefined {
-	const model = ctx.model;
-	if (!model) return undefined;
-	return { provider: model.provider, model: model.id, tier: tierFromPrice(model.cost?.input) };
 }
 
 function availableModels(ctx: ExtensionContext): AvailableModel[] {
@@ -105,6 +107,7 @@ async function runTriage(
 	if (!config.enabled) {
 		const entry: TriageRun = {
 			plan: disabledPlan({ files: 0, added: 0, removed: 0, signals: [] }),
+			catalog: { options: [], pruned: [], notes: [] },
 			evidence: { target: "none", files: [], added: 0, removed: 0, signals: [] },
 		};
 		try {
@@ -117,6 +120,11 @@ async function runTriage(
 
 	const available = availableModels(ctx);
 	const candidates = resolveCandidates(config, available);
+	const catalog = generateCatalog({
+		candidates,
+		ladder: config.thinkingLadder,
+		available,
+	});
 	const target = resolveTarget(params);
 
 	onProgress?.("gathering change evidence");
@@ -135,6 +143,15 @@ async function runTriage(
 		removed: evidence.removed,
 		signals: evidence.signals,
 	};
+	// The collector/instability work (§6) will fill these from real signals;
+	// until then the extension is explicit that it assumed the snapshot stable,
+	// and only the collection error is treated as incomplete evidence.
+	const gates: PolicyGates = {
+		stable: true,
+		conflicts: false,
+		evidenceComplete: !evidence.error,
+		mandatoryReview: config.policy.mandatoryReview ?? false,
+	};
 
 	onProgress?.(`asking ${config.judge.provider}/${config.judge.model}`);
 	let judgment: Judgment | undefined;
@@ -144,7 +161,7 @@ async function runTriage(
 			ctx.modelRegistry,
 			config,
 			buildState(evidence, config.stateChars),
-			candidates,
+			catalog.options,
 			signal,
 		);
 		plan = composePlan({
@@ -152,7 +169,8 @@ async function runTriage(
 			config,
 			candidates,
 			available,
-			current: currentModel(ctx),
+			catalog: catalog.options,
+			gates,
 			evidence: planEvidence,
 			summary,
 		});
@@ -166,7 +184,8 @@ async function runTriage(
 			config,
 			candidates,
 			available,
-			current: currentModel(ctx),
+			catalog: catalog.options,
+			gates,
 			evidence: planEvidence,
 			summary,
 			reason: error.message,
@@ -176,6 +195,7 @@ async function runTriage(
 	const entry: TriageRun = {
 		plan,
 		...(judgment ? { judgment } : {}),
+		catalog,
 		evidence: {
 			target: evidence.target,
 			files: evidence.files.slice(0, 40),
@@ -243,10 +263,10 @@ export default function (pi: ExtensionAPI) {
 		label: "Review Triage",
 		description:
 			"Decide whether a just-finished change needs an independent adversarial review, a complexity/design " +
-			"review, or neither — and with which model and thinking level. Gathers the git diff as evidence and " +
-			"asks a calibrated decision model (Jev) for the judgement; code applies the thresholds and the capability " +
-			"floor. Returns a plan; it does not launch anything. Use it before committing or opening a PR when " +
-			"you are unsure how much independent review the change warrants.",
+			"review, or neither — and with which profile (capability band + thinking level). Gathers the git diff " +
+			"as evidence and asks a calibrated decision model (Jev) for the judgement; code applies the skip gate " +
+			"and resolves the profile to a model. Returns a plan; it does not launch anything. Use it before " +
+			"committing or opening a PR when you are unsure how much independent review the change warrants.",
 		promptSnippet: "Gate a finished change: does it need adversarial or complexity review, and how strong?",
 		promptGuidelines: [
 			"Use triage_change after implementing a change and before committing or opening a PR, when its risk is not obvious.",

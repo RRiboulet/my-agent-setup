@@ -19,26 +19,19 @@ function indent(text: string, prefix: string): string {
 function formatTrack(track: TrackPlan): string {
 	const headline = track.track === "adversarial" ? "Adversarial" : "Complexity";
 	if (!track.needed) {
-		return `${headline}: not needed (P(depth = none) ${(1 - track.neededProbability).toFixed(2)})`;
+		return `${headline}: not needed (P(none) ${track.skipConfidence.toFixed(2)})`;
 	}
 
-	// The whole distribution is shown, not just the rung it landed on: a
-	// near-tie between standard and deep is exactly what the confidence gate is
-	// deciding on, and hiding it would make the plan look more certain than it is.
-	const depth = (["none", "light", "standard", "deep"] as const)
-		.map((level) => `${level} ${(track.depth[level] ?? 0).toFixed(2)}`)
-		.join(" · ");
-	const lines = [
-		`${headline}: NEEDED`,
-		`  depth ${depth} · tier ${track.tier}`,
-	];
+	const fallback = track.status === "fallback" ? " · policy fallback" : "";
+	const lines = [`${headline}: NEEDED${fallback}`];
 	if (track.model) {
 		lines.push(
-			`  model ${track.model.provider}/${track.model.model} (${track.model.tier}) · thinking ${track.thinking}${track.fallbackUsed ? " · fallback" : ""}`,
+			`  profile ${track.finalChoice} · thinking ${track.thinking} · model ${track.model.provider}/${track.model.model} (${track.model.tier})`,
 		);
 	} else {
-		lines.push(`  no review model available — choose one for a ${track.tier} review, thinking ${track.thinking}`);
+		lines.push(`  no review model available for ${track.finalChoice ?? "a review"} (${track.status})`);
 	}
+	if (track.reasonCodes.length > 0) lines.push(`  because: ${track.reasonCodes.join(", ")}`);
 	if (track.notes.length > 0) {
 		lines.push(`  notes: ${track.notes.join(" ")}`);
 	}

@@ -1,36 +1,31 @@
 /**
- * Composition: Jev judges, code owns the budget.
+ * Composition: Jev judges, policy decides, code resolves.
  *
- * Nothing in here calls a model or reads a file. It takes Jev's probabilities
- * and turns them into a plan by applying policy that a human wrote down:
+ * Nothing in here calls a model or reads a file. It takes the per-track profile
+ * judgement, applies the pure skip/fallback policy, and resolves the chosen
+ * profile to a concrete model:
  *
- *   - a noul probability at or above the track's threshold means the review is
- *     recommended;
- *   - the strength score picks a tier, and each tier carries an capability floor and a
- *     thinking level;
- *   - Jev's Choice names the model, but only within the floor — a confident
- *     pick of a cheap model for a deep review is promoted, because the score,
- *     not the Choice, decides how much capability the work deserves;
- *   - a low-confidence Choice, or one naming an unavailable or floor-breaking
- *     model, walks the configured fallback chain instead.
+ *   - the profile's band selects the model from the candidate list;
+ *   - the profile's thinking level is used verbatim, with the old clamp kept
+ *     only as a defensive assertion that logs when it would have changed;
+ *   - a judge failure is routed through policy, so it is marked as a fallback
+ *     rather than ever being read as a judgement.
  *
  * Keeping this pure is what makes the gate auditable: every decision it makes
- * can be replayed from a saved judgement and a config.
+ * can be replayed from a saved judgement, a catalog and a config.
  */
 
 import type {
 	Candidate,
 	CapabilityTier,
-	DepthLevel,
+	ProfileOption,
 	ThinkingLevel,
-	Tier,
-	TrackConfig,
 	TriageConfig,
 	TrackName,
 } from "./config.ts";
-import { DEPTH_LEVELS, DEPTH_RANK, THINKING_RANK } from "./config.ts";
+import { PROFILE_NONE, parseProfile, THINKING_RANK } from "./config.ts";
 import type { Judgment, TrackJudgment } from "./judge.ts";
-import { candidateKey } from "./judge.ts";
+import { decidePolicy, type PolicyGates, type PolicySource, type PolicyStatus } from "./policy.ts";
 
 /** The subset of a pi catalogue model this tool needs. */
 export interface AvailableModel {
@@ -50,18 +45,20 @@ export interface ModelRef {
 export interface TrackPlan {
 	track: TrackName;
 	needed: boolean;
-	/** P(depth >= light): the probability a review is warranted. */
-	neededProbability: number;
-	/** The averaged depth distribution Jev returned, kept for the audit trail. */
-	depth: Record<DepthLevel, number>;
-	/** Rung name: "none" when skipped, else light/standard/deep. */
-	tier: string;
+	/** P(none): the skip signal Jev returned. */
+	skipConfidence: number;
+	/** The winning non-none profile's averaged probability. */
+	routingConfidence: number;
+	/** Jev's overall argmax (may be `none`), kept for the audit trail. */
+	proposedChoice: string;
+	/** The profile policy resolved to, present when a review is recommended. */
+	finalChoice?: string;
 	thinking: ThinkingLevel;
 	model?: ModelRef;
-	/** Jev's raw model pick, kept even when it fell outside the rung's band. */
-	choice: string;
-	choiceConfidence: number;
-	fallbackUsed: boolean;
+	status: PolicyStatus;
+	source: PolicySource;
+	/** Deterministic tags; the rendered rationale is a template over these. */
+	reasonCodes: string[];
 	notes: string[];
 	/** Ready-to-paste task for the `subagent` tool, present only when needed. */
 	task?: string;
@@ -78,10 +75,10 @@ export interface ReviewPlan {
 
 /**
  * Capability tier inferred from catalogue price. This exists only for models
- * that appear in a fallback chain but not in the curated candidate list — and
- * for the synthesised list on a machine with no config at all. It is a coarse
- * last resort: price cannot tell `deepseek-v4.1-flash` from `glm-5.3-flash`
- * (both 0.15), which is why the real ordering comes from an explicit `tier`.
+ * that appear in the synthesised list on a machine with no config at all. It is
+ * a coarse last resort: price cannot tell `deepseek-v4.1-flash` from
+ * `glm-5.3-flash` (both 0.15), which is why the real ordering comes from an
+ * explicit `tier`.
  */
 export function tierFromPrice(inputPerMillion: number | undefined): CapabilityTier {
 	if (inputPerMillion === undefined || !Number.isFinite(inputPerMillion)) return "medium";
@@ -117,6 +114,7 @@ export function resolveCandidates(config: TriageConfig, available: readonly Avai
 			provider: model.provider,
 			model: model.id,
 			tier,
+			cost: model.cost?.input ?? 0,
 			description:
 				tier === "low"
 					? "Lowest price tier. A quick second read for obvious mistakes."
@@ -139,32 +137,12 @@ function priceOf(model: AvailableModel): number {
 }
 
 /**
- * The rung for a depth distribution: the deepest rung whose CUMULATIVE
- * probability clears its own `minConfidence`. That single rule is both the
- * gate and the cost control — because `P(depth >= rung)` shrinks as the rung
- * deepens, an expensive rung has to be argued for, and the two distributions
- * we used to ask separately (needed? how hard?) collapse into one.
- *
- * Tiers are sorted ascending, and cumulative probability is monotonic in depth,
- * so a plain sweep is enough: a rung that clears its bar implies every shallower
- * rung clears its lower bar too.
- */
-export function tierForDepth(track: TrackConfig, depth: Record<DepthLevel, number>): Tier {
-	let chosen = track.tiers[0];
-	for (const rung of track.tiers) {
-		const cumulative = DEPTH_LEVELS.filter(
-			(level) => DEPTH_RANK[level] >= DEPTH_RANK[rung.name],
-		).reduce((sum, level) => sum + (depth[level] ?? 0), 0);
-		if (cumulative >= rung.minConfidence) chosen = rung;
-	}
-	return chosen;
-}
-
-/**
- * Clamp a thinking level to what the model actually supports. A model that
- * cannot reason must not be handed "high": the subagent would silently run at
- * its default and the plan would be a lie. `thinkingLevelMap` is authoritative
- * when present; otherwise `reasoning: false` caps the level at `off`.
+ * Clamp a thinking level to what the model actually supports. The catalog
+ * should already have pruned unsupported pairs, so in the normal path this
+ * changes nothing; it is kept as a defensive assertion for the case where the
+ * runtime map changed after the catalog was generated. A model that cannot
+ * reason must not be handed "high" — the subagent would silently run at its
+ * default and the plan would be a lie.
  */
 export function clampThinking(level: ThinkingLevel, model: AvailableModel | undefined): ThinkingLevel {
 	if (!model) return level;
@@ -183,138 +161,54 @@ export function clampThinking(level: ThinkingLevel, model: AvailableModel | unde
 }
 
 function findAvailable(
-	ref: ModelRef,
+	ref: Pick<ModelRef, "provider" | "model">,
 	available: readonly AvailableModel[],
 ): AvailableModel | undefined {
 	return available.find((model) => model.provider === ref.provider && model.id === ref.model);
 }
 
-function availableModelFor(
-	key: string,
-	available: readonly AvailableModel[],
-): AvailableModel | undefined {
-	const slash = key.indexOf("/");
-	if (slash <= 0) return undefined;
-	const provider = key.slice(0, slash);
-	const id = key.slice(slash + 1);
-	return available.find((model) => model.provider === provider && model.id === id);
-}
-
-/** Resolve a fallback-chain key to a candidate: config first, catalogue second. */
-function refFromKey(
-	key: string,
-	candidates: readonly Candidate[],
-	available: readonly AvailableModel[],
-): ModelRef | undefined {
-	const described = candidates.find((candidate) => candidateKey(candidate) === key);
-	if (described) return { provider: described.provider, model: described.model, tier: described.tier };
-	const model = availableModelFor(key, available);
-	if (!model) return undefined;
-	return { provider: model.provider, model: model.id, tier: tierFromPrice(model.cost?.input) };
-}
-
-function isAvailable(ref: ModelRef, available: readonly AvailableModel[]): boolean {
-	return Boolean(findAvailable(ref, available));
-}
-
-interface Selection {
-	model?: ModelRef;
-	fallbackUsed: boolean;
-	notes: string[];
-}
-
 /**
- * Pick the review model from the rung's band. The rung already decided how much
- * capability the review deserves (from the depth distribution), so the band is a
- * hard boundary: Jev's model pick is used only if it falls inside it. That is
- * what stops a "standard" review from quietly buying the expensive model — the
- * leak the old floor-only rule allowed.
- *
- *   1. Jev's pick, when it is inside the band and confident;
- *   2. the best-ranked available candidate in the band, by Jev's own order;
- *   3. the configured fallback chain;
- *   4. any available candidate, then the session model, with a note.
+ * Resolve a profile to a concrete model: the band selects the candidate, and
+ * the candidate must be available in this session. There is deliberately no
+ * run-down-the-thinking-ladder or cross-band leak here — the catalog already
+ * decided which pairs are legitimate, so this is a lookup. A band with no
+ * available model resolves to nothing and the caller reports it as unavailable.
  */
-export function selectModel(args: {
-	track: TrackName;
-	tier: Tier;
-	judgment: TrackJudgment;
-	config: TriageConfig;
+export function resolveProfileModel(args: {
+	profile: string;
 	candidates: readonly Candidate[];
 	available: readonly AvailableModel[];
-	current?: ModelRef | undefined;
-}): Selection {
-	const { track, tier, judgment, config, candidates, available, current } = args;
-	const notes: string[] = [];
-	const toRef = (candidate: Candidate): ModelRef => ({
-		provider: candidate.provider,
-		model: candidate.model,
-		tier: candidate.tier,
-	});
-	const band = candidates.filter((candidate) => candidate.tier === tier.candidateTier);
-	const pick = band.find((candidate) => candidateKey(candidate) === judgment.choice);
-	const confident = judgment.choiceConfidence >= config.judge.minConfidence;
-
-	if (pick && confident && isAvailable(toRef(pick), available)) {
-		return { model: toRef(pick), fallbackUsed: false, notes };
+}): { model?: ModelRef; notes: string[] } {
+	const parsed = parseProfile(args.profile);
+	if (!parsed) return { notes: [`unknown profile "${args.profile}"`] };
+	const inBand = args.candidates.filter((candidate) => candidate.tier === parsed.band);
+	const model = inBand
+		.map((candidate): ModelRef => ({
+			provider: candidate.provider,
+			model: candidate.model,
+			tier: candidate.tier,
+		}))
+		.find((ref) => Boolean(findAvailable(ref, args.available)));
+	if (!model) {
+		return { notes: [`no available ${parsed.band}-band model for profile ${args.profile}`] };
 	}
-	if (pick && !confident) {
-		notes.push(
-			`Choice confidence ${judgment.choiceConfidence.toFixed(2)} is below ${config.judge.minConfidence}; used the band's best-ranked model.`,
-		);
-	} else if (pick) {
-		notes.push(`Jev chose ${judgment.choice}, which this session cannot use.`);
-	} else {
-		const outside = candidates.find((candidate) => candidateKey(candidate) === judgment.choice);
-		notes.push(
-			outside
-				? `Jev chose ${judgment.choice} (${outside.tier}), outside the ${tier.candidateTier} band for a ${tier.name} review; kept the band.`
-				: "Jev named no candidate in the band; used the band's best-ranked model.",
-		);
-	}
-
-	// 2. Best-ranked available candidate in the band, by Jev's own order.
-	const rankedBand = [...band]
-		.filter((candidate) => isAvailable(toRef(candidate), available))
-		.sort(
-			(a, b) =>
-				(judgment.choiceProbabilities[candidateKey(b)] ?? 0) -
-				(judgment.choiceProbabilities[candidateKey(a)] ?? 0),
-		);
-	if (rankedBand[0]) return { model: toRef(rankedBand[0]), fallbackUsed: true, notes };
-
-	// 3. Configured fallback chain, in order.
-	const chain = config.tracks[track].fallbackChain
-		.map((key) => refFromKey(key, candidates, available))
-		.filter((ref): ref is ModelRef => ref !== undefined);
-	for (const ref of chain) {
-		if (isAvailable(ref, available)) return { model: ref, fallbackUsed: true, notes };
-	}
-
-	// 4. Any available candidate, then the session's current model.
-	const anyAvailable = candidates.map(toRef).find((ref) => isAvailable(ref, available));
-	if (anyAvailable) {
-		notes.push(`No ${tier.candidateTier}-band model is available; used ${anyAvailable.tier}.`);
-		return { model: anyAvailable, fallbackUsed: true, notes };
-	}
-	if (current && isAvailable(current, available)) {
-		notes.push("No configured review model is available; using the session model.");
-		return { model: current, fallbackUsed: true, notes };
-	}
-
-	notes.push("No review model is available; the agent must choose one.");
-	return { model: undefined, fallbackUsed: false, notes };
+	return { model, notes: [] };
 }
 
 /** A one-line task for the `subagent` tool, kept in the plan so it can be pasted. */
-export function buildTask(track: TrackName, tier: string, evidence: ReviewPlan["evidence"], summary: string): string {
+export function buildTask(
+	track: TrackName,
+	profile: string,
+	evidence: ReviewPlan["evidence"],
+	summary: string,
+): string {
 	const facts = [
 		`${evidence.files} file(s), +${evidence.added}/-${evidence.removed}`,
 		evidence.signals.length > 0 ? `signals: ${evidence.signals.join("; ")}` : "no risk signals detected",
 	].join(". ");
 	if (track === "adversarial") {
 		return [
-			`Adversarially review this change at a ${tier} depth. Your job is to falsify it, not to summarise it.`,
+			`Adversarially review this change using profile ${profile}. Your job is to falsify it, not to summarise it.`,
 			`Change: ${summary}`,
 			`Evidence: ${facts}.`,
 			"Look for correctness bugs, security holes, unhandled edge cases, untrusted-input handling, and silent error recovery that hides failures.",
@@ -322,7 +216,7 @@ export function buildTask(track: TrackName, tier: string, evidence: ReviewPlan["
 		].join("\n");
 	}
 	return [
-		`Review the design complexity of this change at a ${tier} depth.`,
+		`Review the design complexity of this change using profile ${profile}.`,
 		`Change: ${summary}`,
 		`Evidence: ${facts}.`,
 		"Judge whether it is over-engineered, whether a simpler design fits the codebase, and whether any new abstraction earns its keep.",
@@ -333,87 +227,121 @@ export function buildTask(track: TrackName, tier: string, evidence: ReviewPlan["
 
 function composeTrack(args: {
 	track: TrackName;
-	judgment: TrackJudgment;
+	judgment?: TrackJudgment;
+	failure?: string;
+	gates: PolicyGates;
 	config: TriageConfig;
+	catalog: readonly ProfileOption[];
 	candidates: readonly Candidate[];
 	available: readonly AvailableModel[];
-	current?: ModelRef | undefined;
 	evidence: ReviewPlan["evidence"];
 	summary: string;
 }): TrackPlan {
-	const { track, judgment, config } = args;
-	const trackConfig = config.tracks[track];
+	const decision = decidePolicy({
+		judgment: args.judgment,
+		failure: args.failure,
+		gates: args.gates,
+		config: args.config.policy,
+		catalog: args.catalog.map((option) => option.key),
+	});
+
 	const base: TrackPlan = {
-		track,
-		needed: judgment.depth.none < trackConfig.nothingMargin,
-		neededProbability: 1 - (judgment.depth.none ?? 0),
-		depth: judgment.depth,
-		tier: "none",
+		track: args.track,
+		needed: decision.status !== "skipped",
+		skipConfidence: decision.skipConfidence,
+		routingConfidence: args.judgment?.routingConfidence ?? 0,
+		proposedChoice: decision.skip ? PROFILE_NONE : (args.judgment?.reviewAlternative ?? ""),
+		...(decision.profile ? { finalChoice: decision.profile } : {}),
 		thinking: "off",
-		choice: judgment.choice,
-		choiceConfidence: judgment.choiceConfidence,
-		fallbackUsed: false,
+		status: decision.status,
+		source: decision.source,
+		reasonCodes: decision.reasonCodes,
 		notes: [],
 	};
 
-	if (!base.needed) {
+	if (decision.status === "skipped") {
 		base.notes.push(
-			`P(depth = none) is ${judgment.depth.none.toFixed(2)}, at or above the ${trackConfig.nothingMargin} margin.`,
+			`P(none) ${decision.skipConfidence.toFixed(2)} > ${args.config.policy.skipThreshold} and every gate passed.`,
 		);
 		return base;
 	}
 
-	const tier = tierForDepth(trackConfig, judgment.depth);
-	const selection = selectModel({
-		track,
-		tier,
-		judgment,
-		config,
+	if (!decision.profile) {
+		base.notes.push("no allowed profile resolves to an available model.");
+		return base;
+	}
+
+	const profile = parseProfile(decision.profile);
+	if (!profile) {
+		base.notes.push(`policy returned an unparseable profile "${decision.profile}".`);
+		return { ...base, status: "unavailable" };
+	}
+
+	const resolution = resolveProfileModel({
+		profile: decision.profile,
 		candidates: args.candidates,
 		available: args.available,
-		current: args.current,
 	});
-	const catalogue = selection.model
-		? findAvailable(selection.model, args.available)
-		: undefined;
+	base.notes.push(...resolution.notes);
+	if (!resolution.model) {
+		return { ...base, status: "unavailable" };
+	}
+
+	const catalogue = findAvailable(resolution.model, args.available);
+	const resolvedThinking = clampThinking(profile.thinking, catalogue);
+	if (resolvedThinking !== profile.thinking) {
+		// Reaching here means the catalog was generated against a different
+		// runtime map. Log it rather than silently claiming the requested level.
+		base.notes.push(
+			`profile ${decision.profile} requests thinking ${profile.thinking}, but ` +
+				`${resolution.model.provider}/${resolution.model.model} clamps it to ${resolvedThinking}.`,
+		);
+	}
 
 	return {
 		...base,
-		tier: tier.name,
-		thinking: clampThinking(tier.thinking, catalogue),
-		...(selection.model ? { model: selection.model } : {}),
-		fallbackUsed: selection.fallbackUsed,
-		notes: [...base.notes, ...selection.notes],
-		task: buildTask(track, tier.name, args.evidence, args.summary),
+		thinking: resolvedThinking,
+		model: resolution.model,
+		task: buildTask(args.track, decision.profile, args.evidence, args.summary),
 	};
 }
 
-export function composePlan(args: {
-	judgment: Judgment;
+export interface ComposeArgs {
+	/** The judge's answer; absent when the judge failed. */
+	judgment?: Judgment;
+	/** A judge failure reason; set only when `judgment` is absent. */
+	failure?: string;
 	config: TriageConfig;
 	candidates: readonly Candidate[];
 	available: readonly AvailableModel[];
-	current?: ModelRef | undefined;
+	catalog: readonly ProfileOption[];
+	gates: PolicyGates;
 	evidence: { files: number; added: number; removed: number; signals: string[] };
 	summary: string;
-}): ReviewPlan {
+}
+
+export function composePlan(args: ComposeArgs): ReviewPlan {
 	const adversarial = composeTrack({
 		track: "adversarial",
-		judgment: args.judgment.adversarial,
+		judgment: args.judgment?.adversarial,
+		failure: args.failure,
+		gates: args.gates,
 		config: args.config,
+		catalog: args.catalog,
 		candidates: args.candidates,
 		available: args.available,
-		current: args.current,
 		evidence: args.evidence,
 		summary: args.summary,
 	});
 	const complexity = composeTrack({
 		track: "complexity",
-		judgment: args.judgment.complexity,
+		judgment: args.judgment?.complexity,
+		failure: args.failure,
+		gates: args.gates,
 		config: args.config,
+		catalog: args.catalog,
 		candidates: args.candidates,
 		available: args.available,
-		current: args.current,
 		evidence: args.evidence,
 		summary: args.summary,
 	});
@@ -429,8 +357,8 @@ export function composePlan(args: {
 		verdict: verdict || "no review",
 		adversarial,
 		complexity,
-		judge: args.judgment.judge,
-		latencyMs: args.judgment.latencyMs,
+		judge: args.judgment?.judge ?? "unavailable",
+		latencyMs: args.judgment?.latencyMs ?? 0,
 		evidence: args.evidence,
 	};
 }
@@ -444,13 +372,13 @@ export function disabledPlan(evidence: ReviewPlan["evidence"]): ReviewPlan {
 	const track = (name: TrackName): TrackPlan => ({
 		track: name,
 		needed: false,
-		neededProbability: 0,
-		depth: { none: 1, light: 0, standard: 0, deep: 0 },
-		tier: "none",
+		skipConfidence: 0,
+		routingConfidence: 0,
+		proposedChoice: "",
 		thinking: "off",
-		choice: "",
-		choiceConfidence: 0,
-		fallbackUsed: false,
+		status: "unavailable",
+		source: "none",
+		reasonCodes: ["disabled"],
 		notes: ["review-triage is disabled (enabled:false or PI_REVIEW_TRIAGE_OFF)"],
 	});
 	return {
@@ -464,67 +392,14 @@ export function disabledPlan(evidence: ReviewPlan["evidence"]): ReviewPlan {
 }
 
 /**
- * What to do when Jev cannot be reached. "Conservative" recommends both reviews
- * at their middle rung: an unreachable judge should cost the user a review, not
- * buy them a skipped one. "Skip" is for a machine that must not spend review
- * tokens when the judge is down.
+ * What to do when Jev cannot be reached. Routed through policy so the result is
+ * a `fallback` marked `policy-fallback` — a conservative profile, never `none`
+ * and never mistaken for a judgement. This is the one place the extension
+ * spends review tokens it was not asked for, and it is deliberate: an
+ * unreachable judge should not buy a skipped review.
  */
-export function failOpenPlan(args: {
-	config: TriageConfig;
-	candidates: readonly Candidate[];
-	available: readonly AvailableModel[];
-	current?: ModelRef | undefined;
-	evidence: ReviewPlan["evidence"];
-	summary: string;
-	reason: string;
-}): ReviewPlan {
-	if (args.config.onJudgeError === "skip") {
-		const empty: TrackPlan = {
-			track: "adversarial",
-			needed: false,
-			neededProbability: 0,
-			depth: { none: 1, light: 0, standard: 0, deep: 0 },
-			tier: "none",
-			thinking: "off",
-			choice: "",
-			choiceConfidence: 0,
-			fallbackUsed: false,
-			notes: [`judge unavailable: ${args.reason}`],
-		};
-		const complexity: TrackPlan = { ...empty, track: "complexity" };
-		return {
-			verdict: "no review (judge unavailable)",
-			adversarial: empty,
-			complexity,
-			judge: "unavailable",
-			latencyMs: 0,
-			evidence: args.evidence,
-		};
-	}
-
-	// The middle rung by INDEX, not a fixed level: a config with a different
-	// rung table should land the fail-open plan on its own middle, not ours.
-	const middleLevel = (track: TrackName): DepthLevel => {
-		const tiers = args.config.tracks[track].tiers;
-		const middle = tiers[Math.floor((tiers.length - 1) / 2)];
-		return (middle?.name ?? "standard") as DepthLevel;
-	};
-	const synthesize = (track: TrackName): TrackJudgment => {
-		// Certainty at the middle rung: all of the depth mass there, so the plan
-		// recommends a review but not the deepest one, whatever the margins are.
-		const depth = { none: 0, light: 0, standard: 0, deep: 0 } as Record<DepthLevel, number>;
-		depth[middleLevel(track)] = 1;
-		return { depth, choice: "", choiceConfidence: 0, choiceProbabilities: {} };
-	};
-	const judgment: Judgment = {
-		adversarial: synthesize("adversarial"),
-		complexity: synthesize("complexity"),
-		judge: "unavailable",
-		latencyMs: 0,
-	};
-	const plan = composePlan({ ...args, judgment });
-	plan.verdict = `${plan.verdict} (judge unavailable — conservative default)`;
-	plan.adversarial.notes.unshift(`judge unavailable: ${args.reason}`);
-	plan.complexity.notes.unshift(`judge unavailable: ${args.reason}`);
+export function failOpenPlan(args: Omit<ComposeArgs, "judgment" | "failure"> & { reason: string }): ReviewPlan {
+	const plan = composePlan({ ...args, failure: args.reason });
+	plan.verdict = `${plan.verdict} (judge unavailable)`;
 	return plan;
 }
