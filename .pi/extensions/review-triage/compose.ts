@@ -18,6 +18,7 @@
 import type {
 	Candidate,
 	CapabilityTier,
+	PolicyConfig,
 	ProfileOption,
 	ThinkingLevel,
 	TriageConfig,
@@ -25,7 +26,14 @@ import type {
 } from "./config.ts";
 import { PROFILE_NONE, parseProfile, THINKING_RANK } from "./config.ts";
 import type { Judgment, TrackJudgment } from "./judge.ts";
-import { decidePolicy, type PolicyGates, type PolicySource, type PolicyStatus } from "./policy.ts";
+import type { DossierScope, DossierTask } from "./dossier.ts";
+import {
+	decidePolicy,
+	rationaleFor,
+	type PolicyGates,
+	type PolicySource,
+	type PolicyStatus,
+} from "./policy.ts";
 
 /** The subset of a pi catalogue model this tool needs. */
 export interface AvailableModel {
@@ -47,31 +55,101 @@ export interface TrackPlan {
 	needed: boolean;
 	/** P(none): the skip signal Jev returned. */
 	skipConfidence: number;
+	/**
+	 * Jev's probabilities are not calibrated, so the marker travels with them:
+	 * a consumer must not read `skipConfidence`/`routingConfidence` as
+	 * frequentist confidence. Published, never inferred.
+	 */
+	calibration: "uncalibrated";
 	/** The winning non-none profile's averaged probability. */
 	routingConfidence: number;
 	/** Jev's overall argmax (may be `none`), kept for the audit trail. */
 	proposedChoice: string;
 	/** The profile policy resolved to, present when a review is recommended. */
 	finalChoice?: string;
-	thinking: ThinkingLevel;
+	/**
+	 * The thinking level the resolved profile asked for. Present whenever a
+	 * profile was chosen, even if no model resolved it, so the request is not
+	 * confused with a track that never had one.
+	 */
+	requestedThinking?: ThinkingLevel;
+	/**
+	 * The level after the runtime clamp. Present only when a model resolved and
+	 * something will actually run; absent is "nothing ran", which is distinct
+	 * from a model that runs at `off`.
+	 */
+	resolvedThinking?: ThinkingLevel;
 	model?: ModelRef;
 	status: PolicyStatus;
 	source: PolicySource;
-	/** Deterministic tags; the rendered rationale is a template over these. */
+	/** Deterministic tags; `rationale` is a template over these. */
 	reasonCodes: string[];
+	/** One sentence per reason code. Never Jev's prose. */
+	rationale: string;
 	notes: string[];
 	/** Ready-to-paste task for the `subagent` tool, present only when needed. */
 	task?: string;
 }
 
+/** The plan-level rollup of the two track statuses, plus the disabled state. */
+export type PlanStatus = PolicyStatus | "disabled";
+
+/**
+ * The configured policy in force for this run. A profile named here is what the
+ * config offered, not necessarily what ran: if the catalog did not allow it,
+ * `decidePolicy` fell through to the weakest allowed profile or to
+ * `unavailable`, and the track's `reasonCodes` say which.
+ */
+export interface PolicyOverrides {
+	/** `P(none)` must be strictly greater than this to skip. */
+	skipThreshold: number;
+	/** When true, `none` was never allowed for either track. */
+	mandatoryReview: boolean;
+	/** The configured floor used when no alternative resolved. */
+	minimumProfile?: string;
+	/** The conservative profile used when the judge failed. */
+	fallbackProfile?: string;
+}
+
+/** The task identity the plan publishes: the dossier's task, unchanged. */
+export type PlanTask = DossierTask;
+
+/** The scope identity the plan publishes: the dossier's scope, unchanged. */
+export type PlanScope = DossierScope;
+
+/** Recommendation context published alongside the decision. */
+export interface PlanContext {
+	task: PlanTask;
+	scope: PlanScope;
+	/** Known gaps in the evidence; the recommendation is read with them. */
+	limitations: string[];
+	/** Version identifiers for the rules that produced the evidence. */
+	versions: Record<string, string>;
+}
+
+/** Identifies the published plan shape, so a consumer knows which fields to expect. */
+export const PLAN_VERSION = "1";
+
 export interface ReviewPlan {
 	verdict: string;
+	/** The best actionable outcome across the tracks; see `planStatus`. */
+	status: PlanStatus;
 	adversarial: TrackPlan;
 	complexity: TrackPlan;
 	judge: string;
 	latencyMs: number;
 	/** SHA-256 of the dossier Jev judged, so a verdict can be replayed against its evidence. */
 	fingerprint?: string;
+	/** The policy in force, published so a decision can be replayed. */
+	policyOverrides: PolicyOverrides;
+	/** The task the evidence was measured for. */
+	task: PlanTask;
+	/** The scope the evidence was measured from. */
+	scope: PlanScope;
+	/** Known gaps and omissions in the evidence. */
+	limitations: string[];
+	/** Version identifiers for the rules and contract that produced the plan. */
+	versions: Record<string, string>;
 	evidence: { files: number; added: number; removed: number; signals: string[] };
 }
 
@@ -227,6 +305,17 @@ export function buildTask(
 	].join("\n");
 }
 
+/**
+ * Jev's pick, verbatim but bounded. It is model output read from untrusted
+ * evidence, so it may name a profile the catalog does not allow; `finalChoice`
+ * is what policy actually resolved. The bound keeps a malformed answer from
+ * bloating the session entry.
+ */
+function boundedChoice(choice: string | undefined): string {
+	if (!choice) return "";
+	return choice.length > 80 ? `${choice.slice(0, 77)}...` : choice;
+}
+
 function composeTrack(args: {
 	track: TrackName;
 	judgment?: TrackJudgment;
@@ -251,13 +340,14 @@ function composeTrack(args: {
 		track: args.track,
 		needed: decision.status !== "skipped",
 		skipConfidence: decision.skipConfidence,
+		calibration: "uncalibrated",
 		routingConfidence: args.judgment?.routingConfidence ?? 0,
-		proposedChoice: decision.skip ? PROFILE_NONE : (args.judgment?.reviewAlternative ?? ""),
+		proposedChoice: decision.skip ? PROFILE_NONE : boundedChoice(args.judgment?.reviewAlternative),
 		...(decision.profile ? { finalChoice: decision.profile } : {}),
-		thinking: "off",
 		status: decision.status,
 		source: decision.source,
 		reasonCodes: decision.reasonCodes,
+		rationale: rationaleFor(decision.reasonCodes),
 		notes: [],
 	};
 
@@ -279,14 +369,18 @@ function composeTrack(args: {
 		return { ...base, status: "unavailable" };
 	}
 
+	// The profile was chosen, so the request is published even if no model
+	// resolves it: "requested max, nothing ran" must not read as "requested off".
+	const requested: TrackPlan = { ...base, requestedThinking: profile.thinking };
+
 	const resolution = resolveProfileModel({
 		profile: decision.profile,
 		candidates: args.candidates,
 		available: args.available,
 	});
-	base.notes.push(...resolution.notes);
+	requested.notes.push(...resolution.notes);
 	if (!resolution.model) {
-		return { ...base, status: "unavailable" };
+		return { ...requested, status: "unavailable" };
 	}
 
 	const catalogue = findAvailable(resolution.model, args.available);
@@ -294,15 +388,15 @@ function composeTrack(args: {
 	if (resolvedThinking !== profile.thinking) {
 		// Reaching here means the catalog was generated against a different
 		// runtime map. Log it rather than silently claiming the requested level.
-		base.notes.push(
+		requested.notes.push(
 			`profile ${decision.profile} requests thinking ${profile.thinking}, but ` +
 				`${resolution.model.provider}/${resolution.model.model} clamps it to ${resolvedThinking}.`,
 		);
 	}
 
 	return {
-		...base,
-		thinking: resolvedThinking,
+		...requested,
+		resolvedThinking,
 		model: resolution.model,
 		task: buildTask(args.track, decision.profile, args.evidence, args.summary),
 	};
@@ -322,6 +416,38 @@ export interface ComposeArgs {
 	gates: PolicyGates;
 	evidence: { files: number; added: number; removed: number; signals: string[] };
 	summary: string;
+	/** The task, scope, limitations and versions published with the plan. */
+	context: PlanContext;
+}
+
+/**
+ * The rollup of the two track statuses. It is the best actionable outcome, not
+ * the worst — a genuine recommendation is still a recommendation when the other
+ * track could not resolve — and each track publishes its own status, so the
+ * degradation is not hidden. Precedence: both-skipped > recommended > fallback
+ * > unavailable.
+ */
+function planStatus(adversarial: TrackPlan, complexity: TrackPlan): PlanStatus {
+	const statuses = [adversarial.status, complexity.status];
+	if (statuses.every((status) => status === "skipped")) return "skipped";
+	if (statuses.some((status) => status === "recommended")) return "recommended";
+	if (statuses.some((status) => status === "fallback")) return "fallback";
+	return "unavailable";
+}
+
+/**
+ * The effective policy, published so a decision can be replayed without the
+ * config file. `mandatoryReview` is read from the gate the decision actually
+ * used, not re-derived from the config, so the published policy cannot disagree
+ * with the decision when a caller supplies the two separately.
+ */
+function policyOverridesOf(policy: PolicyConfig, mandatoryReview: boolean): PolicyOverrides {
+	return {
+		skipThreshold: policy.skipThreshold,
+		mandatoryReview,
+		...(policy.minimumProfile ? { minimumProfile: policy.minimumProfile } : {}),
+		...(policy.fallbackProfile ? { fallbackProfile: policy.fallbackProfile } : {}),
+	};
 }
 
 export function composePlan(args: ComposeArgs): ReviewPlan {
@@ -350,20 +476,37 @@ export function composePlan(args: ComposeArgs): ReviewPlan {
 		summary: args.summary,
 	});
 
-	const verdict = [
+	const wanted = [
 		adversarial.needed ? "adversarial" : undefined,
 		complexity.needed ? "complexity" : undefined,
-	]
-		.filter((part): part is string => part !== undefined)
-		.join(" + ");
+	].filter((part): part is string => part !== undefined);
+	// A verdict must not read "no review" over a track that needed one but could
+	// not resolve a model: that is "no review was possible", not "none needed".
+	const resolvable = [adversarial, complexity].some(
+		(track) => track.status === "recommended" || track.status === "fallback",
+	);
+	const verdict =
+		wanted.length === 0
+			? "no review"
+			: resolvable
+				? wanted.join(" + ")
+				: "no review (no review model resolved)";
 
 	return {
-		verdict: verdict || "no review",
+		verdict,
+		status: planStatus(adversarial, complexity),
 		adversarial,
 		complexity,
 		judge: args.judgment?.judge ?? "unavailable",
 		latencyMs: args.judgment?.latencyMs ?? 0,
 		...(args.fingerprint ? { fingerprint: args.fingerprint } : {}),
+		policyOverrides: policyOverridesOf(args.config.policy, args.gates.mandatoryReview),
+		task: args.context.task,
+		scope: args.context.scope,
+		limitations: args.context.limitations,
+		// The built-in plan version is authoritative and cannot be shadowed by a
+		// caller-supplied `plan` key, mirroring the dossier's `riskRules`.
+		versions: { ...args.context.versions, plan: PLAN_VERSION },
 		evidence: args.evidence,
 	};
 }
@@ -373,25 +516,34 @@ export function composePlan(args: ComposeArgs): ReviewPlan {
  * that would be a judgement the tool was told not to make — so the verdict says
  * plainly that nothing was judged.
  */
-export function disabledPlan(evidence: ReviewPlan["evidence"]): ReviewPlan {
-	const track = (name: TrackName): TrackPlan => ({
-		track: name,
-		needed: false,
-		skipConfidence: 0,
-		routingConfidence: 0,
-		proposedChoice: "",
-		thinking: "off",
-		status: "unavailable",
-		source: "none",
-		reasonCodes: ["disabled"],
-		notes: ["review-triage is disabled (enabled:false or PI_REVIEW_TRIAGE_OFF)"],
-	});
+export function disabledPlan(evidence: ReviewPlan["evidence"], policy: PolicyConfig): ReviewPlan {
+	const track = (name: TrackName): TrackPlan => {
+		const reasonCodes = ["disabled"];
+		return {
+			track: name,
+			needed: false,
+			skipConfidence: 0,
+			calibration: "uncalibrated",
+			routingConfidence: 0,
+			proposedChoice: "",
+			status: "unavailable",
+			source: "none",
+			reasonCodes,
+			rationale: rationaleFor(reasonCodes),
+		};
+	};
 	return {
 		verdict: "disabled (review-triage is off)",
+		status: "disabled",
 		adversarial: track("adversarial"),
 		complexity: track("complexity"),
 		judge: "disabled",
 		latencyMs: 0,
+		policyOverrides: policyOverridesOf(policy, policy.mandatoryReview ?? false),
+		task: { summary: "" },
+		scope: { target: "none", snapshot: "none" },
+		limitations: ["review-triage is disabled (enabled:false or PI_REVIEW_TRIAGE_OFF)"],
+		versions: { plan: PLAN_VERSION },
 		evidence,
 	};
 }

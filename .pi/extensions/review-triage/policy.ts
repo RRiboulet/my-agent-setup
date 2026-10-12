@@ -45,6 +45,39 @@ export type PolicyStatus = "skipped" | "recommended" | "fallback" | "unavailable
 export type PolicySource = "jev" | "policy-fallback" | "none";
 
 /**
+ * A deterministic sentence per reason code. `rationale` is a template over
+ * `reasonCodes`, never free text — Jev is not asked for prose, so the plan can
+ * only publish sentences this table wrote. An unknown code is carried through
+ * verbatim rather than dropped, so a new trigger is visible before its sentence
+ * is written. `disabled` is not a policy decision but lives here so the
+ * disabled plan's rationale comes from the same template.
+ */
+const RATIONALE_SENTENCES: Record<string, string> = {
+	[POLICY_REASONS.skipConfidence]: "the judged probability of no review cleared the threshold",
+	[POLICY_REASONS.gatesPassed]: "every skip gate passed",
+	[POLICY_REASONS.skipBelowThreshold]: "the judged probability of no review was at or below the threshold",
+	[POLICY_REASONS.mandatoryReview]: "policy makes a review mandatory for this track",
+	[POLICY_REASONS.unstableSnapshot]: "the snapshot was unstable during collection",
+	[POLICY_REASONS.unresolvedConflicts]: "unresolved merge conflicts were present",
+	[POLICY_REASONS.incompleteEvidence]: "the evidence was incomplete",
+	[POLICY_REASONS.judgeFailure]: "the judge failed, so a conservative profile was used",
+	[POLICY_REASONS.noJudgement]: "no judgement was available",
+	[POLICY_REASONS.reviewAlternative]: "the judge preferred a review profile",
+	[POLICY_REASONS.policyFallback]: "policy fell back to a conservative profile",
+	[POLICY_REASONS.noProfileAvailable]: "no profile resolved to an available model",
+	disabled: "review-triage is disabled, so nothing was judged",
+};
+
+/** Render a reason-code list as one sentence list. Pure and order-preserving. */
+export function rationaleFor(reasonCodes: readonly string[]): string {
+	if (reasonCodes.length === 0) return "no specific reason was recorded.";
+	const parts = reasonCodes.map(
+		(code) => RATIONALE_SENTENCES[code] ?? `unrecognised reason code ${JSON.stringify(code)}`,
+	);
+	return `${parts.join("; ")}.`;
+}
+
+/**
  * The deterministic conditions that must all hold before `none` is allowed.
  * Each is supplied by the caller: `stable`, `conflicts` and `evidenceComplete`
  * come from the collector (see the dossier/collector work); `mandatoryReview`

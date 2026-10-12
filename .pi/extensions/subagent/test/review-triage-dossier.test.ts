@@ -176,7 +176,7 @@ test("dossier: a manifest within its limit is not an overflow", () => {
 // redaction
 // ---------------------------------------------------------------------------
 
-test("dossier: a redacted path is removed and the removal recorded", () => {
+test("dossier: a redacted path is removed and the removal recorded without the value", () => {
 	const built = buildDossier(
 		input({
 			items: [artifact("src/auth/secret.ts"), artifact("src/public.ts")],
@@ -187,7 +187,11 @@ test("dossier: a redacted path is removed and the removal recorded", () => {
 		built.dossier.manifest.entries.map((entry) => entry.path),
 		["src/public.ts"],
 	);
-	assert.ok(built.dossier.exclusions.some((entry) => entry.includes("redacted artifact src/auth/secret.ts")));
+	assert.ok(built.dossier.exclusions.some((entry) => entry.includes("paths withheld")));
+	assert.ok(
+		!canonicalJson(built.dossier).includes("src/auth/secret.ts"),
+		"recording the excluded path to prove the exclusion would defeat it",
+	);
 });
 
 test("dossier: a redacted pattern is masked, recorded, and absent from the serialised form", () => {
@@ -420,11 +424,15 @@ test("dossier: a mask containing `$&` is inserted literally", () => {
 	assert.equal(built.dossier.artifactEvidence[0]?.patch, "+secret=$&");
 });
 
-test("dossier: an invalid redaction pattern is recorded, not thrown", () => {
+test("dossier: an invalid redaction pattern is recorded without echoing its source", () => {
 	const built = buildDossier(
-		input({ items: [artifact("src/a.ts")], redaction: { patterns: ["["] } }),
+		input({ items: [artifact("src/a.ts")], redaction: { patterns: ["AKIA[SECRET"] } }),
 	);
 	assert.ok(built.dossier.exclusions.some((entry) => entry.includes("invalid redaction pattern")));
+	assert.ok(
+		!canonicalJson(built.dossier).includes("AKIA[SECRET"),
+		"a pattern source may itself be secret-shaped and must not be echoed",
+	);
 });
 
 // ---------------------------------------------------------------------------

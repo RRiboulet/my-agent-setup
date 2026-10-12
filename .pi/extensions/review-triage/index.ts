@@ -122,7 +122,7 @@ async function runTriage(
 
 	if (!config.enabled) {
 		const entry: TriageRun = {
-			plan: disabledPlan({ files: 0, added: 0, removed: 0, signals: [] }),
+			plan: disabledPlan({ files: 0, added: 0, removed: 0, signals: [] }, config.policy),
 			catalog: { options: [], pruned: [], notes: [] },
 			evidence: { target: "none", files: [], added: 0, removed: 0, signals: [] },
 		};
@@ -188,6 +188,16 @@ async function runTriage(
 		budgetChars: config.stateChars,
 	});
 
+	// What the plan publishes about the task and scope it judged. The dossier's
+	// exclusions (trims and redactions) are limitations too, so they travel with
+	// them rather than staying only inside the hashed document.
+	const context = {
+		task: built.dossier.task,
+		scope: built.dossier.scope,
+		limitations: [...new Set([...built.dossier.limitations, ...built.dossier.exclusions])],
+		versions: built.dossier.versions,
+	};
+
 	// Every gate reads from a real signal: `stable` comes from the probe around
 	// collection (§6), conflicts from the collector's per-file flags, a skip-
 	// blocking limitation keeps the review, and a dossier that could not be made
@@ -210,6 +220,7 @@ async function runTriage(
 		plan = composePlan({
 			judgment,
 			fingerprint: built.fingerprint,
+			context,
 			config,
 			candidates,
 			available,
@@ -226,6 +237,7 @@ async function runTriage(
 		if (error.failure === "aborted") throw error;
 		plan = failOpenPlan({
 			fingerprint: built.fingerprint,
+			context,
 			config,
 			candidates,
 			available,

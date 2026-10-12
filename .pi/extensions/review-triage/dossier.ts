@@ -354,7 +354,9 @@ function compileRedaction(config: RedactionConfig | undefined, exclusions: strin
 		try {
 			patternMatchers.push(new RegExp(source, "gsu"));
 		} catch {
-			exclusions.push(`ignored an invalid redaction pattern ${JSON.stringify(source)}`);
+			// The pattern source is configuration and may itself be secret-shaped,
+			// so it is not echoed into a record that travels to the judge.
+			exclusions.push("ignored an invalid redaction pattern (source withheld)");
 		}
 	}
 	const mask = config?.mask ?? "[redacted]";
@@ -560,13 +562,20 @@ export function buildDossier(input: DossierInput): BuiltDossier {
 
 	// 2. Normalise paths and 3. redact, before anything is sorted or counted.
 	const prepared: ArtifactChangeItem[] = [];
+	let redactedArtifacts = 0;
 	for (const item of artifacts) {
 		const path = normalisePath(item.path);
 		if (redaction.excludes(path)) {
-			exclusions.push(`redacted artifact ${path}`);
+			// The path was excluded because it is sensitive. Recording it to prove
+			// the exclusion happened would defeat the exclusion, so the fact and
+			// the count are recorded and the value is not.
+			redactedArtifacts += 1;
 			continue;
 		}
 		prepared.push({ ...item, path });
+	}
+	if (redactedArtifacts > 0) {
+		exclusions.push(`redacted ${redactedArtifacts} artifact(s) (paths withheld)`);
 	}
 
 	// 4. Fixed sort with a total tie-break, so duplicate paths cannot make the
@@ -620,7 +629,7 @@ export function buildDossier(input: DossierInput): BuiltDossier {
 		const paths = signalPaths.get(signal) ?? new Set<string>();
 		for (const rawPath of item.paths ?? []) {
 			const path = normalisePath(rawPath);
-			if (!redaction.excludes(path)) paths.add(mask(path, `a risk-signal path (${path})`));
+			if (!redaction.excludes(path)) paths.add(mask(path, "a risk-signal path"));
 		}
 		signalPaths.set(signal, paths);
 	}

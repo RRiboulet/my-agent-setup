@@ -71,7 +71,7 @@ import {
 	type AvailableModel,
 	type ComposeArgs,
 } from "../../review-triage/compose.ts";
-import { decidePolicy, POLICY_REASONS, type PolicyGates } from "../../review-triage/policy.ts";
+import { decidePolicy, POLICY_REASONS, rationaleFor, type PolicyGates } from "../../review-triage/policy.ts";
 import { formatPlan } from "../../review-triage/format.ts";
 import { parseTriageArgs, resolveTarget } from "../../review-triage/index.ts";
 import reviewTriageExtension from "../../review-triage/index.ts";
@@ -170,6 +170,13 @@ function judgment(overrides: Partial<Judgment> = {}): Judgment {
 
 const EVIDENCE = { files: 3, added: 40, removed: 10, signals: ["changes error handling"] };
 
+const PLAN_CONTEXT = {
+	task: { summary: "add a thing" },
+	scope: { target: "uncommitted", snapshot: "HEAD" },
+	limitations: ["a known gap"],
+	versions: { riskRules: "1" },
+};
+
 function compose(overrides: Partial<ComposeArgs> = {}) {
 	return composePlan({
 		judgment: judgment(),
@@ -180,6 +187,7 @@ function compose(overrides: Partial<ComposeArgs> = {}) {
 		gates: gates(),
 		evidence: EVIDENCE,
 		summary: "add a thing",
+		context: PLAN_CONTEXT,
 		...overrides,
 	});
 }
@@ -1198,7 +1206,20 @@ const PIPELINE_CANDIDATES = [
 
 interface PipelinePlan {
 	fingerprint?: string;
-	adversarial?: { needed?: boolean; reasonCodes?: string[] };
+	status?: string;
+	policyOverrides?: { skipThreshold?: number; mandatoryReview?: boolean };
+	task?: { summary?: string };
+	scope?: { target?: string; snapshot?: string };
+	limitations?: string[];
+	versions?: Record<string, string>;
+	adversarial?: {
+		needed?: boolean;
+		reasonCodes?: string[];
+		calibration?: string;
+		requestedThinking?: string;
+		resolvedThinking?: string;
+		rationale?: string;
+	};
 	complexity?: { needed?: boolean };
 }
 
@@ -1266,6 +1287,27 @@ test("wiring: the session entry carries the dossier fingerprint", async () => {
 	assert.equal(details.plan?.fingerprint, details.fingerprint, "the plan records the same fingerprint");
 	const entry = appended.find((item) => item.type === "review-triage");
 	assert.equal(entry?.entry.fingerprint, details.fingerprint, "the session entry carries it too");
+});
+
+test("wiring: the session entry persists the published recommendation fields", async () => {
+	const { details, appended } = await runPipeline({ exec: stableExec().exec, answers: fullAnswers() });
+	const plan = details.plan;
+	assert.equal(plan?.status, "recommended");
+	assert.equal(plan?.scope?.target, "uncommitted");
+	assert.equal(plan?.scope?.snapshot, "uncommitted", "one snapshot identity for items and scope");
+	assert.equal(plan?.task?.summary, "wire the dossier");
+	assert.deepEqual(plan?.policyOverrides, { skipThreshold: 0.9, mandatoryReview: false });
+	assert.equal(plan?.versions?.plan, "1");
+	assert.equal(plan?.versions?.riskRules, "1");
+	assert.equal(plan?.adversarial?.calibration, "uncalibrated");
+	assert.ok(
+		plan?.limitations?.some((limitation) => limitation.includes("validation results")),
+		"the unwired collectors are recorded as a limitation",
+	);
+
+	// The entry persists the plan itself, so every published field survives.
+	const entry = appended.find((item) => item.type === "review-triage")?.entry as { plan?: PipelinePlan };
+	assert.deepEqual(entry?.plan, plan, "the persisted plan is the published plan");
 });
 
 test("wiring: a dossier that overflows cannot skip, even at P(none)=0.99", async () => {
@@ -1516,11 +1558,149 @@ test("compose: a recommended plan uses the profile's model and thinking verbatim
 	assert.equal(plan.adversarial.finalChoice, "high:max");
 	assert.equal(plan.adversarial.routingConfidence, 0.4);
 	assert.equal(plan.adversarial.model?.model, "strong");
-	assert.equal(plan.adversarial.thinking, "max");
+	assert.equal(plan.adversarial.requestedThinking, "max");
+	assert.equal(plan.adversarial.resolvedThinking, "max");
+	assert.equal(plan.adversarial.calibration, "uncalibrated");
 	assert.equal(plan.adversarial.status, "recommended");
 	assert.equal(plan.adversarial.source, "jev");
 	assert.ok(plan.adversarial.task?.includes("falsify"), "the adversarial task must be hostile");
 	assert.ok(plan.complexity.task?.includes("over-engineered"));
+});
+
+test("compose: the plan publishes its status, policy, task, scope, limitations and versions", () => {
+	const plan = compose();
+	assert.equal(plan.status, "recommended");
+	assert.deepEqual(plan.policyOverrides, { skipThreshold: 0.9, mandatoryReview: false });
+	assert.deepEqual(plan.task, { summary: "add a thing" });
+	assert.deepEqual(plan.scope, { target: "uncommitted", snapshot: "HEAD" });
+	assert.deepEqual(plan.limitations, ["a known gap"]);
+	assert.equal(plan.versions.plan, "1");
+	assert.equal(plan.versions.riskRules, "1");
+});
+
+test("compose: the plan status is the best actionable outcome, not the worst", () => {
+	// A genuine recommendation survives the other track failing to resolve; the
+	// per-track status is where that degradation is visible.
+	const mixed = compose({
+		judgment: judgment({ adversarial: track({ reviewAlternative: "medium:max" }) }),
+		available: AVAILABLE.filter((model) => model.id !== "strong"),
+	});
+	assert.equal(mixed.adversarial.status, "recommended");
+	assert.equal(mixed.complexity.status, "unavailable");
+	assert.equal(mixed.status, "recommended");
+
+	// A judge failure marks both tracks as policy fallbacks.
+	assert.equal(compose({ failure: "timeout" }).status, "fallback");
+
+	// Both tracks skipped is the only skipped plan.
+	const skipped = compose({
+		judgment: judgment({
+			adversarial: track({ skipConfidence: 0.99, choice: "none" }),
+			complexity: track({ skipConfidence: 0.99, choice: "none" }),
+		}),
+	});
+	assert.equal(skipped.status, "skipped");
+});
+
+test("compose: the policy in force is published with the decision", () => {
+	const plan = compose({
+		config: config({ policy: { skipThreshold: 0.5, mandatoryReview: true, minimumProfile: "low:low" } }),
+		gates: gates({ mandatoryReview: true }),
+	});
+	assert.deepEqual(plan.policyOverrides, {
+		skipThreshold: 0.5,
+		mandatoryReview: true,
+		minimumProfile: "low:low",
+	});
+
+	// Mandatory review keeps the track even at P(none)=0.99.
+	const mandatory = compose({
+		config: config({ policy: { skipThreshold: 0.9, mandatoryReview: true } }),
+		gates: gates({ mandatoryReview: true }),
+		judgment: judgment({
+			adversarial: track({ skipConfidence: 0.99, choice: "none" }),
+			complexity: track({ skipConfidence: 0.99, choice: "none" }),
+		}),
+	});
+	assert.notEqual(mandatory.status, "skipped");
+	assert.ok(mandatory.adversarial.reasonCodes.includes(POLICY_REASONS.mandatoryReview));
+});
+
+test("rationale: every published sentence is a template over reasonCodes, never Jev's prose", () => {
+	assert.equal(
+		rationaleFor([POLICY_REASONS.skipConfidence, POLICY_REASONS.gatesPassed]),
+		"the judged probability of no review cleared the threshold; every skip gate passed.",
+	);
+	// An unknown code is carried through verbatim rather than dropped.
+	assert.match(rationaleFor(["new-code"]), /new-code/u);
+	assert.equal(rationaleFor([]), "no specific reason was recorded.");
+
+	// The plan's rationale is exactly the template for its codes: no free text
+	// from the judge can reach it.
+	const plan = compose();
+	assert.equal(plan.adversarial.rationale, rationaleFor(plan.adversarial.reasonCodes));
+	assert.equal(plan.complexity.rationale, rationaleFor(plan.complexity.reasonCodes));
+	// And a failed judge still produces a rationale from its (policy) codes.
+	assert.equal(compose({ failure: "timeout" }).adversarial.rationale, rationaleFor(["judge-failure", "policy-fallback"]));
+});
+
+test("compose: a chosen profile's request survives the model failing to resolve", () => {
+	const plan = compose({ available: [] });
+	assert.equal(plan.adversarial.status, "unavailable");
+	assert.equal(plan.adversarial.requestedThinking, "max", "the request is published, not conflated with off");
+	assert.equal(plan.adversarial.resolvedThinking, undefined, "nothing ran, so nothing resolved");
+});
+
+test("compose: a needed review that cannot resolve is not published as 'no review'", () => {
+	const plan = compose({ available: [] });
+	assert.equal(plan.status, "unavailable");
+	assert.equal(plan.verdict, "no review (no review model resolved)");
+	assert.match(formatPlan(plan), /no review \(no review model resolved\) \[unavailable\]/);
+});
+
+test("compose: an over-long answer key is bounded, never published whole", () => {
+	const plan = compose({ judgment: judgment({ adversarial: track({ reviewAlternative: "x".repeat(500) }) }) });
+	assert.ok(
+		plan.adversarial.proposedChoice.length <= 80,
+		"a model-controlled key must not bloat the published plan",
+	);
+});
+
+test("compose: a withheld redaction is published without the excluded value", () => {
+	const built = buildDossier({
+		items: [
+			{
+				source: "git",
+				kind: "artifact-change",
+				provenance: "p",
+				snapshot: "s",
+				completeness: "complete",
+				trust: "observed",
+				path: "src/auth/secret.ts",
+				added: 1,
+				removed: 0,
+			},
+		],
+		task: { summary: "x" },
+		scope: { target: "uncommitted" },
+		catalog: [],
+		redaction: { paths: ["src/auth/**"] },
+	});
+	// The same merge index.ts performs: the plan publishes the dossier's
+	// limitations and exclusions.
+	const plan = compose({
+		context: {
+			task: built.dossier.task,
+			scope: built.dossier.scope,
+			limitations: [...new Set([...built.dossier.limitations, ...built.dossier.exclusions])],
+			versions: built.dossier.versions,
+		},
+	});
+	assert.ok(plan.limitations.some((limitation) => limitation.includes("paths withheld")));
+	assert.ok(
+		!plan.limitations.some((limitation) => limitation.includes("src/auth/secret.ts")),
+		"publishing the excluded path would defeat the redaction",
+	);
 });
 
 test("compose: unstable evidence cannot skip, even with a high P(none)", () => {
@@ -1562,7 +1742,8 @@ test("compose: a profile the model cannot actually run is logged, not silently c
 	});
 	assert.equal(plan.adversarial.finalChoice, "medium:medium");
 	assert.equal(plan.adversarial.model?.model, "mid");
-	assert.equal(plan.adversarial.thinking, "low", "the clamp walks down to a supported level");
+	assert.equal(plan.adversarial.resolvedThinking, "low", "the clamp walks down to a supported level");
+	assert.equal(plan.adversarial.requestedThinking, "medium", "the request is still published");
 	assert.ok(plan.adversarial.notes.some((note) => note.includes("clamps it to low")));
 });
 
@@ -1583,6 +1764,7 @@ test("compose: fail-open routes through policy and is marked as a fallback", () 
 		gates: gates(),
 		evidence: EVIDENCE,
 		summary: "x",
+		context: PLAN_CONTEXT,
 		reason: "timeout",
 	});
 	assert.equal(plan.adversarial.needed, true);
@@ -1593,7 +1775,7 @@ test("compose: fail-open routes through policy and is marked as a fallback", () 
 });
 
 test("compose: a disabled extension says so instead of judging", () => {
-	const plan = disabledPlan(EVIDENCE);
+	const plan = disabledPlan(EVIDENCE, config().policy);
 	assert.equal(plan.verdict, "disabled (review-triage is off)");
 	assert.equal(plan.adversarial.needed, false);
 	assert.equal(plan.adversarial.reasonCodes.includes("disabled"), true);
@@ -1619,6 +1801,30 @@ test("format: a skipped plan says not needed with the skip confidence", () => {
 		}),
 	);
 	assert.match(text, /not needed \(P\(none\) 0\.99\)/);
+});
+
+test("format: the rendered plan carries the status, rationale, fingerprint and limitations", () => {
+	const text = formatPlan(compose({ fingerprint: "a".repeat(64) }));
+	assert.match(text, /Review triage — adversarial \+ complexity \[recommended\]/);
+	assert.match(text, /because: .*the judge preferred a review profile.*\[.*review-alternative.*\]/);
+	assert.match(text, /Dossier aaaaaaaaaaaa…/);
+	assert.match(text, /Limitations: a known gap/);
+	assert.doesNotMatch(text, /\u001b\[/u, "plain text, no escape codes");
+});
+
+test("format: the rendered limitation list is bounded", () => {
+	const text = formatPlan(
+		compose({
+			context: {
+				task: { summary: "add a thing" },
+				scope: { target: "uncommitted", snapshot: "HEAD" },
+				limitations: Array.from({ length: 9 }, (_, i) => `gap ${i}`),
+				versions: { riskRules: "1" },
+			},
+		}),
+	);
+	assert.match(text, /Limitations: gap 0; gap 1; gap 2; gap 3; gap 4; \+4 more/);
+	assert.doesNotMatch(text, /gap 8/u, "the transcript shows a bounded sample");
 });
 
 // ---------------------------------------------------------------------------
