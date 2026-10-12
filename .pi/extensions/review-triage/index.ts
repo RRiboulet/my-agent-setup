@@ -28,6 +28,14 @@ import {
 	type TriageConfig,
 } from "./config.ts";
 import { collectEvidence, toEvidenceItems, type TriageTarget } from "./evidence.ts";
+import {
+	collectArtifacts,
+	collectHarnessContext,
+	collectValidations,
+	type CallerArtifact,
+	type ExistingValidationResult,
+	type HarnessContextInput,
+} from "./collectors.ts";
 import { askJudge, JudgeError, type Judgment } from "./judge.ts";
 import {
 	composePlan,
@@ -37,9 +45,10 @@ import {
 	type AvailableModel,
 	type ReviewPlan,
 } from "./compose.ts";
-import { buildDossier, RISK_RULES_VERSION } from "./dossier.ts";
+import { buildDossier, RISK_RULES_VERSION, type EvidenceItem } from "./dossier.ts";
 import type { PolicyGates } from "./policy.ts";
 import { formatPlan } from "./format.ts";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
 const TARGETS = ["uncommitted", "branch", "commit", "task", "none"] as const;
@@ -54,6 +63,71 @@ export interface TriageParams {
 	baseline?: string;
 	notes?: string[];
 	cwd?: string;
+	/** Inline JSON context (the tool path): `{ artifacts, validations, harness }`. */
+	context?: string;
+	/** Path to a JSON context file (the `/triage --context <path>` path). */
+	contextPath?: string;
+}
+
+/** The collector inputs a context payload resolves to, plus what went wrong. */
+interface ResolvedContext {
+	artifacts?: CallerArtifact[];
+	validations?: ExistingValidationResult[];
+	harness?: HarnessContextInput;
+	warnings: string[];
+}
+
+/**
+ * Longest context payload accepted, in characters. Beyond this the cost of
+ * shaping, masking and budgeting it outweighs any evidence it could carry.
+ */
+export const MAX_CONTEXT_CHARS = 64_000;
+
+/**
+ * Resolve the optional JSON context the tool (inline) or the command (a file)
+ * supplies. The shape is `{ artifacts, validations, harness }`; the collectors
+ * do the field-level guarding, so this insists only on an object. A missing,
+ * unreadable, oversized or malformed source becomes a warning that travels into
+ * the dossier's limitations rather than a thrown error.
+ */
+export function resolveContext(params: TriageParams): ResolvedContext {
+	const label = params.contextPath ? `--context ${params.contextPath}` : "the context argument";
+	let raw: string | undefined;
+	if (params.contextPath) {
+		try {
+			raw = readFileSync(params.contextPath, "utf8");
+		} catch (error) {
+			return { warnings: [`${label} could not be read (${(error as Error).message}); it was ignored`] };
+		}
+	} else if (params.context) {
+		raw = params.context;
+	} else {
+		return { warnings: [] };
+	}
+	if (raw.length > MAX_CONTEXT_CHARS) {
+		return {
+			warnings: [`${label} is ${raw.length} characters, over the ${MAX_CONTEXT_CHARS} limit; it was ignored`],
+		};
+	}
+
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch (error) {
+		return { warnings: [`${label} is not valid JSON (${(error as Error).message}); it was ignored`] };
+	}
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		return { warnings: [`${label} must be a JSON object; it was ignored`] };
+	}
+	const record = parsed as Record<string, unknown>;
+	return {
+		...(record.artifacts !== undefined ? { artifacts: record.artifacts as CallerArtifact[] } : {}),
+		...(record.validations !== undefined
+			? { validations: record.validations as ExistingValidationResult[] }
+			: {}),
+		...(record.harness !== undefined ? { harness: record.harness as HarnessContextInput } : {}),
+		warnings: [],
+	};
 }
 
 interface TriageRun {
@@ -169,9 +243,39 @@ async function runTriage(
 	// One snapshot identity is used for both the evidence items and the scope,
 	// so the two cannot default differently and hash against different baselines.
 	const snapshot = evidence.baseline ?? evidence.ref ?? evidence.base ?? target.kind;
+	// The thin collectors measure nothing: they shape what the caller already
+	// holds into evidence items. Artifacts cover changes git cannot see,
+	// validations consume results a check already produced, and the harness
+	// context carries the task identity. None of them runs a check or reads the
+	// repository; only a command-supplied context file is read, by the resolver.
+	const resolved = resolveContext(params);
+	const harness = collectHarnessContext(resolved.harness ?? {});
+	const validationItems = collectValidations(resolved.validations ?? [], { now: Date.now() });
+	const items: EvidenceItem[] = [
+		...toEvidenceItems(evidence, snapshot),
+		...collectArtifacts(resolved.artifacts ?? [], { baseline: snapshot }),
+		...harness.items,
+		...validationItems,
+	];
+	// Freshness is bucketed against the observation time, so a `ranAt` change
+	// inside one bucket does not change the fingerprint; crossing the fresh
+	// window does, because that is a real change in what Jev sees. An empty
+	// validation section must not read as "everything passed", so say whether
+	// results were supplied at all — anything supplied but dropped carries its
+	// own collector limitation, so the absence note stays out of the way.
+	const suppliedValidations = Array.isArray(resolved.validations) && resolved.validations.length > 0;
+	const limitations = [
+		...resolved.warnings,
+		...(suppliedValidations ? [] : ["no validation results were supplied for this run"]),
+	];
 	const built = buildDossier({
-		items: toEvidenceItems(evidence, snapshot),
-		task: { summary },
+		items,
+		task: {
+			summary,
+			...(harness.task.objective ? { objective: harness.task.objective } : {}),
+			...(harness.task.acceptance.length > 0 ? { acceptance: harness.task.acceptance } : {}),
+			...(harness.task.identity ? { identity: harness.task.identity } : {}),
+		},
 		scope: {
 			target: target.kind,
 			...(target.base ? { base: target.base } : {}),
@@ -179,11 +283,8 @@ async function runTriage(
 			snapshot,
 		},
 		catalog: catalog.options.map((option) => option.key),
-		supplementary: params.notes,
-		// The thin collectors (validation, harness context, caller artifacts) are
-		// not wired into the pipeline yet, so say so rather than let an empty
-		// `validation` section read as "no checks were run".
-		limitations: ["validation results and task requirements were not collected for this run"],
+		supplementary: [...(params.notes ?? []), ...harness.supplementary],
+		limitations,
 		versions: { riskRules: RISK_RULES_VERSION },
 		budgetChars: config.stateChars,
 	});
@@ -271,7 +372,11 @@ async function runTriage(
 	return entry;
 }
 
-/** Parse `/triage [uncommitted|branch <name>|commit <sha>] [--summary "..."] [--note "..."]`. */
+/**
+ * Parse `/triage [uncommitted|branch <name>|commit <sha>] [--summary "..."]
+ * [--note "..."] [--context <path>]`. `--context` names a JSON file
+ * (`{ artifacts, validations, harness }`) carrying the thin collectors' inputs.
+ */
 export function parseTriageArgs(raw: string): TriageParams {
 	const tokens = raw.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
 	const unquote = (value: string | undefined) => value?.replace(/^["']|["']$/g, "");
@@ -293,6 +398,8 @@ export function parseTriageArgs(raw: string): TriageParams {
 		else if (token.startsWith("--baseline=")) params.baseline = token.slice("--baseline=".length);
 		else if (token === "--ref") params.ref = unquote(tokens[++i]);
 		else if (token.startsWith("--ref=")) params.ref = token.slice("--ref=".length);
+		else if (token === "--context") params.contextPath = unquote(tokens[++i]) ?? "";
+		else if (token.startsWith("--context=")) params.contextPath = token.slice("--context=".length);
 		else positional.push(token);
 	}
 
@@ -321,7 +428,7 @@ export function parseTriageArgs(raw: string): TriageParams {
 	return params;
 }
 
-export default function (pi: ExtensionAPI) {
+function registerTriageTool(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "triage_change",
 		label: "Review Triage",
@@ -359,11 +466,29 @@ export default function (pi: ExtensionAPI) {
 				}),
 			),
 			cwd: Type.Optional(Type.String({ description: "Repository to inspect; defaults to the session cwd" })),
+			context: Type.Optional(
+				Type.String({
+					description:
+						"Optional JSON for evidence git cannot see: { artifacts: [{ path, before?, after?, added?, removed?, status? }], validations: [{ check, outcome?, provenance?, ranAt?, snapshot?, detail? }], harness: { objective?, acceptanceCriteria?, identity?, recordedEdits?, toolResults?, unresolvedIssues? } }. Validation results are consumed, never run; an unrecognised outcome becomes 'unknown', never 'passed'.",
+				}),
+			),
 		}),
 
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			onUpdate?.({ content: [{ type: "text", text: "Review triage: consulting the judge…" }] });
-			const run = await runTriage(pi, ctx, params as TriageParams, {
+			// Build from the declared fields only, so an undeclared key (such as a
+			// smuggled `contextPath`) cannot reach the pipeline.
+			const toolParams: TriageParams = {
+				summary: params.summary,
+				...(params.target ? { target: params.target } : {}),
+				...(params.base ? { base: params.base } : {}),
+				...(params.ref ? { ref: params.ref } : {}),
+				...(params.baseline ? { baseline: params.baseline } : {}),
+				...(params.notes ? { notes: params.notes } : {}),
+				...(params.cwd ? { cwd: params.cwd } : {}),
+				...(params.context ? { context: params.context } : {}),
+			};
+			const run = await runTriage(pi, ctx, toolParams, {
 				signal,
 				onProgress: (text) =>
 					onUpdate?.({ content: [{ type: "text", text: `Review triage: ${text}…` }] }),
@@ -374,6 +499,16 @@ export default function (pi: ExtensionAPI) {
 			};
 		},
 	});
+}
+
+export default function (pi: ExtensionAPI) {
+	// The tool is recommendation-only, but its description still rides on every
+	// request's prompt, so `tool: false` leaves `/triage` as the only way in and
+	// a disabled extension registers nothing that costs prompt weight.
+	// Registration is a load-time act, so the config is read once here; the
+	// per-call read that drives the run happens in `runTriage`.
+	const registration = loadConfig({ warn: () => {} });
+	if (registration.enabled && registration.tool) registerTriageTool(pi);
 
 	pi.registerCommand("triage", {
 		description: "Decide whether the current change needs independent review (/triage [branch <b>|commit <sha>] [--summary \"...\"])",
@@ -391,6 +526,7 @@ export default function (pi: ExtensionAPI) {
 
 export const __test__ = {
 	parseTriageArgs,
+	resolveContext,
 	resolveTarget,
 };
 

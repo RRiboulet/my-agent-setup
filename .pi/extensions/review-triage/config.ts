@@ -164,6 +164,13 @@ export interface PolicyConfig {
 
 export interface TriageConfig {
 	enabled: boolean;
+	/**
+	 * Register the `triage_change` tool. `/triage` is always available; the tool
+	 * is recommendation-only but its description and schema ride on every
+	 * request, so an owner who wants the command alone can drop that weight.
+	 * Read at extension load, because registration is a load-time act.
+	 */
+	tool: boolean;
 	judge: JudgeConfig;
 	/** Empty means "synthesise from the models this session can actually use". */
 	candidates: Candidate[];
@@ -194,6 +201,7 @@ export function configPath(env: NodeJS.ProcessEnv = process.env): string {
 
 export const DEFAULT_CONFIG: TriageConfig = {
 	enabled: true,
+	tool: true,
 	judge: {
 		provider: "openrouter",
 		model: "typesafe/jev-1.13",
@@ -466,6 +474,7 @@ export function loadConfig(options: LoadConfigOptions = {}): TriageConfig {
 
 	if (Object.keys(file).length > 0) {
 		if ("enabled" in file) config.enabled = bool(file.enabled, config.enabled);
+		if ("tool" in file) config.tool = bool(file.tool, config.tool);
 
 		if (isObject(file.judge)) {
 			config.judge.provider = str(file.judge.provider) ?? config.judge.provider;

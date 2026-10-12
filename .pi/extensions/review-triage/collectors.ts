@@ -22,8 +22,11 @@
  *     and an outcome label this collector does not recognise becomes `unknown`,
  *     never `passed`.
  *
- * Everything here is pure, so the same caller input always yields the same
- * items — which is what lets the dossier fingerprint them as a replay key.
+ * Everything here is pure: the same caller input and reference time always
+ * yields the same items. The validation collector is the one consumer of a
+ * clock, and it only reads the `now` it was handed; with none, freshness is
+ * `unknown` and the items are wall-clock independent. Caller strings are
+ * capped per field, with the truncation recorded rather than silent.
  *
  * The artifact and validation collectors return items; the harness collector
  * also returns the task fields and supplementary context it produces, because
@@ -47,6 +50,31 @@ import type {
 /** Trimmed caller text, or undefined when there is none. Caller text is data. */
 function text(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+/**
+ * Longest caller-supplied text carried per field. Caller strings are unbounded,
+ * and one enormous entry can otherwise crowd the dossier's budget and evict the
+ * caller's own other evidence. This is a safety valve, not a design limit.
+ */
+export const MAX_CALLER_TEXT = 2_000;
+
+/**
+ * Read caller text with the per-field cap, counting truncations so the
+ * collector can record them once. Caller text is data, never instructions.
+ */
+function textReader(): { read(value: unknown): string | undefined; truncated(): number } {
+	let truncated = 0;
+	return {
+		read(value: unknown): string | undefined {
+			const trimmed = text(value);
+			if (trimmed === undefined) return undefined;
+			if (trimmed.length <= MAX_CALLER_TEXT) return trimmed;
+			truncated += 1;
+			return trimmed.slice(0, MAX_CALLER_TEXT);
+		},
+		truncated: () => truncated,
+	};
 }
 
 /** A limitation item: the collector's own observation about a gap, as evidence. */
@@ -263,7 +291,8 @@ export function collectArtifacts(
 	options: ArtifactCollectorOptions = {},
 ): EvidenceItem[] {
 	const items: EvidenceItem[] = [];
-	const snapshot = text(options.baseline) ?? "unknown";
+	const { read, truncated } = textReader();
+	const snapshot = read(options.baseline) ?? "unknown";
 
 	if (entries !== undefined && !Array.isArray(entries)) {
 		// A non-list would iterate as characters or throw on .map — the same
@@ -280,7 +309,7 @@ export function collectArtifacts(
 	}
 
 	for (const entry of entries ?? []) {
-		const path = text(entry?.path);
+		const path = read(entry?.path);
 		if (!path) {
 			items.push(
 				limitation(
@@ -315,7 +344,7 @@ export function collectArtifacts(
 				),
 			);
 		}
-		const status = text(entry.status);
+		const status = read(entry.status);
 
 		if (before !== undefined && after !== undefined) {
 			items.push(...diffedArtifact(path, before, after, { snapshot, asserted, status, flags }));
@@ -348,6 +377,17 @@ export function collectArtifacts(
 				),
 			);
 		}
+	}
+
+	if (truncated() > 0) {
+		items.push(
+			limitation(
+				"filesystem",
+				"caller artifact list",
+				`${truncated()} caller text field(s) were truncated to ${MAX_CALLER_TEXT} characters`,
+				"partial",
+			),
+		);
 	}
 
 	return items;
@@ -401,10 +441,28 @@ export interface HarnessContext {
 export function collectHarnessContext(input: HarnessContextInput): HarnessContext {
 	const items: EvidenceItem[] = [];
 
-	const objective = text(input?.objective);
-	const identity = text(input?.identity);
+	if (input !== undefined && (input === null || typeof input !== "object" || Array.isArray(input))) {
+		// Every field of a non-object reads as undefined, which would make an
+		// unusable context look like an empty one; say what happened instead.
+		return {
+			task: { acceptance: [] },
+			supplementary: [],
+			items: [
+				limitation(
+					"harness",
+					"the session record",
+					"the harness context was not an object; it was not read",
+					"missing",
+				),
+			],
+		};
+	}
+
+	const { read, truncated } = textReader();
+	const objective = read(input?.objective);
+	const identity = read(input?.identity);
 	const acceptance = (input?.acceptanceCriteria ?? [])
-		.map((criterion) => text(criterion))
+		.map((criterion) => read(criterion))
 		.filter((criterion): criterion is string => criterion !== undefined);
 
 	const edits = input?.recordedEdits;
@@ -421,7 +479,7 @@ export function collectHarnessContext(input: HarnessContextInput): HarnessContex
 		);
 	} else if (Array.isArray(edits)) {
 		for (const edit of edits) {
-			const path = text(edit?.path);
+			const path = read(edit?.path);
 			if (!path) {
 				items.push(
 					limitation(
@@ -433,7 +491,7 @@ export function collectHarnessContext(input: HarnessContextInput): HarnessContex
 				);
 				continue;
 			}
-			const tool = text(edit?.tool);
+			const tool = read(edit?.tool);
 			items.push({
 				source: "harness",
 				kind: "artifact-change",
@@ -473,7 +531,7 @@ export function collectHarnessContext(input: HarnessContextInput): HarnessContex
 		);
 	} else {
 		supplementary = (toolResults ?? [])
-			.map((result) => text(result))
+			.map((result) => read(result))
 			.filter((result): result is string => result !== undefined);
 	}
 
@@ -489,7 +547,7 @@ export function collectHarnessContext(input: HarnessContextInput): HarnessContex
 		);
 	} else {
 		for (const issue of issues ?? []) {
-			const unresolved = text(issue);
+			const unresolved = read(issue);
 			if (!unresolved) continue;
 			items.push({
 				source: "harness",
@@ -501,6 +559,17 @@ export function collectHarnessContext(input: HarnessContextInput): HarnessContex
 				text: unresolved,
 			});
 		}
+	}
+
+	if (truncated() > 0) {
+		items.push(
+			limitation(
+				"harness",
+				"the session record",
+				`${truncated()} caller text field(s) were truncated to ${MAX_CALLER_TEXT} characters`,
+				"partial",
+			),
+		);
 	}
 
 	return {
@@ -557,6 +626,7 @@ export function collectValidations(
 ): EvidenceItem[] {
 	const now = options.now;
 	const items: EvidenceItem[] = [];
+	const { read, truncated } = textReader();
 
 	if (results !== undefined && !Array.isArray(results)) {
 		items.push(
@@ -571,7 +641,7 @@ export function collectValidations(
 	}
 
 	for (const result of results ?? []) {
-		const check = text(result?.check);
+		const check = read(result?.check);
 		if (!check) {
 			items.push(
 				limitation(
@@ -584,7 +654,7 @@ export function collectValidations(
 			continue;
 		}
 
-		const rawOutcome = text(result?.outcome);
+		const rawOutcome = read(result?.outcome);
 		const label = rawOutcome?.toLowerCase();
 		let outcome: ValidationOutcome;
 		let recognised: boolean;
@@ -600,7 +670,7 @@ export function collectValidations(
 			recognised = false;
 		}
 
-		const provenance = text(result?.provenance);
+		const provenance = read(result?.provenance);
 		const ranAt = result?.ranAt;
 		let freshness: EvidenceFreshness = "unknown";
 		if (Number.isFinite(ranAt) && Number.isFinite(now)) {
@@ -609,7 +679,7 @@ export function collectValidations(
 			freshness = age < 0 ? "unknown" : age <= DEFAULT_FRESH_WINDOW_MS ? "fresh" : "stale";
 		}
 
-		const detailParts = [text(result?.detail)];
+		const detailParts = [read(result?.detail)];
 		if (!recognised) detailParts.push(`the recorded outcome label was ${JSON.stringify(rawOutcome)}`);
 		const detail = detailParts.filter((part): part is string => part !== undefined).join(" ");
 
@@ -617,7 +687,7 @@ export function collectValidations(
 			source: "harness",
 			kind: "validation-result",
 			provenance: provenance ?? "unspecified",
-			snapshot: text(result?.snapshot) ?? "unknown",
+			snapshot: read(result?.snapshot) ?? "unknown",
 			// Completeness describes the record, not the outcome: a tool that
 			// honestly reported `unknown` produced a complete record, while an
 			// unrecognised label means the collector could not read the result.
@@ -628,6 +698,17 @@ export function collectValidations(
 			freshness,
 			...(detail ? { detail } : {}),
 		});
+	}
+
+	if (truncated() > 0) {
+		items.push(
+			limitation(
+				"harness",
+				"caller validation record",
+				`${truncated()} caller text field(s) were truncated to ${MAX_CALLER_TEXT} characters`,
+				"partial",
+			),
+		);
 	}
 
 	return items;

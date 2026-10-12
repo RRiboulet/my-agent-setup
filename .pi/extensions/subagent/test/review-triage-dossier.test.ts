@@ -345,6 +345,31 @@ test("dossier: the scope snapshot resolves from the ref when not given", () => {
 	assert.equal(built.dossier.scope.snapshot, "abc123");
 });
 
+test("dossier: a validation entry carries the collector's trust level", () => {
+	const built = buildDossier(
+		input({
+			items: [
+				{
+					source: "harness",
+					kind: "validation-result",
+					provenance: "npm test",
+					snapshot: "HEAD",
+					completeness: "complete",
+					trust: "self-reported",
+					check: "tests",
+					outcome: "passed",
+					freshness: "unknown",
+				},
+			],
+		}),
+	);
+	assert.equal(
+		built.dossier.validation[0]?.trust,
+		"self-reported",
+		"a caller's word must not reach Jev looking like an observed result",
+	);
+});
+
 // ---------------------------------------------------------------------------
 // validation and determinism regressions
 // ---------------------------------------------------------------------------

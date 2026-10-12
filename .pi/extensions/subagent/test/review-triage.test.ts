@@ -73,7 +73,7 @@ import {
 } from "../../review-triage/compose.ts";
 import { decidePolicy, POLICY_REASONS, rationaleFor, type PolicyGates } from "../../review-triage/policy.ts";
 import { formatPlan } from "../../review-triage/format.ts";
-import { parseTriageArgs, resolveTarget } from "../../review-triage/index.ts";
+import { parseTriageArgs, resolveContext, resolveTarget } from "../../review-triage/index.ts";
 import reviewTriageExtension from "../../review-triage/index.ts";
 import type { ClassifierResult, ClassifierAnswer } from "@earendil-works/pi-ai";
 
@@ -199,11 +199,25 @@ function compose(overrides: Partial<ComposeArgs> = {}) {
 test("config: defaults apply when no file exists", () => {
 	const loaded = loadConfig({ path: "/nonexistent/review-triage.json", env: {} });
 	assert.equal(loaded.enabled, true);
+	assert.equal(loaded.tool, true, "the tool is registered by default");
 	assert.equal(loaded.judge.provider, "openrouter");
 	assert.equal(loaded.judge.model, "typesafe/jev-1.13");
 	assert.equal(loaded.reverseChoice, true);
 	assert.equal(loaded.policy.skipThreshold, 0.9);
 	assert.deepEqual(loaded.thinkingLadder, DEFAULT_THINKING_LADDER);
+});
+
+test("config: the tool switch is read from the file", () => {
+	const dir = mkdtempSync(join(tmpdir(), "triage-test-"));
+	const path = join(dir, "review-triage.json");
+	writeFileSync(path, JSON.stringify({ tool: false }));
+	try {
+		const loaded = loadConfig({ path, env: {} });
+		assert.equal(loaded.tool, false);
+		assert.equal(loaded.enabled, true, "turning the tool off leaves the command usable");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 test("config: a file merges over defaults field by field", () => {
@@ -1208,7 +1222,7 @@ interface PipelinePlan {
 	fingerprint?: string;
 	status?: string;
 	policyOverrides?: { skipThreshold?: number; mandatoryReview?: boolean };
-	task?: { summary?: string };
+	task?: { summary?: string; objective?: string; identity?: string };
 	scope?: { target?: string; snapshot?: string };
 	limitations?: string[];
 	versions?: Record<string, string>;
@@ -1223,62 +1237,114 @@ interface PipelinePlan {
 	complexity?: { needed?: boolean };
 }
 
-/**
- * Drive the registered tool once, with a temp agent dir so `loadConfig` sees no
- * stray user config. Returns the tool result's details and every appended
- * session entry.
- */
-async function runPipeline(options: {
-	exec: GitExec;
-	answers: Record<string, ClassifierAnswer>;
-}): Promise<{
-	details: { fingerprint?: string; plan?: PipelinePlan };
-	appended: { type: string; entry: { fingerprint?: string } }[];
-}> {
+/** Run `fn` with a temp agent dir, so `loadConfig` sees only the given config. */
+async function withAgentDir<T>(config: Record<string, unknown>, fn: () => Promise<T> | T): Promise<T> {
 	const previous = process.env.PI_CODING_AGENT_DIR;
-	const dir = mkdtempSync(join(tmpdir(), "review-triage-run-"));
+	const dir = mkdtempSync(join(tmpdir(), "review-triage-agent-"));
 	process.env.PI_CODING_AGENT_DIR = dir;
-	writeFileSync(join(dir, "review-triage.json"), JSON.stringify({ candidates: PIPELINE_CANDIDATES }));
-	const appended: { type: string; entry: { fingerprint?: string } }[] = [];
-	let tool: { execute: (...args: never[]) => Promise<{ details: unknown }> } | undefined;
-	const pi = {
-		registerTool: (definition: never) => {
-			tool = definition as never;
-		},
-		registerCommand: () => {},
-		appendEntry: (type: string, entry: { fingerprint?: string }) => {
-			appended.push({ type, entry });
-		},
-		exec: options.exec,
-		sendUserMessage: () => {},
-	};
-	const ctx = {
-		modelRegistry: {
-			getAvailable: () => AVAILABLE,
-			findOfType: () => ({ provider: "openrouter", id: "typesafe/jev-1.13" }),
-			classify: async () => classifierResult(options.answers),
-		},
-		cwd: "/repo",
-		signal: undefined,
-		hasUI: false,
-		ui: { notify: () => {} },
-	};
+	writeFileSync(join(dir, "review-triage.json"), JSON.stringify(config));
 	try {
-		reviewTriageExtension(pi as never);
-		assert.ok(tool, "the extension registered the tool");
-		const result = await tool.execute(
-			"id",
-			{ summary: "wire the dossier", target: "uncommitted" },
-			undefined,
-			undefined,
-			ctx as never,
-		);
-		return { details: result.details as never, appended };
+		return await fn();
 	} finally {
 		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
 		else process.env.PI_CODING_AGENT_DIR = previous;
 		rmSync(dir, { recursive: true, force: true });
 	}
+}
+
+interface FakeTool {
+	name?: string;
+	execute?: (
+		id: string,
+		params: unknown,
+		signal: unknown,
+		onUpdate: unknown,
+		ctx: unknown,
+	) => Promise<{ details: unknown }>;
+}
+
+interface FakePi {
+	tools: FakeTool[];
+	commands: Map<string, { handler: (args: string | undefined, ctx: unknown) => Promise<void> }>;
+	appended: { type: string; entry: { fingerprint?: string; plan?: PipelinePlan } }[];
+	messages: string[];
+	notifications: string[];
+}
+
+/** A mock extension host: it records registrations and effects, and runs nothing. */
+function fakePi(exec: GitExec): FakePi & Record<string, unknown> {
+	const tools: FakeTool[] = [];
+	const commands = new Map<string, { handler: (args: string | undefined, ctx: unknown) => Promise<void> }>();
+	const appended: FakePi["appended"] = [];
+	const messages: string[] = [];
+	const notifications: string[] = [];
+	return {
+		tools,
+		commands,
+		appended,
+		messages,
+		notifications,
+		registerTool: (definition: FakeTool) => {
+			tools.push(definition);
+		},
+		registerCommand: (
+			name: string,
+			definition: { handler: (args: string | undefined, ctx: unknown) => Promise<void> },
+		) => {
+			commands.set(name, definition);
+		},
+		appendEntry: (type: string, entry: { fingerprint?: string }) => {
+			appended.push({ type, entry });
+		},
+		exec,
+		sendUserMessage: (message: string) => {
+			messages.push(message);
+		},
+	};
+}
+
+function fakeCtx(answers: Record<string, ClassifierAnswer>, notifications: string[]): Record<string, unknown> {
+	return {
+		modelRegistry: {
+			getAvailable: () => AVAILABLE,
+			findOfType: () => ({ provider: "openrouter", id: "typesafe/jev-1.13" }),
+			classify: async () => classifierResult(answers),
+		},
+		cwd: "/repo",
+		signal: undefined,
+		hasUI: false,
+		ui: { notify: (message: string) => notifications.push(message) },
+	};
+}
+
+/**
+ * Drive the registered tool once, with a temp agent dir so `loadConfig` sees no
+ * stray user config. Returns the tool result's details, every appended session
+ * entry, and the mock host.
+ */
+async function runPipeline(options: {
+	exec: GitExec;
+	answers: Record<string, ClassifierAnswer>;
+	params?: Record<string, unknown>;
+	config?: Record<string, unknown>;
+}): Promise<{
+	details: { fingerprint?: string; plan?: PipelinePlan };
+	appended: FakePi["appended"];
+	pi: FakePi;
+}> {
+	const pi = fakePi(options.exec);
+	return withAgentDir(options.config ?? { candidates: PIPELINE_CANDIDATES }, async () => {
+		reviewTriageExtension(pi as never);
+		assert.ok(pi.tools[0]?.execute, "the extension registered the tool");
+		const result = await pi.tools[0].execute(
+			"id",
+			{ summary: "wire the dossier", target: "uncommitted", ...(options.params ?? {}) },
+			undefined,
+			undefined,
+			fakeCtx(options.answers, pi.notifications),
+		);
+		return { details: result.details as never, appended: pi.appended, pi };
+	});
 }
 
 test("wiring: the session entry carries the dossier fingerprint", async () => {
@@ -1301,8 +1367,8 @@ test("wiring: the session entry persists the published recommendation fields", a
 	assert.equal(plan?.versions?.riskRules, "1");
 	assert.equal(plan?.adversarial?.calibration, "uncalibrated");
 	assert.ok(
-		plan?.limitations?.some((limitation) => limitation.includes("validation results")),
-		"the unwired collectors are recorded as a limitation",
+		plan?.limitations?.some((limitation) => limitation.includes("no validation results were supplied")),
+		"an empty validation section says so rather than reading as 'everything passed'",
 	);
 
 	// The entry persists the plan itself, so every published field survives.
@@ -1364,6 +1430,217 @@ test("wiring: a dossier that overflows cannot skip, even at P(none)=0.99", async
 		"the reason says the evidence was incomplete",
 	);
 	assert.equal(details.plan?.complexity?.needed, true);
+});
+
+// ---------------------------------------------------------------------------
+// Pi adapter: command primary, tool behind a switch
+// ---------------------------------------------------------------------------
+
+test("adapter: tool:false drops the tool but keeps the command as the entry point", async () => {
+	const pi = fakePi(stableExec().exec);
+	await withAgentDir({ tool: false }, () => {
+		reviewTriageExtension(pi as never);
+	});
+	assert.deepEqual(pi.tools, [], "the tool is not registered when it is switched off");
+	assert.deepEqual([...pi.commands.keys()], ["triage"], "the command is still the primary entry point");
+});
+
+test("adapter: a disabled extension registers no tool, but keeps the command", async () => {
+	const pi = fakePi(stableExec().exec);
+	await withAgentDir({ enabled: false }, () => {
+		reviewTriageExtension(pi as never);
+	});
+	assert.deepEqual(pi.tools, [], "a disabled extension does not pay the tool's prompt weight");
+	assert.deepEqual([...pi.commands.keys()], ["triage"], "the command still explains that it is disabled");
+});
+
+test("adapter: the tool is registered by default", async () => {
+	const pi = fakePi(stableExec().exec);
+	await withAgentDir({}, () => {
+		reviewTriageExtension(pi as never);
+	});
+	assert.deepEqual(pi.tools.map((tool) => tool.name), ["triage_change"]);
+	assert.deepEqual([...pi.commands.keys()], ["triage"]);
+});
+
+test("adapter: registration touches nothing but the tool and command slots", async () => {
+	const pi = fakePi(stableExec().exec);
+	const touched: string[] = [];
+	const observed = new Proxy(pi, {
+		get(target, property) {
+			if (typeof property === "string") touched.push(property);
+			return Reflect.get(target, property);
+		},
+	});
+	await withAgentDir({}, () => {
+		reviewTriageExtension(observed as never);
+	});
+	assert.deepEqual(
+		[...new Set(touched)].sort(),
+		["registerCommand", "registerTool"],
+		"no event subscription, reviewer launch, model switch or test run",
+	);
+});
+
+test("adapter: the command produces the structured plan and appends the session entry", async () => {
+	const pi = fakePi(stableExec().exec);
+	await withAgentDir({ candidates: PIPELINE_CANDIDATES }, async () => {
+		reviewTriageExtension(pi as never);
+		const command = pi.commands.get("triage");
+		assert.ok(command, "the command is registered");
+		await command.handler('uncommitted --summary "wire the dossier"', fakeCtx(fullAnswers(), pi.notifications));
+	});
+	assert.equal(pi.messages.length, 1, "one user message");
+	assert.match(pi.messages[0] ?? "", /Review triage — /u);
+	const entry = pi.appended.find((item) => item.type === "review-triage");
+	assert.match(entry?.entry.fingerprint ?? "", /^[0-9a-f]{64}$/u, "the command persists the structured entry");
+	assert.deepEqual(pi.notifications, [], "no error was reported");
+});
+
+test("adapter: caller-supplied collector inputs reach the dossier", async () => {
+	const withContext = await runPipeline({
+		exec: stableExec().exec,
+		answers: fullAnswers(),
+		params: {
+			context: JSON.stringify({
+				validations: [{ check: "node --test", outcome: "failed", provenance: "bash", ranAt: Date.now() }],
+				harness: {
+					objective: "wire the collectors",
+					identity: "TODO-aed9dd5e",
+					unresolvedIssues: ["one test is flaky"],
+				},
+			}),
+		},
+	});
+	const without = await runPipeline({ exec: stableExec().exec, answers: fullAnswers() });
+	assert.notEqual(
+		withContext.details.fingerprint,
+		without.details.fingerprint,
+		"the supplied context is part of the judged dossier",
+	);
+	assert.equal(withContext.details.plan?.task?.objective, "wire the collectors");
+	assert.equal(withContext.details.plan?.task?.identity, "TODO-aed9dd5e");
+	assert.ok(
+		withContext.details.plan?.limitations?.some((limitation) => limitation.includes("flaky")),
+		"an unresolved issue is recorded as a limitation",
+	);
+	assert.ok(
+		!withContext.details.plan?.limitations?.some((limitation) => limitation.includes("no validation results")),
+		"a supplied validation result silences the absence note",
+	);
+	assert.ok(
+		without.details.plan?.limitations?.some((limitation) => limitation.includes("no validation results")),
+		"without results the absence note is present",
+	);
+});
+
+test("adapter: a supplied-but-dropped validation does not also claim nothing was supplied", async () => {
+	const dropped = await runPipeline({
+		exec: stableExec().exec,
+		answers: fullAnswers(),
+		params: { context: JSON.stringify({ validations: [{ outcome: "passed" }] }) },
+	});
+	const limitations = dropped.details.plan?.limitations ?? [];
+	assert.ok(
+		limitations.some((limitation) => limitation.includes("without a usable check name")),
+		"the collector explains the drop",
+	);
+	assert.ok(
+		!limitations.some((limitation) => limitation.includes("no validation results were supplied")),
+		"the absence note would contradict the drop record",
+	);
+});
+
+test("command: --context names a JSON file, and a bad payload warns instead of throwing", () => {
+	const parsed = parseTriageArgs("uncommitted --context /tmp/ctx.json");
+	assert.equal(parsed.contextPath, "/tmp/ctx.json");
+	assert.equal(parsed.context, undefined);
+
+	const missing = resolveContext({ summary: "x", contextPath: "/nonexistent/ctx.json" });
+	assert.equal(missing.artifacts, undefined);
+	assert.ok(missing.warnings.some((warning) => warning.includes("could not be read")));
+
+	const bad = resolveContext({ summary: "x", context: "{not json" });
+	assert.equal(bad.validations, undefined);
+	assert.ok(bad.warnings.some((warning) => warning.includes("not valid JSON")));
+
+	const wrongShape = resolveContext({ summary: "x", context: "[1,2]" });
+	assert.ok(wrongShape.warnings.some((warning) => warning.includes("must be a JSON object")));
+
+	const resolved = resolveContext({
+		summary: "x",
+		context: JSON.stringify({ validations: [{ check: "t", outcome: "failed" }], harness: { identity: "T1" } }),
+	});
+	assert.equal(resolved.validations?.length, 1);
+	assert.equal(resolved.harness?.identity, "T1");
+	assert.deepEqual(resolved.warnings, []);
+});
+
+test("adapter: an undeclared tool param cannot reach the pipeline", async () => {
+	// The schema declares `context`, not `contextPath`; a smuggled path must not
+	// make the pipeline read a file.
+	const pi = fakePi(stableExec().exec);
+	await withAgentDir({ candidates: PIPELINE_CANDIDATES }, async () => {
+		reviewTriageExtension(pi as never);
+		const tool = pi.tools[0];
+		assert.ok(tool?.execute);
+		const result = await tool.execute(
+			"id",
+			{ summary: "x", target: "uncommitted", contextPath: "/etc/hostname" },
+			undefined,
+			undefined,
+			fakeCtx(fullAnswers(), pi.notifications),
+		);
+		const details = result.details as { plan?: PipelinePlan };
+		assert.ok(
+			!details.plan?.limitations?.some((limitation) => limitation.includes("could not be read")),
+			"the smuggled path was ignored",
+		);
+	});
+});
+
+test("adapter: the command reads a context file into the dossier", async () => {
+	const pi = fakePi(stableExec().exec);
+	const dir = mkdtempSync(join(tmpdir(), "review-triage-ctx-"));
+	const contextPath = join(dir, "context.json");
+	writeFileSync(
+		contextPath,
+		JSON.stringify({
+			validations: [{ check: "node --test", outcome: "passed", provenance: "bash" }],
+			harness: { objective: "read the context file", identity: "TODO-ctx" },
+		}),
+	);
+	try {
+		await withAgentDir({ candidates: PIPELINE_CANDIDATES }, async () => {
+			reviewTriageExtension(pi as never);
+			const command = pi.commands.get("triage");
+			assert.ok(command, "the command is registered");
+			await command.handler(
+				`uncommitted --summary "read it" --context ${contextPath}`,
+				fakeCtx(fullAnswers(), pi.notifications),
+			);
+		});
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+	const entry = pi.appended.find((item) => item.type === "review-triage")?.entry as { plan?: PipelinePlan };
+	assert.equal(entry?.plan?.task?.objective, "read the context file");
+	assert.ok(
+		!entry?.plan?.limitations?.some((limitation) => limitation.includes("no validation results")),
+		"a supplied validation result silences the absence note",
+	);
+});
+
+test("adapter: a bad context payload becomes a limitation, not a failed run", async () => {
+	const bad = await runPipeline({
+		exec: stableExec().exec,
+		answers: fullAnswers(),
+		params: { context: "{not json" },
+	});
+	assert.ok(
+		bad.details.plan?.limitations?.some((limitation) => limitation.includes("not valid JSON")),
+		"a bad context is recorded, not swallowed",
+	);
 });
 
 // ---------------------------------------------------------------------------

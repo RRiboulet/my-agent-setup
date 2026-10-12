@@ -160,6 +160,12 @@ export interface DossierValidation {
 	freshness: EvidenceFreshness;
 	provenance: string;
 	completeness: EvidenceCompleteness;
+	/**
+	 * Who is the source: observed by a collector, asserted by a caller, or the
+	 * caller's word alone. Carried so a fabricated "passed" cannot reach Jev
+	 * looking like an observed result.
+	 */
+	trust: EvidenceTrust;
 	detail?: string;
 }
 
@@ -644,6 +650,7 @@ export function buildDossier(input: DossierInput): BuiltDossier {
 			freshness: item.freshness,
 			provenance: mask(item.provenance, "a validation provenance"),
 			completeness: item.completeness,
+			trust: item.trust,
 			...(item.detail ? { detail: mask(item.detail, "a validation detail") } : {}),
 		}))
 		.sort((a, b) => {

@@ -24,6 +24,7 @@ import {
 	collectArtifacts,
 	collectHarnessContext,
 	collectValidations,
+	MAX_CALLER_TEXT,
 	MAX_DIFF_LINES,
 	type CallerArtifact,
 	type ExistingValidationResult,
@@ -281,6 +282,23 @@ test("harness: an empty context records nothing", () => {
 	const context = collectHarnessContext({});
 	assert.deepEqual(context.items, []);
 	assert.deepEqual(context.supplementary, []);
+	assert.deepEqual(context.task, { acceptance: [] });
+});
+
+test("harness: an over-long caller string is truncated, and the truncation is recorded", () => {
+	const context = collectHarnessContext({ toolResults: ["x".repeat(MAX_CALLER_TEXT + 500)] });
+	assert.equal(context.supplementary[0]?.length, MAX_CALLER_TEXT, "the cap bounds one caller string");
+	assert.ok(
+		context.items.some((item) => item.kind === "limitation" && item.text.includes("truncated")),
+		"a cap that bit must say so",
+	);
+});
+
+test("harness: a non-object context is recorded, not read as an empty one", () => {
+	const context = collectHarnessContext("nope" as never);
+	assert.ok(
+		context.items.some((item) => item.kind === "limitation" && item.text.includes("was not an object")),
+	);
 	assert.deepEqual(context.task, { acceptance: [] });
 });
 
