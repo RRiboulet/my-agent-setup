@@ -4,6 +4,49 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Added:
+
+- **Added `review-triage`: a Jev-gated planner for independent review.** The
+  `triage_change` tool (and a `/triage` command) answers a question that until
+  now was a judgement call every time: after implementing something, does this
+  change need an independent adversarial review, a complexity/design review, or
+  neither — and if so, how strong should the reviewing subagent be, and on which
+  model. Deterministic code gathers the evidence (`git diff --numstat`,
+  `--name-status`, a zero-context patch, plus any hand-written risk notes),
+  labels the risk-shaped things it can see, and packages them as Jev's `state`.
+  One batched request then asks a calibrated decision model — OpenRouter's
+  `typesafe/jev-1.13` through pi's own classifier path
+  (`ctx.modelRegistry.classify()`), so no second API client and the call lands
+  in the session cost like any other — two `noul` gates, two `score` strength
+  readings, and two `choice` model picks. Code owns everything after that: the
+  noul thresholds, the strength-to-tier mapping, each tier's cost floor and
+  thinking level, and the fallback chains. A confident Choice inside the floor
+  is used; a cheap pick for a deep review is promoted; a low-confidence Choice
+  or an unavailable model walks the configured chain rather than guessing. The
+  result is a plan, not an action — it carries a ready-to-paste `subagent` task
+  and never launches anything, so the agent still decides.
+
+  Two things are load-bearing. Each model `choice` is asked **twice, forward and
+  reversed**, and the two probability vectors are averaged, because Jev leans
+  toward the first option it is offered and the average is what makes a split
+  read as low confidence instead of a confident wrong pick (the same trick
+  `decision-router` documents). And when Jev is unreachable the default is to
+  **fail open conservatively** — recommend both reviews at their middle rung —
+  because an unreachable judge should cost a review, not buy a skipped one;
+  `onJudgeError: "skip"` opts a machine out. Every verdict is appended to the
+  session as a `review-triage` entry with the probabilities, confidences, tiers
+  and models, so "we chose not to review this" is auditable after the fact.
+
+  Policy sits in `~/.pi/agent/review-triage.json` (all fields optional; judge
+  model and thresholds also settable through `PI_REVIEW_TRIAGE_*`), and a
+  `.env` beside it is read for `OPENROUTER_API_KEY` so a key that never reached
+  `auth.json` still works. With no config at all, the candidate list is
+  synthesised from the models the session can actually use, bucketed by
+  catalogue price, so the tool works on a fresh install. The decision functions
+  are pure and unit-tested — config merge, signal scan, reverse-choice
+  averaging, the cost floor and the fallback walk — alongside a load guard and
+  the manifest check.
+
 ## v1.4.0 — 2026-10-11
 
 Added:

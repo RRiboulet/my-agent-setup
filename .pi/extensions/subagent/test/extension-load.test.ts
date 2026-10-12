@@ -28,6 +28,7 @@ const EXTENSIONS = [
 	"../../native-web-search.ts",
 	"../../opencode-go-provider/index.ts",
 	"../../repo-explorer/index.ts",
+	"../../review-triage/index.ts",
 	"../../review.ts",
 	"../../session-breakdown.ts",
 	"../../todos.ts",
