@@ -131,8 +131,9 @@ export function parseNameStatus(stdout: string): {
 	return { newFiles, deletedFiles, renamedFiles };
 }
 
-const SECURITY_PATH = /(^|\/)(auth|oauth|token|secret|credential|password|passwd|crypto|cipher|permission|acl|rbac|session|cookie|login|signup|billing|payment)/iu;
-const MIGRATION_PATH = /(^|\/)(migrations?|schema)|\.sql$|prisma/iu;
+/** Path categories shared with the dossier's budget ordering, so the two cannot drift. */
+export const SECURITY_PATH = /(^|\/)(auth|oauth|token|secret|credential|password|passwd|crypto|cipher|permission|acl|rbac|session|cookie|login|signup|billing|payment)/iu;
+export const MIGRATION_PATH = /(^|\/)(migrations?|schema)|\.sql$|prisma/iu;
 const DEPENDENCY_PATH = /(^|\/)(package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|requirements\.txt|Cargo\.(toml|lock)|go\.(mod|sum)|Gemfile|pyproject\.toml)/iu;
 const INFRA_PATH = /(^|\/)(Dockerfile|\.github|\.gitlab-ci|devcontainer|docker-compose|Makefile|\.circleci)/iu;
 const TEST_PATH = /(^|\/)(tests?|spec|__tests__)(\/|$)|\.(test|spec)\.[cm]?[jt]sx?$/iu;
