@@ -27,13 +27,17 @@ export type TrackName = "adversarial" | "complexity";
 export const TRACKS: readonly TrackName[] = ["adversarial", "complexity"];
 
 /**
- * `cost` doubles as the capability rank the tier floor is enforced against,
- * the same convention decision-router uses: a cheap model is not just cheaper,
- * it is the weaker choice for a hard review.
+ * How much capability a model brings, judged by a human — deliberately NOT
+ * price. Two models can share a price and differ in strength (this catalogue's
+ * `deepseek-v4.1-flash` and `glm-5.3-flash` both cost 0.15), and a free model
+ * can be the strongest one offered (`step-5-preview-free`). Price is therefore
+ * useless as a capability signal here; the tier is an explicit judgement.
+ * It is the rank the review floor is enforced against: the stronger the review
+ * a change deserves, the higher the tier the chosen model must have.
  */
-export type CostTier = "low" | "medium" | "high";
-export const COST_TIERS: readonly CostTier[] = ["low", "medium", "high"];
-export const COST_RANK: Record<CostTier, number> = { low: 0, medium: 1, high: 2 };
+export type CapabilityTier = "low" | "medium" | "high";
+export const CAPABILITY_TIERS: readonly CapabilityTier[] = ["low", "medium", "high"];
+export const CAPABILITY_RANK: Record<CapabilityTier, number> = { low: 0, medium: 1, high: 2 };
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export const THINKING_LEVELS: readonly ThinkingLevel[] = [
@@ -59,7 +63,8 @@ export const THINKING_RANK: Record<ThinkingLevel, number> = {
 export interface Candidate {
 	provider: string;
 	model: string;
-	cost: CostTier;
+	/** Capability rank, assigned by a human — see {@link CapabilityTier}. */
+	tier: CapabilityTier;
 	/** What this model is good at — the Choice question's criteria text. */
 	description: string;
 	/** What belongs to a neighbour instead, to sharpen the Choice. */
@@ -74,7 +79,7 @@ export interface Tier {
 	minScore: number;
 	thinking: ThinkingLevel;
 	/** The chosen model must sit at or above this rank. */
-	costFloor: CostTier;
+	minTier: CapabilityTier;
 }
 
 export interface TrackConfig {
@@ -132,18 +137,18 @@ export const DEFAULT_TRACKS: Record<TrackName, TrackConfig> = {
 	adversarial: {
 		threshold: 0.5,
 		tiers: [
-			{ name: "light", minScore: 0, thinking: "low", costFloor: "low" },
-			{ name: "standard", minScore: 1.5, thinking: "medium", costFloor: "medium" },
-			{ name: "deep", minScore: 2.5, thinking: "high", costFloor: "high" },
+			{ name: "light", minScore: 0, thinking: "low", minTier: "low" },
+			{ name: "standard", minScore: 1.5, thinking: "medium", minTier: "medium" },
+			{ name: "deep", minScore: 2.5, thinking: "high", minTier: "high" },
 		],
 		fallbackChain: [],
 	},
 	complexity: {
 		threshold: 0.5,
 		tiers: [
-			{ name: "light", minScore: 0, thinking: "low", costFloor: "low" },
-			{ name: "standard", minScore: 1.5, thinking: "medium", costFloor: "medium" },
-			{ name: "deep", minScore: 2.5, thinking: "high", costFloor: "high" },
+			{ name: "light", minScore: 0, thinking: "low", minTier: "low" },
+			{ name: "standard", minScore: 1.5, thinking: "medium", minTier: "medium" },
+			{ name: "deep", minScore: 2.5, thinking: "high", minTier: "high" },
 		],
 		fallbackChain: [],
 	},
@@ -188,9 +193,11 @@ function parseCandidate(value: unknown): Candidate | undefined {
 	const model = str(value.model);
 	const description = str(value.description);
 	if (!provider || !model || !description) return undefined;
-	const cost = COST_TIERS.includes(value.cost as CostTier) ? (value.cost as CostTier) : "medium";
+	const tier = CAPABILITY_TIERS.includes(value.tier as CapabilityTier)
+		? (value.tier as CapabilityTier)
+		: "medium";
 	const notFor = str(value.notFor);
-	return { provider, model, cost, description, ...(notFor ? { notFor } : {}) };
+	return { provider, model, tier, description, ...(notFor ? { notFor } : {}) };
 }
 
 function parseTier(value: unknown): Tier | undefined {
@@ -200,12 +207,12 @@ function parseTier(value: unknown): Tier | undefined {
 	const thinking = THINKING_LEVELS.includes(value.thinking as ThinkingLevel)
 		? (value.thinking as ThinkingLevel)
 		: "medium";
-	const costFloor = COST_TIERS.includes(value.costFloor as CostTier) ? (value.costFloor as CostTier) : "low";
+	const minTier = CAPABILITY_TIERS.includes(value.minTier as CapabilityTier) ? (value.minTier as CapabilityTier) : "low";
 	const minScore =
 		typeof value.minScore === "number" && Number.isFinite(value.minScore)
 			? Math.min(3, Math.max(0, value.minScore))
 			: 0;
-	return { name, minScore, thinking, costFloor };
+	return { name, minScore, thinking, minTier };
 }
 
 /** A track override may replace any subset of `threshold` / `tiers` / `fallbackChain`. */

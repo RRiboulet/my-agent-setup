@@ -20,7 +20,7 @@ a ready-to-paste task for the `subagent` tool.
    averaged to cancel Jev's first-option bias.
 3. **Policy** (code). A `noul` probability at or above the track threshold means
    "needed". The `score` picks a tier; each tier carries a thinking level and a
-   cost floor the chosen model must clear. A confident `choice` inside the floor
+   capability floor the chosen model must clear. A confident `choice` inside the floor
    is used; a low-confidence or unavailable choice walks the fallback chain.
 
 ## Configuration
@@ -34,32 +34,34 @@ and a `.env` beside this file is read for `OPENROUTER_API_KEY`.
   "enabled": true,
   "judge": { "provider": "openrouter", "model": "typesafe/jev-1.13", "timeoutMs": 8000, "minConfidence": 0.35 },
   "candidates": [
-    { "provider": "opencode-go", "model": "glm-5.3-flash", "cost": "low",
-      "description": "Fast and cheap. A quick second read for obvious mistakes." },
-    { "provider": "opencode-go", "model": "glm-5.3", "cost": "medium",
-      "description": "Competent mid-tier. A full correctness pass on ordinary work." },
-    { "provider": "opencode-go", "model": "kimi-k2", "cost": "high",
-      "description": "Strong reasoning. Hostile review of subtle or high-stakes work.",
-      "notFor": "Routine work a cheaper model handles well." }
+    { "provider": "opencode-go", "model": "deepseek-v4.1-flash", "tier": "low",
+      "description": "Fast and cheap. Catches obvious mistakes in small, low-risk changes.",
+      "notFor": "Subtle security, concurrency or data-integrity bugs." },
+    { "provider": "opencode-go", "model": "glm-5.3-flash", "tier": "medium",
+      "description": "Strong general reasoner at low cost. A full correctness and edge-case pass on ordinary work.",
+      "notFor": "Hostile review of subtle or security-sensitive changes." },
+    { "provider": "opencode-go", "model": "step-5-preview-free", "tier": "high",
+      "description": "The strongest reasoner available. For hostile, exhaustive or security-focused review.",
+      "notFor": "Routine changes a cheaper model handles well." }
   ],
   "tracks": {
     "adversarial": {
       "threshold": 0.5,
       "tiers": [
-        { "name": "light",    "minScore": 0,   "thinking": "low",    "costFloor": "low" },
-        { "name": "standard", "minScore": 1.5, "thinking": "medium", "costFloor": "medium" },
-        { "name": "deep",     "minScore": 2.5, "thinking": "high",   "costFloor": "high" }
+        { "name": "light",    "minScore": 0,   "thinking": "low",    "minTier": "low" },
+        { "name": "standard", "minScore": 1.5, "thinking": "medium", "minTier": "medium" },
+        { "name": "deep",     "minScore": 2.5, "thinking": "high",   "minTier": "high" }
       ],
-      "fallbackChain": ["opencode-go/glm-5.3", "opencode-go/glm-5.3-flash"]
+      "fallbackChain": ["opencode-go/glm-5.3-flash", "opencode-go/step-5-preview-free"]
     },
     "complexity": {
       "threshold": 0.5,
       "tiers": [
-        { "name": "light",    "minScore": 0,   "thinking": "low",    "costFloor": "low" },
-        { "name": "standard", "minScore": 1.5, "thinking": "medium", "costFloor": "medium" },
-        { "name": "deep",     "minScore": 2.5, "thinking": "high",   "costFloor": "high" }
+        { "name": "light",    "minScore": 0,   "thinking": "low",    "minTier": "low" },
+        { "name": "standard", "minScore": 1.5, "thinking": "medium", "minTier": "medium" },
+        { "name": "deep",     "minScore": 2.5, "thinking": "high",   "minTier": "high" }
       ],
-      "fallbackChain": ["opencode-go/glm-5.3"]
+      "fallbackChain": ["opencode-go/glm-5.3-flash"]
     }
   },
   "reverseChoice": true,
@@ -68,11 +70,17 @@ and a `.env` beside this file is read for `OPENROUTER_API_KEY`.
 }
 ```
 
-- **`cost`** (`low`/`medium`/`high`) is both the price and the capability rank the
-  cost floor is enforced against.
-- **`description`** / **`notFor`** are what Jev reads when choosing. With no
-  `candidates`, the list is synthesised from the models the session can use,
-  bucketed by catalogue price.
+- **`tier`** (`low`/`medium`/`high`) is the capability rank the tier floor is
+  enforced against. It is an explicit human judgement, **not** price: two models
+  can share a price and differ in strength, and a free model can be the strongest
+  one offered, so price cannot be trusted to rank them. A `deep` review needs a
+  model at or above `minTier: high`; if Jev picks below it, the pick is promoted.
+- **`description`** / **`notFor`** are what Jev reads when choosing — this is
+  where routing quality actually comes from. With no `candidates`, the list is
+  synthesised from the models the session can use and bucketed by catalogue
+  price, which is a coarse guess, not a capability judgement.
+- **`fallbackChain`** is per track: what to use when Jev's Choice is
+  low-confidence or the chosen model is unavailable.
 - **`onJudgeError`** is `"conservative"` (default): if Jev is unreachable,
   recommend both reviews at their middle rung. `"skip"` recommends nothing.
 - **`enabled`** (or `PI_REVIEW_TRIAGE_OFF=1`) turns the tool off; a disabled run

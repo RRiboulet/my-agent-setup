@@ -19,7 +19,7 @@ Added:
   (`ctx.modelRegistry.classify()`), so no second API client and the call lands
   in the session cost like any other — two `noul` gates, two `score` strength
   readings, and two `choice` model picks. Code owns everything after that: the
-  noul thresholds, the strength-to-tier mapping, each tier's cost floor and
+  noul thresholds, the strength-to-tier mapping, each tier's capability floor and
   thinking level, and the fallback chains. A confident Choice inside the floor
   is used; a cheap pick for a deep review is promoted; a low-confidence Choice
   or an unavailable model walks the configured chain rather than guessing. The
@@ -44,7 +44,7 @@ Added:
   synthesised from the models the session can actually use, bucketed by
   catalogue price, so the tool works on a fresh install. The decision functions
   are pure and unit-tested — config merge, signal scan, reverse-choice
-  averaging, the cost floor and the fallback walk — alongside a load guard and
+  averaging, the capability floor and the fallback walk — alongside a load guard and
   the manifest check.
 
 Fixes to the triage work, from an adversarial review before it shipped:
@@ -80,6 +80,15 @@ Fixes to the triage work, from an adversarial review before it shipped:
   disabled extension still spent a classifier request per call. The switch is
   honoured now, and a disabled run reports that nothing was judged rather than
   a verdict.
+- **The candidate field was named `cost` but used as a capability rank**, which
+  is simply wrong for this catalogue: `deepseek-v4.1-flash` and `glm-5.3-flash`
+  cost the same 0.15, and `step-5-preview-free` is free yet the strongest of the
+  three. The field is now `tier`, and a rung's floor is `minTier` — an explicit
+  human judgement the floor is enforced against. Price is still consulted, but
+  only to synthesise a list on a machine with no config, and `tierFromPrice` is
+  named and documented as the coarse guess it is. The reviewed models are thus
+  tiered by strength (`deepseek-v4.1-flash` low, `glm-5.3-flash` medium,
+  `step-5-preview-free` high), not by what they charge.
 - Smaller: the state cap is enforced against a caller-supplied `author_notes`
   of any size and re-checks after every trim; the reversed Choice questions are
   sent only when `reverseChoice` is on (they were paid for and discarded

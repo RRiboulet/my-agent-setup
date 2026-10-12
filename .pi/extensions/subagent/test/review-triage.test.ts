@@ -49,7 +49,7 @@ import {
 import {
 	clampThinking,
 	composePlan,
-	costBucket,
+	tierFromPrice,
 	disabledPlan,
 	failOpenPlan,
 	resolveCandidates,
@@ -79,9 +79,9 @@ function config(overrides: Partial<TriageConfig> = {}): TriageConfig {
 }
 
 const CANDIDATES: Candidate[] = [
-	{ provider: "p", model: "cheap", cost: "low", description: "cheap" },
-	{ provider: "p", model: "mid", cost: "medium", description: "mid" },
-	{ provider: "p", model: "strong", cost: "high", description: "strong" },
+	{ provider: "p", model: "cheap", tier: "low", description: "cheap" },
+	{ provider: "p", model: "mid", tier: "medium", description: "mid" },
+	{ provider: "p", model: "strong", tier: "high", description: "strong" },
 ];
 
 const AVAILABLE: AvailableModel[] = [
@@ -135,7 +135,7 @@ test("config: a file merges over defaults field by field", () => {
 		path,
 		JSON.stringify({
 			judge: { model: "typesafe/jev-latest", minConfidence: 0.6 },
-			candidates: [{ provider: "x", model: "y", cost: "high", description: "best" }],
+			candidates: [{ provider: "x", model: "y", tier: "high", description: "best" }],
 			tracks: { adversarial: { threshold: 0.8, fallbackChain: ["x/y"] } },
 			onJudgeError: "skip",
 		}),
@@ -146,6 +146,7 @@ test("config: a file merges over defaults field by field", () => {
 		assert.equal(loaded.judge.provider, "openrouter", "an unset field keeps the default");
 		assert.equal(loaded.judge.minConfidence, 0.6);
 		assert.equal(loaded.candidates.length, 1);
+		assert.equal(loaded.candidates[0]?.tier, "high", "the capability tier must survive the config read");
 		assert.equal(loaded.tracks.adversarial.threshold, 0.8);
 		assert.deepEqual(loaded.tracks.adversarial.fallbackChain, ["x/y"]);
 		// The complexity track was not overridden and must keep its default tiers.
@@ -551,11 +552,11 @@ test("judge: state trims the diff before anything else when over the cap", () =>
 // composition
 // ---------------------------------------------------------------------------
 
-test("compose: cost buckets follow catalogue price", () => {
-	assert.equal(costBucket(0.2), "low");
-	assert.equal(costBucket(3), "medium");
-	assert.equal(costBucket(30), "high");
-	assert.equal(costBucket(undefined), "medium");
+test("compose: tierFromPrice buckets by catalogue price", () => {
+	assert.equal(tierFromPrice(0.2), "low");
+	assert.equal(tierFromPrice(3), "medium");
+	assert.equal(tierFromPrice(30), "high");
+	assert.equal(tierFromPrice(undefined), "medium");
 });
 
 test("compose: tierForScore picks the last rung the score clears", () => {
@@ -587,7 +588,7 @@ test("compose: resolveCandidates prefers config, else buckets the available mode
 		],
 	);
 	assert.deepEqual(
-		synthesized.map((c) => c.cost),
+		synthesized.map((c) => c.tier),
 		["low", "medium", "high"],
 	);
 });
@@ -595,7 +596,7 @@ test("compose: resolveCandidates prefers config, else buckets the available mode
 test("compose: a confident Choice within the floor is used as-is", () => {
 	const selection = selectModel({
 		track: "adversarial",
-		tier: { name: "standard", minScore: 1.5, thinking: "medium", costFloor: "medium" },
+		tier: { name: "standard", minScore: 1.5, thinking: "medium", minTier: "medium" },
 		judgment: trackJudgment(),
 		config: config(),
 		candidates: CANDIDATES,
@@ -608,7 +609,7 @@ test("compose: a confident Choice within the floor is used as-is", () => {
 test("compose: a cheap pick for a deep review is promoted to clear the floor", () => {
 	const selection = selectModel({
 		track: "adversarial",
-		tier: { name: "deep", minScore: 2.5, thinking: "high", costFloor: "high" },
+		tier: { name: "deep", minScore: 2.5, thinking: "high", minTier: "high" },
 		judgment: trackJudgment({ choice: "p/cheap", choiceProbabilities: { "p/cheap": 0.9, "p/strong": 0.1 } }),
 		config: config(),
 		candidates: CANDIDATES,
@@ -621,7 +622,7 @@ test("compose: a cheap pick for a deep review is promoted to clear the floor", (
 test("compose: a low-confidence Choice walks the fallback chain", () => {
 	const selection = selectModel({
 		track: "adversarial",
-		tier: { name: "standard", minScore: 1.5, thinking: "medium", costFloor: "medium" },
+		tier: { name: "standard", minScore: 1.5, thinking: "medium", minTier: "medium" },
 		judgment: trackJudgment({ choiceConfidence: 0.1 }),
 		config: config({ tracks: { ...DEFAULT_TRACKS, adversarial: { ...DEFAULT_TRACKS.adversarial, fallbackChain: ["p/strong"] } } }),
 		candidates: CANDIDATES,
@@ -634,7 +635,7 @@ test("compose: a low-confidence Choice walks the fallback chain", () => {
 test("compose: an unavailable pick walks the chain to a usable model", () => {
 	const selection = selectModel({
 		track: "adversarial",
-		tier: { name: "standard", minScore: 1.5, thinking: "medium", costFloor: "medium" },
+		tier: { name: "standard", minScore: 1.5, thinking: "medium", minTier: "medium" },
 		judgment: trackJudgment({ choice: "p/mid" }),
 		config: config(),
 		candidates: CANDIDATES,
@@ -647,7 +648,7 @@ test("compose: an unavailable pick walks the chain to a usable model", () => {
 test("compose: no usable model leaves the choice to the agent with a note", () => {
 	const selection = selectModel({
 		track: "adversarial",
-		tier: { name: "standard", minScore: 1.5, thinking: "medium", costFloor: "medium" },
+		tier: { name: "standard", minScore: 1.5, thinking: "medium", minTier: "medium" },
 		judgment: trackJudgment(),
 		config: config(),
 		candidates: CANDIDATES,
@@ -741,10 +742,10 @@ test("compose: fail-open targets the middle rung of a custom tier table", () => 
 			adversarial: {
 				threshold: 0.5,
 				tiers: [
-					{ name: "a", minScore: 0, thinking: "low", costFloor: "low" },
-					{ name: "b", minScore: 1, thinking: "medium", costFloor: "medium" },
-					{ name: "c", minScore: 2, thinking: "high", costFloor: "high" },
-					{ name: "d", minScore: 3, thinking: "max", costFloor: "high" },
+					{ name: "a", minScore: 0, thinking: "low", minTier: "low" },
+					{ name: "b", minScore: 1, thinking: "medium", minTier: "medium" },
+					{ name: "c", minScore: 2, thinking: "high", minTier: "high" },
+					{ name: "d", minScore: 3, thinking: "max", minTier: "high" },
 				],
 				fallbackChain: [],
 			},

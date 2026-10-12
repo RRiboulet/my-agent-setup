@@ -205,13 +205,13 @@ export function buildQuestions(
 		},
 		[QUESTION_IDS.adversarialModel]: modelChoice(
 			"Which candidate model is appropriate to run the adversarial review? Weigh its reasoning " +
-				"strength and cost against the strength this change deserves, and pick the cheapest model " +
+				"strength against how demanding this review is, and pick the least capable model " +
 				"that would still mount a convincing hostile review.",
 			criteria,
 		),
 		[QUESTION_IDS.complexityModel]: modelChoice(
 			"Which candidate model is appropriate to run the complexity and design review? Weigh its " +
-				"reasoning strength and cost against how much design judgement this change needs.",
+				"reasoning strength against how much design judgement this change needs.",
 			criteria,
 		),
 	};
@@ -222,13 +222,13 @@ export function buildQuestions(
 	if (config.reverseChoice) {
 		questions[QUESTION_IDS.adversarialModelReversed] = modelChoice(
 			"Which candidate model is appropriate to run the adversarial review? Weigh its reasoning " +
-				"strength and cost against the strength this change deserves, and pick the cheapest model " +
+				"strength against how demanding this review is, and pick the least capable model " +
 				"that would still mount a convincing hostile review.",
 			reversed,
 		);
 		questions[QUESTION_IDS.complexityModelReversed] = modelChoice(
 			"Which candidate model is appropriate to run the complexity and design review? Weigh its " +
-				"reasoning strength and cost against how much design judgement this change needs.",
+				"reasoning strength against how much design judgement this change needs.",
 			reversed,
 		);
 	}

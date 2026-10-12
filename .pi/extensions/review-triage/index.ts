@@ -5,7 +5,7 @@
  * code gathers the evidence and packages it; Jev judges whether the change
  * needs adversarial and/or complexity review, how hard each should push, and
  * which of the allowed models should run it; code applies the thresholds, the
- * cost floor, the fallback chains and the thinking level. The result is a plan,
+ * capability floor, the fallback chains and the thinking level. The result is a plan,
  * not an action — the agent starts the reviews with the `subagent` tool.
  *
  * The whole decision is appended to the session as a `review-triage` entry, so
@@ -23,7 +23,7 @@ import { collectEvidence, type TriageTarget } from "./evidence.ts";
 import { askJudge, buildState, JudgeError, type Judgment } from "./judge.ts";
 import {
 	composePlan,
-	costBucket,
+	tierFromPrice,
 	disabledPlan,
 	failOpenPlan,
 	resolveCandidates,
@@ -66,7 +66,7 @@ export function resolveTarget(params: TriageParams): TriageTarget {
 function currentModel(ctx: ExtensionContext): ModelRef | undefined {
 	const model = ctx.model;
 	if (!model) return undefined;
-	return { provider: model.provider, model: model.id, cost: costBucket(model.cost?.input) };
+	return { provider: model.provider, model: model.id, tier: tierFromPrice(model.cost?.input) };
 }
 
 function availableModels(ctx: ExtensionContext): AvailableModel[] {
@@ -244,7 +244,7 @@ export default function (pi: ExtensionAPI) {
 		description:
 			"Decide whether a just-finished change needs an independent adversarial review, a complexity/design " +
 			"review, or neither — and with which model and thinking level. Gathers the git diff as evidence and " +
-			"asks a calibrated decision model (Jev) for the judgement; code applies the thresholds and the cost " +
+			"asks a calibrated decision model (Jev) for the judgement; code applies the thresholds and the capability " +
 			"floor. Returns a plan; it does not launch anything. Use it before committing or opening a PR when " +
 			"you are unsure how much independent review the change warrants.",
 		promptSnippet: "Gate a finished change: does it need adversarial or complexity review, and how strong?",

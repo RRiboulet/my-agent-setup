@@ -6,7 +6,7 @@
  *
  *   - a noul probability at or above the track's threshold means the review is
  *     recommended;
- *   - the strength score picks a tier, and each tier carries a cost floor and a
+ *   - the strength score picks a tier, and each tier carries an capability floor and a
  *     thinking level;
  *   - Jev's Choice names the model, but only within the floor — a confident
  *     pick of a cheap model for a deep review is promoted, because the score,
@@ -18,8 +18,8 @@
  * can be replayed from a saved judgement and a config.
  */
 
-import type { Candidate, CostTier, ThinkingLevel, Tier, TrackConfig, TriageConfig, TrackName } from "./config.ts";
-import { COST_RANK, THINKING_RANK } from "./config.ts";
+import type { Candidate, CapabilityTier, ThinkingLevel, Tier, TrackConfig, TriageConfig, TrackName } from "./config.ts";
+import { CAPABILITY_RANK, THINKING_RANK } from "./config.ts";
 import type { Judgment, TrackJudgment } from "./judge.ts";
 import { candidateKey } from "./judge.ts";
 
@@ -35,7 +35,7 @@ export interface AvailableModel {
 export interface ModelRef {
 	provider: string;
 	model: string;
-	cost: CostTier;
+	tier: CapabilityTier;
 }
 
 export interface TrackPlan {
@@ -66,12 +66,13 @@ export interface ReviewPlan {
 }
 
 /**
- * Price bucket for a catalogue model, used only for models named by a fallback
- * chain rather than described in config. Thresholds are per million input
- * tokens; they are coarse on purpose, because a chain entry is a last resort
- * and the exact rung matters less than "is this in the ballpark".
+ * Capability tier inferred from catalogue price. This exists only for models
+ * that appear in a fallback chain but not in the curated candidate list — and
+ * for the synthesised list on a machine with no config at all. It is a coarse
+ * last resort: price cannot tell `deepseek-v4.1-flash` from `glm-5.3-flash`
+ * (both 0.15), which is why the real ordering comes from an explicit `tier`.
  */
-export function costBucket(inputPerMillion: number | undefined): CostTier {
+export function tierFromPrice(inputPerMillion: number | undefined): CapabilityTier {
 	if (inputPerMillion === undefined || !Number.isFinite(inputPerMillion)) return "medium";
 	if (inputPerMillion < 1) return "low";
 	if (inputPerMillion < 5) return "medium";
@@ -82,7 +83,8 @@ export function costBucket(inputPerMillion: number | undefined): CostTier {
  * The candidate list. A curated config list wins; otherwise, and only then, the
  * models this session can actually use are ranked by catalogue price and split
  * into three buckets, so a fresh install still gets a working Choice without
- * anyone writing config first.
+ * anyone writing config first. That fallback is a price guess, not a capability
+ * judgement — a config with real `tier`s is what makes the Choice meaningful.
  */
 export function resolveCandidates(config: TriageConfig, available: readonly AvailableModel[]): Candidate[] {
 	if (config.candidates.length > 0) return [...config.candidates];
@@ -94,20 +96,20 @@ export function resolveCandidates(config: TriageConfig, available: readonly Avai
 
 	// Up to three per bucket: enough for a real Choice, short enough that Jev is
 	// not choosing from a wall of near-identical ids.
-	const perBucket: Record<CostTier, number> = { low: 0, medium: 0, high: 0 };
+	const perBucket: Record<CapabilityTier, number> = { low: 0, medium: 0, high: 0 };
 	const candidates: Candidate[] = [];
 	for (const model of ranked) {
-		const cost = costBucket(model.cost?.input);
-		if (perBucket[cost] >= 3) continue;
-		perBucket[cost] += 1;
+		const tier = tierFromPrice(model.cost?.input);
+		if (perBucket[tier] >= 3) continue;
+		perBucket[tier] += 1;
 		candidates.push({
 			provider: model.provider,
 			model: model.id,
-			cost,
+			tier,
 			description:
-				cost === "low"
-					? "Cheapest price tier. A quick second read for obvious mistakes."
-					: cost === "medium"
+				tier === "low"
+					? "Lowest price tier. A quick second read for obvious mistakes."
+					: tier === "medium"
 						? "Middle price tier. A full correctness pass on ordinary work."
 						: "Highest price tier. Expected to be the strongest reasoner; for hostile or high-stakes review.",
 		});
@@ -181,10 +183,10 @@ function refFromKey(
 	available: readonly AvailableModel[],
 ): ModelRef | undefined {
 	const described = candidates.find((candidate) => candidateKey(candidate) === key);
-	if (described) return { provider: described.provider, model: described.model, cost: described.cost };
+	if (described) return { provider: described.provider, model: described.model, tier: described.tier };
 	const model = availableModelFor(key, available);
 	if (!model) return undefined;
-	return { provider: model.provider, model: model.id, cost: costBucket(model.cost?.input) };
+	return { provider: model.provider, model: model.id, tier: tierFromPrice(model.cost?.input) };
 }
 
 function isAvailable(ref: ModelRef, available: readonly AvailableModel[]): boolean {
@@ -199,10 +201,10 @@ interface Selection {
 
 /**
  * Pick the review model. The order is the policy:
- *   1. Jev's Choice, when it is confident and clears the tier's cost floor;
+ *   1. Jev's Choice, when it is confident and clears the tier's capability floor;
  *   2. the highest-probability candidate that clears the floor;
  *   3. the configured fallback chain, floor-clearing entries first;
- *   4. the cheapest floor-clearing model that is available;
+ *   4. the least capable floor-clearing model that is available;
  *   5. anything available at all, then the session model, with a note.
  */
 export function selectModel(args: {
@@ -216,8 +218,8 @@ export function selectModel(args: {
 }): Selection {
 	const { track, tier, judgment, config, candidates, available, current } = args;
 	const notes: string[] = [];
-	const floor = COST_RANK[tier.costFloor];
-	const clearsFloor = (ref: ModelRef) => COST_RANK[ref.cost] >= floor;
+	const floor = CAPABILITY_RANK[tier.minTier];
+	const clearsFloor = (ref: ModelRef) => CAPABILITY_RANK[ref.tier] >= floor;
 	const usable = (ref: ModelRef | undefined) =>
 		Boolean(ref && clearsFloor(ref) && isAvailable(ref, available));
 
@@ -227,13 +229,13 @@ export function selectModel(args: {
 	if (pick && !lowConfidence) {
 		if (!clearsFloor(pick)) {
 			notes.push(
-				`Jev chose ${judgment.choice} (${pick.cost}) below the ${tier.costFloor} floor for a ${tier.name} review; promoted.`,
+				`Jev chose ${judgment.choice} (${pick.tier}) below the ${tier.minTier} floor for a ${tier.name} review; promoted.`,
 			);
 		} else if (!isAvailable(pick, available)) {
 			notes.push(`Jev chose ${judgment.choice}, which this session cannot use; used the fallback policy.`);
 		} else {
-			if (COST_RANK[pick.cost] > floor) {
-				notes.push(`Jev chose ${judgment.choice} (${pick.cost}), above the ${tier.costFloor} floor for a ${tier.name} review; accepted.`);
+			if (CAPABILITY_RANK[pick.tier] > floor) {
+				notes.push(`Jev chose ${judgment.choice} (${pick.tier}), above the ${tier.minTier} floor for a ${tier.name} review; accepted.`);
 			}
 			return { model: pick, fallbackUsed: false, notes };
 		}
@@ -252,7 +254,7 @@ export function selectModel(args: {
 	const ranked = lowConfidence
 		? []
 		: [...candidates]
-		.map((candidate) => ({ ref: { provider: candidate.provider, model: candidate.model, cost: candidate.cost } }))
+		.map((candidate) => ({ ref: { provider: candidate.provider, model: candidate.model, tier: candidate.tier } }))
 		.filter(({ ref }) => clearsFloor(ref))
 		.sort(
 			(a, b) =>
@@ -272,25 +274,25 @@ export function selectModel(args: {
 	for (const ref of refs) if (usable(ref)) return { model: ref, fallbackUsed: true, notes };
 	for (const ref of refs) {
 		if (isAvailable(ref, available)) {
-			notes.push(`${ref.provider}/${ref.model} is below the ${tier.costFloor} floor but is the only configured fallback.`);
+			notes.push(`${ref.provider}/${ref.model} is below the ${tier.minTier} floor but is the only configured fallback.`);
 			return { model: ref, fallbackUsed: true, notes };
 		}
 	}
 
-	// 4. Cheapest available candidate that still clears the floor.
-	const cheapest = candidates
-		.map((candidate): ModelRef => ({ provider: candidate.provider, model: candidate.model, cost: candidate.cost }))
+	// 4. Least capable available candidate that still clears the floor.
+	const leastCapable = candidates
+		.map((candidate): ModelRef => ({ provider: candidate.provider, model: candidate.model, tier: candidate.tier }))
 		.filter((ref) => usable(ref))
-		.sort((a, b) => COST_RANK[a.cost] - COST_RANK[b.cost])[0];
-	if (cheapest) return { model: cheapest, fallbackUsed: true, notes };
+		.sort((a, b) => CAPABILITY_RANK[a.tier] - CAPABILITY_RANK[b.tier])[0];
+	if (leastCapable) return { model: leastCapable, fallbackUsed: true, notes };
 
-	// 5. Cheapest available of any rank, then the session's current model.
+	// 5. Least capable available of any rank, then the session's current model.
 	const anyAvailable = candidates
-		.map((candidate): ModelRef => ({ provider: candidate.provider, model: candidate.model, cost: candidate.cost }))
+		.map((candidate): ModelRef => ({ provider: candidate.provider, model: candidate.model, tier: candidate.tier }))
 		.filter((ref) => isAvailable(ref, available))
-		.sort((a, b) => COST_RANK[a.cost] - COST_RANK[b.cost])[0];
+		.sort((a, b) => CAPABILITY_RANK[a.tier] - CAPABILITY_RANK[b.tier])[0];
 	if (anyAvailable) {
-		notes.push(`No model clearing the ${tier.costFloor} floor is available; downgraded to ${anyAvailable.cost}.`);
+		notes.push(`No model clearing the ${tier.minTier} floor is available; downgraded to ${anyAvailable.tier}.`);
 		return { model: anyAvailable, fallbackUsed: true, notes };
 	}
 	if (current && isAvailable(current, available)) {

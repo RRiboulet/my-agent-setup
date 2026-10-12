@@ -28,7 +28,7 @@ function formatTrack(track: TrackPlan): string {
 	];
 	if (track.model) {
 		lines.push(
-			`  model ${track.model.provider}/${track.model.model} (${track.model.cost}) · thinking ${track.thinking}${track.fallbackUsed ? " · fallback" : ""}`,
+			`  model ${track.model.provider}/${track.model.model} (${track.model.tier}) · thinking ${track.thinking}${track.fallbackUsed ? " · fallback" : ""}`,
 		);
 	} else {
 		lines.push(`  no review model available — choose one for a ${track.tier} review, thinking ${track.thinking}`);
