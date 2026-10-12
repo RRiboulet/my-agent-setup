@@ -91,7 +91,12 @@ export function buildState(evidence: ChangeEvidence, stateChars: number): Record
 	};
 	if (evidence.base) change.base = evidence.base;
 	if (evidence.ref) change.ref = evidence.ref;
+	if (evidence.baseline) change.baseline = evidence.baseline;
 	if (evidence.error) change.inspection_error = evidence.error;
+	// Instability is a decision-grade fact, not just a limitation string: it is
+	// what the skip gate refuses on, so Jev weighs it explicitly rather than
+	// finding it buried in a limitations list.
+	if (evidence.unstable) change.snapshot_unstable = true;
 	if (evidence.patchExcerpt) change.diff_excerpt = evidence.patchExcerpt;
 
 	// Structural facts the collector observed, and the gaps it recorded, so Jev

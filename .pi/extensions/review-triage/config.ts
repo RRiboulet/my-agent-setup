@@ -176,6 +176,12 @@ export interface TriageConfig {
 	stateChars: number;
 	/** Optional dotenv file loaded for OPENROUTER_API_KEY et al. before judging. */
 	envFile: string;
+	/**
+	 * Default baseline ref for the `task` scope: the ref captured (or pinned)
+	 * before a task began, so its diff excludes work that predates the task. A
+	 * caller-supplied `baseline` wins over this.
+	 */
+	taskBaselineRef?: string;
 }
 
 export function agentDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -481,6 +487,7 @@ export function loadConfig(options: LoadConfigOptions = {}): TriageConfig {
 		if ("reverseChoice" in file) config.reverseChoice = bool(file.reverseChoice, config.reverseChoice);
 		config.stateChars = Math.round(num(file.stateChars, config.stateChars, 1_000, 60_000));
 		config.envFile = str(file.envFile) ?? config.envFile;
+		config.taskBaselineRef = str(file.taskBaselineRef) ?? config.taskBaselineRef;
 	}
 
 	// Environment wins so a one-off run can be redirected without editing files.

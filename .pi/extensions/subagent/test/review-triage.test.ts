@@ -37,8 +37,10 @@ import {
 import {
 	buildRangeCommand,
 	collectEvidence,
+	detectInstability,
 	detectSignals,
 	indicatorsFor,
+	INSTABILITY_MARKERS,
 	parseNumstatZ,
 	parsePathListZ,
 	parseRawZ,
@@ -653,6 +655,188 @@ test("evidence: a merge commit's empty diff is explained, not silently empty", a
 });
 
 // ---------------------------------------------------------------------------
+// task scope and snapshot stability (§6)
+// ---------------------------------------------------------------------------
+
+function stableExec(untracked = ""): { exec: GitExec; commands: string[] } {
+	const commands: string[] = [];
+	const exec: GitExec = async (_command, args) => {
+		const key = args.join(" ");
+		commands.push(key);
+		if (key.includes("rev-parse")) return { stdout: "/repo/.git\n", stderr: "", code: 0 };
+		if (key.includes("--diff-filter=U")) return { stdout: "", stderr: "", code: 0 };
+		if (key.includes("--numstat")) return { stdout: "2\t1\tsrc/task.ts\0", stderr: "", code: 0 };
+		if (key.includes("--raw")) return { stdout: ":100644 100644 aaa bbb M\0src/task.ts\0", stderr: "", code: 0 };
+		if (key.includes("--unified=0")) return { stdout: "+x\n-x\n", stderr: "", code: 0 };
+		return { stdout: untracked, stderr: "", code: 0 };
+	};
+	return { exec, commands };
+}
+
+test("evidence: the task scope diffs the baseline ref, never HEAD", async () => {
+	const { exec, commands } = stableExec();
+	const evidence = await collectEvidence(exec, {
+		summary: "did the task",
+		target: { kind: "task", baselineRef: "abc123" },
+		fsExists: () => false,
+	});
+	assert.equal(evidence.error, undefined);
+	assert.equal(evidence.target, "task");
+	assert.equal(evidence.baseline, "abc123");
+	assert.equal(evidence.unstable, false);
+	for (const marker of ["--numstat", "--raw", "--unified=0"]) {
+		const command = commands.find((issued) => issued.includes(marker));
+		assert.ok(command, `a ${marker} command was issued`);
+		assert.match(command, /abc123/u, "the range is the task's baseline");
+		assert.doesNotMatch(command, /HEAD/u, "pre-existing dirty work must not be attributed to the task");
+	}
+});
+
+test("evidence: the task scope lists untracked files but cannot baseline them", async () => {
+	const { exec, commands } = stableExec("src/new.ts\0");
+	const evidence = await collectEvidence(exec, {
+		summary: "x",
+		target: { kind: "task", baselineRef: "abc123" },
+		fsExists: () => false,
+	});
+	assert.deepEqual(evidence.newFiles, ["src/new.ts"]);
+	const slug = evidence.limitations.find((limitation) => limitation.text.includes("cannot be attributed"));
+	assert.ok(slug, "the attribution caveat is recorded");
+	assert.equal(slug.blocksSkip, false, "it is an attribution caveat, not missing evidence");
+	assert.ok(commands.every((issued) => !issued.includes("git show")), "the task scope never uses git show");
+});
+
+test("evidence: a task scope without a baseline fails the scope, and takes no diff", async () => {
+	const { exec, commands } = stableExec();
+	const evidence = await collectEvidence(exec, { summary: "x", target: { kind: "task" } });
+	assert.match(evidence.error ?? "", /baseline ref/u);
+	assert.ok(!commands.some((issued) => issued.includes("--numstat")), "no diff was taken");
+	assert.equal(evidence.unstable, false, "nothing was inspected, so nothing was unstable");
+});
+
+test("evidence: an in-progress merge marks the snapshot unstable", async () => {
+	const { exec } = stableExec();
+	const evidence = await collectEvidence(exec, {
+		summary: "x",
+		target: { kind: "uncommitted" },
+		fsExists: (path) => path.endsWith("MERGE_HEAD"),
+	});
+	assert.equal(evidence.unstable, true);
+	assert.ok(evidence.limitations.some((limitation) => limitation.text.includes("a merge is in progress")));
+	assert.ok(
+		!evidence.limitations.some((limitation) => limitation.blocksSkip && limitation.text.includes("unstable")),
+		"instability is its own gate, not a borrowed incompleteness",
+	);
+});
+
+test("evidence: a probe that throws refuses to read as stable, and says so once", async () => {
+	const { exec } = stableExec();
+	const evidence = await collectEvidence(exec, {
+		summary: "x",
+		target: { kind: "uncommitted" },
+		fsExists: () => {
+			throw new Error("eproperm");
+		},
+	});
+	assert.equal(evidence.unstable, true);
+	assert.equal(
+		evidence.limitations.filter((limitation) => limitation.text.includes("stability probe")).length,
+		1,
+		"two probes, one failure record",
+	);
+});
+
+test("evidence: stability that cannot be located reads as unstable", async () => {
+	const commands: string[] = [];
+	const exec: GitExec = async (_command, args) => {
+		const key = args.join(" ");
+		commands.push(key);
+		if (key.includes("rev-parse")) return { stdout: "", stderr: "", code: 0 };
+		if (key.includes("--numstat")) return { stdout: "1\t0\tsrc/a.ts\0", stderr: "", code: 0 };
+		return { stdout: "", stderr: "", code: 0 };
+	};
+	const evidence = await collectEvidence(exec, { summary: "x", target: { kind: "uncommitted" } });
+	assert.equal(evidence.unstable, true);
+	assert.equal(evidence.error, undefined, "the diffs still read; only stability failed");
+});
+
+test("evidence: a quiet .git reads as stable", async () => {
+	const { exec } = stableExec();
+	const evidence = await collectEvidence(exec, {
+		summary: "x",
+		target: { kind: "uncommitted" },
+		fsExists: () => false,
+	});
+	assert.equal(evidence.unstable, false);
+});
+
+test("evidence: a numstat failure still carries the stability facts", async () => {
+	const exec: GitExec = async (_command, args) => {
+		const key = args.join(" ");
+		if (key.includes("numstat")) return { stdout: "", stderr: "lock contention", code: 128 };
+		if (key.includes("rev-parse")) return { stdout: "/repo/.git\n", stderr: "", code: 0 };
+		return { stdout: "", stderr: "", code: 0 };
+	};
+	const evidence = await collectEvidence(exec, {
+		summary: "x",
+		target: { kind: "uncommitted" },
+		fsExists: (path) => path.endsWith("index.lock"),
+	});
+	assert.ok(evidence.error, "the inspection failed");
+	assert.equal(evidence.unstable, true, "stability is verified before the diff is trusted");
+	assert.ok(evidence.limitations.some((limitation) => limitation.text.includes("the git index is locked")));
+});
+
+test("evidence: an unstable empty-commit inspection still carries its stability facts", async () => {
+	const exec: GitExec = async (_command, args) => {
+		const key = args.join(" ");
+		if (key.includes("rev-parse")) return { stdout: "/repo/.git\n", stderr: "", code: 0 };
+		if (key.includes("--raw")) return { stdout: "", stderr: "unreadable", code: 128 };
+		return { stdout: "", stderr: "", code: 0 };
+	};
+	const evidence = await collectEvidence(exec, {
+		summary: "merge",
+		target: { kind: "commit", ref: "abc" },
+		fsExists: (path) => path.endsWith("MERGE_HEAD"),
+	});
+	assert.ok(evidence.error);
+	assert.equal(evidence.unstable, true);
+	assert.ok(evidence.limitations.some((limitation) => limitation.text.includes("a merge is in progress")));
+});
+
+test("evidence: committed work since the baseline is caveated as attributed, and only for the task scope", async () => {
+	const { exec } = stableExec();
+	const task = await collectEvidence(exec, {
+		summary: "x",
+		target: { kind: "task", baselineRef: "abc123" },
+		fsExists: () => false,
+	});
+	assert.ok(
+		task.limitations.some((limitation) => limitation.text.includes("commits that landed on the branch for other reasons")),
+	);
+	const uncommitted = await collectEvidence(exec, {
+		summary: "x",
+		target: { kind: "uncommitted" },
+		fsExists: () => false,
+	});
+	assert.ok(
+		!uncommitted.limitations.some((limitation) => limitation.text.includes("commits that landed on the branch for other reasons")),
+		"the caveat names a baseline; the default scope has none",
+	);
+});
+
+test("evidence: every instability marker route is named and matched", () => {
+	assert.ok(INSTABILITY_MARKERS.some((marker) => marker.file === "rebase-merge" && /rebase/u.test(marker.reason)));
+	assert.ok(INSTABILITY_MARKERS.some((marker) => marker.file === "index.lock"));
+	for (const marker of INSTABILITY_MARKERS) {
+		const probed = detectInstability("/git", (path) => path === `/git/${marker.file}`);
+		assert.deepEqual(probed, { reasons: [marker.reason], failed: false });
+	}
+	const probed = detectInstability("/git", () => false);
+	assert.deepEqual(probed, { reasons: [], failed: false });
+});
+
+// ---------------------------------------------------------------------------
 // judge
 // ---------------------------------------------------------------------------
 
@@ -862,6 +1046,7 @@ test("judge: a state over the cap is bounded even with huge notes", () => {
 		summary: "s".repeat(5_000),
 		patchExcerpt: "y".repeat(5_000),
 		truncated: false,
+		unstable: false,
 	};
 	const state = buildState(evidence, 2_000);
 	assert.ok(JSON.stringify(state).length <= 3_000, `state was ${JSON.stringify(state).length} chars`);
@@ -881,6 +1066,7 @@ test("judge: state trims the diff before anything else when over the cap", () =>
 		summary: "x",
 		patchExcerpt: "y".repeat(5_000),
 		truncated: false,
+		unstable: false,
 	};
 	const state = buildState(evidence, 1_000);
 	const change = state.change as Record<string, unknown>;
@@ -888,6 +1074,28 @@ test("judge: state trims the diff before anything else when over the cap", () =>
 	assert.equal(change.diff_omitted, true, "the diff was removed, so say removed");
 	assert.equal(change.diff_truncated, false, "git did not truncate it; don't claim it did");
 	assert.ok(JSON.stringify(state).length <= 1_200);
+});
+
+test("judge: the state names the task baseline and an unstable snapshot", () => {
+	const evidence = {
+		target: "task" as const,
+		isGit: true,
+		files: [],
+		added: 0,
+		removed: 0,
+		newFiles: [],
+		deletedFiles: [],
+		signals: [],
+		notes: [],
+		summary: "x",
+		patchExcerpt: "",
+		truncated: false,
+		unstable: true,
+		baseline: "abc123",
+	};
+	const change = buildState(evidence, 12_000).change as Record<string, unknown>;
+	assert.equal(change.baseline, "abc123", "the scope the evidence was measured from");
+	assert.equal(change.snapshot_unstable, true, "a decision-grade fact, not a buried limitation");
 });
 
 // ---------------------------------------------------------------------------
@@ -1089,6 +1297,18 @@ test("compose: a recommended plan uses the profile's model and thinking verbatim
 	assert.ok(plan.complexity.task?.includes("over-engineered"));
 });
 
+test("compose: unstable evidence cannot skip, even with a high P(none)", () => {
+	const plan = compose({
+		judgment: judgment({
+			adversarial: track({ skipConfidence: 0.99, choice: "none" }),
+			complexity: track({ skipConfidence: 0.99, choice: "none" }),
+		}),
+		gates: { stable: false, conflicts: false, evidenceComplete: true, mandatoryReview: false },
+	});
+	assert.notEqual(plan.adversarial.status, "skipped");
+	assert.ok(plan.adversarial.reasonCodes.includes(POLICY_REASONS.unstableSnapshot));
+});
+
 test("compose: a plan where policy allows skip needs no task or model", () => {
 	const plan = compose({
 		judgment: judgment({
@@ -1198,6 +1418,22 @@ test("acceptance: composing a plan is pure and renders reason codes as plain tex
 // ---------------------------------------------------------------------------
 // command parsing
 // ---------------------------------------------------------------------------
+
+test("command: the task scope resolves a baseline from args or config", () => {
+	assert.deepEqual(resolveTarget(parseTriageArgs("task abc123")), { kind: "task", baselineRef: "abc123" });
+	assert.deepEqual(resolveTarget(parseTriageArgs("task"), "dev~2"), { kind: "task", baselineRef: "dev~2" });
+	assert.deepEqual(resolveTarget(parseTriageArgs("task")), { kind: "task" }, "no silent HEAD fallback");
+	assert.deepEqual(resolveTarget(parseTriageArgs("--baseline abc")), { kind: "task", baselineRef: "abc" });
+	assert.deepEqual(resolveTarget(parseTriageArgs("task abc --baseline dev")), {
+		kind: "task",
+		baselineRef: "dev",
+	}, "flag beats positional");
+	assert.deepEqual(
+		resolveTarget({ summary: "x", target: "uncommitted", baseline: "abc" }),
+		{ kind: "task", baselineRef: "abc" },
+		"a supplied baseline is never silently ignored",
+	);
+});
 
 test("command: positional and flag forms both resolve the target", () => {
 	assert.deepEqual(resolveTarget(parseTriageArgs("branch dev")), { kind: "branch", base: "dev" });

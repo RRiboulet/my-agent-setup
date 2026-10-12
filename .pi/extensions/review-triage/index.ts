@@ -41,7 +41,7 @@ import type { PolicyGates } from "./policy.ts";
 import { formatPlan } from "./format.ts";
 import { join } from "node:path";
 
-const TARGETS = ["uncommitted", "branch", "commit", "none"] as const;
+const TARGETS = ["uncommitted", "branch", "commit", "task", "none"] as const;
 type TargetParam = (typeof TARGETS)[number];
 
 export interface TriageParams {
@@ -49,6 +49,8 @@ export interface TriageParams {
 	target?: TargetParam;
 	base?: string;
 	ref?: string;
+	/** Baseline ref for the `task` target. */
+	baseline?: string;
 	notes?: string[];
 	cwd?: string;
 }
@@ -60,8 +62,19 @@ interface TriageRun {
 	evidence: { target: string; files: string[]; added: number; removed: number; signals: string[]; error?: string };
 }
 
-export function resolveTarget(params: TriageParams): TriageTarget {
+export function resolveTarget(params: TriageParams, taskBaselineRef?: string): TriageTarget {
 	if (params.target === "none") return { kind: "none" };
+	if (params.target === "task" || params.baseline) {
+		// The task scope measures the worktree against the baseline ref, so
+		// work that predates the task stays out of the evidence. A supplied
+		// baseline always implies this scope, whatever target was also named —
+		// the caller asked for baseline-scoped evidence and a baseline is
+		// never silently ignored. Neither supplied nor configured leaves the
+		// scope without a snapshot to measure from, which the collector
+		// reports as an error.
+		const baseline = params.baseline?.trim() || taskBaselineRef?.trim();
+		return { kind: "task", ...(baseline ? { baselineRef: baseline } : {}) };
+	}
 	if (params.target === "commit" || (!params.target && params.ref)) {
 		return { kind: "commit", ...(params.ref ? { ref: params.ref } : {}) };
 	}
@@ -125,7 +138,7 @@ async function runTriage(
 		ladder: config.thinkingLadder,
 		available,
 	});
-	const target = resolveTarget(params);
+	const target = resolveTarget(params, config.taskBaselineRef);
 
 	onProgress?.("gathering change evidence");
 	const evidence = await collectEvidence((command, args, execOptions) => pi.exec(command, args, execOptions), {
@@ -143,12 +156,11 @@ async function runTriage(
 		removed: evidence.removed,
 		signals: evidence.signals,
 	};
-	// The collector/instability work (§6) will fill `stable` from real signals;
-	// until then the extension is explicit that it assumed the snapshot stable.
-	// Conflicts are read from the collector's per-file flags, and a limitation
-	// that marks evidence as unsafe to skip keeps the review.
+	// Every gate reads from real signals: `stable` comes from the probe around
+	// collection (§6), conflicts from the collector's per-file flags, and a
+	// limitation that marks evidence as unsafe to skip keeps the review.
 	const gates: PolicyGates = {
-		stable: true,
+		stable: !evidence.unstable,
 		conflicts: Object.values(evidence.indicators).some((flags) => flags.conflict),
 		evidenceComplete: !evidence.error && !evidence.limitations.some((limitation) => limitation.blocksSkip),
 		mandatoryReview: config.policy.mandatoryReview ?? false,
@@ -232,6 +244,8 @@ export function parseTriageArgs(raw: string): TriageParams {
 		} else if (token.startsWith("--note=")) notes.push(token.slice("--note=".length));
 		else if (token === "--base") params.base = unquote(tokens[++i]);
 		else if (token.startsWith("--base=")) params.base = token.slice("--base=".length);
+		else if (token === "--baseline") params.baseline = unquote(tokens[++i]);
+		else if (token.startsWith("--baseline=")) params.baseline = token.slice("--baseline=".length);
 		else if (token === "--ref") params.ref = unquote(tokens[++i]);
 		else if (token.startsWith("--ref=")) params.ref = token.slice("--ref=".length);
 		else positional.push(token);
@@ -244,6 +258,10 @@ export function parseTriageArgs(raw: string): TriageParams {
 	} else if (mode === "commit") {
 		params.target = "commit";
 		if (positional[1]) params.ref = positional[1];
+	} else if (mode === "task") {
+		params.target = "task";
+		// An explicit --baseline flag outranks the positional ref.
+		if (positional[1] && params.baseline === undefined) params.baseline = positional[1];
 	} else if (mode === "none") {
 		params.target = "none";
 	} else if (mode === "uncommitted") {
@@ -279,11 +297,17 @@ export default function (pi: ExtensionAPI) {
 			target: Type.Optional(
 				StringEnum(TARGETS, {
 					description:
-						"What to inspect: 'uncommitted' (default), 'branch' (needs base), 'commit' (needs ref), or 'none' to judge from the summary alone",
+						"What to inspect: 'uncommitted' (default), 'branch' (needs base), 'commit' (needs ref), 'task' (needs a baseline ref — diffs against it, so pre-existing dirty work is not attributed to the task), or 'none' to judge from the summary alone. Supplying a baseline implies the task scope",
 				}),
 			),
 			base: Type.Optional(Type.String({ description: "Base branch for target='branch' (default 'dev')" })),
 			ref: Type.Optional(Type.String({ description: "Commit sha for target='commit'" })),
+			baseline: Type.Optional(
+				Type.String({
+					description:
+						"Baseline ref for target='task': the ref captured (or configured) before the task began; falls back to the configured taskBaselineRef. Supplying it implies the task scope",
+				}),
+			),
 			notes: Type.Optional(
 				Type.Array(Type.String(), {
 					description: "Risk the diff cannot show, e.g. 'this changes an on-disk format'",

@@ -21,7 +21,9 @@
  * plumbing can be covered without a repository or a child process.
  */
 
-export type TriageTargetKind = "uncommitted" | "branch" | "commit" | "none";
+import { existsSync } from "node:fs";
+
+export type TriageTargetKind = "uncommitted" | "branch" | "commit" | "none" | "task";
 
 export interface TriageTarget {
 	kind: TriageTargetKind;
@@ -29,6 +31,8 @@ export interface TriageTarget {
 	base?: string;
 	/** Commit sha for `commit`. */
 	ref?: string;
+	/** Baseline ref for `task`: the ref captured or configured before the task started. */
+	baselineRef?: string;
 }
 
 /** Structural facts about one changed path, independent of its content. */
@@ -69,11 +73,20 @@ export interface ChangeEvidence {
 	signals: string[];
 	/** Risk the caller declared by hand. */
 	notes: string[];
+	/** The task scope's baseline ref (the snapshot the change is measured from). */
+	baseline?: string;
 	/** The agent's own one-line description of the change. */
 	summary: string;
 	/** Bounded, zero-context diff text. */
 	patchExcerpt: string;
 	truncated: boolean;
+	/**
+	 * True when the snapshot looked unstable around collection — an operation
+	 * in progress or a probe that could not run. Policy refuses to skip on
+	 * unstable evidence: a tree that changed while it was being measured
+	 * cannot produce a confident "no review".
+	 */
+	unstable: boolean;
 	/** Populated when the target could not be inspected. */
 	error?: string;
 }
@@ -98,6 +111,12 @@ export interface CollectOptions {
 	signal?: AbortSignal;
 	/** Cap on the serialised patch carried into the state. */
 	patchChars?: number;
+	/**
+	 * Existence probe for snapshot-stability markers, by absolute path.
+	 * Defaults to the real filesystem; tests inject a fake so no test needs
+	 * a file inside .git.
+	 */
+	fsExists?: (path: string) => boolean;
 }
 
 const DEFAULT_PATCH_CHARS = 8_000;
@@ -312,6 +331,53 @@ export function detectSignals(files: string[], patch: string, added: number, rem
 }
 
 // ---------------------------------------------------------------------------
+// Snapshot stability
+// ---------------------------------------------------------------------------
+
+/**
+ * Marker paths, relative to .git, whose existence means a git operation may
+ * still be running — so the tree being measured can change mid-collect, and
+ * whatever the diffs say is provisional. `rebase-merge`/`rebase-apply` are
+ * directories; the rest are files. `BISECT_LOG` is included: a bisect moves
+ * HEAD without touching it in a way `diff` would notice.
+ */
+export const INSTABILITY_MARKERS: readonly { file: string; reason: string }[] = [
+	{ file: "index.lock", reason: "the git index is locked; another git operation may still be running" },
+	{ file: "MERGE_HEAD", reason: "a merge is in progress" },
+	{ file: "rebase-merge", reason: "a rebase is in progress" },
+	{ file: "rebase-apply", reason: "a rebase or patch application is in progress" },
+	{ file: "CHERRY_PICK_HEAD", reason: "a cherry-pick is in progress" },
+	{ file: "REVERT_HEAD", reason: "a revert is in progress" },
+	{ file: "BISECT_LOG", reason: "a bisect is in progress" },
+];
+
+export type ExistsFn = (path: string) => boolean;
+
+/**
+ * Which markers are present under a .git directory. A probe that throws is
+ * also a failure — the stability of the snapshot is simply not knowable,
+ * which reads as unstable, never as stable.
+ */
+export function detectInstability(
+	gitDir: string,
+	exists: ExistsFn,
+): { reasons: string[]; failed: boolean } {
+	const reasons: string[] = [];
+	let failed = false;
+	for (const marker of INSTABILITY_MARKERS) {
+		let present: boolean;
+		try {
+			present = Boolean(exists(`${gitDir}/${marker.file}`));
+		} catch {
+			failed = true;
+			continue;
+		}
+		if (present) reasons.push(marker.reason);
+	}
+	return { reasons, failed };
+}
+
+// ---------------------------------------------------------------------------
 // Collection
 // ---------------------------------------------------------------------------
 
@@ -324,6 +390,13 @@ function buildTargetArgs(target: TriageTarget): { range: string[]; show: boolean
 			return target.base ? { range: [`${target.base}...HEAD`], show: false } : undefined;
 		case "commit":
 			return target.ref ? { range: [target.ref], show: true } : undefined;
+		case "task":
+			// Two-dot against the baseline ref, not `...HEAD`: `git diff <ref>`
+			// measures the worktree against the ref, so work committed since the
+			// baseline AND the dirty worktree are in, while whatever was committed
+			// before the task started stays out. A three-dot range would measure
+			// from the merge base and drop uncommitted work entirely.
+			return target.baselineRef ? { range: [target.baselineRef], show: false } : undefined;
 		default:
 			return undefined;
 	}
@@ -360,6 +433,8 @@ export async function collectEvidence(exec: GitExec, options: CollectOptions): P
 		summary: options.summary,
 		patchExcerpt: "",
 		truncated: false,
+		unstable: false,
+		...(options.target.baselineRef ? { baseline: options.target.baselineRef } : {}),
 	};
 
 	if (options.target.kind === "none") return base;
@@ -369,27 +444,91 @@ export async function collectEvidence(exec: GitExec, options: CollectOptions): P
 	// diff drivers cannot change the evidence.
 	const run = (args: string[]) => exec("git", [...GIT_CONFIG_ARGS, ...args], execOptions);
 
+	if (options.target.kind === "task" && !options.target.baselineRef) {
+		// Without a baseline the diff would be `git diff HEAD`, which attributes
+		// work committed or dirtied before the task started to the task. That
+		// is exactly what this scope exists to avoid, so the scope fails
+		// explicitly rather than falling back.
+		return {
+			...base,
+			error:
+				"the task scope needs a baseline ref (the ref captured or configured before the task started); no diff was taken",
+		};
+	}
+
 	const rangeCommand = buildRangeCommand(options.target, ["--numstat", "-z", ...DIFF_FLAGS]);
 	if (!rangeCommand) {
 		return { ...base, error: "missing base branch or commit ref for the requested target" };
 	}
 
 	const numstat = await run(rangeCommand);
+
+	// Stability around collection: an index lock, merge, rebase, cherry-pick,
+	// revert or bisect in progress means the tree may change while it is being
+	// measured, so what the diffs say is provisional. Probed after the numstat
+	// read and again after the others; either hit marks the evidence unstable,
+	// and policy refuses to skip on unstable evidence. A probe that cannot
+	// run is a failure too — stability that cannot be verified is not
+	// stability, which is why the probe runs even on the failure paths below,
+	// and every later return carries the facts it accumulated.
+	const limitations: EvidenceLimitation[] = [];
+	const gitDir = await run(["rev-parse", "--absolute-git-dir"]);
+	const gitDirPath = gitDir.code === 0 && gitDir.stdout.trim() !== "" ? gitDir.stdout.trim() : undefined;
+	const exists = options.fsExists ?? existsSync;
+	const stabilityReasons: string[] = [];
+	let stabilityFailed = false;
+	let probeFailureRecorded = false;
+	if (!gitDirPath) {
+		stabilityFailed = true;
+		limitations.push({
+			text: "the .git directory could not be located; snapshot stability could not be verified",
+			blocksSkip: false,
+		});
+	}
+	const probeStability = (): void => {
+		if (!gitDirPath) return; // recorded above
+		const probed = detectInstability(gitDirPath, exists);
+		stabilityFailed = stabilityFailed || probed.failed;
+		stabilityReasons.push(...probed.reasons);
+		if (probed.failed && !probeFailureRecorded) {
+			probeFailureRecorded = true;
+			limitations.push({
+				text: "a snapshot-stability probe failed; the snapshot is treated as unstable",
+				blocksSkip: false,
+			});
+		}
+	};
+	probeStability();
+
+	// Every return after this point carries the accumulated stability facts:
+	// the boolean for the skip gate, the reasons where the state will show them.
+	const unstableNow = (): boolean => stabilityReasons.length > 0 || stabilityFailed;
+	const recordStability = (): void => {
+		for (const reason of [...new Set(stabilityReasons)]) {
+			limitations.push({ text: `snapshot unstable: ${reason}`, blocksSkip: false });
+		}
+	};
+
 	if (numstat.code !== 0) {
-		return { ...base, error: numstat.stderr.trim() || `git ${rangeCommand.join(" ")} failed` };
+		recordStability();
+		return {
+			...base,
+			limitations,
+			unstable: unstableNow(),
+			error: numstat.stderr.trim() || `git ${rangeCommand.join(" ")} failed`,
+		};
 	}
 
 	const rawCommand = buildRangeCommand(options.target, ["--raw", "-z", ...DIFF_FLAGS]);
 	const patchCommand = buildRangeCommand(options.target, ["--unified=0", ...DIFF_FLAGS]);
 	if (!rawCommand || !patchCommand) {
-		return { ...base, error: "missing base branch or commit ref for the requested target" };
+		recordStability();
+		return { ...base, limitations, unstable: unstableNow(), error: "missing base branch or commit ref for the requested target" };
 	}
 	const raw = await run(rawCommand);
 	const patch = await run(patchCommand);
 	// Unmerged paths show as `U` only in the working-tree diff, not in `diff HEAD`.
 	const unmerged = await run(["diff", "--diff-filter=U", "--raw", "-z", ...DIFF_FLAGS]);
-
-	const limitations: EvidenceLimitation[] = [];
 
 	const numEntries = parseNumstatZ(numstat.stdout);
 	if (raw.code !== 0) {
@@ -424,10 +563,21 @@ export async function collectEvidence(exec: GitExec, options: CollectOptions): P
 	const newFiles = rawEntries.filter((entry) => entry.status.startsWith("A")).map((entry) => entry.path);
 	const deletedFiles = rawEntries.filter((entry) => entry.status.startsWith("D")).map((entry) => entry.path);
 
+	// The tracked side of the same attribution limit the untracked caveat
+	// states: everything committed between the baseline and now is measured,
+	// including commits that landed on the branch for other reasons.
+	if (options.target.kind === "task" && (numEntries.length > 0 || rawEntries.length > 0)) {
+		limitations.push({
+			text: "work committed between the baseline and now is attributed to the task, including commits that landed on the branch for other reasons",
+			blocksSkip: false,
+		});
+	}
+
 	let files = [...new Set([...rawEntries.map((entry) => entry.path), ...numEntries.map((entry) => entry.path)])];
-	if (options.target.kind === "uncommitted") {
-		// Untracked files are absent from `git diff HEAD`; a brand-new file is
-		// exactly the case a reviewer should see, so list them explicitly.
+	if (options.target.kind === "uncommitted" || options.target.kind === "task") {
+		// Untracked files are absent from `git diff HEAD` (and from any diff
+		// against a ref); a brand-new file is exactly the case a reviewer
+		// should see, so list them explicitly.
 		const untracked = await run(["ls-files", "-z", "--others", "--exclude-standard"]);
 		if (untracked.code !== 0) {
 			limitations.push({
@@ -440,11 +590,21 @@ export async function collectEvidence(exec: GitExec, options: CollectOptions): P
 			newFiles.push(...extras);
 			files = [...files, ...extras];
 			if (extras.length > 0) {
-				// `git diff HEAD` excludes untracked content, so a new file's body is
-				// invisible to the patch and the risk scan; say so rather than pretend.
+				// A diff excludes untracked content, so a new file's body is
+				// invisible to the patch and the risk scan; say so rather than
+				// pretend.
 				limitations.push({
 					text: `${extras.length} untracked file(s) were listed but their content was not read`,
 					blocksSkip: true,
+				});
+			}
+			if (options.target.kind === "task" && extras.length > 0) {
+				// Unlike tracked dirt, an untracked file cannot be checked
+				// against the baseline: one that pre-dates it cannot be told
+				// apart from one the task created.
+				limitations.push({
+					text: "untracked files cannot be attributed to the task's baseline; a file that was already untracked before it may be listed as the task's work",
+					blocksSkip: false,
 				});
 			}
 		}
@@ -463,12 +623,22 @@ export async function collectEvidence(exec: GitExec, options: CollectOptions): P
 	// numstat there reads as "nothing changed". Say why instead of letting an
 	// empty evidence block become a confident "no review".
 	if (options.target.kind === "commit" && rawEntries.length === 0 && patchText.trim() === "") {
+		recordStability();
 		return {
 			...base,
 			isGit: true,
+			limitations,
+			unstable: stabilityReasons.length > 0 || stabilityFailed,
 			error:
 				"the commit produced no per-file diff (a merge commit shows none by default, and an empty commit has none; use a non-merge commit or a branch target)",
 		};
+	}
+
+	probeStability();
+
+	const unstableReasons = [...new Set(stabilityReasons)];
+	for (const reason of unstableReasons) {
+		limitations.push({ text: `snapshot unstable: ${reason}`, blocksSkip: false });
 	}
 
 	return {
@@ -484,5 +654,6 @@ export async function collectEvidence(exec: GitExec, options: CollectOptions): P
 		signals: detectSignals(files, patchText, added, removed),
 		patchExcerpt: truncated ? patchText.slice(0, patchCap) : patchText,
 		truncated,
+		unstable: unstableReasons.length > 0 || stabilityFailed,
 	};
 }
