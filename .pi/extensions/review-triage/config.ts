@@ -225,15 +225,26 @@ function mergeTrack(base: TrackConfig, value: unknown): TrackConfig {
 }
 
 /**
- * Read the config file, or return the defaults. Never throws: a broken file is
- * a configuration mistake worth one warning, not a failed tool call.
+ * Read the config file. A missing file is the normal first-run state and stays
+ * silent; a file that exists but cannot be parsed is a policy the owner meant
+ * to apply and did not, so it warns once rather than vanishing.
  */
-export function readConfigFile(path: string): Record<string, unknown> {
+export function readConfigFile(path: string, warn?: (message: string) => void): Record<string, unknown> {
+	let text: string;
 	try {
-		const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
-		if (!isObject(parsed)) return {};
-		return parsed;
+		text = readFileSync(path, "utf8");
 	} catch {
+		return {};
+	}
+	try {
+		const parsed: unknown = JSON.parse(text);
+		if (!isObject(parsed)) {
+			warn?.(`review-triage: ignoring ${path}: expected a JSON object`);
+			return {};
+		}
+		return parsed;
+	} catch (error) {
+		warn?.(`review-triage: ignoring malformed ${path}: ${(error as Error).message}`);
 		return {};
 	}
 }
@@ -248,8 +259,8 @@ export interface LoadConfigOptions {
 export function loadConfig(options: LoadConfigOptions = {}): TriageConfig {
 	const env = options.env ?? process.env;
 	const path = options.path ?? configPath(env);
-	const file = readConfigFile(path);
 	const warn = options.warn ?? ((message: string) => console.warn(message));
+	const file = readConfigFile(path, warn);
 
 	const config: TriageConfig = {
 		...DEFAULT_CONFIG,
@@ -304,11 +315,6 @@ export function loadConfig(options: LoadConfigOptions = {}): TriageConfig {
 	// this re-sort keeps a hand-built config object (a test, a caller) honest.
 	for (const track of TRACKS) {
 		config.tracks[track].tiers.sort((a, b) => a.minScore - b.minScore);
-	}
-	if (!config.judge.model.includes("/")) {
-		// Not fatal — a direct TypeSafe id such as "jev-latest" is valid — but a
-		// provider-qualified id is what the OpenRouter path expects, so say so.
-		warn(`review-triage: judge.model "${config.judge.model}" is not provider-qualified`);
 	}
 
 	return config;

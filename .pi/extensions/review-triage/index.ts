@@ -24,6 +24,7 @@ import { askJudge, buildState, JudgeError, type Judgment } from "./judge.ts";
 import {
 	composePlan,
 	costBucket,
+	disabledPlan,
 	failOpenPlan,
 	resolveCandidates,
 	type AvailableModel,
@@ -100,6 +101,20 @@ async function runTriage(
 
 	const signal = options.signal ?? ctx.signal;
 	const onProgress = options.onProgress;
+
+	if (!config.enabled) {
+		const entry: TriageRun = {
+			plan: disabledPlan({ files: 0, added: 0, removed: 0, signals: [] }),
+			evidence: { target: "none", files: [], added: 0, removed: 0, signals: [] },
+		};
+		try {
+			pi.appendEntry("review-triage", entry);
+		} catch {
+			// Durable entries are a convenience; never let one break the tool call.
+		}
+		return entry;
+	}
+
 	const available = availableModels(ctx);
 	const candidates = resolveCandidates(config, available);
 	const target = resolveTarget(params);
@@ -143,6 +158,10 @@ async function runTriage(
 		});
 	} catch (error) {
 		if (!(error instanceof JudgeError)) throw error;
+		// An abort is a cancellation, not a judge failure. Fail-open exists for an
+		// unreachable judge; composing a plan from a user's Esc and writing it to
+		// the session as an audited verdict is the fabrication this tool forbids.
+		if (error.failure === "aborted") throw error;
 		plan = failOpenPlan({
 			config,
 			candidates,
@@ -159,7 +178,7 @@ async function runTriage(
 		...(judgment ? { judgment } : {}),
 		evidence: {
 			target: evidence.target,
-			files: evidence.files,
+			files: evidence.files.slice(0, 40),
 			added: evidence.added,
 			removed: evidence.removed,
 			signals: evidence.signals,

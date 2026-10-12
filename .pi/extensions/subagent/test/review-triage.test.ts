@@ -34,6 +34,7 @@ import {
 	detectSignals,
 	parseNameStatus,
 	parseNumstat,
+	renameDestination,
 	type GitExec,
 } from "../../review-triage/evidence.ts";
 import {
@@ -49,6 +50,7 @@ import {
 	clampThinking,
 	composePlan,
 	costBucket,
+	disabledPlan,
 	failOpenPlan,
 	resolveCandidates,
 	selectModel,
@@ -90,7 +92,6 @@ const AVAILABLE: AvailableModel[] = [
 
 function trackJudgment(overrides: Partial<Parameters<typeof composePlan>[0]["judgment"]["adversarial"]> = {}) {
 	return {
-		needed: true,
 		neededProbability: 0.9,
 		strength: 2.0,
 		strengthConfidence: 0.9,
@@ -155,16 +156,27 @@ test("config: a file merges over defaults field by field", () => {
 	}
 });
 
-test("config: a malformed file degrades to defaults instead of throwing", () => {
+test("config: a malformed file degrades to defaults and says so once", () => {
 	const dir = mkdtempSync(join(tmpdir(), "triage-test-"));
 	const path = join(dir, "review-triage.json");
 	writeFileSync(path, "{ not json");
 	try {
-		const loaded = loadConfig({ path, env: {}, warn: () => {} });
+		const warnings: string[] = [];
+		const loaded = loadConfig({ path, env: {}, warn: (message) => warnings.push(message) });
 		assert.equal(loaded.judge.model, DEFAULT_CONFIG.judge.model);
+		// A policy file that exists but cannot be read is worth saying out loud;
+		// silently ignoring it means the owner runs default policy without knowing.
+		assert.equal(warnings.length, 1);
+		assert.match(warnings[0] ?? "", /malformed/);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+test("config: a missing file is silent", () => {
+	const warnings: string[] = [];
+	loadConfig({ path: "/nonexistent/review-triage.json", env: {}, warn: (m) => warnings.push(m) });
+	assert.deepEqual(warnings, []);
 });
 
 test("config: environment overrides the file for the judge model", () => {
@@ -247,6 +259,44 @@ test("evidence: large churn and many files are labelled", () => {
 	assert.ok(signals.some((s) => s.includes("many files")));
 });
 
+test("evidence: a rename's numstat pseudo-path resolves to its destination", () => {
+	// git emits `src/{util => auth}/helper.ts` and `old.ts => new.ts`; the
+	// security-path check must see `src/auth/helper.ts`, not the abbreviation.
+	assert.equal(renameDestination("src/{util => auth}/helper.ts"), "src/auth/helper.ts");
+	assert.equal(renameDestination("src/a.ts => src/b.ts"), "src/b.ts");
+	const parsed = parseNumstat("0\t0\tsrc/{util => auth}/helper.ts\n");
+	assert.deepEqual(parsed.files, ["src/auth/helper.ts"]);
+	assert.ok(detectSignals(parsed.files, "", 0, 0).some((s) => s.includes("authentication")));
+});
+
+test("evidence: name-status keep-list includes rename destinations", () => {
+	const parsed = parseNameStatus("R100\tsrc/util/helper.ts\tsrc/auth/helper.ts\nA\tsrc/new.ts\n");
+	assert.deepEqual(parsed.renamedFiles, ["src/auth/helper.ts"]);
+	assert.deepEqual(parsed.newFiles, ["src/new.ts"]);
+});
+
+test("evidence: a file header alone must not manufacture a signal", () => {
+	// `+++ b/src/spawn.ts` used to match the process-execution regex, so a diff
+	// with no content was reported as touching process execution.
+	assert.deepEqual(detectSignals(["src/spawn.ts"], "+++ b/src/spawn.ts\n--- a/src/spawn.ts\n", 0, 0), []);
+});
+
+test("evidence: a .sql file triggers the migration label", () => {
+	assert.ok(detectSignals(["queries/orders.sql"], "", 1, 0).some((s) => s.includes("migration")));
+});
+
+test("evidence: collectEvidence folds rename destinations into the file list", async () => {
+	const exec: GitExec = async (_command, args) => {
+		const key = args.join(" ");
+		if (key === "diff --numstat HEAD") return { stdout: "0\t0\tsrc/{util => auth}/h.ts\n", stderr: "", code: 0 };
+		if (key === "diff --name-status HEAD") return { stdout: "R100\tsrc/util/h.ts\tsrc/auth/h.ts\n", stderr: "", code: 0 };
+		if (key === "diff --unified=0 HEAD") return { stdout: "", stderr: "", code: 0 };
+		return { stdout: "", stderr: "", code: 0 };
+	};
+	const evidence = await collectEvidence(exec, { summary: "move a file", target: { kind: "uncommitted" } });
+	assert.deepEqual(evidence.files, ["src/auth/h.ts"]);
+});
+
 test("evidence: the range command matches the target", () => {
 	assert.deepEqual(buildRangeCommand({ kind: "uncommitted" }, ["--numstat"]), ["diff", "--numstat", "HEAD"]);
 	assert.deepEqual(buildRangeCommand({ kind: "branch", base: "dev" }, ["--numstat"]), [
@@ -293,11 +343,20 @@ test("evidence: a git failure degrades to a usable state with the reason attache
 	assert.equal(evidence.summary, "x");
 });
 
+test("evidence: a merge commit's empty diff is explained, not silently empty", async () => {
+	const exec: GitExec = async () => ({ stdout: "", stderr: "", code: 0 });
+	const evidence = await collectEvidence(exec, { summary: "merge", target: { kind: "commit", ref: "abc" } });
+	assert.match(evidence.error ?? "", /merge commit/);
+});
+
 // ---------------------------------------------------------------------------
 // judge
 // ---------------------------------------------------------------------------
 
-function classifierResult(answers: Record<string, ClassifierAnswer>): ClassifierResult {
+function classifierResult(
+	answers: Record<string, ClassifierAnswer>,
+	extra: Partial<ClassifierResult> = {},
+): ClassifierResult {
 	return {
 		api: "typesafe-system-one",
 		provider: "openrouter",
@@ -305,6 +364,7 @@ function classifierResult(answers: Record<string, ClassifierAnswer>): Classifier
 		answers,
 		stopReason: "stop",
 		timestamp: Date.now(),
+		...extra,
 	} as unknown as ClassifierResult;
 }
 
@@ -358,7 +418,6 @@ test("judge: averaging cancels a first-option lean", () => {
 	// Forward favours cheap; reversed favours strong. The average should not
 	// hand the pick to either with high confidence.
 	const averaged = averageChoice(
-		true,
 		{ probabilities: { cheap: 0.8, strong: 0.2 }, confidence: 0.8 },
 		{ probabilities: { cheap: 0.2, strong: 0.8 }, confidence: 0.8 },
 	);
@@ -369,7 +428,6 @@ test("judge: averaging cancels a first-option lean", () => {
 
 test("judge: both orders agreeing raises confidence", () => {
 	const averaged = averageChoice(
-		true,
 		{ probabilities: { cheap: 0.9, strong: 0.1 }, confidence: 0.9 },
 		{ probabilities: { cheap: 0.85, strong: 0.15 }, confidence: 0.85 },
 	);
@@ -377,13 +435,71 @@ test("judge: both orders agreeing raises confidence", () => {
 	assert.ok(averaged.confidence > 0.85);
 });
 
-test("judge: parseJudgment thresholds each track independently", () => {
+test("judge: reverseChoice:false asks six questions and needs no reverse answer", () => {
+	const questions = buildQuestions(config({ reverseChoice: false }), CANDIDATES);
+	assert.equal(Object.keys(questions).length, 6, "the reversed pair must not be sent and paid for");
+	assert.equal(QUESTION_IDS.adversarialModelReversed in questions, false);
+
+	// parseJudgment must accept a result that has no reversed answers at all.
+	const forwardOnly = { ...fullAnswers() };
+	delete forwardOnly[QUESTION_IDS.adversarialModelReversed];
+	delete forwardOnly[QUESTION_IDS.complexityModelReversed];
+	const parsed = parseJudgment(classifierResult(forwardOnly), config({ reverseChoice: false }), 5);
+	assert.equal(parsed.adversarial.choice, "p/mid");
+});
+
+test("judge: an abort is its own failure, not a reason to fail open", async () => {
+	const registry = {
+		findOfType: () => ({ provider: "openrouter", id: "typesafe/jev-1.13" }),
+		classify: async () => ({ ...classifierResult(fullAnswers()), stopReason: "aborted" }),
+	};
+	await assert.rejects(
+		() => askJudge(registry as never, config(), {}, CANDIDATES),
+		(error: unknown) => error instanceof JudgeError && error.failure === "aborted",
+	);
+});
+
+test("judge: a state over the cap is bounded even with huge notes", () => {
+	const evidence = {
+		target: "uncommitted" as const,
+		isGit: true,
+		files: Array.from({ length: 200 }, (_, i) => `src/very/long/path/number/${i}/file.ts`),
+		added: 1,
+		removed: 0,
+		newFiles: [],
+		deletedFiles: [],
+		signals: [],
+		notes: Array.from({ length: 50 }, () => "n".repeat(2_000)),
+		summary: "s".repeat(5_000),
+		patchExcerpt: "y".repeat(5_000),
+		truncated: false,
+	};
+	const state = buildState(evidence, 2_000);
+	assert.ok(JSON.stringify(state).length <= 3_000, `state was ${JSON.stringify(state).length} chars`);
+});
+
+test("judge: taking the threshold out of parseTrack keeps one source of truth", () => {
 	const parsed = parseJudgment(classifierResult(fullAnswers()), config(), 123);
-	assert.equal(parsed.adversarial.needed, true, "0.9 clears the 0.5 threshold");
-	assert.equal(parsed.complexity.needed, false, "0.4 does not");
+	// 0.9 would clear the adversarial threshold and 0.4 would not, but choosing
+	// is compose's job; parseJudgment only reports the probability.
+	assert.equal(parsed.adversarial.neededProbability, 0.9);
+	assert.equal(parsed.complexity.neededProbability, 0.4);
+	assert.equal("needed" in parsed.adversarial, false);
 	assert.equal(parsed.adversarial.choice, "p/mid");
 	assert.equal(parsed.adversarial.strength, 2.2);
 	assert.equal(parsed.latencyMs, 123);
+});
+
+test("judge: records the judge's token usage with the right field names", () => {
+	// pi-ai's Usage uses input/output; inputTokens/outputTokens are not fields,
+	// and the old `?? 0` silently recorded every call as zero tokens.
+	const result = classifierResult(fullAnswers(), {
+		usage: { input: 966, output: 215, totalTokens: 1181, cacheRead: 0, cacheWrite: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.00004 } } as never,
+	});
+	const parsed = parseJudgment(result, config(), 10);
+	assert.equal(parsed.usage?.inputTokens, 966);
+	assert.equal(parsed.usage?.outputTokens, 215);
+	assert.equal(parsed.usage?.cost, 0.00004);
 });
 
 test("judge: an absent classifier model fails as unavailable", async () => {
@@ -426,7 +542,8 @@ test("judge: state trims the diff before anything else when over the cap", () =>
 	const state = buildState(evidence, 1_000);
 	const change = state.change as Record<string, unknown>;
 	assert.equal(change.diff_excerpt, undefined);
-	assert.equal(change.diff_truncated, true);
+	assert.equal(change.diff_omitted, true, "the diff was removed, so say removed");
+	assert.equal(change.diff_truncated, false, "git did not truncate it; don't claim it did");
 	assert.ok(JSON.stringify(state).length <= 1_200);
 });
 
@@ -594,6 +711,63 @@ test("compose: fail-open is conservative by default and can be told to skip", ()
 	});
 	assert.equal(skip.adversarial.needed, false);
 	assert.equal(skip.verdict, "no review (judge unavailable)");
+});
+
+test("compose: fail-open stays conservative under a raised threshold", () => {
+	// The regression: a hardcoded 0.5 probability against a configured 0.7
+	// threshold rendered as "no review (judge unavailable — conservative)".
+	const raised = config({
+		tracks: {
+			adversarial: { ...DEFAULT_TRACKS.adversarial, threshold: 0.7 },
+			complexity: { ...DEFAULT_TRACKS.complexity, threshold: 0.95 },
+		},
+	});
+	const plan = failOpenPlan({
+		config: raised,
+		candidates: CANDIDATES,
+		available: AVAILABLE,
+		evidence: EVIDENCE,
+		summary: "x",
+		reason: "timeout",
+	});
+	assert.equal(plan.adversarial.needed, true);
+	assert.equal(plan.complexity.needed, true);
+	assert.equal(plan.verdict, "adversarial + complexity (judge unavailable — conservative default)");
+});
+
+test("compose: fail-open targets the middle rung of a custom tier table", () => {
+	const custom = config({
+		tracks: {
+			adversarial: {
+				threshold: 0.5,
+				tiers: [
+					{ name: "a", minScore: 0, thinking: "low", costFloor: "low" },
+					{ name: "b", minScore: 1, thinking: "medium", costFloor: "medium" },
+					{ name: "c", minScore: 2, thinking: "high", costFloor: "high" },
+					{ name: "d", minScore: 3, thinking: "max", costFloor: "high" },
+				],
+				fallbackChain: [],
+			},
+			complexity: { ...DEFAULT_TRACKS.complexity, fallbackChain: [] },
+		},
+	});
+	const plan = failOpenPlan({
+		config: custom,
+		candidates: CANDIDATES,
+		available: AVAILABLE,
+		evidence: EVIDENCE,
+		summary: "x",
+		reason: "timeout",
+	});
+	// Middle of a four-rung table is index 1, not the default's "standard".
+	assert.equal(plan.adversarial.tier, "b");
+});
+
+test("compose: a disabled extension says so instead of judging", () => {
+	const plan = disabledPlan(EVIDENCE);
+	assert.equal(plan.verdict, "disabled (review-triage is off)");
+	assert.equal(plan.adversarial.needed, false);
+	assert.equal(plan.judge, "disabled");
 });
 
 test("format: the rendered plan names the model, thinking level and task", () => {

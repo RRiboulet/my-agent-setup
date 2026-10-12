@@ -47,6 +47,47 @@ Added:
   averaging, the cost floor and the fallback walk — alongside a load guard and
   the manifest check.
 
+Fixes to the triage work, from an adversarial review before it shipped:
+
+- **The fail-open default could recommend the exact opposite of what it
+  promised.** It synthesised a `0.5` needed-probability and a `1.5` strength,
+  then ran them through the *configured* threshold and tier table — so a config
+  with `threshold: 0.7`, or a non-default tier list, composed "no review" and
+  labelled it a conservative default, from nothing, when the judge was down. It
+  now reports certainty against the threshold and targets the middle rung *by
+  index*, so what the plan promises is what it recommends regardless of config.
+- **An abort was classified as a judge failure.** Pressing Esc during the
+  classifier call produced a full "both reviews needed" plan — and wrote it to
+  the session as an audited verdict — because abort surfaced as `failure:
+  "timeout"` and fell into fail-open. Abort is its own outcome now and
+  propagates; fail-open is for an unreachable judge, not for a cancellation.
+- **Jev's token usage was always recorded as zero.** The audit entry read
+  `usage.inputTokens`, but pi-ai's `Usage` is `input`/`output`; the `?? 0`
+  fallback hid it, and no typechecker exists to catch a wrong field name. The
+  entry now records the real counts and cost.
+- **Rename detection corrupted the evidence.** `git diff --numstat` abbreviates
+  a move as `src/{util => auth}/helper.ts`, which the path-based signals tested
+  and missed — a file moved under `auth/` did not read as security-relevant.
+  The abbreviation is resolved to its destination, and `--name-status` rename
+  destinations are folded into the file list.
+- **Diff file headers manufactured signals.** `changedLines` kept `+++`/`---`
+  lines, so a diff touching `spawn.ts` or `fetch.ts` reported "changes process
+  execution" / "changes a network boundary" from the filename alone, with no
+  content. Headers are excluded, and the migration pattern's `\.sql$` branch —
+  dead inside a path-anchored group, so `queries/orders.sql` never matched — is
+  a working alternative again.
+- **`enabled` and `PI_REVIEW_TRIAGE_OFF` were parsed and then ignored**, so a
+  disabled extension still spent a classifier request per call. The switch is
+  honoured now, and a disabled run reports that nothing was judged rather than
+  a verdict.
+- Smaller: the state cap is enforced against a caller-supplied `author_notes`
+  of any size and re-checks after every trim; the reversed Choice questions are
+  sent only when `reverseChoice` is on (they were paid for and discarded
+  otherwise); a malformed config file warns instead of being silently ignored;
+  and Jev is told to treat the diff as untrusted evidence, never as
+  instructions — otherwise a planted patch could argue the gate into "no
+  review".
+
 ## v1.4.0 — 2026-10-11
 
 Added:

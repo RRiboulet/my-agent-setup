@@ -89,7 +89,7 @@ export function resolveCandidates(config: TriageConfig, available: readonly Avai
 
 	const ranked = [...available]
 		.filter((model) => Boolean(model.provider) && Boolean(model.id))
-		.sort((a, b) => (a.cost?.input ?? 0) - (b.cost?.input ?? 0));
+		.sort((a, b) => priceOf(a) - priceOf(b));
 	if (ranked.length === 0) return [];
 
 	// Up to three per bucket: enough for a real Choice, short enough that Jev is
@@ -106,13 +106,23 @@ export function resolveCandidates(config: TriageConfig, available: readonly Avai
 			cost,
 			description:
 				cost === "low"
-					? "Low cost and fast. A quick second read for obvious mistakes."
+					? "Cheapest price tier. A quick second read for obvious mistakes."
 					: cost === "medium"
-						? "Mid-cost and competent. A full correctness pass on ordinary work."
-						: "Highest cost, strongest reasoning. Hostile review of subtle or high-stakes work.",
+						? "Middle price tier. A full correctness pass on ordinary work."
+						: "Highest price tier. Expected to be the strongest reasoner; for hostile or high-stakes review.",
 		});
 	}
 	return candidates;
+}
+
+/**
+ * Sort key for the synthesised list. An unknown price sorts last rather than
+ * first, so a catalogue entry with no published cost cannot crowd a genuinely
+ * cheap model out of the low bucket.
+ */
+function priceOf(model: AvailableModel): number {
+	const input = model.cost?.input;
+	return typeof input === "number" && Number.isFinite(input) ? input : Number.POSITIVE_INFINITY;
 }
 
 /** The last tier whose score floor the reading clears. Tiers are pre-sorted. */
@@ -222,6 +232,9 @@ export function selectModel(args: {
 		} else if (!isAvailable(pick, available)) {
 			notes.push(`Jev chose ${judgment.choice}, which this session cannot use; used the fallback policy.`);
 		} else {
+			if (COST_RANK[pick.cost] > floor) {
+				notes.push(`Jev chose ${judgment.choice} (${pick.cost}), above the ${tier.costFloor} floor for a ${tier.name} review; accepted.`);
+			}
 			return { model: pick, fallbackUsed: false, notes };
 		}
 	} else if (lowConfidence) {
@@ -271,10 +284,11 @@ export function selectModel(args: {
 		.sort((a, b) => COST_RANK[a.cost] - COST_RANK[b.cost])[0];
 	if (cheapest) return { model: cheapest, fallbackUsed: true, notes };
 
-	// 5. Anything available, then the session's current model.
+	// 5. Cheapest available of any rank, then the session's current model.
 	const anyAvailable = candidates
 		.map((candidate): ModelRef => ({ provider: candidate.provider, model: candidate.model, cost: candidate.cost }))
-		.find((ref) => isAvailable(ref, available));
+		.filter((ref) => isAvailable(ref, available))
+		.sort((a, b) => COST_RANK[a.cost] - COST_RANK[b.cost])[0];
 	if (anyAvailable) {
 		notes.push(`No model clearing the ${tier.costFloor} floor is available; downgraded to ${anyAvailable.cost}.`);
 		return { model: anyAvailable, fallbackUsed: true, notes };
@@ -419,6 +433,35 @@ export function composePlan(args: {
 }
 
 /**
+ * What to return when the extension is switched off. It is not "no review" —
+ * that would be a judgement the tool was told not to make — so the verdict says
+ * plainly that nothing was judged.
+ */
+export function disabledPlan(evidence: ReviewPlan["evidence"]): ReviewPlan {
+	const track = (name: TrackName): TrackPlan => ({
+		track: name,
+		needed: false,
+		neededProbability: 0,
+		strength: 0,
+		strengthConfidence: 0,
+		tier: "none",
+		thinking: "off",
+		choice: "",
+		choiceConfidence: 0,
+		fallbackUsed: false,
+		notes: ["review-triage is disabled (enabled:false or PI_REVIEW_TRIAGE_OFF)"],
+	});
+	return {
+		verdict: "disabled (review-triage is off)",
+		adversarial: track("adversarial"),
+		complexity: track("complexity"),
+		judge: "disabled",
+		latencyMs: 0,
+		evidence,
+	};
+}
+
+/**
  * What to do when Jev cannot be reached. "Conservative" recommends both reviews
  * at their middle rung: an unreachable judge should cost the user a review, not
  * buy them a skipped one. "Skip" is for a machine that must not spend review
@@ -458,10 +501,18 @@ export function failOpenPlan(args: {
 		};
 	}
 
+	// The middle rung by INDEX, not a magic score: a config with a different
+	// tier table would otherwise land the fail-open plan on the wrong rung.
+	const middleScore = (track: TrackName): number => {
+		const tiers = args.config.tracks[track].tiers;
+		return tiers[Math.floor((tiers.length - 1) / 2)]?.minScore ?? 0;
+	};
 	const synthesize = (track: TrackName): TrackJudgment => ({
-		needed: true,
-		neededProbability: 0.5,
-		strength: 1.5,
+		// Certainty, not 0.5: a configured threshold above 0.5 would otherwise
+		// turn "fail open conservatively" into "recommend nothing", which is the
+		// opposite of what the default promises.
+		neededProbability: 1,
+		strength: middleScore(track),
 		strengthConfidence: 0,
 		choice: "",
 		choiceConfidence: 0,

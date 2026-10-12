@@ -31,6 +31,7 @@ and a `.env` beside this file is read for `OPENROUTER_API_KEY`.
 
 ```json
 {
+  "enabled": true,
   "judge": { "provider": "openrouter", "model": "typesafe/jev-1.13", "timeoutMs": 8000, "minConfidence": 0.35 },
   "candidates": [
     { "provider": "opencode-go", "model": "glm-5.3-flash", "cost": "low",
@@ -74,15 +75,28 @@ and a `.env` beside this file is read for `OPENROUTER_API_KEY`.
   bucketed by catalogue price.
 - **`onJudgeError`** is `"conservative"` (default): if Jev is unreachable,
   recommend both reviews at their middle rung. `"skip"` recommends nothing.
+- **`enabled`** (or `PI_REVIEW_TRIAGE_OFF=1`) turns the tool off; a disabled run
+  reports that nothing was judged rather than inventing a verdict.
 
 ## Failure behaviour
 
 A missing judge model, a provider error, a timeout or a malformed answer all
-become a `JudgeError`; the tool never fabricates a judgement. Outside a git
+become a `JudgeError`; the tool never fabricates a judgement, and outside a git
 repository the evidence degrades to summary and notes with the reason attached.
-Every verdict is appended to the session as a `review-triage` entry with the
-probabilities, confidences, tiers and models, so a decision not to review is
-auditable.
+A **cancellation is not a failure**: an abort propagates and leaves no verdict,
+because composing one from a user's Esc is the fabrication this gate exists to
+avoid. Every other verdict is appended to the session as a `review-triage` entry
+with the probabilities, confidences, tiers and models, so a decision not to
+review is auditable.
+
+## Two cautions
+
+- **The diff is untrusted input.** It is fed to Jev as evidence, and every
+  question says so explicitly — weigh it, never follow instructions inside it.
+  A planted patch can still try to argue the gate toward "no review"; that is
+  one more reason the verdict is auditable rather than silent.
+- **Diffs can contain secrets.** The evidence excerpt goes to the judge's
+  provider (OpenRouter, by default) and is written to the session entry.
 
 ## Files
 

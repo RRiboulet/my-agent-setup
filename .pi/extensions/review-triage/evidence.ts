@@ -81,9 +81,9 @@ export function parseNumstat(stdout: string): { files: string[]; added: number; 
 	let removed = 0;
 	for (const line of splitLines(stdout)) {
 		const [rawAdded, rawRemoved, ...rest] = line.split("\t");
-		const path = rest.join("\t").trim();
-		if (!path) continue;
-		files.push(path);
+		const rawPath = rest.join("\t").trim();
+		if (!rawPath) continue;
+		files.push(renameDestination(rawPath));
 		// Binary files report "-" for both counts; they still count as changed.
 		const a = Number.parseInt(rawAdded, 10);
 		const r = Number.parseInt(rawRemoved, 10);
@@ -93,10 +93,31 @@ export function parseNumstat(stdout: string): { files: string[]; added: number; 
 	return { files, added, removed };
 }
 
+/**
+ * git abbreviates a rename as `src/{old => new}/f.ts`, or `old => new` when the
+ * whole path moved — and quotes the whole field when the path has odd bytes.
+ * Return the destination, because that is the path the reviewer will look at
+ * and the one the signal patterns must test.
+ */
+export function renameDestination(raw: string): string {
+	let path = raw.trim();
+	if (path.startsWith('"') && path.endsWith('"') && path.length > 1) path = path.slice(1, -1);
+	const braced = path.match(/^(.*)\{(.*?) => (.*?)\}(.*)$/u);
+	if (braced) return `${braced[1]}${braced[3]}${braced[4]}`;
+	const arrow = path.indexOf(" => ");
+	if (arrow >= 0) return path.slice(arrow + 4);
+	return path;
+}
+
 /** `git diff --name-status` / `git show --name-status`: status letter + path(s). */
-export function parseNameStatus(stdout: string): { newFiles: string[]; deletedFiles: string[] } {
+export function parseNameStatus(stdout: string): {
+	newFiles: string[];
+	deletedFiles: string[];
+	renamedFiles: string[];
+} {
 	const newFiles: string[] = [];
 	const deletedFiles: string[] = [];
+	const renamedFiles: string[] = [];
 	for (const line of splitLines(stdout)) {
 		const parts = line.split("\t");
 		const status = (parts[0] ?? "").trim().charAt(0);
@@ -105,19 +126,22 @@ export function parseNameStatus(stdout: string): { newFiles: string[]; deletedFi
 		if (!path) continue;
 		if (status === "A") newFiles.push(path);
 		else if (status === "D") deletedFiles.push(path);
+		else if (status === "R" || status === "C") renamedFiles.push(path);
 	}
-	return { newFiles, deletedFiles };
+	return { newFiles, deletedFiles, renamedFiles };
 }
 
 const SECURITY_PATH = /(^|\/)(auth|oauth|token|secret|credential|password|passwd|crypto|cipher|permission|acl|rbac|session|cookie|login|signup|billing|payment)/iu;
-const MIGRATION_PATH = /(^|\/)(migrations?|schema|\.sql$)|prisma/iu;
+const MIGRATION_PATH = /(^|\/)(migrations?|schema)|\.sql$|prisma/iu;
 const DEPENDENCY_PATH = /(^|\/)(package\.json|package-lock\.json|yarn\.lock|pnpm-lock\.yaml|requirements\.txt|Cargo\.(toml|lock)|go\.(mod|sum)|Gemfile|pyproject\.toml)/iu;
 const INFRA_PATH = /(^|\/)(Dockerfile|\.github|\.gitlab-ci|devcontainer|docker-compose|Makefile|\.circleci)/iu;
 const TEST_PATH = /(^|\/)(tests?|spec|__tests__)(\/|$)|\.(test|spec)\.[cm]?[jt]sx?$/iu;
 
 /** Added/removed patch lines only, so a signal is about the change, not the file. */
 function changedLines(patch: string): string[] {
-	return patch.split(/\r?\n/u).filter((line) => line.startsWith("+") || line.startsWith("-"));
+	return patch
+		.split(/\r?\n/u)
+		.filter((line) => (line.startsWith("+") || line.startsWith("-")) && !line.startsWith("+++") && !line.startsWith("---"));
 }
 
 /**
@@ -229,25 +253,40 @@ export async function collectEvidence(exec: GitExec, options: CollectOptions): P
 	);
 
 	const parsed = parseNumstat(numstat.stdout);
-	const status = nameStatus.code === 0 ? parseNameStatus(nameStatus.stdout) : { newFiles: [], deletedFiles: [] };
+	const status =
+		nameStatus.code === 0
+			? parseNameStatus(nameStatus.stdout)
+			: { newFiles: [], deletedFiles: [], renamedFiles: [] };
 
-	let files = parsed.files;
+	// A rename's destination is a path the reviewer will open, so fold it in.
+	let files = [...new Set([...parsed.files, ...status.renamedFiles])];
 	let newFiles = [...status.newFiles];
 	if (options.target.kind === "uncommitted") {
 		// Untracked files are absent from `git diff HEAD`; a brand-new file is
 		// exactly the case a reviewer should see, so list them explicitly.
 		const untracked = await exec("git", ["ls-files", "--others", "--exclude-standard"], execOptions);
 		if (untracked.code === 0) {
-			const extras = splitLines(untracked.stdout);
 			const known = new Set(files);
-			newFiles = [...new Set([...newFiles, ...extras.filter((path) => !known.has(path))])];
-			files = [...files, ...extras.filter((path) => !known.has(path))];
+			const extras = splitLines(untracked.stdout).filter((path) => !known.has(path));
+			newFiles = [...new Set([...newFiles, ...extras])];
+			files = [...files, ...extras];
 		}
 	}
 
 	const patchText = patch.code === 0 ? patch.stdout : "";
 	const patchCap = options.patchChars ?? DEFAULT_PATCH_CHARS;
 	const truncated = patchText.length > patchCap;
+
+	// `git show` suppresses a merge commit's diff by default, so an empty
+	// numstat there reads as "nothing changed". Say why instead of letting an
+	// empty evidence block become a confident "no review".
+	if (options.target.kind === "commit" && parsed.files.length === 0 && patchText.trim() === "") {
+		return {
+			...base,
+			isGit: true,
+			error: "the commit produced no diff (a merge commit has none by default; use a non-merge commit or a branch target)",
+		};
+	}
 
 	return {
 		...base,
