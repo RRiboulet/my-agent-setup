@@ -41,23 +41,14 @@ and a `.env` beside this file is read for `OPENROUTER_API_KEY`.
   "judge": { "provider": "openrouter", "model": "typesafe/jev-1.13", "timeoutMs": 8000, "minConfidence": 0.35 },
   "candidates": [
     { "provider": "opencode-go", "model": "mimo-v2.6-flash", "tier": "low",
-      "description": "Low cost and fast. A quick second read for obvious mistakes.",
+      "description": "Low cost and fast. A light second read for obvious mistakes.",
       "notFor": "Anything subtle, or a change with real blast radius." },
-    { "provider": "opencode-go", "model": "muse-spark-1.3-contributor", "tier": "low",
-      "description": "Low cost generalist. A light second read when speed matters more than depth.",
-      "notFor": "Security, concurrency or data-integrity questions." },
     { "provider": "opencode-go", "model": "glm-5.3-flash", "tier": "medium",
       "description": "Strong general coder at low cost. A full correctness and edge-case pass.",
       "notFor": "Hostile review of subtle or security-sensitive changes." },
-    { "provider": "opencode-go", "model": "deepseek-v4.1-flash", "tier": "medium",
-      "description": "Low cost and strong on implementation detail. Reads code closely.",
-      "notFor": "Design-level or architectural judgement." },
     { "provider": "opencode-go", "model": "glm-5.3", "tier": "high",
-      "description": "The strongest reasoner here. For a hostile or security-focused review.",
-      "notFor": "Routine changes a flash model already covers well." },
-    { "provider": "opencode-go", "model": "grok-4.7", "tier": "high",
-      "description": "A strong second opinion from a different model family.",
-      "notFor": "Routine changes, or when glm-5.3 is already the right kind of reviewer." }
+      "description": "The strongest reasoner here. A hostile, exhaustive or security-focused review.",
+      "notFor": "Routine changes a flash model already covers well." }
   ],
   "tracks": {
     "adversarial": {
@@ -91,6 +82,12 @@ and a `.env` beside this file is read for `OPENROUTER_API_KEY`.
   is a hard boundary — a `standard` review draws only from the `medium` band.
 - **`minConfidence`** is the cumulative `P(depth >= this rung)` needed to select
   it. This is the whole cost policy: raise it to make an expensive rung rarer.
+- **`thinking`** is the rung's thinking level, passed to the review subagent. It
+  is a function of the rung (light → low, standard → medium, deep → high), then
+  **clamped to what the chosen model supports**: a model that exposes a
+  `thinkingLevelMap` walks the requested level down to the highest one it
+  accepts, and a non-reasoning model gets `off`. The chosen model never raises
+  or lowers the level on its own — only the clamp does.
 - **`nothingMargin`** is the most `P(depth = none)` that still recommends a
   review. Lower it to review less, raise it to review more.
 - **`description`** / **`notFor`** are what Jev reads when choosing within a band
