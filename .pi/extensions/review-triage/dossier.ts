@@ -30,7 +30,7 @@
  */
 
 import { createHash } from "node:crypto";
-import { MIGRATION_PATH, SECURITY_PATH } from "./evidence.ts";
+import { MIGRATION_PATH, SECURITY_PATH, type ArtifactFlags } from "./evidence.ts";
 
 // ---------------------------------------------------------------------------
 // Evidence items
@@ -48,16 +48,6 @@ export type EvidenceTrust = "observed" | "asserted" | "self-reported";
 /** Freshness is a state, not a timestamp, so it cannot perturb the fingerprint. */
 export type EvidenceFreshness = "fresh" | "stale" | "unknown";
 export type ValidationOutcome = "passed" | "failed" | "not-run" | "unknown";
-
-/** Structural flags a collector can observe about one artifact change. */
-export interface ArtifactFlags {
-	binary?: boolean;
-	deletion?: boolean;
-	modeChange?: boolean;
-	symlink?: boolean;
-	submodule?: boolean;
-	conflict?: boolean;
-}
 
 /** The fields every evidence item carries, whatever its payload. */
 export interface EvidenceItemBase {
