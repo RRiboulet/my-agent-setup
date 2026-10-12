@@ -14,14 +14,20 @@ a ready-to-paste task for the `subagent` tool.
    Risk-shaped things — auth paths, network boundaries, export-surface changes,
    error handling, migrations, dependency churn, size — are labelled and put in
    Jev's `state`. Nothing scores them.
-2. **Judgement** (Jev, one batched request). Two `noul` gates (does this need
-   adversarial / complexity review?), two `score` readings (how hard should each
-   push, 0–3), and each model `choice` asked twice, forward and reversed, then
-   averaged to cancel Jev's first-option bias.
-3. **Policy** (code). A `noul` probability at or above the track threshold means
-   "needed". The `score` picks a tier; each tier carries a thinking level and a
-   capability floor the chosen model must clear. A confident `choice` inside the floor
-   is used; a low-confidence or unavailable choice walks the fallback chain.
+2. **Judgement** (Jev, one batched request). **One depth question per track** —
+   a `choice` over `none`/`light`/`standard`/`deep` — asked forward and reversed,
+   then averaged. That single distribution is the only probability per track:
+   `none` is the gate and the deeper levels are the cost ladder, so nothing can
+   disagree with itself. A second `choice` per track picks the model, also asked
+   both ways.
+3. **Policy** (code). A review is recommended when `P(depth = none)` is below
+   the track's `nothingMargin`. The rung is the **deepest whose cumulative
+   probability clears its own `minConfidence`** — i.e. select `deep` only when
+   `P(depth >= deep) >= 0.75`. That one rule is the cost gate: because cumulative
+   probability shrinks as the rung deepens, an expensive rung has to be argued
+   for, not merely be the largest single slice. The rung's band then bounds the
+   model; Jev's `choice` picks within it, and can never leak the expensive model
+   into a cheaper review.
 
 ## Configuration
 
@@ -34,32 +40,41 @@ and a `.env` beside this file is read for `OPENROUTER_API_KEY`.
   "enabled": true,
   "judge": { "provider": "openrouter", "model": "typesafe/jev-1.13", "timeoutMs": 8000, "minConfidence": 0.35 },
   "candidates": [
-    { "provider": "opencode-go", "model": "deepseek-v4.1-flash", "tier": "low",
-      "description": "Fast and cheap. Catches obvious mistakes in small, low-risk changes.",
-      "notFor": "Subtle security, concurrency or data-integrity bugs." },
+    { "provider": "opencode-go", "model": "mimo-v2.6-flash", "tier": "low",
+      "description": "Low cost and fast. A quick second read for obvious mistakes.",
+      "notFor": "Anything subtle, or a change with real blast radius." },
+    { "provider": "opencode-go", "model": "muse-spark-1.3-contributor", "tier": "low",
+      "description": "Low cost generalist. A light second read when speed matters more than depth.",
+      "notFor": "Security, concurrency or data-integrity questions." },
     { "provider": "opencode-go", "model": "glm-5.3-flash", "tier": "medium",
-      "description": "Strong general reasoner at low cost. A full correctness and edge-case pass on ordinary work.",
+      "description": "Strong general coder at low cost. A full correctness and edge-case pass.",
       "notFor": "Hostile review of subtle or security-sensitive changes." },
+    { "provider": "opencode-go", "model": "deepseek-v4.1-flash", "tier": "medium",
+      "description": "Low cost and strong on implementation detail. Reads code closely.",
+      "notFor": "Design-level or architectural judgement." },
     { "provider": "opencode-go", "model": "glm-5.3", "tier": "high",
-      "description": "The strongest reviewer here, and the most expensive. For hostile, exhaustive or security-focused review.",
-      "notFor": "Routine changes, or anything a flash model already covers well." }
+      "description": "The strongest reasoner here. For a hostile or security-focused review.",
+      "notFor": "Routine changes a flash model already covers well." },
+    { "provider": "opencode-go", "model": "grok-4.7", "tier": "high",
+      "description": "A strong second opinion from a different model family.",
+      "notFor": "Routine changes, or when glm-5.3 is already the right kind of reviewer." }
   ],
   "tracks": {
     "adversarial": {
-      "threshold": 0.5,
+      "nothingMargin": 0.5,
       "tiers": [
-        { "name": "light",    "minScore": 0,   "thinking": "low",    "minTier": "low" },
-        { "name": "standard", "minScore": 1.5, "thinking": "medium", "minTier": "medium" },
-        { "name": "deep",     "minScore": 2.5, "thinking": "high",   "minTier": "high" }
+        { "name": "light",    "candidateTier": "low",    "thinking": "low",    "minConfidence": 0 },
+        { "name": "standard", "candidateTier": "medium", "thinking": "medium", "minConfidence": 0.5 },
+        { "name": "deep",     "candidateTier": "high",   "thinking": "high",   "minConfidence": 0.75 }
       ],
       "fallbackChain": ["opencode-go/glm-5.3-flash", "opencode-go/glm-5.3"]
     },
     "complexity": {
-      "threshold": 0.5,
+      "nothingMargin": 0.5,
       "tiers": [
-        { "name": "light",    "minScore": 0,   "thinking": "low",    "minTier": "low" },
-        { "name": "standard", "minScore": 1.5, "thinking": "medium", "minTier": "medium" },
-        { "name": "deep",     "minScore": 2.5, "thinking": "high",   "minTier": "high" }
+        { "name": "light",    "candidateTier": "low",    "thinking": "low",    "minConfidence": 0 },
+        { "name": "standard", "candidateTier": "medium", "thinking": "medium", "minConfidence": 0.5 },
+        { "name": "deep",     "candidateTier": "high",   "thinking": "high",   "minConfidence": 0.75 }
       ],
       "fallbackChain": ["opencode-go/glm-5.3-flash"]
     }
@@ -70,17 +85,19 @@ and a `.env` beside this file is read for `OPENROUTER_API_KEY`.
 }
 ```
 
-- **`tier`** (`low`/`medium`/`high`) is the capability rank the tier floor is
-  enforced against. It is an explicit human judgement, **not** price: two models
-  can share a price and differ in strength, and a free model can be the strongest
-  one offered, so price cannot be trusted to rank them. A `deep` review needs a
-  model at or above `minTier: high`; if Jev picks below it, the pick is promoted.
-- **`description`** / **`notFor`** are what Jev reads when choosing — this is
-  where routing quality actually comes from. With no `candidates`, the list is
+- **`tier`** (`low`/`medium`/`high`) is a capability band assigned by a human,
+  **not** price: two models can share a price and differ in strength, and a free
+  model can be the strongest offered, so price cannot rank them. The rung's band
+  is a hard boundary — a `standard` review draws only from the `medium` band.
+- **`minConfidence`** is the cumulative `P(depth >= this rung)` needed to select
+  it. This is the whole cost policy: raise it to make an expensive rung rarer.
+- **`nothingMargin`** is the most `P(depth = none)` that still recommends a
+  review. Lower it to review less, raise it to review more.
+- **`description`** / **`notFor`** are what Jev reads when choosing within a band
+  — this is where routing quality comes from. With no `candidates`, the list is
   synthesised from the models the session can use and bucketed by catalogue
-  price, which is a coarse guess, not a capability judgement.
-- **`fallbackChain`** is per track: what to use when Jev's Choice is
-  low-confidence or the chosen model is unavailable.
+  price, a coarse guess rather than a capability judgement.
+- **`fallbackChain`** is per track: what to use when the band is unavailable.
 - **`onJudgeError`** is `"conservative"` (default): if Jev is unreachable,
   recommend both reviews at their middle rung. `"skip"` recommends nothing.
 - **`enabled`** (or `PI_REVIEW_TRIAGE_OFF=1`) turns the tool off; a disabled run
@@ -114,5 +131,5 @@ review is auditable.
 | `config.ts` | policy: defaults, file + env merge, dotenv |
 | `evidence.ts` | git measurement and risk labelling (pure parsers) |
 | `judge.ts` | the batched Jev questions, answer parsing, reverse-choice averaging |
-| `compose.ts` | thresholds, tier/floor selection, fallback walk (pure) |
+| `compose.ts` | depth rungs, band selection, fallback walk (pure) |
 | `format.ts` | plan rendering |

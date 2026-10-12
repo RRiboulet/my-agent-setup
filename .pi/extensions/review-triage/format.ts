@@ -19,12 +19,18 @@ function indent(text: string, prefix: string): string {
 function formatTrack(track: TrackPlan): string {
 	const headline = track.track === "adversarial" ? "Adversarial" : "Complexity";
 	if (!track.needed) {
-		return `${headline}: not needed (probability ${track.neededProbability.toFixed(2)})`;
+		return `${headline}: not needed (P(depth = none) ${(1 - track.neededProbability).toFixed(2)})`;
 	}
 
+	// The whole distribution is shown, not just the rung it landed on: a
+	// near-tie between standard and deep is exactly what the confidence gate is
+	// deciding on, and hiding it would make the plan look more certain than it is.
+	const depth = (["none", "light", "standard", "deep"] as const)
+		.map((level) => `${level} ${(track.depth[level] ?? 0).toFixed(2)}`)
+		.join(" · ");
 	const lines = [
 		`${headline}: NEEDED`,
-		`  probability ${track.neededProbability.toFixed(2)} · strength ${track.strength.toFixed(2)}/3 (confidence ${track.strengthConfidence.toFixed(2)}) · tier ${track.tier}`,
+		`  depth ${depth} · tier ${track.tier}`,
 	];
 	if (track.model) {
 		lines.push(

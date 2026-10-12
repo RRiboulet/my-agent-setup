@@ -54,7 +54,7 @@ import {
 	failOpenPlan,
 	resolveCandidates,
 	selectModel,
-	tierForScore,
+	tierForDepth,
 	type AvailableModel,
 } from "../../review-triage/compose.ts";
 import { formatPlan } from "../../review-triage/format.ts";
@@ -90,11 +90,13 @@ const AVAILABLE: AvailableModel[] = [
 	{ provider: "p", id: "strong", reasoning: true },
 ];
 
+function depth(none = 0.05, light = 0.05, standard = 0.4, deep = 0.5) {
+	return { none, light, standard, deep };
+}
+
 function trackJudgment(overrides: Partial<Parameters<typeof composePlan>[0]["judgment"]["adversarial"]> = {}) {
 	return {
-		neededProbability: 0.9,
-		strength: 2.0,
-		strengthConfidence: 0.9,
+		depth: depth(),
 		choice: "p/mid",
 		choiceConfidence: 0.9,
 		choiceProbabilities: { "p/cheap": 0.05, "p/mid": 0.9, "p/strong": 0.05 },
@@ -136,7 +138,7 @@ test("config: a file merges over defaults field by field", () => {
 		JSON.stringify({
 			judge: { model: "typesafe/jev-latest", minConfidence: 0.6 },
 			candidates: [{ provider: "x", model: "y", tier: "high", description: "best" }],
-			tracks: { adversarial: { threshold: 0.8, fallbackChain: ["x/y"] } },
+			tracks: { adversarial: { nothingMargin: 0.8, fallbackChain: ["x/y"] } },
 			onJudgeError: "skip",
 		}),
 	);
@@ -147,7 +149,7 @@ test("config: a file merges over defaults field by field", () => {
 		assert.equal(loaded.judge.minConfidence, 0.6);
 		assert.equal(loaded.candidates.length, 1);
 		assert.equal(loaded.candidates[0]?.tier, "high", "the capability tier must survive the config read");
-		assert.equal(loaded.tracks.adversarial.threshold, 0.8);
+		assert.equal(loaded.tracks.adversarial.nothingMargin, 0.8);
 		assert.deepEqual(loaded.tracks.adversarial.fallbackChain, ["x/y"]);
 		// The complexity track was not overridden and must keep its default tiers.
 		assert.deepEqual(loaded.tracks.complexity.tiers, DEFAULT_TRACKS.complexity.tiers);
@@ -373,11 +375,14 @@ function fullAnswers(overrides: Record<string, ClassifierAnswer> = {}): Record<s
 	const keys = CANDIDATES.map((c) => `${c.provider}/${c.model}`);
 	const forward = Object.fromEntries(keys.map((k, i) => [k, i === 1 ? 0.9 : 0.05]));
 	const reverse = Object.fromEntries([...keys].reverse().map((k, i) => [k, i === 1 ? 0.85 : 0.075]));
+	const adversarial = { none: 0.05, light: 0.05, standard: 0.4, deep: 0.5 };
+	const complexity = { none: 0.4, light: 0.3, standard: 0.2, deep: 0.1 };
+	const reverseOf = (record: Record<string, number>) => Object.fromEntries(Object.entries(record).reverse());
 	return {
-		[QUESTION_IDS.adversarialNeeded]: { type: "bool", probability: 0.9 },
-		[QUESTION_IDS.complexityNeeded]: { type: "bool", probability: 0.4 },
-		[QUESTION_IDS.adversarialStrength]: { type: "score", score: 2.2, confidence: 0.8 },
-		[QUESTION_IDS.complexityStrength]: { type: "score", score: 0.8, confidence: 0.7 },
+		[QUESTION_IDS.adversarialDepth]: { type: "choice", choice: "deep", probabilities: adversarial, confidence: 0.6 },
+		[QUESTION_IDS.adversarialDepthReversed]: { type: "choice", choice: "deep", probabilities: reverseOf(adversarial), confidence: 0.6 },
+		[QUESTION_IDS.complexityDepth]: { type: "choice", choice: "none", probabilities: complexity, confidence: 0.5 },
+		[QUESTION_IDS.complexityDepthReversed]: { type: "choice", choice: "none", probabilities: reverseOf(complexity), confidence: 0.5 },
 		[QUESTION_IDS.adversarialModel]: { type: "choice", choice: "p/mid", probabilities: forward, confidence: 0.9 },
 		[QUESTION_IDS.adversarialModelReversed]: {
 			type: "choice",
@@ -409,7 +414,9 @@ test("judge: the batch asks eight questions, every Choice in both orders", () =>
 });
 
 test("judge: a missing answer is a malformed judge error, not a zero", () => {
-	const result = classifierResult({ [QUESTION_IDS.adversarialNeeded]: { type: "bool", probability: 0.9 } });
+	const result = classifierResult({
+		[QUESTION_IDS.adversarialDepth]: { type: "choice", choice: "deep", probabilities: { deep: 1 }, confidence: 0.9 },
+	});
 	assert.throws(() => parseJudgment(result, config(), 10), (error: unknown) => {
 		return error instanceof JudgeError && error.failure === "malformed";
 	});
@@ -436,17 +443,21 @@ test("judge: both orders agreeing raises confidence", () => {
 	assert.ok(averaged.confidence > 0.85);
 });
 
-test("judge: reverseChoice:false asks six questions and needs no reverse answer", () => {
+test("judge: reverseChoice:false asks four questions and needs no reverse answer", () => {
 	const questions = buildQuestions(config({ reverseChoice: false }), CANDIDATES);
-	assert.equal(Object.keys(questions).length, 6, "the reversed pair must not be sent and paid for");
+	assert.equal(Object.keys(questions).length, 4, "the reversed pairs must not be sent and paid for");
 	assert.equal(QUESTION_IDS.adversarialModelReversed in questions, false);
+	assert.equal(QUESTION_IDS.adversarialDepthReversed in questions, false);
 
 	// parseJudgment must accept a result that has no reversed answers at all.
 	const forwardOnly = { ...fullAnswers() };
 	delete forwardOnly[QUESTION_IDS.adversarialModelReversed];
 	delete forwardOnly[QUESTION_IDS.complexityModelReversed];
+	delete forwardOnly[QUESTION_IDS.adversarialDepthReversed];
+	delete forwardOnly[QUESTION_IDS.complexityDepthReversed];
 	const parsed = parseJudgment(classifierResult(forwardOnly), config({ reverseChoice: false }), 5);
 	assert.equal(parsed.adversarial.choice, "p/mid");
+	assert.equal(parsed.adversarial.depth.deep, 0.5);
 });
 
 test("judge: an abort is its own failure, not a reason to fail open", async () => {
@@ -479,15 +490,20 @@ test("judge: a state over the cap is bounded even with huge notes", () => {
 	assert.ok(JSON.stringify(state).length <= 3_000, `state was ${JSON.stringify(state).length} chars`);
 });
 
-test("judge: taking the threshold out of parseTrack keeps one source of truth", () => {
+test("judge: parseJudgment reports the whole depth distribution, and gates nothing", () => {
 	const parsed = parseJudgment(classifierResult(fullAnswers()), config(), 123);
-	// 0.9 would clear the adversarial threshold and 0.4 would not, but choosing
-	// is compose's job; parseJudgment only reports the probability.
-	assert.equal(parsed.adversarial.neededProbability, 0.9);
-	assert.equal(parsed.complexity.neededProbability, 0.4);
+	// Averaging the forward and reversed orders reproduces the same distribution.
+	const near = (actual: Record<string, number>, expected: Record<string, number>) => {
+		for (const [key, value] of Object.entries(expected)) {
+			assert.ok(Math.abs((actual[key] ?? 0) - value) < 1e-9, `${key}: ${actual[key]} !~ ${value}`);
+		}
+	};
+	near(parsed.adversarial.depth, { none: 0.05, light: 0.05, standard: 0.4, deep: 0.5 });
+	near(parsed.complexity.depth, { none: 0.4, light: 0.3, standard: 0.2, deep: 0.1 });
+	// Whether 0.5 deep is enough to buy the expensive model is compose's call.
 	assert.equal("needed" in parsed.adversarial, false);
+	assert.equal("strength" in parsed.adversarial, false);
 	assert.equal(parsed.adversarial.choice, "p/mid");
-	assert.equal(parsed.adversarial.strength, 2.2);
 	assert.equal(parsed.latencyMs, 123);
 });
 
@@ -559,12 +575,17 @@ test("compose: tierFromPrice buckets by catalogue price", () => {
 	assert.equal(tierFromPrice(undefined), "medium");
 });
 
-test("compose: tierForScore picks the last rung the score clears", () => {
+test("compose: tierForDepth needs confidence to climb, not an expected-value midpoint", () => {
 	const track = DEFAULT_TRACKS.adversarial;
-	assert.equal(tierForScore(track, 0).name, "light");
-	assert.equal(tierForScore(track, 1.4).name, "light");
-	assert.equal(tierForScore(track, 1.5).name, "standard");
-	assert.equal(tierForScore(track, 2.9).name, "deep");
+	// Solidly standard: P(>=standard) is 0.9 but P(deep) is only 0.1.
+	assert.equal(tierForDepth(track, depth(0, 0, 0.9, 0.1)).name, "standard");
+	// A 50/50 straddle between standard and deep must NOT buy the expensive rung.
+	assert.equal(tierForDepth(track, depth(0, 0.1, 0.4, 0.5)).name, "standard");
+	// Only clear confidence at the deep bar crosses it.
+	assert.equal(tierForDepth(track, depth(0, 0.05, 0.2, 0.75)).name, "deep");
+	assert.equal(tierForDepth(track, depth(0, 0.1, 0.1, 0.8)).name, "deep");
+	// Mostly none/light: not even the middle rung.
+	assert.equal(tierForDepth(track, depth(0.2, 0.8, 0, 0)).name, "light");
 });
 
 test("compose: thinking is clamped for a model that cannot reason", () => {
@@ -593,10 +614,10 @@ test("compose: resolveCandidates prefers config, else buckets the available mode
 	);
 });
 
-test("compose: a confident Choice within the floor is used as-is", () => {
+test("compose: a confident pick inside the rung's band is used as-is", () => {
 	const selection = selectModel({
 		track: "adversarial",
-		tier: { name: "standard", minScore: 1.5, thinking: "medium", minTier: "medium" },
+		tier: { name: "standard", candidateTier: "medium", thinking: "medium", minConfidence: 0.5 },
 		judgment: trackJudgment(),
 		config: config(),
 		candidates: CANDIDATES,
@@ -606,36 +627,59 @@ test("compose: a confident Choice within the floor is used as-is", () => {
 	assert.equal(selection.fallbackUsed, false);
 });
 
-test("compose: a cheap pick for a deep review is promoted to clear the floor", () => {
+test("compose: a high pick for a standard rung stays in the medium band", () => {
+	// The budget leak the floor-only rule allowed: Jev picks the expensive model
+	// on a standard review, and it is used. The band is now a hard boundary.
 	const selection = selectModel({
 		track: "adversarial",
-		tier: { name: "deep", minScore: 2.5, thinking: "high", minTier: "high" },
-		judgment: trackJudgment({ choice: "p/cheap", choiceProbabilities: { "p/cheap": 0.9, "p/strong": 0.1 } }),
+		tier: { name: "standard", candidateTier: "medium", thinking: "medium", minConfidence: 0.5 },
+		judgment: trackJudgment({
+			choice: "p/strong",
+			choiceConfidence: 0.99,
+			choiceProbabilities: { "p/strong": 0.95, "p/mid": 0.05 },
+		}),
+		config: config(),
+		candidates: CANDIDATES,
+		available: AVAILABLE,
+	});
+	assert.equal(selection.model?.model, "mid", "the expensive model must not leak into a standard review");
+	assert.ok(selection.notes.some((note) => note.includes("outside the medium band")));
+});
+
+test("compose: a deep rung uses the high band", () => {
+	const selection = selectModel({
+		track: "adversarial",
+		tier: { name: "deep", candidateTier: "high", thinking: "high", minConfidence: 0.75 },
+		judgment: trackJudgment({
+			choice: "p/strong",
+			choiceProbabilities: { "p/strong": 0.9, "p/mid": 0.1 },
+		}),
 		config: config(),
 		candidates: CANDIDATES,
 		available: AVAILABLE,
 	});
 	assert.equal(selection.model?.model, "strong");
-	assert.ok(selection.notes.some((note) => note.includes("promoted")));
+	assert.equal(selection.fallbackUsed, false);
 });
 
-test("compose: a low-confidence Choice walks the fallback chain", () => {
+test("compose: a low-confidence pick falls to the band's best-ranked model", () => {
 	const selection = selectModel({
 		track: "adversarial",
-		tier: { name: "standard", minScore: 1.5, thinking: "medium", minTier: "medium" },
+		tier: { name: "standard", candidateTier: "medium", thinking: "medium", minConfidence: 0.5 },
 		judgment: trackJudgment({ choiceConfidence: 0.1 }),
-		config: config({ tracks: { ...DEFAULT_TRACKS, adversarial: { ...DEFAULT_TRACKS.adversarial, fallbackChain: ["p/strong"] } } }),
+		config: config(),
 		candidates: CANDIDATES,
 		available: AVAILABLE,
 	});
-	assert.equal(selection.model?.model, "strong");
+	assert.equal(selection.model?.model, "mid");
 	assert.equal(selection.fallbackUsed, true);
+	assert.ok(selection.notes.some((note) => note.includes("below")));
 });
 
-test("compose: an unavailable pick walks the chain to a usable model", () => {
+test("compose: an unavailable band walks the chain to a usable model", () => {
 	const selection = selectModel({
 		track: "adversarial",
-		tier: { name: "standard", minScore: 1.5, thinking: "medium", minTier: "medium" },
+		tier: { name: "standard", candidateTier: "medium", thinking: "medium", minConfidence: 0.5 },
 		judgment: trackJudgment({ choice: "p/mid" }),
 		config: config(),
 		candidates: CANDIDATES,
@@ -648,7 +692,7 @@ test("compose: an unavailable pick walks the chain to a usable model", () => {
 test("compose: no usable model leaves the choice to the agent with a note", () => {
 	const selection = selectModel({
 		track: "adversarial",
-		tier: { name: "standard", minScore: 1.5, thinking: "medium", minTier: "medium" },
+		tier: { name: "standard", candidateTier: "medium", thinking: "medium", minConfidence: 0.5 },
 		judgment: trackJudgment(),
 		config: config(),
 		candidates: CANDIDATES,
@@ -658,7 +702,7 @@ test("compose: no usable model leaves the choice to the agent with a note", () =
 	assert.ok(selection.notes.some((note) => note.includes("agent must choose")));
 });
 
-test("compose: a plan gates each track on its own probability", () => {
+test("compose: a plan gates each track on its own depth, not on a shared threshold", () => {
 	const plan = composePlan({
 		judgment: judgment(),
 		config: config(),
@@ -669,15 +713,36 @@ test("compose: a plan gates each track on its own probability", () => {
 	});
 	assert.equal(plan.verdict, "adversarial + complexity");
 	assert.equal(plan.adversarial.needed, true);
+	assert.equal(plan.adversarial.tier, "standard", "0.5 deep is not enough for the expensive rung");
 	assert.ok(plan.adversarial.task?.includes("falsify"), "the adversarial task must be hostile");
 	assert.ok(plan.complexity.task?.includes("over-engineered"));
+});
+
+test("compose: confident depth climbs to the expensive rung and its model", () => {
+	const plan = composePlan({
+		judgment: judgment({
+			adversarial: trackJudgment({
+				depth: depth(0, 0.02, 0.13, 0.85),
+				choice: "p/strong",
+				choiceProbabilities: { "p/strong": 0.9, "p/mid": 0.1 },
+			}),
+		}),
+		config: config(),
+		candidates: CANDIDATES,
+		available: AVAILABLE,
+		evidence: EVIDENCE,
+		summary: "add a thing",
+	});
+	assert.equal(plan.adversarial.tier, "deep");
+	assert.equal(plan.adversarial.model?.model, "strong");
+	assert.equal(plan.adversarial.thinking, "high");
 });
 
 test("compose: a plan with neither track needed says so", () => {
 	const plan = composePlan({
 		judgment: judgment({
-			adversarial: trackJudgment({ neededProbability: 0.1 }),
-			complexity: trackJudgment({ neededProbability: 0.2 }),
+			adversarial: trackJudgment({ depth: depth(0.9, 0.05, 0.03, 0.02) }),
+			complexity: trackJudgment({ depth: depth(0.8, 0.1, 0.05, 0.05) }),
 		}),
 		config: config(),
 		candidates: CANDIDATES,
@@ -700,6 +765,7 @@ test("compose: fail-open is conservative by default and can be told to skip", ()
 		reason: "timeout",
 	});
 	assert.equal(conservative.adversarial.needed, true);
+	assert.equal(conservative.adversarial.tier, "standard", "fail open at the middle rung, not the deepest");
 	assert.ok(conservative.verdict.includes("conservative"));
 
 	const skip = failOpenPlan({
@@ -714,13 +780,13 @@ test("compose: fail-open is conservative by default and can be told to skip", ()
 	assert.equal(skip.verdict, "no review (judge unavailable)");
 });
 
-test("compose: fail-open stays conservative under a raised threshold", () => {
-	// The regression: a hardcoded 0.5 probability against a configured 0.7
-	// threshold rendered as "no review (judge unavailable — conservative)".
+test("compose: fail-open still recommends under a high nothing-margin", () => {
+	// The regression, in depth terms: a synthesised 0.5 against a configured
+	// margin above 0.5 rendered as "no review (judge unavailable - conservative)".
 	const raised = config({
 		tracks: {
-			adversarial: { ...DEFAULT_TRACKS.adversarial, threshold: 0.7 },
-			complexity: { ...DEFAULT_TRACKS.complexity, threshold: 0.95 },
+			adversarial: { ...DEFAULT_TRACKS.adversarial, nothingMargin: 0.9 },
+			complexity: { ...DEFAULT_TRACKS.complexity, nothingMargin: 0.95 },
 		},
 	});
 	const plan = failOpenPlan({
@@ -736,16 +802,14 @@ test("compose: fail-open stays conservative under a raised threshold", () => {
 	assert.equal(plan.verdict, "adversarial + complexity (judge unavailable — conservative default)");
 });
 
-test("compose: fail-open targets the middle rung of a custom tier table", () => {
-	const custom = config({
+test("compose: fail-open takes the middle rung by index, whatever the table", () => {
+	const twoRungs = config({
 		tracks: {
 			adversarial: {
-				threshold: 0.5,
+				nothingMargin: 0.5,
 				tiers: [
-					{ name: "a", minScore: 0, thinking: "low", minTier: "low" },
-					{ name: "b", minScore: 1, thinking: "medium", minTier: "medium" },
-					{ name: "c", minScore: 2, thinking: "high", minTier: "high" },
-					{ name: "d", minScore: 3, thinking: "max", minTier: "high" },
+					{ name: "light", candidateTier: "low", thinking: "low", minConfidence: 0 },
+					{ name: "standard", candidateTier: "medium", thinking: "medium", minConfidence: 0.5 },
 				],
 				fallbackChain: [],
 			},
@@ -753,21 +817,23 @@ test("compose: fail-open targets the middle rung of a custom tier table", () => 
 		},
 	});
 	const plan = failOpenPlan({
-		config: custom,
+		config: twoRungs,
 		candidates: CANDIDATES,
 		available: AVAILABLE,
 		evidence: EVIDENCE,
 		summary: "x",
 		reason: "timeout",
 	});
-	// Middle of a four-rung table is index 1, not the default's "standard".
-	assert.equal(plan.adversarial.tier, "b");
+	// Middle of a two-rung table is index 0, so this lands on light - not a
+	// hardcoded "standard".
+	assert.equal(plan.adversarial.tier, "light");
 });
 
 test("compose: a disabled extension says so instead of judging", () => {
 	const plan = disabledPlan(EVIDENCE);
 	assert.equal(plan.verdict, "disabled (review-triage is off)");
 	assert.equal(plan.adversarial.needed, false);
+	assert.equal(plan.adversarial.depth.none, 1);
 	assert.equal(plan.judge, "disabled");
 });
 

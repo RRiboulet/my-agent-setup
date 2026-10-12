@@ -18,8 +18,17 @@
  * can be replayed from a saved judgement and a config.
  */
 
-import type { Candidate, CapabilityTier, ThinkingLevel, Tier, TrackConfig, TriageConfig, TrackName } from "./config.ts";
-import { CAPABILITY_RANK, THINKING_RANK } from "./config.ts";
+import type {
+	Candidate,
+	CapabilityTier,
+	DepthLevel,
+	ThinkingLevel,
+	Tier,
+	TrackConfig,
+	TriageConfig,
+	TrackName,
+} from "./config.ts";
+import { DEPTH_LEVELS, DEPTH_RANK, THINKING_RANK } from "./config.ts";
 import type { Judgment, TrackJudgment } from "./judge.ts";
 import { candidateKey } from "./judge.ts";
 
@@ -41,13 +50,15 @@ export interface ModelRef {
 export interface TrackPlan {
 	track: TrackName;
 	needed: boolean;
+	/** P(depth >= light): the probability a review is warranted. */
 	neededProbability: number;
-	strength: number;
-	strengthConfidence: number;
+	/** The averaged depth distribution Jev returned, kept for the audit trail. */
+	depth: Record<DepthLevel, number>;
+	/** Rung name: "none" when skipped, else light/standard/deep. */
 	tier: string;
 	thinking: ThinkingLevel;
 	model?: ModelRef;
-	/** Jev's raw pick, kept even when overridden, so the override is visible. */
+	/** Jev's raw model pick, kept even when it fell outside the rung's band. */
 	choice: string;
 	choiceConfidence: number;
 	fallbackUsed: boolean;
@@ -127,11 +138,24 @@ function priceOf(model: AvailableModel): number {
 	return typeof input === "number" && Number.isFinite(input) ? input : Number.POSITIVE_INFINITY;
 }
 
-/** The last tier whose score floor the reading clears. Tiers are pre-sorted. */
-export function tierForScore(track: TrackConfig, score: number): Tier {
+/**
+ * The rung for a depth distribution: the deepest rung whose CUMULATIVE
+ * probability clears its own `minConfidence`. That single rule is both the
+ * gate and the cost control — because `P(depth >= rung)` shrinks as the rung
+ * deepens, an expensive rung has to be argued for, and the two distributions
+ * we used to ask separately (needed? how hard?) collapse into one.
+ *
+ * Tiers are sorted ascending, and cumulative probability is monotonic in depth,
+ * so a plain sweep is enough: a rung that clears its bar implies every shallower
+ * rung clears its lower bar too.
+ */
+export function tierForDepth(track: TrackConfig, depth: Record<DepthLevel, number>): Tier {
 	let chosen = track.tiers[0];
-	for (const tier of track.tiers) {
-		if (score >= tier.minScore) chosen = tier;
+	for (const rung of track.tiers) {
+		const cumulative = DEPTH_LEVELS.filter(
+			(level) => DEPTH_RANK[level] >= DEPTH_RANK[rung.name],
+		).reduce((sum, level) => sum + (depth[level] ?? 0), 0);
+		if (cumulative >= rung.minConfidence) chosen = rung;
 	}
 	return chosen;
 }
@@ -200,12 +224,16 @@ interface Selection {
 }
 
 /**
- * Pick the review model. The order is the policy:
- *   1. Jev's Choice, when it is confident and clears the tier's capability floor;
- *   2. the highest-probability candidate that clears the floor;
- *   3. the configured fallback chain, floor-clearing entries first;
- *   4. the least capable floor-clearing model that is available;
- *   5. anything available at all, then the session model, with a note.
+ * Pick the review model from the rung's band. The rung already decided how much
+ * capability the review deserves (from the depth distribution), so the band is a
+ * hard boundary: Jev's model pick is used only if it falls inside it. That is
+ * what stops a "standard" review from quietly buying the expensive model — the
+ * leak the old floor-only rule allowed.
+ *
+ *   1. Jev's pick, when it is inside the band and confident;
+ *   2. the best-ranked available candidate in the band, by Jev's own order;
+ *   3. the configured fallback chain;
+ *   4. any available candidate, then the session model, with a note.
  */
 export function selectModel(args: {
 	track: TrackName;
@@ -218,85 +246,59 @@ export function selectModel(args: {
 }): Selection {
 	const { track, tier, judgment, config, candidates, available, current } = args;
 	const notes: string[] = [];
-	const floor = CAPABILITY_RANK[tier.minTier];
-	const clearsFloor = (ref: ModelRef) => CAPABILITY_RANK[ref.tier] >= floor;
-	const usable = (ref: ModelRef | undefined) =>
-		Boolean(ref && clearsFloor(ref) && isAvailable(ref, available));
+	const toRef = (candidate: Candidate): ModelRef => ({
+		provider: candidate.provider,
+		model: candidate.model,
+		tier: candidate.tier,
+	});
+	const band = candidates.filter((candidate) => candidate.tier === tier.candidateTier);
+	const pick = band.find((candidate) => candidateKey(candidate) === judgment.choice);
+	const confident = judgment.choiceConfidence >= config.judge.minConfidence;
 
-	const pick = refFromKey(judgment.choice, candidates, available);
-	const lowConfidence = judgment.choiceConfidence < config.judge.minConfidence;
-
-	if (pick && !lowConfidence) {
-		if (!clearsFloor(pick)) {
-			notes.push(
-				`Jev chose ${judgment.choice} (${pick.tier}) below the ${tier.minTier} floor for a ${tier.name} review; promoted.`,
-			);
-		} else if (!isAvailable(pick, available)) {
-			notes.push(`Jev chose ${judgment.choice}, which this session cannot use; used the fallback policy.`);
-		} else {
-			if (CAPABILITY_RANK[pick.tier] > floor) {
-				notes.push(`Jev chose ${judgment.choice} (${pick.tier}), above the ${tier.minTier} floor for a ${tier.name} review; accepted.`);
-			}
-			return { model: pick, fallbackUsed: false, notes };
-		}
-	} else if (lowConfidence) {
+	if (pick && confident && isAvailable(toRef(pick), available)) {
+		return { model: toRef(pick), fallbackUsed: false, notes };
+	}
+	if (pick && !confident) {
 		notes.push(
-			`Choice confidence ${judgment.choiceConfidence.toFixed(2)} is below ${config.judge.minConfidence}; ignored Jev's pick in favour of the fallback policy.`,
+			`Choice confidence ${judgment.choiceConfidence.toFixed(2)} is below ${config.judge.minConfidence}; used the band's best-ranked model.`,
 		);
+	} else if (pick) {
+		notes.push(`Jev chose ${judgment.choice}, which this session cannot use.`);
 	} else {
-		notes.push("Jev named no usable candidate; used the fallback policy.");
+		const outside = candidates.find((candidate) => candidateKey(candidate) === judgment.choice);
+		notes.push(
+			outside
+				? `Jev chose ${judgment.choice} (${outside.tier}), outside the ${tier.candidateTier} band for a ${tier.name} review; kept the band.`
+				: "Jev named no candidate in the band; used the band's best-ranked model.",
+		);
 	}
 
-	// 2. Best described candidate that clears the floor, by Jev's own ranking.
-	// Skipped on a low-confidence Choice: an untrusted distribution must not be
-	// allowed to name the runner-up either — the human's fallback chain is the
-	// stop for that case, below.
-	const ranked = lowConfidence
-		? []
-		: [...candidates]
-		.map((candidate) => ({ ref: { provider: candidate.provider, model: candidate.model, tier: candidate.tier } }))
-		.filter(({ ref }) => clearsFloor(ref))
+	// 2. Best-ranked available candidate in the band, by Jev's own order.
+	const rankedBand = [...band]
+		.filter((candidate) => isAvailable(toRef(candidate), available))
 		.sort(
 			(a, b) =>
-				(judgment.choiceProbabilities[candidateKey(a.ref)] ?? 0) -
-				(judgment.choiceProbabilities[candidateKey(b.ref)] ?? 0),
-		)
-		.reverse();
-	for (const { ref } of ranked) {
+				(judgment.choiceProbabilities[candidateKey(b)] ?? 0) -
+				(judgment.choiceProbabilities[candidateKey(a)] ?? 0),
+		);
+	if (rankedBand[0]) return { model: toRef(rankedBand[0]), fallbackUsed: true, notes };
+
+	// 3. Configured fallback chain, in order.
+	const chain = config.tracks[track].fallbackChain
+		.map((key) => refFromKey(key, candidates, available))
+		.filter((ref): ref is ModelRef => ref !== undefined);
+	for (const ref of chain) {
 		if (isAvailable(ref, available)) return { model: ref, fallbackUsed: true, notes };
 	}
 
-	// 3. Configured chain for this track, floor-clearing entries first, then any.
-	const trackChain = config.tracks[track].fallbackChain;
-	const refs = trackChain
-		.map((key) => refFromKey(key, candidates, available))
-		.filter((ref): ref is ModelRef => ref !== undefined);
-	for (const ref of refs) if (usable(ref)) return { model: ref, fallbackUsed: true, notes };
-	for (const ref of refs) {
-		if (isAvailable(ref, available)) {
-			notes.push(`${ref.provider}/${ref.model} is below the ${tier.minTier} floor but is the only configured fallback.`);
-			return { model: ref, fallbackUsed: true, notes };
-		}
-	}
-
-	// 4. Least capable available candidate that still clears the floor.
-	const leastCapable = candidates
-		.map((candidate): ModelRef => ({ provider: candidate.provider, model: candidate.model, tier: candidate.tier }))
-		.filter((ref) => usable(ref))
-		.sort((a, b) => CAPABILITY_RANK[a.tier] - CAPABILITY_RANK[b.tier])[0];
-	if (leastCapable) return { model: leastCapable, fallbackUsed: true, notes };
-
-	// 5. Least capable available of any rank, then the session's current model.
-	const anyAvailable = candidates
-		.map((candidate): ModelRef => ({ provider: candidate.provider, model: candidate.model, tier: candidate.tier }))
-		.filter((ref) => isAvailable(ref, available))
-		.sort((a, b) => CAPABILITY_RANK[a.tier] - CAPABILITY_RANK[b.tier])[0];
+	// 4. Any available candidate, then the session's current model.
+	const anyAvailable = candidates.map(toRef).find((ref) => isAvailable(ref, available));
 	if (anyAvailable) {
-		notes.push(`No model clearing the ${tier.minTier} floor is available; downgraded to ${anyAvailable.tier}.`);
+		notes.push(`No ${tier.candidateTier}-band model is available; used ${anyAvailable.tier}.`);
 		return { model: anyAvailable, fallbackUsed: true, notes };
 	}
 	if (current && isAvailable(current, available)) {
-		notes.push(`No configured review model is available; using the session model.`);
+		notes.push("No configured review model is available; using the session model.");
 		return { model: current, fallbackUsed: true, notes };
 	}
 
@@ -343,10 +345,9 @@ function composeTrack(args: {
 	const trackConfig = config.tracks[track];
 	const base: TrackPlan = {
 		track,
-		needed: judgment.neededProbability >= trackConfig.threshold,
-		neededProbability: judgment.neededProbability,
-		strength: judgment.strength,
-		strengthConfidence: judgment.strengthConfidence,
+		needed: judgment.depth.none < trackConfig.nothingMargin,
+		neededProbability: 1 - (judgment.depth.none ?? 0),
+		depth: judgment.depth,
 		tier: "none",
 		thinking: "off",
 		choice: judgment.choice,
@@ -357,12 +358,12 @@ function composeTrack(args: {
 
 	if (!base.needed) {
 		base.notes.push(
-			`needed probability ${judgment.neededProbability.toFixed(2)} is below the ${trackConfig.threshold} threshold.`,
+			`P(depth = none) is ${judgment.depth.none.toFixed(2)}, at or above the ${trackConfig.nothingMargin} margin.`,
 		);
 		return base;
 	}
 
-	const tier = tierForScore(trackConfig, judgment.strength);
+	const tier = tierForDepth(trackConfig, judgment.depth);
 	const selection = selectModel({
 		track,
 		tier,
@@ -444,8 +445,7 @@ export function disabledPlan(evidence: ReviewPlan["evidence"]): ReviewPlan {
 		track: name,
 		needed: false,
 		neededProbability: 0,
-		strength: 0,
-		strengthConfidence: 0,
+		depth: { none: 1, light: 0, standard: 0, deep: 0 },
 		tier: "none",
 		thinking: "off",
 		choice: "",
@@ -483,8 +483,7 @@ export function failOpenPlan(args: {
 			track: "adversarial",
 			needed: false,
 			neededProbability: 0,
-			strength: 0,
-			strengthConfidence: 0,
+			depth: { none: 1, light: 0, standard: 0, deep: 0 },
 			tier: "none",
 			thinking: "off",
 			choice: "",
@@ -503,23 +502,20 @@ export function failOpenPlan(args: {
 		};
 	}
 
-	// The middle rung by INDEX, not a magic score: a config with a different
-	// tier table would otherwise land the fail-open plan on the wrong rung.
-	const middleScore = (track: TrackName): number => {
+	// The middle rung by INDEX, not a fixed level: a config with a different
+	// rung table should land the fail-open plan on its own middle, not ours.
+	const middleLevel = (track: TrackName): DepthLevel => {
 		const tiers = args.config.tracks[track].tiers;
-		return tiers[Math.floor((tiers.length - 1) / 2)]?.minScore ?? 0;
+		const middle = tiers[Math.floor((tiers.length - 1) / 2)];
+		return (middle?.name ?? "standard") as DepthLevel;
 	};
-	const synthesize = (track: TrackName): TrackJudgment => ({
-		// Certainty, not 0.5: a configured threshold above 0.5 would otherwise
-		// turn "fail open conservatively" into "recommend nothing", which is the
-		// opposite of what the default promises.
-		neededProbability: 1,
-		strength: middleScore(track),
-		strengthConfidence: 0,
-		choice: "",
-		choiceConfidence: 0,
-		choiceProbabilities: {},
-	});
+	const synthesize = (track: TrackName): TrackJudgment => {
+		// Certainty at the middle rung: all of the depth mass there, so the plan
+		// recommends a review but not the deepest one, whatever the margins are.
+		const depth = { none: 0, light: 0, standard: 0, deep: 0 } as Record<DepthLevel, number>;
+		depth[middleLevel(track)] = 1;
+		return { depth, choice: "", choiceConfidence: 0, choiceProbabilities: {} };
+	};
 	const judgment: Judgment = {
 		adversarial: synthesize("adversarial"),
 		complexity: synthesize("complexity"),

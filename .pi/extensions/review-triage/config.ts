@@ -39,6 +39,18 @@ export type CapabilityTier = "low" | "medium" | "high";
 export const CAPABILITY_TIERS: readonly CapabilityTier[] = ["low", "medium", "high"];
 export const CAPABILITY_RANK: Record<CapabilityTier, number> = { low: 0, medium: 1, high: 2 };
 
+/**
+ * Jev's depth scale — ONE question per track. "none" is the gate: it is the
+ * level that says no review is needed, which is why there is no separate
+ * yes/no question to disagree with the depth. Everything downstream is derived
+ * from this one distribution: whether to review, and how deep.
+ */
+export type DepthLevel = "none" | "light" | "standard" | "deep";
+export const DEPTH_LEVELS: readonly DepthLevel[] = ["none", "light", "standard", "deep"];
+export const DEPTH_RANK: Record<DepthLevel, number> = { none: 0, light: 1, standard: 2, deep: 3 };
+/** The reviewable levels; a rung is never "none". */
+export const REVIEW_LEVELS: readonly DepthLevel[] = ["light", "standard", "deep"];
+
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 export const THINKING_LEVELS: readonly ThinkingLevel[] = [
 	"off",
@@ -71,23 +83,29 @@ export interface Candidate {
 	notFor?: string;
 }
 
-/** One rung of a track's strength scale, keyed by the score Jev returns. */
+/** One rung of a track's depth scale. */
 export interface Tier {
-	/** Shown in the plan, e.g. "light" / "standard" / "deep". */
-	name: string;
-	/** Inclusive lower bound on Jev's probability-weighted score (0..3). */
-	minScore: number;
+	/** One of light/standard/deep — the level this rung covers. */
+	name: DepthLevel;
+	/** The candidate band this rung draws its review model from. */
+	candidateTier: CapabilityTier;
 	thinking: ThinkingLevel;
-	/** The chosen model must sit at or above this rank. */
-	minTier: CapabilityTier;
+	/**
+	 * Cumulative probability at or above this rung required to select it, i.e.
+	 * select this rung when `P(depth >= name) >= minConfidence`. This is the cost
+	 * gate: the deeper and more expensive the rung, the more mass Jev must put at
+	 * or above it. A deep rung at 0.75 uses the expensive model only when Jev is
+	 * confident, not when "deep" merely holds the largest single slice.
+	 */
+	minConfidence: number;
 }
 
 export interface TrackConfig {
-	/** noul probability at or above which the review is recommended. */
-	threshold: number;
-	/** Ascending by `minScore`; the last rung whose floor the score clears wins. */
+	/** P(depth = none) below which a review is recommended. */
+	nothingMargin: number;
+	/** Ascending by depth; the deepest rung whose `minConfidence` is met wins. */
 	tiers: Tier[];
-	/** "provider/model" keys tried in order when the Choice is unusable. */
+	/** "provider/model" keys tried in order when the rung's own band is unusable. */
 	fallbackChain: string[];
 }
 
@@ -123,32 +141,22 @@ export function configPath(env: NodeJS.ProcessEnv = process.env): string {
 	return join(agentDir(env), CONFIG_BASENAME);
 }
 
-/** Jev's strength scale, in the four words the question hands to it. */
-const STRENGTH_CRITERIA = [
-	"None: no review is warranted",
-	"Light: a quick second read for obvious mistakes",
-	"Standard: a full correctness and edge-case pass",
-	"Deep: hostile, exhaustive, security-focused falsification",
-] as const;
-
-export const STRENGTH_SCALE = STRENGTH_CRITERIA;
-
 export const DEFAULT_TRACKS: Record<TrackName, TrackConfig> = {
 	adversarial: {
-		threshold: 0.5,
+		nothingMargin: 0.5,
 		tiers: [
-			{ name: "light", minScore: 0, thinking: "low", minTier: "low" },
-			{ name: "standard", minScore: 1.5, thinking: "medium", minTier: "medium" },
-			{ name: "deep", minScore: 2.5, thinking: "high", minTier: "high" },
+			{ name: "light", candidateTier: "low", thinking: "low", minConfidence: 0 },
+			{ name: "standard", candidateTier: "medium", thinking: "medium", minConfidence: 0.5 },
+			{ name: "deep", candidateTier: "high", thinking: "high", minConfidence: 0.75 },
 		],
 		fallbackChain: [],
 	},
 	complexity: {
-		threshold: 0.5,
+		nothingMargin: 0.5,
 		tiers: [
-			{ name: "light", minScore: 0, thinking: "low", minTier: "low" },
-			{ name: "standard", minScore: 1.5, thinking: "medium", minTier: "medium" },
-			{ name: "deep", minScore: 2.5, thinking: "high", minTier: "high" },
+			{ name: "light", candidateTier: "low", thinking: "low", minConfidence: 0 },
+			{ name: "standard", candidateTier: "medium", thinking: "medium", minConfidence: 0.5 },
+			{ name: "deep", candidateTier: "high", thinking: "high", minConfidence: 0.75 },
 		],
 		fallbackChain: [],
 	},
@@ -202,27 +210,30 @@ function parseCandidate(value: unknown): Candidate | undefined {
 
 function parseTier(value: unknown): Tier | undefined {
 	if (!isObject(value)) return undefined;
-	const name = str(value.name);
+	const name = REVIEW_LEVELS.includes(value.name as DepthLevel) ? (value.name as DepthLevel) : undefined;
 	if (!name) return undefined;
+	const candidateTier = CAPABILITY_TIERS.includes(value.candidateTier as CapabilityTier)
+		? (value.candidateTier as CapabilityTier)
+		: "medium";
 	const thinking = THINKING_LEVELS.includes(value.thinking as ThinkingLevel)
 		? (value.thinking as ThinkingLevel)
 		: "medium";
-	const minTier = CAPABILITY_TIERS.includes(value.minTier as CapabilityTier) ? (value.minTier as CapabilityTier) : "low";
-	const minScore =
-		typeof value.minScore === "number" && Number.isFinite(value.minScore)
-			? Math.min(3, Math.max(0, value.minScore))
-			: 0;
-	return { name, minScore, thinking, minTier };
+	// A rung without an explicit confidence gets the cost-informed default for
+	// its depth: the expensive rung is the one that must be argued for.
+	const defaultConfidence = name === "deep" ? 0.75 : name === "standard" ? 0.5 : 0;
+	return { name, candidateTier, thinking, minConfidence: num(value.minConfidence, defaultConfidence, 0, 1) };
 }
 
-/** A track override may replace any subset of `threshold` / `tiers` / `fallbackChain`. */
+/** A track override may replace any subset of `nothingMargin` / `tiers` / `fallbackChain`. */
 function mergeTrack(base: TrackConfig, value: unknown): TrackConfig {
 	if (!isObject(value)) return base;
 	const merged: TrackConfig = { ...base };
-	if (typeof value.threshold === "number") merged.threshold = num(value.threshold, base.threshold, 0, 1);
+	if (typeof value.nothingMargin === "number") {
+		merged.nothingMargin = num(value.nothingMargin, base.nothingMargin, 0, 1);
+	}
 	if (Array.isArray(value.tiers)) {
 		const tiers = value.tiers.map(parseTier).filter((tier): tier is Tier => tier !== undefined);
-		if (tiers.length > 0) merged.tiers = tiers.sort((a, b) => a.minScore - b.minScore);
+		if (tiers.length > 0) merged.tiers = tiers.sort((a, b) => DEPTH_RANK[a.name] - DEPTH_RANK[b.name]);
 	}
 	if (Array.isArray(value.fallbackChain)) {
 		const chain = value.fallbackChain.map(str).filter((key): key is string => key !== undefined);
@@ -321,7 +332,7 @@ export function loadConfig(options: LoadConfigOptions = {}): TriageConfig {
 	// mergeTrack already refuses an empty tier list and sorts what it accepts;
 	// this re-sort keeps a hand-built config object (a test, a caller) honest.
 	for (const track of TRACKS) {
-		config.tracks[track].tiers.sort((a, b) => a.minScore - b.minScore);
+		config.tracks[track].tiers.sort((a, b) => DEPTH_RANK[a.name] - DEPTH_RANK[b.name]);
 	}
 
 	return config;

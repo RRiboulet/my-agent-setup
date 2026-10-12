@@ -17,14 +17,17 @@ Added:
   One batched request then asks a calibrated decision model — OpenRouter's
   `typesafe/jev-1.13` through pi's own classifier path
   (`ctx.modelRegistry.classify()`), so no second API client and the call lands
-  in the session cost like any other — two `noul` gates, two `score` strength
-  readings, and two `choice` model picks. Code owns everything after that: the
-  noul thresholds, the strength-to-tier mapping, each tier's capability floor and
-  thinking level, and the fallback chains. A confident Choice inside the floor
-  is used; a cheap pick for a deep review is promoted; a low-confidence Choice
-  or an unavailable model walks the configured chain rather than guessing. The
-  result is a plan, not an action — it carries a ready-to-paste `subagent` task
-  and never launches anything, so the agent still decides.
+  in the session cost like any other — **one depth question per track**, a
+  `choice` over `none`/`light`/`standard`/`deep`, plus a `choice` picking the
+  model. Nothing else is asked: `none` is the gate and the deeper levels are the
+  cost ladder, so the judgement cannot disagree with itself. Code owns
+  everything after that — a review is recommended while `P(depth = none)` is
+  below `nothingMargin`; the rung is the deepest whose **cumulative**
+  probability clears its own `minConfidence` (`deep` at 0.75); and the rung's
+  capability band is a hard boundary the model is drawn from, so a `standard`
+  review cannot quietly buy the expensive model. The result is a plan, not an
+  action — it carries a ready-to-paste `subagent` task and never launches
+  anything, so the agent still decides.
 
   Two things are load-bearing. Each model `choice` is asked **twice, forward and
   reversed**, and the two probability vectors are averaged, because Jev leans
@@ -49,13 +52,13 @@ Added:
 
 Fixes to the triage work, from an adversarial review before it shipped:
 
-- **The fail-open default could recommend the exact opposite of what it
-  promised.** It synthesised a `0.5` needed-probability and a `1.5` strength,
-  then ran them through the *configured* threshold and tier table — so a config
-  with `threshold: 0.7`, or a non-default tier list, composed "no review" and
-  labelled it a conservative default, from nothing, when the judge was down. It
-  now reports certainty against the threshold and targets the middle rung *by
-  index*, so what the plan promises is what it recommends regardless of config.
+- **The fail-open default could recommend the opposite of what it promised.**
+  It synthesised a fixed judgement and ran it through the *configured* policy, so
+  a raised threshold or a non-default tier table composed "no review" and
+  labelled it a conservative default, from nothing, when the judge was down. The
+  synthesised judgement is now certainty at the middle rung, which clears any
+  margin, and the middle is taken by index — so what the plan promises is what
+  it recommends whatever the config says.
 - **An abort was classified as a judge failure.** Pressing Esc during the
   classifier call produced a full "both reviews needed" plan — and wrote it to
   the session as an audited verdict — because abort surfaced as `failure:
@@ -81,13 +84,21 @@ Fixes to the triage work, from an adversarial review before it shipped:
   honoured now, and a disabled run reports that nothing was judged rather than
   a verdict.
 - **The candidate field was named `cost` but used as a capability rank**, which
-  is wrong for this catalogue: two models can share a price and differ in
-  strength (`deepseek-v4.1-flash` and `glm-5.3-flash` both cost 0.15), and a free
-  model can be the strongest one offered. The field is now `tier`, and a rung's
-  floor is `minTier` — an explicit human judgement the floor is enforced
-  against. Price is still consulted, but only to synthesise a list on a machine
-  with no config, and `tierFromPrice` is named and documented as the coarse
-  guess it is.
+  is wrong for this catalogue: `deepseek-v4.1-flash` and `glm-5.3-flash` cost the
+  same 0.15, and a free model can be the strongest offered. The field is `tier`,
+  a rung's band is `candidateTier` and its confidence bar is `minConfidence` —
+  an explicit human judgement, not a price. Price is still consulted, but only
+  to synthesise a list on a machine with no config, and `tierFromPrice` is named
+  and documented as the coarse guess it is.
+- **The tier rule was rebuilt around one distribution and a confidence gate.**
+  The first version asked a `noul` gate, a `score` strength *and* a model
+  `choice` per track, then thresholded the score at 1.5 and 2.5 — the exact
+  midpoints between levels, where Jev is least certain. Real diffs showed both
+  faults: a change could be 0.87 likely to need review while scoring 2.49, and a
+  2.49/2.54 pair flipped a ~9x model step. Those three questions are gone,
+  replaced by the single depth distribution above. Re-run on this branch's own
+  diffs, the deep rate fell from 3 of 12 track decisions to 1, and no `standard`
+  review bought `glm-5.3`.
 - Smaller: the state cap is enforced against a caller-supplied `author_notes`
   of any size and re-checks after every trim; the reversed Choice questions are
   sent only when `reverseChoice` is on (they were paid for and discarded
