@@ -10,55 +10,108 @@ Added:
   `triage_change` tool (and a `/triage` command) answers a question that until
   now was a judgement call every time: after implementing something, does this
   change need an independent adversarial review, a complexity/design review, or
-  neither — and if so, how strong should the reviewing subagent be, and on which
-  model. Deterministic code gathers the evidence (`git diff --numstat`,
-  `--name-status`, a zero-context patch, plus any hand-written risk notes),
-  labels the risk-shaped things it can see, and packages them as Jev's `state`.
-  One batched request then asks a calibrated decision model — OpenRouter's
-  `typesafe/jev-1.13` through pi's own classifier path
-  (`ctx.modelRegistry.classify()`), so no second API client and the call lands
-  in the session cost like any other — **one depth question per track**, a
-  `choice` over `none`/`light`/`standard`/`deep`, plus a `choice` picking the
-  model. Nothing else is asked: `none` is the gate and the deeper levels are the
-  cost ladder, so the judgement cannot disagree with itself. Code owns
-  everything after that — a review is recommended while `P(depth = none)` is
-  below `nothingMargin`; the rung is the deepest whose **cumulative**
-  probability clears its own `minConfidence` (`deep` at 0.75); and the rung's
-  capability band is a hard boundary the model is drawn from, so a `standard`
-  review cannot quietly buy the expensive model. The result is a plan, not an
+  neither — and if so, which model and how hard should it think. Deterministic
+  code gathers the evidence (`git diff --numstat -z`, `--raw -z`, a zero-context
+  patch, untracked files and structural flags, plus hand-written risk notes and
+  optional caller-supplied context), labels the risk-shaped things it can see,
+  and packages them into a **dossier**: a canonical, SHA-256-fingerprinted
+  document whose every truncation and redaction is recorded. One batched request
+  then asks a calibrated decision model — OpenRouter's `typesafe/jev-1.13`
+  through pi's own classifier path (`ctx.modelRegistry.classify()`), so no
+  second API client and the call lands in the session cost like any other —
+  **one `choice` per track over `none` plus the allowed profiles.** A profile is
+  a capability band paired with a thinking level (`medium:max`); the band
+  selects the model, so there is no second model-choice question and nothing for
+  the judgement to disagree with. Each Choice is asked forward and reversed and
+  the two distributions averaged, because Jev leans toward the first option it
+  is offered.
+
+  Code owns everything after the judgement. `none` is allowed only when every
+  gate passes: `P(none)` strictly above `skipThreshold` (0.90 by default), a
+  stable snapshot, no unresolved conflicts, complete-enough evidence, and no
+  mandatory-review restriction — a high probability is necessary, never
+  sufficient. Otherwise the review routes to Jev's best non-`none` profile, then
+  to the configured floor, then to the weakest profile the catalog offers; and
+  when Jev is unreachable the default is to **fail open conservatively** rather
+  than buy a skipped review, marked `policy-fallback` so it is never mistaken
+  for a judgement. The allowed profiles are **generated**, not hardcoded: band ×
+  `thinkingLadder`, pruned against each band model's runtime
+  `thinkingLevelMap` with the prune recorded. The result is a plan, not an
   action — it carries a ready-to-paste `subagent` task and never launches
   anything, so the agent still decides.
 
-  Two things are load-bearing. Each model `choice` is asked **twice, forward and
-  reversed**, and the two probability vectors are averaged, because Jev leans
-  toward the first option it is offered and the average is what makes a split
-  read as low confidence instead of a confident wrong pick (the same trick
-  `decision-router` documents). And when Jev is unreachable the default is to
-  **fail open conservatively** — recommend both reviews at their middle rung —
-  because an unreachable judge should cost a review, not buy a skipped one;
-  `onJudgeError: "skip"` opts a machine out. Every verdict is appended to the
-  session as a `review-triage` entry with the probabilities, confidences, tiers
-  and models, so "we chose not to review this" is auditable after the fact.
+  Evidence is treated as typed and fallible. Each item carries where it came
+  from, how complete it is, and whether it is observed, asserted or
+  self-reported; caller-supplied artifacts, existing check results and session
+  context are *consumed*, never run, through a single optional JSON context (a
+  file for `/triage --context`, an inline string for the tool). The document is
+  budgeted by `stateChars` with security and migration patches allocated first,
+  and anything that made it incomplete refuses a skip — "we could not see
+  everything" must never read as "there was nothing to see", including a
+  configured redaction that removed an artifact. Path and pattern
+  redaction removes or masks configured material before serialisation, recording
+  that it was removed without recording the value. Every verdict is appended to
+  the session as a `review-triage` entry carrying the plan, the judgement, the
+  catalog and the dossier fingerprint, so "we chose not to review this" is
+  auditable and a decision can be replayed against the evidence that produced
+  it, with a `rationale` templated over deterministic reason codes rather than
+  any model prose.
 
-  Policy sits in `~/.pi/agent/review-triage.json` (all fields optional; judge
-  model and thresholds also settable through `PI_REVIEW_TRIAGE_*`), and a
-  `.env` beside it is read for `OPENROUTER_API_KEY` so a key that never reached
-  `auth.json` still works. With no config at all, the candidate list is
-  synthesised from the models the session can actually use, bucketed by
-  catalogue price, so the tool works on a fresh install. The decision functions
-  are pure and unit-tested — config merge, signal scan, reverse-choice
-  averaging, the capability floor and the fallback walk — alongside a load guard and
-  the manifest check.
+  Policy sits in `~/.pi/agent/review-triage.json` (all fields optional; the
+  judge model and the on/off switch are also settable through
+  `PI_REVIEW_TRIAGE_*`), and a `.env` beside it is read for
+  `OPENROUTER_API_KEY` so a key that never reached `auth.json` still works. With
+  no config at all, the candidate list is synthesised from the models the
+  session can actually use, bucketed by catalogue price, so the tool works on a
+  fresh install. The decision functions are pure and unit-tested — config merge,
+  the profile catalog and its runtime prune, the skip gate and fallback routing,
+  the forward/reverse averaging, the dossier's determinism and budget, the thin
+  collectors, and the plan's published fields — alongside a load guard and the
+  manifest check.
 
-Fixes to the triage work, from an adversarial review before it shipped:
+Fixes found by reviewing the triage work, before it shipped:
 
-- **The fail-open default could recommend the opposite of what it promised.**
-  It synthesised a fixed judgement and ran it through the *configured* policy, so
-  a raised threshold or a non-default tier table composed "no review" and
-  labelled it a conservative default, from nothing, when the judge was down. The
-  synthesised judgement is now certainty at the middle rung, which clears any
-  margin, and the middle is taken by index — so what the plan promises is what
-  it recommends whatever the config says.
+- **A skipped review could hide a brand-new file.** The dossier's manifest was
+  built from tracked diffs alone, so an untracked file — the case the untracked
+  listing exists for — was invisible to Jev by name, where the serializer it
+  replaced had listed it. Untracked paths are manifest entries of their own now,
+  with `missing` completeness because their content was not read, so a routing
+  judgement is never blind to a file that exists only in the worktree.
+- **Redaction defeated itself.** The dossier recorded an excluded path verbatim
+  ("redacted artifact src/auth/secret.ts") to prove the exclusion happened, and
+  an invalid redaction pattern echoed the configured regex; publishing the
+  exclusions as plan limitations then carried both into the session entry and
+  the transcript. The fact and count of a removal are recorded now and the value
+  is not, which is what the redaction contract always said.
+- **A caller's fabricated "tests passed" reached Jev as an observed result.**
+  The collectors mark caller-supplied validation `asserted` or `self-reported`,
+  but the dossier's validation section dropped the field, so a caller could
+  invent a provenance and a pass that the judge could not tell from a real
+  tool's record. `trust` is carried through now.
+- **The adapter could be talked into reading a file, and a disabled extension
+  still paid the tool's prompt weight.** The tool built its arguments by
+  spreading whatever the caller sent, so an undeclared `contextPath` or a
+  `warnings` array reached the pipeline; it builds from declared fields only
+  now. And `enabled: false` registered a tool that could only answer "disabled",
+  costing its schema on every request — it now registers no tool at all.
+- **The command's structured input was a parser nobody could use.** Inline JSON
+  flags on `/triage` broke on any payload containing a quote, which is most
+  `before`/`after` file content, and the equivalent tool schema would have added
+  roughly 2800 characters of nested parameters to every request. Both are one
+  optional JSON context now: a file for `--context`, an inline string for the
+  tool. A missing, unreadable, oversized or malformed payload becomes a recorded
+  limitation rather than a failed run.
+- **One huge caller string could censor the caller's own evidence.** The
+  dossier's budget drop is all-or-nothing for the supplementary section, so a
+  multi-megabyte `toolResults` entry evicted the legitimate notes beside it.
+  Caller text is capped per field with the truncation recorded, and the whole
+  context payload is capped.
+- **The fail-open path could recommend the opposite of what it promised.** It
+  synthesised a fixed judgement and ran it through the *configured* policy, so a
+  raised threshold could compose "no review" and label it a conservative
+  default, from nothing, when the judge was down. A judge failure now routes
+  through policy to the configured fallback profile and is always marked
+  `policy-fallback` — never `none`, and never a judgement.
 - **An abort was classified as a judge failure.** Pressing Esc during the
   classifier call produced a full "both reviews needed" plan — and wrote it to
   the session as an audited verdict — because abort surfaced as `failure:
@@ -68,44 +121,34 @@ Fixes to the triage work, from an adversarial review before it shipped:
   `usage.inputTokens`, but pi-ai's `Usage` is `input`/`output`; the `?? 0`
   fallback hid it, and no typechecker exists to catch a wrong field name. The
   entry now records the real counts and cost.
-- **Rename detection corrupted the evidence.** `git diff --numstat` abbreviates
-  a move as `src/{util => auth}/helper.ts`, which the path-based signals tested
-  and missed — a file moved under `auth/` did not read as security-relevant.
-  The abbreviation is resolved to its destination, and `--name-status` rename
-  destinations are folded into the file list.
-- **Diff file headers manufactured signals.** `changedLines` kept `+++`/`---`
-  lines, so a diff touching `spawn.ts` or `fetch.ts` reported "changes process
-  execution" / "changes a network boundary" from the filename alone, with no
-  content. Headers are excluded, and the migration pattern's `\.sql$` branch —
-  dead inside a path-anchored group, so `queries/orders.sql` never matched — is
-  a working alternative again.
-- **`enabled` and `PI_REVIEW_TRIAGE_OFF` were parsed and then ignored**, so a
-  disabled extension still spent a classifier request per call. The switch is
-  honoured now, and a disabled run reports that nothing was judged rather than
-  a verdict.
+- **Rename detection corrupted the evidence**, and **diff file headers
+  manufactured signals.** `git diff --numstat` abbreviates a move as
+  `src/{util => auth}/helper.ts`, which the path-based signals tested and missed
+  — a file moved under `auth/` did not read as security-relevant; the
+  abbreviation is resolved to its destination, `--raw -z` is parsed
+  NUL-separated so a path with a space, a newline or a leading dash round-trips,
+  and the rename destinations are folded into the file list. Separately,
+  `changedLines` kept `+++`/`---` lines, so a diff touching `spawn.ts` or
+  `fetch.ts` reported "changes process execution" / "changes a network
+  boundary" from the filename alone, with no content; headers are excluded, and
+  the migration pattern's `\.sql$` branch — dead inside a path-anchored group,
+  so `queries/orders.sql` never matched — is a working alternative again.
 - **The candidate field was named `cost` but used as a capability rank**, which
   is wrong for this catalogue: `deepseek-v4.1-flash` and `glm-5.3-flash` cost the
-  same 0.15, and a free model can be the strongest offered. The field is `tier`,
-  a rung's band is `candidateTier` and its confidence bar is `minConfidence` —
-  an explicit human judgement, not a price. Price is still consulted, but only
-  to synthesise a list on a machine with no config, and `tierFromPrice` is named
-  and documented as the coarse guess it is.
-- **The tier rule was rebuilt around one distribution and a confidence gate.**
-  The first version asked a `noul` gate, a `score` strength *and* a model
-  `choice` per track, then thresholded the score at 1.5 and 2.5 — the exact
-  midpoints between levels, where Jev is least certain. Real diffs showed both
-  faults: a change could be 0.87 likely to need review while scoring 2.49, and a
-  2.49/2.54 pair flipped a ~9x model step. Those three questions are gone,
-  replaced by the single depth distribution above. Re-run on this branch's own
-  diffs, the deep rate fell from 3 of 12 track decisions to 1, and no `standard`
-  review bought `glm-5.3`.
-- Smaller: the state cap is enforced against a caller-supplied `author_notes`
-  of any size and re-checks after every trim; the reversed Choice questions are
-  sent only when `reverseChoice` is on (they were paid for and discarded
-  otherwise); a malformed config file warns instead of being silently ignored;
-  and Jev is told to treat the diff as untrusted evidence, never as
-  instructions — otherwise a planted patch could argue the gate into "no
-  review".
+  same 0.15, and a free model can be the strongest offered. Capability is an
+  explicit `tier` now and `cost` is what Jev minimises; price is still consulted,
+  but only to synthesise a list on a machine with no config, and `tierFromPrice`
+  is named and documented as the coarse guess it is.
+- **`enabled` and `PI_REVIEW_TRIAGE_OFF` were parsed and then ignored**, so a
+  disabled extension still spent a classifier request per call. The switch is
+  honoured now, and a disabled run reports that nothing was judged rather than a
+  verdict.
+- Smaller: the reversed Choice questions are sent only when `reverseChoice` is
+  on (they were paid for and discarded otherwise); a malformed config file warns
+  instead of vanishing; the judge is told to treat the diff as untrusted
+  evidence, never as instructions — otherwise a planted patch could argue the
+  gate into "no review"; and a supplied `baseline` always implies the `task`
+  scope, so an argument the caller gave is never silently ignored.
 
 ## v1.4.0 — 2026-10-11
 

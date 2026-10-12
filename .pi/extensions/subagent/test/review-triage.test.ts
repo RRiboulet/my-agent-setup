@@ -220,6 +220,48 @@ test("config: the tool switch is read from the file", () => {
 	}
 });
 
+test("config: a redaction block is parsed, and a bad rule warns instead of vanishing", () => {
+	const dir = mkdtempSync(join(tmpdir(), "triage-test-"));
+	const path = join(dir, "review-triage.json");
+	const warnings: string[] = [];
+	const collect = (message: string) => warnings.push(message);
+	try {
+		writeFileSync(
+			path,
+			JSON.stringify({
+				redaction: { paths: ["src/auth/**", 7, ""], patterns: ["AKIA[0-9A-Z]{16}"], mask: "[gone]" },
+			}),
+		);
+		assert.deepEqual(loadConfig({ path, env: {}, warn: collect }).redaction, {
+			paths: ["src/auth/**"],
+			patterns: ["AKIA[0-9A-Z]{16}"],
+			mask: "[gone]",
+		});
+		assert.ok(
+			warnings.some((warning) => warning.includes("non-string redaction.paths")),
+			"a rule the owner wrote and the parser dropped is worth a warning",
+		);
+
+		// A wrong type for a whole field is ignored, loudly, rather than silently
+		// disabling that half of the guard.
+		writeFileSync(
+			path,
+			JSON.stringify({ redaction: { patterns: "AKIA", mask: [1], paths: ["src/auth/**"] } }),
+		);
+		warnings.length = 0;
+		assert.deepEqual(loadConfig({ path, env: {}, warn: collect }).redaction, { paths: ["src/auth/**"] });
+		assert.ok(warnings.some((warning) => warning.includes("redaction.patterns is not a list")));
+		assert.ok(warnings.some((warning) => warning.includes("redaction.mask")));
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+	assert.equal(
+		loadConfig({ path: "/nonexistent/review-triage.json", env: {} }).redaction,
+		undefined,
+		"no block means nothing to hash differently",
+	);
+});
+
 test("config: a file merges over defaults field by field", () => {
 	const dir = mkdtempSync(join(tmpdir(), "triage-test-"));
 	const path = join(dir, "review-triage.json");
@@ -1233,6 +1275,7 @@ interface PipelinePlan {
 		requestedThinking?: string;
 		resolvedThinking?: string;
 		rationale?: string;
+		task?: string;
 	};
 	complexity?: { needed?: boolean };
 }
@@ -1266,7 +1309,10 @@ interface FakeTool {
 interface FakePi {
 	tools: FakeTool[];
 	commands: Map<string, { handler: (args: string | undefined, ctx: unknown) => Promise<void> }>;
-	appended: { type: string; entry: { fingerprint?: string; plan?: PipelinePlan } }[];
+	appended: {
+		type: string;
+		entry: { fingerprint?: string; plan?: PipelinePlan; evidence?: { files?: string[] } };
+	}[];
 	messages: string[];
 	notifications: string[];
 }
@@ -1376,6 +1422,32 @@ test("wiring: the session entry persists the published recommendation fields", a
 	assert.deepEqual(entry?.plan, plan, "the persisted plan is the published plan");
 });
 
+/** Answers that put almost all the mass on `none`, so the gates are what refuse. */
+function skipEverythingAnswers(): Record<string, ClassifierAnswer> {
+	const skipProbs: Record<string, number> = {
+		none: 0.99,
+		"low:low": 0.005,
+		"low:medium": 0.002,
+		"low:high": 0.001,
+		"medium:high": 0.001,
+		"medium:max": 0.0005,
+		"high:high": 0.0005,
+		"high:max": 0.0005,
+	};
+	const choice = (probabilities: Record<string, number>): ClassifierAnswer => ({
+		type: "choice",
+		choice: "none",
+		probabilities,
+		confidence: 0.99,
+	});
+	return {
+		[QUESTION_IDS.adversarialProfile]: choice(skipProbs),
+		[QUESTION_IDS.adversarialProfileReversed]: choice(reverseOf(skipProbs)),
+		[QUESTION_IDS.complexityProfile]: choice(skipProbs),
+		[QUESTION_IDS.complexityProfileReversed]: choice(reverseOf(skipProbs)),
+	};
+}
+
 test("wiring: a dossier that overflows cannot skip, even at P(none)=0.99", async () => {
 	// 201 files overflow the 200-entry manifest limit, so the dossier is
 	// incomplete and the skip gate must refuse regardless of the judge's answer.
@@ -1397,32 +1469,7 @@ test("wiring: a dossier that overflows cannot skip, even at P(none)=0.99", async
 		if (key.includes("--unified=0")) return { stdout: "", stderr: "", code: 0 };
 		return { stdout: "", stderr: "", code: 0 };
 	};
-	const skipProbs: Record<string, number> = {
-		none: 0.99,
-		"low:low": 0.005,
-		"low:medium": 0.002,
-		"low:high": 0.001,
-		"medium:high": 0.001,
-		"medium:max": 0.0005,
-		"high:high": 0.0005,
-		"high:max": 0.0005,
-	};
-	const answers: Record<string, ClassifierAnswer> = {
-		[QUESTION_IDS.adversarialProfile]: { type: "choice", choice: "none", probabilities: skipProbs, confidence: 0.99 },
-		[QUESTION_IDS.adversarialProfileReversed]: {
-			type: "choice",
-			choice: "none",
-			probabilities: reverseOf(skipProbs),
-			confidence: 0.99,
-		},
-		[QUESTION_IDS.complexityProfile]: { type: "choice", choice: "none", probabilities: skipProbs, confidence: 0.99 },
-		[QUESTION_IDS.complexityProfileReversed]: {
-			type: "choice",
-			choice: "none",
-			probabilities: reverseOf(skipProbs),
-			confidence: 0.99,
-		},
-	};
+	const answers = skipEverythingAnswers();
 	const { details } = await runPipeline({ exec, answers });
 	assert.equal(details.plan?.adversarial?.needed, true, "an incomplete dossier cannot skip");
 	assert.ok(
@@ -1641,6 +1688,74 @@ test("adapter: a bad context payload becomes a limitation, not a failed run", as
 		bad.details.plan?.limitations?.some((limitation) => limitation.includes("not valid JSON")),
 		"a bad context is recorded, not swallowed",
 	);
+});
+
+test("wiring: a configured redaction keeps the excluded path out of the plan", async () => {
+	const exec: GitExec = async (_command, args) => {
+		const key = args.join(" ");
+		if (key.includes("rev-parse")) return { stdout: "/repo/.git\n", stderr: "", code: 0 };
+		if (key.includes("--diff-filter=U")) return { stdout: "", stderr: "", code: 0 };
+		if (key.includes("--numstat")) return { stdout: "1\t0\tsrc/auth/secret.ts\0", stderr: "", code: 0 };
+		if (key.includes("--raw")) {
+			return { stdout: ":100644 100644 aaa bbb M\0src/auth/secret.ts\0", stderr: "", code: 0 };
+		}
+		if (key.includes("--unified=0")) return { stdout: "", stderr: "", code: 0 };
+		return { stdout: "", stderr: "", code: 0 };
+	};
+	const { details, appended } = await runPipeline({
+		exec,
+		answers: fullAnswers(),
+		config: { candidates: PIPELINE_CANDIDATES, redaction: { paths: ["src/auth/**"] } },
+	});
+	const limitations = details.plan?.limitations ?? [];
+	assert.ok(limitations.some((limitation) => limitation.includes("paths withheld")));
+	assert.ok(
+		!limitations.some((limitation) => limitation.includes("src/auth/secret.ts")),
+		"the excluded path must never reach the plan",
+	);
+	const entry = appended.find((item) => item.type === "review-triage")?.entry;
+	assert.ok(
+		!(entry?.evidence?.files ?? []).some((path) => path.includes("src/auth/secret.ts")),
+		"the session entry's evidence list must not carry the withheld path either",
+	);
+});
+
+test("wiring: a path redaction refuses skip even at P(none)=0.99", async () => {
+	const exec: GitExec = async (_command, args) => {
+		const key = args.join(" ");
+		if (key.includes("rev-parse")) return { stdout: "/repo/.git\n", stderr: "", code: 0 };
+		if (key.includes("--diff-filter=U")) return { stdout: "", stderr: "", code: 0 };
+		if (key.includes("--numstat")) return { stdout: "1\t0\tsrc/auth/secret.ts\0", stderr: "", code: 0 };
+		if (key.includes("--raw")) {
+			return { stdout: ":100644 100644 aaa bbb M\0src/auth/secret.ts\0", stderr: "", code: 0 };
+		}
+		if (key.includes("--unified=0")) return { stdout: "", stderr: "", code: 0 };
+		return { stdout: "", stderr: "", code: 0 };
+	};
+	const { details } = await runPipeline({
+		exec,
+		answers: skipEverythingAnswers(),
+		config: { candidates: PIPELINE_CANDIDATES, redaction: { paths: ["src/auth/**"] } },
+	});
+	assert.equal(details.plan?.adversarial?.needed, true, "a redacted dossier cannot skip");
+	assert.ok(details.plan?.adversarial?.reasonCodes?.includes("incomplete-evidence"));
+});
+
+test("wiring: a masked summary is what the rendered task and the entry carry", async () => {
+	const { details, appended } = await runPipeline({
+		exec: stableExec().exec,
+		answers: fullAnswers(),
+		config: { candidates: PIPELINE_CANDIDATES, redaction: { patterns: ["wire"], mask: "[gone]" } },
+	});
+	assert.match(details.plan?.task?.summary ?? "", /\[gone\]/);
+	assert.match(details.plan?.adversarial?.task ?? "", /\[gone\]/, "the subagent task uses the masked summary");
+	assert.doesNotMatch(
+		details.plan?.adversarial?.task ?? "",
+		/wire/u,
+		"the raw summary must not survive in the task the plan renders",
+	);
+	const entry = appended.find((item) => item.type === "review-triage")?.entry;
+	assert.match(entry?.plan?.adversarial?.task ?? "", /\[gone\]/, "the persisted task is masked too");
 });
 
 // ---------------------------------------------------------------------------
@@ -2141,6 +2256,11 @@ test("command: the task scope resolves a baseline from args or config", () => {
 		resolveTarget({ summary: "x", target: "uncommitted", baseline: "abc" }),
 		{ kind: "task", baselineRef: "abc" },
 		"a supplied baseline is never silently ignored",
+	);
+	assert.deepEqual(
+		resolveTarget(parseTriageArgs("none --baseline dev")),
+		{ kind: "task", baselineRef: "dev" },
+		"a baseline beats an explicit none",
 	);
 });
 

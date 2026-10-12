@@ -140,18 +140,18 @@ interface TriageRun {
 }
 
 export function resolveTarget(params: TriageParams, taskBaselineRef?: string): TriageTarget {
-	if (params.target === "none") return { kind: "none" };
 	if (params.target === "task" || params.baseline) {
 		// The task scope measures the worktree against the baseline ref, so
 		// work that predates the task stays out of the evidence. A supplied
 		// baseline always implies this scope, whatever target was also named —
-		// the caller asked for baseline-scoped evidence and a baseline is
-		// never silently ignored. Neither supplied nor configured leaves the
-		// scope without a snapshot to measure from, which the collector
-		// reports as an error.
+		// including `none`. The caller asked for baseline-scoped evidence and a
+		// baseline is never silently ignored. Neither supplied nor configured
+		// leaves the scope without a snapshot to measure from, which the
+		// collector reports as an error.
 		const baseline = params.baseline?.trim() || taskBaselineRef?.trim();
 		return { kind: "task", ...(baseline ? { baselineRef: baseline } : {}) };
 	}
+	if (params.target === "none") return { kind: "none" };
 	if (params.target === "commit" || (!params.target && params.ref)) {
 		return { kind: "commit", ...(params.ref ? { ref: params.ref } : {}) };
 	}
@@ -226,13 +226,8 @@ async function runTriage(
 		signal,
 	});
 
+	// The raw collector's summary feeds the dossier, where it is masked.
 	const summary = evidence.summary || params.summary;
-	const planEvidence = {
-		files: evidence.files.length,
-		added: evidence.added,
-		removed: evidence.removed,
-		signals: evidence.signals,
-	};
 
 	// The dossier is the single, fingerprinted document Jev judges. It is built
 	// from the collected evidence items plus the caller-supplied context, so the
@@ -285,9 +280,23 @@ async function runTriage(
 		catalog: catalog.options.map((option) => option.key),
 		supplementary: [...(params.notes ?? []), ...harness.supplementary],
 		limitations,
+		redaction: config.redaction,
 		versions: { riskRules: RISK_RULES_VERSION },
 		budgetChars: config.stateChars,
 	});
+
+	// The plan and the session entry publish the dossier's view, not the raw
+	// collector's: a path or pattern the owner redacted must not reappear in the
+	// summary just because the dossier withheld it. Churn counts are aggregates,
+	// so they stay the raw totals.
+	const planEvidence = {
+		files: evidence.files.length,
+		added: evidence.added,
+		removed: evidence.removed,
+		signals: built.dossier.riskSignals.map((risk) => risk.signal),
+	};
+	// `buildTask` embeds the summary; use the masked one, never the raw text.
+	const maskedSummary = built.dossier.task.summary;
 
 	// What the plan publishes about the task and scope it judged. The dossier's
 	// exclusions (trims and redactions) are limitations too, so they travel with
@@ -328,7 +337,7 @@ async function runTriage(
 			catalog: catalog.options,
 			gates,
 			evidence: planEvidence,
-			summary,
+			summary: maskedSummary,
 		});
 	} catch (error) {
 		if (!(error instanceof JudgeError)) throw error;
@@ -345,7 +354,7 @@ async function runTriage(
 			catalog: catalog.options,
 			gates,
 			evidence: planEvidence,
-			summary,
+			summary: maskedSummary,
 			reason: error.message,
 		});
 	}
@@ -357,10 +366,12 @@ async function runTriage(
 		catalog,
 		evidence: {
 			target: evidence.target,
-			files: evidence.files.slice(0, 40),
+			// The dossier's post-redaction manifest, so a withheld path is not
+			// recorded here either.
+			files: built.dossier.manifest.entries.map((manifestEntry) => manifestEntry.path).slice(0, 40),
 			added: evidence.added,
 			removed: evidence.removed,
-			signals: evidence.signals,
+			signals: planEvidence.signals,
 			...(evidence.error ? { error: evidence.error } : {}),
 		},
 	};
@@ -511,7 +522,8 @@ export default function (pi: ExtensionAPI) {
 	if (registration.enabled && registration.tool) registerTriageTool(pi);
 
 	pi.registerCommand("triage", {
-		description: "Decide whether the current change needs independent review (/triage [branch <b>|commit <sha>] [--summary \"...\"])",
+		description:
+			"Decide whether the current change needs independent review (/triage [branch <b>|commit <sha>|task <ref>|none] [--summary \"...\"] [--context <file>])",
 		handler: async (args, ctx) => {
 			const params = parseTriageArgs(args ?? "");
 			try {

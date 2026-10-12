@@ -218,9 +218,10 @@ export interface BuiltDossier {
 	fingerprint: string;
 	/**
 	 * True when the document could not be made complete: the manifest overflowed
-	 * its limit, or the character budget forced an omission. Policy must refuse
-	 * to skip when this is set — an incomplete dossier is not evidence of a small
-	 * change.
+	 * its limit, a budget forced an omission, or a configured path redaction
+	 * removed evidence. Policy must refuse to skip when this is set — an
+	 * incomplete dossier is not evidence of a small change, and a redaction is an
+	 * omission the judge did not see.
 	 */
 	manifestOverflow: boolean;
 }
@@ -715,6 +716,8 @@ export function buildDossier(input: DossierInput): BuiltDossier {
 	return {
 		dossier,
 		fingerprint: fingerprintDossier(dossier),
-		manifestOverflow: overflow || budgetTrimmed,
+		// A deliberate path redaction is an omission too: the judge did not see
+		// what was removed, so the document cannot read as "nothing to see".
+		manifestOverflow: overflow || budgetTrimmed || redactedArtifacts > 0,
 	};
 }

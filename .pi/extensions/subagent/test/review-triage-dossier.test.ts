@@ -192,6 +192,11 @@ test("dossier: a redacted path is removed and the removal recorded without the v
 		!canonicalJson(built.dossier).includes("src/auth/secret.ts"),
 		"recording the excluded path to prove the exclusion would defeat it",
 	);
+	assert.equal(
+		built.manifestOverflow,
+		true,
+		"a path redaction leaves the judge blind, so the document cannot read as complete",
+	);
 });
 
 test("dossier: a redacted pattern is masked, recorded, and absent from the serialised form", () => {

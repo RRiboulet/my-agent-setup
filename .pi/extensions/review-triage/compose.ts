@@ -63,7 +63,12 @@ export interface TrackPlan {
 	calibration: "uncalibrated";
 	/** The winning non-none profile's averaged probability. */
 	routingConfidence: number;
-	/** Jev's overall argmax (may be `none`), kept for the audit trail. */
+	/**
+	 * The profile Jev preferred for a review — its highest-probability non-`none`
+	 * option — or `none` when policy allowed a skip. It is not the raw argmax:
+	 * the session entry's judgement records that, which is where an audit finds a
+	 * `none` the gates overrode.
+	 */
 	proposedChoice: string;
 	/** The profile policy resolved to, present when a review is recommended. */
 	finalChoice?: string;

@@ -27,6 +27,8 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import type { RedactionConfig } from "./dossier.ts";
+
 export const CONFIG_BASENAME = "review-triage.json";
 
 export type TrackName = "adversarial" | "complexity";
@@ -189,6 +191,11 @@ export interface TriageConfig {
 	 * caller-supplied `baseline` wins over this.
 	 */
 	taskBaselineRef?: string;
+	/**
+	 * Path globs and regex patterns removed or masked by the dossier before it
+	 * is serialised, hashed or sent. The removal is recorded; the value is not.
+	 */
+	redaction?: RedactionConfig;
 }
 
 export function agentDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -285,6 +292,39 @@ function parsePolicy(value: unknown, base: PolicyConfig): PolicyConfig {
 	if (minimum) merged.minimumProfile = minimum;
 	if (typeof value.mandatoryReview === "boolean") merged.mandatoryReview = value.mandatoryReview;
 	return merged;
+}
+
+/**
+ * Parse the redaction block. A rule the owner wrote and the parser could not use
+ * is worth a warning — a silently dropped rule is a silently disabled guard —
+ * while an empty block is `undefined` so it cannot change the fingerprint.
+ */
+function parseRedaction(value: unknown, warn?: (message: string) => void): RedactionConfig | undefined {
+	if (!isObject(value)) return undefined;
+	const strings = (input: unknown, field: string): string[] | undefined => {
+		if (input === undefined) return undefined;
+		if (!Array.isArray(input)) {
+			warn?.(`review-triage: redaction.${field} is not a list; it was ignored`);
+			return undefined;
+		}
+		const kept = input.filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "");
+		if (kept.length !== input.length) {
+			warn?.(`review-triage: dropped ${input.length - kept.length} non-string redaction.${field} entry(s)`);
+		}
+		return kept;
+	};
+	const paths = strings(value.paths, "paths");
+	const patterns = strings(value.patterns, "patterns");
+	const mask = str(value.mask);
+	if (value.mask !== undefined && mask === undefined) {
+		warn?.("review-triage: redaction.mask is not a non-empty string; it was ignored");
+	}
+	if (paths === undefined && patterns === undefined && mask === undefined) return undefined;
+	return {
+		...(paths ? { paths } : {}),
+		...(patterns ? { patterns } : {}),
+		...(mask ? { mask } : {}),
+	};
 }
 
 /**
@@ -497,6 +537,8 @@ export function loadConfig(options: LoadConfigOptions = {}): TriageConfig {
 		config.stateChars = Math.round(num(file.stateChars, config.stateChars, 1_000, 60_000));
 		config.envFile = str(file.envFile) ?? config.envFile;
 		config.taskBaselineRef = str(file.taskBaselineRef) ?? config.taskBaselineRef;
+		const redaction = parseRedaction(file.redaction, warn);
+		if (redaction) config.redaction = redaction;
 	}
 
 	// Environment wins so a one-off run can be redirected without editing files.
