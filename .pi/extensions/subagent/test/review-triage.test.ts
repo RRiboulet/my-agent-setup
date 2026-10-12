@@ -44,13 +44,14 @@ import {
 	parseNumstatZ,
 	parsePathListZ,
 	parseRawZ,
+	splitPatchByPath,
+	toEvidenceItems,
 	type GitExec,
 } from "../../review-triage/evidence.ts";
 import {
 	askJudge,
 	averageChoice,
 	buildQuestions,
-	buildState,
 	JudgeError,
 	parseJudgment,
 	QUESTION_IDS,
@@ -58,6 +59,7 @@ import {
 	type Judgment,
 	type TrackJudgment,
 } from "../../review-triage/judge.ts";
+import { buildDossier, type BuiltDossier } from "../../review-triage/dossier.ts";
 import {
 	clampThinking,
 	composePlan,
@@ -72,6 +74,7 @@ import {
 import { decidePolicy, POLICY_REASONS, type PolicyGates } from "../../review-triage/policy.ts";
 import { formatPlan } from "../../review-triage/format.ts";
 import { parseTriageArgs, resolveTarget } from "../../review-triage/index.ts";
+import reviewTriageExtension from "../../review-triage/index.ts";
 import type { ClassifierResult, ClassifierAnswer } from "@earendil-works/pi-ai";
 
 // ---------------------------------------------------------------------------
@@ -131,6 +134,12 @@ function catalog(): ProfileOption[] {
 		ladder: DEFAULT_THINKING_LADDER,
 		available: AVAILABLE,
 	}).options;
+}
+
+/** A minimal dossier for the judge tests: the judge now reads the dossier, not
+ * a flat state, so every askJudge call needs one. */
+function emptyDossier(): BuiltDossier {
+	return buildDossier({ items: [], task: { summary: "x" }, scope: { target: "none" }, catalog: [] });
 }
 
 function gates(overrides: Partial<PolicyGates> = {}): PolicyGates {
@@ -577,6 +586,9 @@ test("evidence: uncommitted collection includes NUL-listed untracked files", asy
 	assert.deepEqual(evidence.files, ["src/a.ts", "src/brand-new.ts"]);
 	assert.deepEqual(evidence.newFiles, ["src/brand-new.ts"]);
 	assert.equal(evidence.added, 3);
+	const untracked = evidence.artifacts.find((artifact) => artifact.path === "src/brand-new.ts");
+	assert.equal(untracked?.completeness, "missing", "an untracked file is listed but its extent is unknown");
+	assert.equal(untracked?.status, "A");
 	assert.ok(
 		evidence.limitations.some((limitation) => limitation.blocksSkip && limitation.text.includes("untracked file(s)")),
 		"unread untracked content must be recorded and must block skip",
@@ -597,6 +609,25 @@ test("evidence: a failed secondary probe is recorded as a skip-blocking limitati
 		evidence.limitations.some((limitation) => limitation.blocksSkip && limitation.text.includes("conflict probe")),
 		"a failed conflict probe must not read as 'no conflicts'",
 	);
+});
+
+test("evidence: a failed raw read still yields per-file measurements from numstat", async () => {
+	const exec: GitExec = async (_command, args) => {
+		const key = args.join(" ");
+		if (key.includes("--numstat")) return { stdout: "2\t1\tsrc/a.ts\0", stderr: "", code: 0 };
+		if (key.includes("--raw") && !key.includes("--diff-filter=U")) {
+			return { stdout: "", stderr: "boom", code: 128 };
+		}
+		if (key.includes("--unified=0")) return { stdout: "", stderr: "", code: 0 };
+		return { stdout: "", stderr: "", code: 0 };
+	};
+	const evidence = await collectEvidence(exec, { summary: "x", target: { kind: "uncommitted" } });
+	assert.deepEqual(
+		evidence.artifacts.map((artifact) => artifact.path),
+		["src/a.ts"],
+		"a failed raw read must not empty the manifest",
+	);
+	assert.equal(evidence.artifacts[0]?.added, 2);
 });
 
 test("evidence: a truncated patch is recorded as a limitation", async () => {
@@ -1008,7 +1039,7 @@ test("judge: an abort is its own failure, not a reason to fail open", async () =
 		classify: async () => ({ ...classifierResult(fullAnswers()), stopReason: "aborted" }),
 	};
 	await assert.rejects(
-		() => askJudge(registry as never, config(), {}, catalog()),
+		() => askJudge(registry as never, config(), emptyDossier(), catalog()),
 		(error: unknown) => error instanceof JudgeError && error.failure === "aborted",
 	);
 });
@@ -1016,7 +1047,7 @@ test("judge: an abort is its own failure, not a reason to fail open", async () =
 test("judge: an absent classifier model fails as unavailable", async () => {
 	const registry = { findOfType: () => undefined, classify: async () => classifierResult(fullAnswers()) };
 	await assert.rejects(
-		() => askJudge(registry as never, config(), {}, catalog()),
+		() => askJudge(registry as never, config(), emptyDossier(), catalog()),
 		(error: unknown) => error instanceof JudgeError && error.failure === "unavailable",
 	);
 });
@@ -1027,75 +1058,270 @@ test("judge: a provider error becomes a JudgeError, never a silent judgement", a
 		classify: async () => ({ ...classifierResult(fullAnswers()), stopReason: "error", errorMessage: "boom" }),
 	};
 	await assert.rejects(
-		() => askJudge(registry as never, config(), {}, catalog()),
+		() => askJudge(registry as never, config(), emptyDossier(), catalog()),
 		(error: unknown) => error instanceof JudgeError && error.failure === "error",
 	);
 });
 
-test("judge: a state over the cap is bounded even with huge notes", () => {
-	const evidence = {
-		target: "uncommitted" as const,
-		isGit: true,
-		files: Array.from({ length: 200 }, (_, i) => `src/very/long/path/number/${i}/file.ts`),
-		added: 1,
-		removed: 0,
-		newFiles: [],
-		deletedFiles: [],
-		signals: [],
-		notes: Array.from({ length: 50 }, () => "n".repeat(2_000)),
-		summary: "s".repeat(5_000),
-		patchExcerpt: "y".repeat(5_000),
-		truncated: false,
-		unstable: false,
+test("judge: the state Jev receives is the dossier itself", async () => {
+	let seen: Record<string, unknown> | undefined;
+	const registry = {
+		findOfType: () => ({ provider: "openrouter", id: "typesafe/jev-1.13" }),
+		classify: async (_model: unknown, context: { state: Record<string, unknown> }) => {
+			seen = context.state;
+			return classifierResult(fullAnswers());
+		},
 	};
-	const state = buildState(evidence, 2_000);
-	assert.ok(JSON.stringify(state).length <= 3_000, `state was ${JSON.stringify(state).length} chars`);
+	const built = emptyDossier();
+	await askJudge(registry as never, config(), built, catalog());
+	assert.equal(
+		(seen as { scope?: { target?: string } } | undefined)?.scope?.target,
+		"none",
+		"Jev is handed the dossier itself, not a second serialization",
+	);
+	assert.ok("manifest" in (seen ?? {}), "the dossier's sections are what Jev sees");
 });
 
-test("judge: state trims the diff before anything else when over the cap", () => {
-	const evidence = {
-		target: "uncommitted" as const,
-		isGit: true,
-		files: ["a.ts"],
-		added: 1,
-		removed: 0,
-		newFiles: [],
-		deletedFiles: [],
-		signals: [],
-		notes: [],
-		summary: "x",
-		patchExcerpt: "y".repeat(5_000),
-		truncated: false,
-		unstable: false,
-	};
-	const state = buildState(evidence, 1_000);
-	const change = state.change as Record<string, unknown>;
-	assert.equal(change.diff_excerpt, undefined);
-	assert.equal(change.diff_omitted, true, "the diff was removed, so say removed");
-	assert.equal(change.diff_truncated, false, "git did not truncate it; don't claim it did");
-	assert.ok(JSON.stringify(state).length <= 1_200);
+// ---------------------------------------------------------------------------
+// dossier adapter
+// ---------------------------------------------------------------------------
+
+const ADAPTER_EVIDENCE = {
+	target: "uncommitted" as const,
+	isGit: true,
+	files: ["src/a.ts", "src/b.ts"],
+	added: 3,
+	removed: 1,
+	newFiles: [],
+	deletedFiles: [],
+	indicators: { "src/a.ts": { modeChange: true } },
+	artifacts: [
+		{ path: "src/a.ts", added: 2, removed: 1, status: "M", binary: false },
+		{ path: "src/b.ts", added: 1, removed: 0, status: "M", binary: false },
+	],
+	limitations: [{ text: "a gap in the evidence", blocksSkip: true }],
+	signals: ["changes error handling"],
+	notes: ["on-disk format changed"],
+	summary: "a change",
+	patchExcerpt: [
+		"diff --git a/src/a.ts b/src/a.ts",
+		"index 111..222 100644",
+		"--- a/src/a.ts",
+		"+++ b/src/a.ts",
+		"@@ -1 +1 @@",
+		"-old line",
+		"+new line",
+		"diff --git a/src/b.ts b/src/b.ts",
+		"new file mode 100644",
+		"--- /dev/null",
+		"+++ b/src/b.ts",
+		"@@ -0,0 +1 @@",
+		"+fresh",
+	].join("\n"),
+	truncated: false,
+	unstable: false,
+};
+
+test("adapter: splitPatchByPath keys each hunk by its file", () => {
+	const split = splitPatchByPath(ADAPTER_EVIDENCE.patchExcerpt);
+	assert.equal(split.size, 2);
+	assert.match(split.get("src/a.ts") ?? "", /-old line/u);
+	assert.match(split.get("src/b.ts") ?? "", /\+fresh/u, "a new file's patch comes from its +++ line");
 });
 
-test("judge: the state names the task baseline and an unstable snapshot", () => {
+test("adapter: toEvidenceItems emits one artifact item per file with its own patch", () => {
+	const items = toEvidenceItems(ADAPTER_EVIDENCE);
+	const artifacts = items.filter((item) => item.kind === "artifact-change");
+	assert.equal(artifacts.length, 2);
+	const a = artifacts.find((item) => item.path === "src/a.ts");
+	assert.equal(a?.added, 2);
+	assert.equal(a?.removed, 1);
+	assert.match(a?.patch ?? "", /-old line/u);
+	assert.deepEqual(a?.flags, { modeChange: true });
+	assert.ok(items.some((item) => item.kind === "risk-signal" && item.signal === "changes error handling"));
+	assert.ok(items.some((item) => item.kind === "limitation" && item.text.includes("a gap")));
+});
+
+test("adapter: the same evidence through the adapter gives the same dossier fingerprint", () => {
+	const build = () =>
+		buildDossier({
+			items: toEvidenceItems(ADAPTER_EVIDENCE),
+			task: { summary: "a change" },
+			scope: { target: "uncommitted", snapshot: "abc" },
+			catalog: [],
+		});
+	assert.equal(build().fingerprint, build().fingerprint);
+	assert.match(build().fingerprint, /^[0-9a-f]{64}$/u);
+});
+
+test("adapter: a patch section with no recoverable path is recorded, not silently lost", () => {
 	const evidence = {
-		target: "task" as const,
-		isGit: true,
-		files: [],
-		added: 0,
-		removed: 0,
-		newFiles: [],
-		deletedFiles: [],
-		signals: [],
-		notes: [],
-		summary: "x",
-		patchExcerpt: "",
-		truncated: false,
-		unstable: true,
-		baseline: "abc123",
+		...ADAPTER_EVIDENCE,
+		artifacts: [{ path: "src/a.ts", added: 0, removed: 0, status: "M", binary: false }],
+		patchExcerpt: "diff --git malformed-header\n@@ -1 +1 @@\n-x\n+y\n",
 	};
-	const change = buildState(evidence, 12_000).change as Record<string, unknown>;
-	assert.equal(change.baseline, "abc123", "the scope the evidence was measured from");
-	assert.equal(change.snapshot_unstable, true, "a decision-grade fact, not a buried limitation");
+	const items = toEvidenceItems(evidence);
+	assert.ok(
+		items.some((item) => item.kind === "limitation" && item.text.includes("could not be attributed")),
+		"an unattributable patch section must be recorded as a limitation",
+	);
+});
+
+test("adapter: a pure rename attributes to its new path, a binary from its diff header", () => {
+	const patch = [
+		"diff --git a/old-name.ts b/new-name.ts",
+		"similarity index 100%",
+		"rename from old-name.ts",
+		"rename to new-name.ts",
+		"diff --git a/logo.png b/logo.png",
+		"index 111..222 100644",
+		"Binary files a/logo.png and b/logo.png differ",
+	].join("\n");
+	const split = splitPatchByPath(patch);
+	assert.ok(split.has("new-name.ts"), "a pure rename is attributed to its new path");
+	assert.ok(split.has("logo.png"), "a headerless binary change is attributed from its diff line");
+});
+
+test("adapter: a truncated excerpt says later files may carry no patch", () => {
+	const items = toEvidenceItems({ ...ADAPTER_EVIDENCE, truncated: true });
+	assert.ok(
+		items.some((item) => item.kind === "limitation" && item.text.includes("truncated")),
+		"a cut excerpt must record that later files have no per-file patch",
+	);
+});
+
+const PIPELINE_CANDIDATES = [
+	{ provider: "p", model: "cheap", tier: "low", cost: 0.1, description: "cheap" },
+	{ provider: "p", model: "mid", tier: "medium", cost: 0.5, description: "mid" },
+	{ provider: "p", model: "strong", tier: "high", cost: 2, description: "strong" },
+];
+
+interface PipelinePlan {
+	fingerprint?: string;
+	adversarial?: { needed?: boolean; reasonCodes?: string[] };
+	complexity?: { needed?: boolean };
+}
+
+/**
+ * Drive the registered tool once, with a temp agent dir so `loadConfig` sees no
+ * stray user config. Returns the tool result's details and every appended
+ * session entry.
+ */
+async function runPipeline(options: {
+	exec: GitExec;
+	answers: Record<string, ClassifierAnswer>;
+}): Promise<{
+	details: { fingerprint?: string; plan?: PipelinePlan };
+	appended: { type: string; entry: { fingerprint?: string } }[];
+}> {
+	const previous = process.env.PI_CODING_AGENT_DIR;
+	const dir = mkdtempSync(join(tmpdir(), "review-triage-run-"));
+	process.env.PI_CODING_AGENT_DIR = dir;
+	writeFileSync(join(dir, "review-triage.json"), JSON.stringify({ candidates: PIPELINE_CANDIDATES }));
+	const appended: { type: string; entry: { fingerprint?: string } }[] = [];
+	let tool: { execute: (...args: never[]) => Promise<{ details: unknown }> } | undefined;
+	const pi = {
+		registerTool: (definition: never) => {
+			tool = definition as never;
+		},
+		registerCommand: () => {},
+		appendEntry: (type: string, entry: { fingerprint?: string }) => {
+			appended.push({ type, entry });
+		},
+		exec: options.exec,
+		sendUserMessage: () => {},
+	};
+	const ctx = {
+		modelRegistry: {
+			getAvailable: () => AVAILABLE,
+			findOfType: () => ({ provider: "openrouter", id: "typesafe/jev-1.13" }),
+			classify: async () => classifierResult(options.answers),
+		},
+		cwd: "/repo",
+		signal: undefined,
+		hasUI: false,
+		ui: { notify: () => {} },
+	};
+	try {
+		reviewTriageExtension(pi as never);
+		assert.ok(tool, "the extension registered the tool");
+		const result = await tool.execute(
+			"id",
+			{ summary: "wire the dossier", target: "uncommitted" },
+			undefined,
+			undefined,
+			ctx as never,
+		);
+		return { details: result.details as never, appended };
+	} finally {
+		if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
+		else process.env.PI_CODING_AGENT_DIR = previous;
+		rmSync(dir, { recursive: true, force: true });
+	}
+}
+
+test("wiring: the session entry carries the dossier fingerprint", async () => {
+	const { details, appended } = await runPipeline({ exec: stableExec().exec, answers: fullAnswers() });
+	assert.match(details.fingerprint ?? "", /^[0-9a-f]{64}$/u, "the run records a dossier fingerprint");
+	assert.equal(details.plan?.fingerprint, details.fingerprint, "the plan records the same fingerprint");
+	const entry = appended.find((item) => item.type === "review-triage");
+	assert.equal(entry?.entry.fingerprint, details.fingerprint, "the session entry carries it too");
+});
+
+test("wiring: a dossier that overflows cannot skip, even at P(none)=0.99", async () => {
+	// 201 files overflow the 200-entry manifest limit, so the dossier is
+	// incomplete and the skip gate must refuse regardless of the judge's answer.
+	const files = Array.from({ length: 201 }, (_, i) => `src/file-${i}.ts`);
+	const exec: GitExec = async (_command, args) => {
+		const key = args.join(" ");
+		if (key.includes("rev-parse")) return { stdout: "/repo/.git\n", stderr: "", code: 0 };
+		if (key.includes("--diff-filter=U")) return { stdout: "", stderr: "", code: 0 };
+		if (key.includes("--numstat")) {
+			return { stdout: `${files.map((path) => `1\t0\t${path}`).join("\0")}\0`, stderr: "", code: 0 };
+		}
+		if (key.includes("--raw")) {
+			return {
+				stdout: files.map((path) => `:100644 100644 aaa bbb M\0${path}\0`).join(""),
+				stderr: "",
+				code: 0,
+			};
+		}
+		if (key.includes("--unified=0")) return { stdout: "", stderr: "", code: 0 };
+		return { stdout: "", stderr: "", code: 0 };
+	};
+	const skipProbs: Record<string, number> = {
+		none: 0.99,
+		"low:low": 0.005,
+		"low:medium": 0.002,
+		"low:high": 0.001,
+		"medium:high": 0.001,
+		"medium:max": 0.0005,
+		"high:high": 0.0005,
+		"high:max": 0.0005,
+	};
+	const answers: Record<string, ClassifierAnswer> = {
+		[QUESTION_IDS.adversarialProfile]: { type: "choice", choice: "none", probabilities: skipProbs, confidence: 0.99 },
+		[QUESTION_IDS.adversarialProfileReversed]: {
+			type: "choice",
+			choice: "none",
+			probabilities: reverseOf(skipProbs),
+			confidence: 0.99,
+		},
+		[QUESTION_IDS.complexityProfile]: { type: "choice", choice: "none", probabilities: skipProbs, confidence: 0.99 },
+		[QUESTION_IDS.complexityProfileReversed]: {
+			type: "choice",
+			choice: "none",
+			probabilities: reverseOf(skipProbs),
+			confidence: 0.99,
+		},
+	};
+	const { details } = await runPipeline({ exec, answers });
+	assert.equal(details.plan?.adversarial?.needed, true, "an incomplete dossier cannot skip");
+	assert.ok(
+		details.plan?.adversarial?.reasonCodes?.includes("incomplete-evidence"),
+		"the reason says the evidence was incomplete",
+	);
+	assert.equal(details.plan?.complexity?.needed, true);
 });
 
 // ---------------------------------------------------------------------------

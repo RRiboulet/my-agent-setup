@@ -23,6 +23,8 @@
 
 import { existsSync } from "node:fs";
 
+import type { EvidenceCompleteness, EvidenceItem } from "./dossier.ts";
+
 export type TriageTargetKind = "uncommitted" | "branch" | "commit" | "none" | "task";
 
 export interface TriageTarget {
@@ -54,6 +56,22 @@ export interface EvidenceLimitation {
 	blocksSkip: boolean;
 }
 
+/** One file's measurement, retained so the dossier can build a real manifest. */
+export interface ArtifactMeasurement {
+	path: string;
+	added: number;
+	removed: number;
+	/** git status letter, when known (`A`, `M`, `D`, `R100`, `U`, …). */
+	status?: string;
+	binary: boolean;
+	/**
+	 * How complete this measurement is. Normal tracked changes are `complete`;
+	 * an untracked file is listed but its content was never read, so it is
+	 * `missing` rather than silently reading as a zero-line change.
+	 */
+	completeness?: EvidenceCompleteness;
+}
+
 export interface ChangeEvidence {
 	target: TriageTargetKind;
 	base?: string;
@@ -67,6 +85,8 @@ export interface ChangeEvidence {
 	deletedFiles: string[];
 	/** Structural indicators, keyed by path. */
 	indicators: Record<string, ArtifactFlags>;
+	/** Per-file measurements, retained so the dossier can build a real manifest. */
+	artifacts: ArtifactMeasurement[];
 	/** Known gaps, recorded rather than silently assumed away. */
 	limitations: EvidenceLimitation[];
 	/** Human-readable risk labels; Jev reads these, nothing else scores them. */
@@ -427,6 +447,7 @@ export async function collectEvidence(exec: GitExec, options: CollectOptions): P
 		newFiles: [],
 		deletedFiles: [],
 		indicators: {},
+		artifacts: [],
 		limitations: [],
 		signals: [],
 		notes: options.notes ?? [],
@@ -560,6 +581,33 @@ export async function collectEvidence(exec: GitExec, options: CollectOptions): P
 		indicators[path] = { ...(indicators[path] ?? {}), conflict: true };
 	}
 
+	// Per-file measurements for the dossier manifest. Counts come from numstat,
+	// status from raw; both list every changed path, so they are merged rather
+	// than one being trusted over the other (a failed `--raw` read must not empty
+	// the manifest). A conflicted path is in neither diff, so it is added with
+	// its extent unknown rather than dropped.
+	const numByPath = new Map(numEntries.map((entry) => [entry.path, entry]));
+	const rawByPath = new Map(rawEntries.map((entry) => [entry.path, entry]));
+	const artifactPaths = [
+		...new Set([...rawEntries.map((entry) => entry.path), ...numEntries.map((entry) => entry.path)]),
+	];
+	const artifacts: ArtifactMeasurement[] = artifactPaths.map((path) => {
+		const num = numByPath.get(path);
+		const raw = rawByPath.get(path);
+		return {
+			path,
+			added: num?.added ?? 0,
+			removed: num?.removed ?? 0,
+			...(raw ? { status: raw.status } : {}),
+			binary: num?.binary ?? false,
+		};
+	});
+	for (const path of conflictPaths) {
+		if (!artifacts.some((artifact) => artifact.path === path)) {
+			artifacts.push({ path, added: 0, removed: 0, status: "U", binary: false });
+		}
+	}
+
 	const newFiles = rawEntries.filter((entry) => entry.status.startsWith("A")).map((entry) => entry.path);
 	const deletedFiles = rawEntries.filter((entry) => entry.status.startsWith("D")).map((entry) => entry.path);
 
@@ -589,6 +637,13 @@ export async function collectEvidence(exec: GitExec, options: CollectOptions): P
 			const extras = parsePathListZ(untracked.stdout).filter((path) => !known.has(path));
 			newFiles.push(...extras);
 			files = [...files, ...extras];
+			// An untracked path is evidence: list it in the manifest too, with its
+			// extent unknown, so Jev sees the file by name rather than only in a
+			// count. `missing` plus the limitation below keeps the unknown extent
+			// from reading as a zero-line change.
+			for (const path of extras) {
+				artifacts.push({ path, added: 0, removed: 0, status: "A", binary: false, completeness: "missing" });
+			}
 			if (extras.length > 0) {
 				// A diff excludes untracked content, so a new file's body is
 				// invisible to the patch and the risk scan; say so rather than
@@ -650,10 +705,158 @@ export async function collectEvidence(exec: GitExec, options: CollectOptions): P
 		newFiles: [...new Set(newFiles)],
 		deletedFiles,
 		indicators,
+		artifacts,
 		limitations,
 		signals: detectSignals(files, patchText, added, removed),
 		patchExcerpt: truncated ? patchText.slice(0, patchCap) : patchText,
 		truncated,
 		unstable: unstableReasons.length > 0 || stabilityFailed,
 	};
+}
+
+// ---------------------------------------------------------------------------
+// Dossier adapter (stopgap)
+// ---------------------------------------------------------------------------
+
+/**
+ * Split a combined `git diff` into one patch per file, keyed by path. The
+ * collector emits a single `--unified=0` patch; the dossier wants a patch per
+ * artifact, so this reconstructs them from the file headers. The path comes
+ * from the `+++ b/<path>` line, falling back to `--- a/<path>` for a deletion
+ * (`+++ /dev/null`), `rename to <path>` for a pure rename, and the
+ * `diff --git a/<old> b/<new>` line for a headerless binary or mode-only change.
+ * A section with no recoverable path is dropped (and recorded by the caller).
+ *
+ * Only the pre-hunk head of a section is searched for `---`/`+++`, so an added
+ * content line that happens to read `+++ b/x` cannot be mistaken for a header.
+ */
+export function splitPatchByPath(patch: string): Map<string, string> {
+	const result = new Map<string, string>();
+	if (!patch) return result;
+	const sections = patch.split(/^(?=diff --git )/mu).filter((section) => section.startsWith("diff --git "));
+	for (const text of sections) {
+		const body = text.slice("diff --git ".length);
+		const head = body.split(/^@@ /mu)[0] ?? body;
+		const plus = /^\+\+\+ b\/(.*)$/mu.exec(head);
+		const minus = /^--- a\/(.*)$/mu.exec(head);
+		const rename = /^rename to (.*)$/mu.exec(head);
+		const git = /^a\/(.*) b\/(.*)$/mu.exec(head);
+		let path: string | undefined;
+		if (plus && plus[1] !== "/dev/null") path = plus[1];
+		else if (minus && minus[1] !== "/dev/null") path = minus[1];
+		else if (rename) path = rename[1];
+		else if (git) path = git[2];
+		if (path !== undefined) result.set(path, text);
+	}
+	return result;
+}
+
+/**
+ * The stopgap adapter from {@link ChangeEvidence} to the dossier's evidence
+ * items. The git collector measures per-file counts and one combined patch;
+ * this turns that into one artifact-change item per file, splitting the combined
+ * patch by its `diff --git` headers so each artifact carries its own patch.
+ * Until the collector emits per-file patches directly, the split is
+ * reconstructed — the patch is too important to drop and too combined to
+ * attribute perfectly, so an unattributable section is recorded as a limitation
+ * rather than silently lost.
+ *
+ * `snapshot` is the identity every item is stamped with. When omitted it is
+ * derived from the evidence, but the caller (index.ts) passes the same value it
+ * gives the dossier scope so the two cannot default differently.
+ */
+export function toEvidenceItems(evidence: ChangeEvidence, snapshot?: string): EvidenceItem[] {
+	const items: EvidenceItem[] = [];
+	const identity = snapshot ?? evidence.baseline ?? evidence.ref ?? evidence.base ?? "unknown";
+	const provenance = "git diff --numstat -z / --raw -z / --unified=0";
+	const patches = splitPatchByPath(evidence.patchExcerpt);
+
+	for (const artifact of evidence.artifacts) {
+		const flags = evidence.indicators[artifact.path];
+		const patch = patches.get(artifact.path);
+		items.push({
+			source: "git",
+			kind: "artifact-change",
+			provenance,
+			snapshot: identity,
+			completeness: artifact.completeness ?? "complete",
+			trust: "observed",
+			path: artifact.path,
+			added: artifact.added,
+			removed: artifact.removed,
+			...(artifact.status ? { status: artifact.status } : {}),
+			...(patch ? { patch } : {}),
+			...(flags ? { flags } : {}),
+		});
+	}
+
+	for (const signal of evidence.signals) {
+		items.push({
+			source: "git",
+			kind: "risk-signal",
+			provenance,
+			snapshot: identity,
+			completeness: "complete",
+			trust: "observed",
+			signal,
+		});
+	}
+
+	for (const limitation of evidence.limitations) {
+		items.push({
+			source: "git",
+			kind: "limitation",
+			provenance,
+			snapshot: identity,
+			completeness: "partial",
+			trust: "observed",
+			text: limitation.text,
+		});
+	}
+
+	// The collector emits one combined patch; the split above reconstructs
+	// per-file patches from it. A section whose path could not be recovered (git
+	// quotes control characters in a header) is not attributed, so record it
+	// rather than let a missing patch read as a file that did not change. The
+	// note disappears on its own once the collector emits per-file patches.
+	const sections = evidence.patchExcerpt.match(/^diff --git /gmu)?.length ?? 0;
+	if (sections > 0 && patches.size < sections) {
+		items.push({
+			source: "git",
+			kind: "limitation",
+			provenance,
+			snapshot: identity,
+			completeness: "partial",
+			trust: "observed",
+			text: `per-file patches were reconstructed from one combined diff; ${sections - patches.size} patch section(s) could not be attributed to a path`,
+		});
+	}
+	// A truncated excerpt drops the sections past the cap, so a manifest entry
+	// can sit there with counts but no patch. Say so rather than let it read as
+	// a file with no patch.
+	if (evidence.truncated) {
+		items.push({
+			source: "git",
+			kind: "limitation",
+			provenance,
+			snapshot: identity,
+			completeness: "partial",
+			trust: "observed",
+			text: "the combined patch excerpt was truncated, so later files may carry no per-file patch",
+		});
+	}
+
+	if (evidence.error) {
+		items.push({
+			source: "git",
+			kind: "limitation",
+			provenance,
+			snapshot: identity,
+			completeness: "missing",
+			trust: "observed",
+			text: evidence.error,
+		});
+	}
+
+	return items;
 }

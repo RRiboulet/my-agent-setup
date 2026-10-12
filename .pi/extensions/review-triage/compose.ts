@@ -70,6 +70,8 @@ export interface ReviewPlan {
 	complexity: TrackPlan;
 	judge: string;
 	latencyMs: number;
+	/** SHA-256 of the dossier Jev judged, so a verdict can be replayed against its evidence. */
+	fingerprint?: string;
 	evidence: { files: number; added: number; removed: number; signals: string[] };
 }
 
@@ -311,6 +313,8 @@ export interface ComposeArgs {
 	judgment?: Judgment;
 	/** A judge failure reason; set only when `judgment` is absent. */
 	failure?: string;
+	/** SHA-256 of the dossier that was judged, recorded for replay. */
+	fingerprint?: string;
 	config: TriageConfig;
 	candidates: readonly Candidate[];
 	available: readonly AvailableModel[];
@@ -359,6 +363,7 @@ export function composePlan(args: ComposeArgs): ReviewPlan {
 		complexity,
 		judge: args.judgment?.judge ?? "unavailable",
 		latencyMs: args.judgment?.latencyMs ?? 0,
+		...(args.fingerprint ? { fingerprint: args.fingerprint } : {}),
 		evidence: args.evidence,
 	};
 }

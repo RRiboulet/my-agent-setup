@@ -14,12 +14,13 @@
  *
  * Two properties matter more than any single section:
  *
- *   - **Determinism.** The same evidence produces the same fingerprint, byte
- *     for byte, whatever the wall clock says and whatever order the collector
- *     emitted its items in. The dossier contains no build timestamp, and every
- *     sort has a total tie-break, so a re-run over an unchanged change is
- *     recognisable as one. The fingerprint is a cache/replay key; it does not
- *     make Jev's answer deterministic.
+ *   - **Determinism.** The same inputs — items, task, scope, catalog, redaction
+ *     and budget — produce the same fingerprint, byte for byte, whatever the
+ *     wall clock says and whatever order the collector emitted its items in.
+ *     The dossier contains no build timestamp, and every sort has a total
+ *     tie-break, so a re-run over unchanged inputs is recognisable as one. The
+ *     fingerprint is a cache/replay key; it does not make Jev's answer
+ *     deterministic.
  *   - **Honesty about what is missing.** Truncation, redaction and omission are
  *     recorded in `exclusions`, and anything that made the document incomplete
  *     sets {@link BuiltDossier.manifestOverflow} — which policy turns into a

@@ -27,8 +27,8 @@ import {
 	type ProfileCatalog,
 	type TriageConfig,
 } from "./config.ts";
-import { collectEvidence, type TriageTarget } from "./evidence.ts";
-import { askJudge, buildState, JudgeError, type Judgment } from "./judge.ts";
+import { collectEvidence, toEvidenceItems, type TriageTarget } from "./evidence.ts";
+import { askJudge, JudgeError, type Judgment } from "./judge.ts";
 import {
 	composePlan,
 	disabledPlan,
@@ -37,6 +37,7 @@ import {
 	type AvailableModel,
 	type ReviewPlan,
 } from "./compose.ts";
+import { buildDossier, RISK_RULES_VERSION } from "./dossier.ts";
 import type { PolicyGates } from "./policy.ts";
 import { formatPlan } from "./format.ts";
 import { join } from "node:path";
@@ -59,6 +60,8 @@ interface TriageRun {
 	plan: ReviewPlan;
 	judgment?: Judgment;
 	catalog: ProfileCatalog;
+	/** SHA-256 of the dossier that was judged, so a verdict can be replayed. */
+	fingerprint?: string;
 	evidence: { target: string; files: string[]; added: number; removed: number; signals: string[]; error?: string };
 }
 
@@ -156,13 +159,46 @@ async function runTriage(
 		removed: evidence.removed,
 		signals: evidence.signals,
 	};
-	// Every gate reads from real signals: `stable` comes from the probe around
-	// collection (§6), conflicts from the collector's per-file flags, and a
-	// limitation that marks evidence as unsafe to skip keeps the review.
+
+	// The dossier is the single, fingerprinted document Jev judges. It is built
+	// from the collected evidence items plus the caller-supplied context, so the
+	// budget and the trim live here rather than in a second state serialization.
+	// The fingerprint identifies the exact dossier judged — evidence, task,
+	// catalog and budget — so a change re-triaged after a model appears or
+	// disappears is honestly a different judgement, not a silently stale one.
+	// One snapshot identity is used for both the evidence items and the scope,
+	// so the two cannot default differently and hash against different baselines.
+	const snapshot = evidence.baseline ?? evidence.ref ?? evidence.base ?? target.kind;
+	const built = buildDossier({
+		items: toEvidenceItems(evidence, snapshot),
+		task: { summary },
+		scope: {
+			target: target.kind,
+			...(target.base ? { base: target.base } : {}),
+			...(target.ref ? { ref: target.ref } : {}),
+			snapshot,
+		},
+		catalog: catalog.options.map((option) => option.key),
+		supplementary: params.notes,
+		// The thin collectors (validation, harness context, caller artifacts) are
+		// not wired into the pipeline yet, so say so rather than let an empty
+		// `validation` section read as "no checks were run".
+		limitations: ["validation results and task requirements were not collected for this run"],
+		versions: { riskRules: RISK_RULES_VERSION },
+		budgetChars: config.stateChars,
+	});
+
+	// Every gate reads from a real signal: `stable` comes from the probe around
+	// collection (§6), conflicts from the collector's per-file flags, a skip-
+	// blocking limitation keeps the review, and a dossier that could not be made
+	// complete (manifest or budget overflow) is never evidence of a small change.
 	const gates: PolicyGates = {
 		stable: !evidence.unstable,
 		conflicts: Object.values(evidence.indicators).some((flags) => flags.conflict),
-		evidenceComplete: !evidence.error && !evidence.limitations.some((limitation) => limitation.blocksSkip),
+		evidenceComplete:
+			!evidence.error &&
+			!built.manifestOverflow &&
+			!evidence.limitations.some((limitation) => limitation.blocksSkip),
 		mandatoryReview: config.policy.mandatoryReview ?? false,
 	};
 
@@ -170,15 +206,10 @@ async function runTriage(
 	let judgment: Judgment | undefined;
 	let plan: ReviewPlan;
 	try {
-		judgment = await askJudge(
-			ctx.modelRegistry,
-			config,
-			buildState(evidence, config.stateChars),
-			catalog.options,
-			signal,
-		);
+		judgment = await askJudge(ctx.modelRegistry, config, built, catalog.options, signal);
 		plan = composePlan({
 			judgment,
+			fingerprint: built.fingerprint,
 			config,
 			candidates,
 			available,
@@ -194,6 +225,7 @@ async function runTriage(
 		// the session as an audited verdict is the fabrication this tool forbids.
 		if (error.failure === "aborted") throw error;
 		plan = failOpenPlan({
+			fingerprint: built.fingerprint,
 			config,
 			candidates,
 			available,
@@ -208,6 +240,7 @@ async function runTriage(
 	const entry: TriageRun = {
 		plan,
 		...(judgment ? { judgment } : {}),
+		...(built.fingerprint ? { fingerprint: built.fingerprint } : {}),
 		catalog,
 		evidence: {
 			target: evidence.target,
