@@ -406,7 +406,17 @@ function boundedReplace(
 	text: string,
 	spent: { ms: number },
 ): string {
-	if (spent.ms > REGEX_TOTAL_TIMEOUT_MS) {
+	if (spent.ms >= REGEX_TOTAL_TIMEOUT_MS) {
+		throw new RedactionError(
+			"redaction masking passed its " + REGEX_TOTAL_TIMEOUT_MS + " ms total budget; simplify the patterns",
+		);
+	}
+	// A single step must never be granted more wall-clock than the total budget
+	// that is left, otherwise a slow final step can push the build past the
+	// documented cap.
+	const remaining = REGEX_TOTAL_TIMEOUT_MS - spent.ms;
+	const stepTimeout = Math.min(REGEX_STEP_TIMEOUT_MS, remaining);
+	if (stepTimeout <= 0) {
 		throw new RedactionError(
 			"redaction masking passed its " + REGEX_TOTAL_TIMEOUT_MS + " ms total budget; simplify the patterns",
 		);
@@ -418,14 +428,14 @@ function boundedReplace(
 	context.mask = mask;
 	const started = Date.now();
 	try {
-		return maskRunner.script.runInContext(context, { timeout: REGEX_STEP_TIMEOUT_MS }) as string;
+		return maskRunner.script.runInContext(context, { timeout: stepTimeout }) as string;
 	} catch (error) {
 		if (isExecutionTimeout(error)) {
 			throw new RedactionError(
 				"redaction pattern #" +
 					pattern.position +
 					" did not finish within " +
-					REGEX_STEP_TIMEOUT_MS +
+					stepTimeout +
 					" ms on one field, so it looks catastrophically backtracking. Simplify or anchor it, or remove it. " +
 					"(Its source is not repeated here because it may be secret-shaped.)",
 			);

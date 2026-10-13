@@ -577,8 +577,17 @@ export function loadConfig(options: LoadConfigOptions = {}): TriageConfig {
 	const envModel = str(env.PI_REVIEW_TRIAGE_JUDGE_MODEL);
 	if (envProvider) config.judge.provider = envProvider;
 	if (envModel) config.judge.model = envModel;
-	if (str(env.PI_REVIEW_TRIAGE_OFF)) config.enabled = false;
-	if (str(env.PI_REVIEW_TRIAGE_ENABLED)) config.enabled = true;
+	// Env values are booleans, not merely present: "false" must not flip the
+	// switch, and an unrecognised value is ignored rather than treated as "on".
+	function parseEnvBool(value: string | undefined): boolean | undefined {
+		if (!value) return undefined;
+		const normalized = value.trim().toLowerCase();
+		if (normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on") return true;
+		if (normalized === "0" || normalized === "false" || normalized === "no" || normalized === "off") return false;
+		return undefined;
+	}
+	if (parseEnvBool(env.PI_REVIEW_TRIAGE_OFF) === true) config.enabled = false;
+	if (parseEnvBool(env.PI_REVIEW_TRIAGE_ENABLED) === true) config.enabled = true;
 
 	return config;
 }

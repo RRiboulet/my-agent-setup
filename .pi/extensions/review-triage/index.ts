@@ -48,7 +48,7 @@ import {
 import { buildDossier, RISK_RULES_VERSION, type EvidenceItem } from "./dossier.ts";
 import type { PolicyGates } from "./policy.ts";
 import { formatPlan } from "./format.ts";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 const TARGETS = ["uncommitted", "branch", "commit", "task", "none"] as const;
@@ -94,6 +94,19 @@ export function resolveContext(params: TriageParams): ResolvedContext {
 	const label = params.contextPath ? `--context ${params.contextPath}` : "the context argument";
 	let raw: string | undefined;
 	if (params.contextPath) {
+		let stats;
+		try {
+			stats = statSync(params.contextPath);
+		} catch (error) {
+			return { warnings: [`${label} could not be read (${(error as Error).message}); it was ignored`] };
+		}
+		// Gate on size before materialising the file, so an oversized (or
+		// enormous) payload cannot be buffered first and defeat the cap.
+		if (stats.size > MAX_CONTEXT_CHARS) {
+			return {
+				warnings: [`${label} is ${stats.size} bytes, over the ${MAX_CONTEXT_CHARS} limit; it was ignored`],
+			};
+		}
 		try {
 			raw = readFileSync(params.contextPath, "utf8");
 		} catch (error) {
@@ -391,7 +404,7 @@ async function runTriage(
  * (`{ artifacts, validations, harness }`) carrying the thin collectors' inputs.
  */
 export function parseTriageArgs(raw: string): TriageParams {
-	const tokens = raw.match(/"[^"]*"|'[^']*'|\S+/g) ?? [];
+	const tokens = raw.match(/--[^=\s]+=(?:"[^"]*"|'[^']*')|"[^"]*"|'[^']*'|\S+/g) ?? [];
 	const unquote = (value: string | undefined) => value?.replace(/^["']|["']$/g, "");
 	const params: TriageParams = { summary: "" };
 	const notes: string[] = [];
@@ -400,19 +413,22 @@ export function parseTriageArgs(raw: string): TriageParams {
 	for (let i = 0; i < tokens.length; i++) {
 		const token = unquote(tokens[i]) ?? "";
 		if (token === "--summary") params.summary = unquote(tokens[++i]) ?? "";
-		else if (token.startsWith("--summary=")) params.summary = token.slice("--summary=".length);
+		else if (token.startsWith("--summary=")) params.summary = unquote(token.slice("--summary=".length)) ?? "";
 		else if (token === "--note") {
 			const note = unquote(tokens[++i]);
 			if (note) notes.push(note);
-		} else if (token.startsWith("--note=")) notes.push(token.slice("--note=".length));
+		} else if (token.startsWith("--note=")) {
+			const value = unquote(token.slice("--note=".length));
+			if (value) notes.push(value);
+		}
 		else if (token === "--base") params.base = unquote(tokens[++i]);
-		else if (token.startsWith("--base=")) params.base = token.slice("--base=".length);
+		else if (token.startsWith("--base=")) params.base = unquote(token.slice("--base=".length));
 		else if (token === "--baseline") params.baseline = unquote(tokens[++i]);
-		else if (token.startsWith("--baseline=")) params.baseline = token.slice("--baseline=".length);
+		else if (token.startsWith("--baseline=")) params.baseline = unquote(token.slice("--baseline=".length));
 		else if (token === "--ref") params.ref = unquote(tokens[++i]);
-		else if (token.startsWith("--ref=")) params.ref = token.slice("--ref=".length);
+		else if (token.startsWith("--ref=")) params.ref = unquote(token.slice("--ref=".length));
 		else if (token === "--context") params.contextPath = unquote(tokens[++i]) ?? "";
-		else if (token.startsWith("--context=")) params.contextPath = token.slice("--context=".length);
+		else if (token.startsWith("--context=")) params.contextPath = unquote(token.slice("--context=".length)) ?? "";
 		else positional.push(token);
 	}
 

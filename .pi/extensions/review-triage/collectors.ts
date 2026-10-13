@@ -210,6 +210,13 @@ function diffedArtifact(path: string, before: string, after: string, context: Di
 	// Beyond the cap the snapshots are recorded with their extent unknown
 	// rather than diffed at quadratic cost.
 	if (beforeLines.length > MAX_DIFF_LINES || afterLines.length > MAX_DIFF_LINES) {
+		const inferred =
+			beforeLines.length === 0 && afterLines.length > 0
+				? "A"
+				: afterLines.length === 0 && beforeLines.length > 0
+					? "D"
+					: undefined;
+		const status = context.status ?? inferred;
 		return [
 			{
 				source: "filesystem",
@@ -221,7 +228,7 @@ function diffedArtifact(path: string, before: string, after: string, context: Di
 				path,
 				added: context.asserted?.added ?? 0,
 				removed: context.asserted?.removed ?? 0,
-				...(context.status ? { status: context.status } : {}),
+				...(status ? { status } : {}),
 				...(context.flags ? { flags: context.flags } : {}),
 			},
 			limitation(
