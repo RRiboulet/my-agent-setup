@@ -4,6 +4,173 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Added:
+
+- **Added `review-triage`: a Jev-gated planner for independent review.** The
+  `triage_change` tool (and a `/triage` command) answers a question that until
+  now was a judgement call every time: after implementing something, does this
+  change need an independent adversarial review, a complexity/design review, or
+  neither — and if so, which model and how hard should it think. Deterministic
+  code gathers the evidence (`git diff --numstat -z`, `--raw -z`, a zero-context
+  patch, untracked files and structural flags, plus hand-written risk notes and
+  optional caller-supplied context), labels the risk-shaped things it can see,
+  and packages them into a **dossier**: a canonical, SHA-256-fingerprinted
+  document whose every truncation and redaction is recorded. One batched request
+  then asks a calibrated decision model — OpenRouter's `typesafe/jev-1.13`
+  through pi's own classifier path (`ctx.modelRegistry.classify()`), so no
+  second API client and the call lands in the session cost like any other —
+  **one `choice` per track over `none` plus the allowed profiles.** A profile is
+  a capability band paired with a thinking level (`medium:max`); the band
+  selects the model, so there is no second model-choice question and nothing for
+  the judgement to disagree with. Each Choice is asked forward and reversed and
+  the two distributions averaged, because Jev leans toward the first option it
+  is offered.
+
+  Code owns everything after the judgement. `none` is allowed only when every
+  gate passes: `P(none)` strictly above `skipThreshold` (0.90 by default), a
+  stable snapshot, no unresolved conflicts, complete-enough evidence, and no
+  mandatory-review restriction — a high probability is necessary, never
+  sufficient. Otherwise the review routes to Jev's best non-`none` profile, then
+  to the configured floor, then to the weakest profile the catalog offers; and
+  when Jev is unreachable the default is to **fail open conservatively** rather
+  than buy a skipped review, marked `policy-fallback` so it is never mistaken
+  for a judgement. The allowed profiles are **generated**, not hardcoded: band ×
+  `thinkingLadder`, pruned against each band model's runtime
+  `thinkingLevelMap` with the prune recorded. The result is a plan, not an
+  action — it carries a ready-to-paste `subagent` task and never launches
+  anything, so the agent still decides.
+
+  Evidence is treated as typed and fallible. Each item carries where it came
+  from, how complete it is, and whether it is observed, asserted or
+  self-reported; caller-supplied artifacts, existing check results and session
+  context are *consumed*, never run, through a single optional JSON context (a
+  file for `/triage --context`, an inline string for the tool). The document is
+  budgeted by `stateChars` with security and migration patches allocated first,
+  and anything that made it incomplete refuses a skip — "we could not see
+  everything" must never read as "there was nothing to see", including a
+  configured redaction that removed an artifact. Path and pattern
+  redaction removes or masks configured material before serialisation, recording
+  that it was removed without recording the value. Every verdict is appended to
+  the session as a `review-triage` entry carrying the plan, the judgement, the
+  catalog and the dossier fingerprint, so "we chose not to review this" is
+  auditable and a decision can be replayed against the evidence that produced
+  it, with a `rationale` templated over deterministic reason codes rather than
+  any model prose.
+
+  Policy sits in `~/.pi/agent/review-triage.json` (all fields optional; the
+  judge model and the on/off switch are also settable through
+  `PI_REVIEW_TRIAGE_*`), and a `.env` beside it is read for
+  `OPENROUTER_API_KEY` so a key that never reached `auth.json` still works. With
+  no config at all, the candidate list is synthesised from the models the
+  session can actually use, bucketed by catalogue price, so the tool works on a
+  fresh install. The decision functions are pure and unit-tested — config merge,
+  the profile catalog and its runtime prune, the skip gate and fallback routing,
+  the forward/reverse averaging, the dossier's determinism and budget, the thin
+  collectors, and the plan's published fields — alongside a load guard and the
+  manifest check.
+
+Fixes found by reviewing the triage work, before it shipped:
+
+- **A skipped review could hide a brand-new file.** The dossier's manifest was
+  built from tracked diffs alone, so an untracked file — the case the untracked
+  listing exists for — was invisible to Jev by name, where the serializer it
+  replaced had listed it. Untracked paths are manifest entries of their own now,
+  with `missing` completeness because their content was not read, so a routing
+  judgement is never blind to a file that exists only in the worktree.
+- **Redaction defeated itself.** The dossier recorded an excluded path verbatim
+  ("redacted artifact src/auth/secret.ts") to prove the exclusion happened, and
+  an invalid redaction pattern echoed the configured regex; publishing the
+  exclusions as plan limitations then carried both into the session entry and
+  the transcript. The fact and count of a removal are recorded now and the value
+  is not, which is what the redaction contract always said.
+- **A caller's fabricated "tests passed" reached Jev as an observed result.**
+  The collectors mark caller-supplied validation `asserted` or `self-reported`,
+  but the dossier's validation section dropped the field, so a caller could
+  invent a provenance and a pass that the judge could not tell from a real
+  tool's record. `trust` is carried through now.
+- **The adapter could be talked into reading a file, and a disabled extension
+  still paid the tool's prompt weight.** The tool built its arguments by
+  spreading whatever the caller sent, so an undeclared `contextPath` or a
+  `warnings` array reached the pipeline; it builds from declared fields only
+  now. And `enabled: false` registered a tool that could only answer "disabled",
+  costing its schema on every request — it now registers no tool at all.
+- **The command's structured input was a parser nobody could use.** Inline JSON
+  flags on `/triage` broke on any payload containing a quote, which is most
+  `before`/`after` file content, and the equivalent tool schema would have added
+  roughly 2800 characters of nested parameters to every request. Both are one
+  optional JSON context now: a file for `--context`, an inline string for the
+  tool. A missing, unreadable, oversized or malformed payload becomes a recorded
+  limitation rather than a failed run.
+- **One huge caller string could censor the caller's own evidence.** The
+  dossier's budget drop is all-or-nothing for the supplementary section, so a
+  multi-megabyte `toolResults` entry evicted the legitimate notes beside it.
+  Caller text is capped per field with the truncation recorded, and the whole
+  context payload is capped.
+- **The fail-open path could recommend the opposite of what it promised.** It
+  synthesised a fixed judgement and ran it through the *configured* policy, so a
+  raised threshold could compose "no review" and label it a conservative
+  default, from nothing, when the judge was down. A judge failure now routes
+  through policy to the configured fallback profile and is always marked
+  `policy-fallback` — never `none`, and never a judgement.
+- **An abort was classified as a judge failure.** Pressing Esc during the
+  classifier call produced a full "both reviews needed" plan — and wrote it to
+  the session as an audited verdict — because abort surfaced as `failure:
+  "timeout"` and fell into fail-open. Abort is its own outcome now and
+  propagates; fail-open is for an unreachable judge, not for a cancellation.
+- **Jev's token usage was always recorded as zero.** The audit entry read
+  `usage.inputTokens`, but pi-ai's `Usage` is `input`/`output`; the `?? 0`
+  fallback hid it, and no typechecker exists to catch a wrong field name. The
+  entry now records the real counts and cost.
+- **Rename detection corrupted the evidence**, and **diff file headers
+  manufactured signals.** `git diff --numstat` abbreviates a move as
+  `src/{util => auth}/helper.ts`, which the path-based signals tested and missed
+  — a file moved under `auth/` did not read as security-relevant; the
+  abbreviation is resolved to its destination, `--raw -z` is parsed
+  NUL-separated so a path with a space, a newline or a leading dash round-trips,
+  and the rename destinations are folded into the file list. Separately,
+  `changedLines` kept `+++`/`---` lines, so a diff touching `spawn.ts` or
+  `fetch.ts` reported "changes process execution" / "changes a network
+  boundary" from the filename alone, with no content; headers are excluded, and
+  the migration pattern's `\.sql$` branch — dead inside a path-anchored group,
+  so `queries/orders.sql` never matched — is a working alternative again.
+- **The candidate field was named `cost` but used as a capability rank**, which
+  is wrong for this catalogue: `deepseek-v4.1-flash` and `glm-5.3-flash` cost the
+  same 0.15, and a free model can be the strongest offered. Capability is an
+  explicit `tier` now and `cost` is what Jev minimises; price is still consulted,
+  but only to synthesise a list on a machine with no config, and `tierFromPrice`
+  is named and documented as the coarse guess it is.
+- **`enabled` and `PI_REVIEW_TRIAGE_OFF` were parsed and then ignored**, so a
+  disabled extension still spent a classifier request per call. The switch is
+  honoured now, and a disabled run reports that nothing was judged rather than a
+  verdict.
+- **A trimmed dossier could still skip review, and the trim gave up the evidence
+  it should have kept.** The budget trim's early stages each returned "not
+  trimmed" once they had brought the document back under the budget, so a large
+  change whose notes were cut reported itself complete and a high `P(none)`
+  could skip over it. The trim now shrinks before it drops — patches first, then
+  the caller's notes, each keeping its head — so a large change keeps some of
+  both instead of losing everything, and the diagnostic exclusion list is
+  bounded so a per-file list cannot crowd out the evidence it describes, with
+  each line shortened so one long path cannot outweigh it either. It
+  reports "incomplete" whenever it changed anything, and the plan publishes a
+  `budget-trimmed` reason code so the audit says the change was large rather
+  than that collection failed.
+- **A mistyped redaction pattern could hang the review tool.** Patterns are
+  arbitrary regex from the config, run over every text field of the dossier in a
+  synchronous build inside a tool call, where nothing can interrupt them: a
+  pattern with catastrophic backtracking (`(a+)+$`) simply never returned. Every
+  application now runs under a wall-clock budget in an interruptible context,
+  and one that does not finish is refused with its position and never its
+  source — refusing beats hanging, and beats silently skipping the rule and
+  publishing the text it was meant to mask. A total budget bounds a config full
+  of merely-slow patterns, and the list is capped too.
+- Smaller: the reversed Choice questions are sent only when `reverseChoice` is
+  on (they were paid for and discarded otherwise); a malformed config file warns
+  instead of vanishing; the judge is told to treat the diff as untrusted
+  evidence, never as instructions — otherwise a planted patch could argue the
+  gate into "no review"; and a supplied `baseline` always implies the `task`
+  scope, so an argument the caller gave is never silently ignored.
+
 ## v1.4.0 — 2026-10-11
 
 Added:
