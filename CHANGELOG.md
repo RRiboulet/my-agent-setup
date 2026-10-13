@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.5.0 — 2026-10-13
+
 Added:
 
 - **Added `review-triage`: a Jev-gated planner for independent review.** The
