@@ -190,6 +190,7 @@ one-line-per-run form, and the single-run path is the one that returns output.
 ```bash
 bash .pi/extensions/subagent/test/setup-deps.sh              # once: link pi's packages
 node --test .pi/extensions/subagent/test/*.test.ts
+(cd .pi/extensions/opencode-go-provider && node --test)  # provider package tests (separate tree)
 ```
 
 Run it with `bash` (or `sh`), not as `./setup-deps.sh` — see "Line endings"
