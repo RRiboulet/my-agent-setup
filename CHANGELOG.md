@@ -4,6 +4,13 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Maintenance:
+
+- Enabled codemode for work in this repository (`.pi/settings.json` now declares
+  `+codemode` and sets `codemode.mode` to `on`) and recorded in AGENTS.md that
+  codemode is the preferred way to batch, parallelize, or pre-filter tool
+  output, with the direct tools kept for one-off single-step work.
+
 ## v1.5.0 — 2026-10-13
 
 Added:
