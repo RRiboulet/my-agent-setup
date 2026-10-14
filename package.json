@@ -2,6 +2,7 @@
   "name": "my-agent-setup",
   "version": "0.0.0",
   "private": true,
+  "type": "module",
   "description": "Personal pi extensions and skills: subagent delegation, todos, /answer, /session-breakdown, native web search, changelog and commit workflow skills.",
   "keywords": [
     "pi-package"

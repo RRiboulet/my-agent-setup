@@ -264,7 +264,7 @@ test("no rendered line carries a control byte, even for a hostile listing", () =
 			// the raw bytes.
 			const cleaned = line
 				.replace(/\u001b\[(?:0|7|27)m/g, "")
-				.replace(/\u001b_pi:[a-z/]*\u0007/g, "");
+				.replace(/\u001b_pi:(?:c|fc|\/fc)\u0007/g, "");
 			assert.doesNotMatch(cleaned, /[\u0000-\u001f\u007f-\u009f]/, `width ${width}: ${JSON.stringify(line)}`);
 		}
 	}
