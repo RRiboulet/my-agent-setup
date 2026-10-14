@@ -9,7 +9,7 @@
 // LOCAL PATCHES, most of the file: provider support beyond upstream's
 // `openai-codex` and `anthropic`, plus a test seam. In short:
 //   - `openrouter` via its `web` plugin, and `opencode-go` via the Go API's
-//     Anthropic-compatible `/messages` endpoint (native `web_search_20250305`),
+//     Anthropic-compatible `/messages` endpoint (native `web_search_20260318`),
 //     with `runOpenRouterSearch`, `opencodeGoHeaders`, `defaultModelId` and
 //     `defaultBaseUrl` added;
 //   - `pickProvider` extended with the opencode-go/openrouter credentials and
@@ -20,6 +20,10 @@
 //     a testable request builder, the OPENCODE_API_KEY fallback);
 //   - a direct-invocation guard and a `__test__` export at the bottom, so
 //     importing the module for tests does not run a search.
+//   - 2026-10: direct `anthropic` and `opencode-go` paths moved to
+//     `web_search_20260318` with `allowed_callers: ["direct"]` (see
+//     ANTHROPIC_WEB_SEARCH_TOOL and OPENCODE_GO_WEB_SEARCH_TOOL). Default
+//     `anthropic` model is now `claude-haiku-5-5`.
 // The body is indented with spaces; upstream uses tabs, so a plain diff against
 // upstream is not meaningful — compare with `diff -w`. See the LOCAL PATCH
 // hunks listed in SKILL.md beside this file.
@@ -362,7 +366,8 @@ function defaultModelId(provider) {
     if (provider === "openai-codex") return "gpt-5.4-mini";
     // opencode-go's web search runs on the Go plan's Anthropic-protocol model.
     if (provider === "opencode-go") return "claude-haiku-5-5";
-    return "claude-haiku-4-5";
+    // Direct Anthropic API: cheapest web-search-capable model as of 2026-10.
+    return "claude-haiku-5-5";
 }
 
 function defaultBaseUrl(provider) {
@@ -371,6 +376,25 @@ function defaultBaseUrl(provider) {
     if (provider === "opencode-go") return "https://opencode.ai/zen/go";
     return "https://api.anthropic.com";
 }
+
+// Web search tool definitions. Both the Go endpoint and the direct Anthropic
+// API use `web_search_20260318` with `allowed_callers: ["direct"]` to force
+// direct invocation regardless of the model's code-execution capabilities —
+// without that pin, `_20260209` and later default to
+// `["code_execution_20260120"]`, which not every model supports.
+const OPENCODE_GO_WEB_SEARCH_TOOL = {
+    type: "web_search_20260318",
+    name: "web_search",
+    max_uses: 5,
+    allowed_callers: ["direct"],
+};
+
+const ANTHROPIC_WEB_SEARCH_TOOL = {
+    type: "web_search_20260318",
+    name: "web_search",
+    max_uses: 5,
+    allowed_callers: ["direct"],
+};
 
 // Newer Anthropic-protocol models reject `temperature` as deprecated — on the Go
 // plan and on the direct API alike. Add a model id here when one starts
@@ -427,7 +451,7 @@ function pickFastModel(provider, requestedModel, piAi) {
     const preferredIds =
         provider === "openai-codex"
             ? ["gpt-5.4-mini", "gpt-5.3-codex-spark", "gpt-5.1", "gpt-5.1-codex-mini"]
-            : ["claude-haiku-4-5", "claude-3-5-haiku-latest", "claude-3-5-haiku-20241022"];
+            : ["claude-haiku-5-5", "claude-haiku-4-5", "claude-3-5-haiku-latest"];
 
     for (const id of preferredIds) {
         const found = models.find((m) => m.id === id);
@@ -710,14 +734,15 @@ function buildAnthropicHeaders(apiKey, extraHeaders = {}) {
 
 // Pure request builder, so tests can pin the endpoint, headers and body without
 // a network call. Serves the direct Anthropic API and opencode-go's
-// Anthropic-compatible endpoint; the caller passes the base URL and any
-// provider headers.
-function buildAnthropicRequest({ model, apiKey, query, purpose, baseUrl, extraHeaders, omitTemperature }) {
+// Anthropic-compatible endpoint; the caller passes the base URL, any provider
+// headers, and the tool definition. Both currently use the newest tool version
+// (`web_search_20260318`).
+function buildAnthropicRequest({ model, apiKey, query, purpose, baseUrl, extraHeaders, omitTemperature, toolDefinition }) {
     const body = {
         model,
         max_tokens: 1800,
         system: buildSystemPrompt(),
-        tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }],
+        tools: [toolDefinition || OPENCODE_GO_WEB_SEARCH_TOOL],
         messages: [{ role: "user", content: buildUserPrompt(query, purpose) }],
     };
     // Omitting temperature is always safe — the API default applies — so it is
@@ -732,8 +757,17 @@ function buildAnthropicRequest({ model, apiKey, query, purpose, baseUrl, extraHe
     };
 }
 
-async function runAnthropicSearch({ model, apiKey, query, purpose, timeoutMs, baseUrl, extraHeaders, omitTemperature }) {
-    const { endpoint, headers, body } = buildAnthropicRequest({ model, apiKey, query, purpose, baseUrl, extraHeaders, omitTemperature });
+async function runAnthropicSearch({ model, apiKey, query, purpose, timeoutMs, baseUrl, extraHeaders, omitTemperature, toolDefinition }) {
+    const { endpoint, headers, body } = buildAnthropicRequest({
+        model,
+        apiKey,
+        query,
+        purpose,
+        baseUrl,
+        extraHeaders,
+        omitTemperature,
+        toolDefinition,
+    });
 
     const signal = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(timeoutMs) : undefined;
 
@@ -808,7 +842,8 @@ async function main() {
                       baseUrl: model.baseUrl,
                   })
               // opencode-go rides the same Anthropic-shaped call, pointed at the
-              // Go API and carrying its session headers.
+              // Go API and carrying its session headers. Both use the newest
+              // tool version (`web_search_20260318`).
               : await runAnthropicSearch({
                       model: model.id,
                       apiKey,
@@ -818,6 +853,7 @@ async function main() {
                       baseUrl: model.baseUrl,
                       extraHeaders: provider === "opencode-go" ? opencodeGoHeaders() : undefined,
                       omitTemperature: provider === "opencode-go",
+                      toolDefinition: provider === "opencode-go" ? OPENCODE_GO_WEB_SEARCH_TOOL : ANTHROPIC_WEB_SEARCH_TOOL,
                   });
 
     if (args.json) {
@@ -879,4 +915,6 @@ export const __test__ = {
     buildAnthropicHeaders,
     buildAnthropicRequest,
     resolveApiKey,
+    OPENCODE_GO_WEB_SEARCH_TOOL,
+    ANTHROPIC_WEB_SEARCH_TOOL,
 };
