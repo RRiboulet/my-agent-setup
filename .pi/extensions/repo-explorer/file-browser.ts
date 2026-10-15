@@ -152,15 +152,30 @@ function collectChangedFiles(options: FileBrowserOptions): Set<string> {
 	const sources: unknown[] = [];
 	for (const key of keys) {
 		const lower = key.toLowerCase();
-		if (lower.includes("change") || lower.includes("diff") || lower.includes("modif") || lower.includes("dirty") || lower === "red" || lower.includes("redfile")) {
+		if (
+			lower.includes("change") ||
+			lower.includes("diff") ||
+			lower.includes("modif") ||
+			lower.includes("dirty") ||
+			lower === "red" ||
+			lower.includes("redfile")
+		) {
 			sources.push((options as Record<string, unknown>)[key]);
 		}
 	}
 	const set = new Set<string>();
 	for (const source of sources) {
-		if (source instanceof Set) for (const v of source) if (typeof v === "string") set.add(v);
-		else if (Array.isArray(source)) for (const v of source) if (typeof v === "string") set.add(v);
-		else if (typeof source === "string") set.add(source);
+		if (source instanceof Set) {
+			for (const v of source) {
+				if (typeof v === "string") set.add(v);
+			}
+		} else if (Array.isArray(source)) {
+			for (const v of source) {
+				if (typeof v === "string") set.add(v);
+			}
+		} else if (typeof source === "string") {
+			set.add(source);
+		}
 	}
 	return set;
 }
