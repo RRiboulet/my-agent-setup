@@ -1423,6 +1423,7 @@ const statusRows = (now: number): StatusRow[] =>
 		// advanced by refreshStatusWidget, and rendering must not move it.
 		const snapshot = classifyStatus(statusStates.get(run.id) ?? statusStateFor(run), now);
 		return {
+			runId: run.id,
 			id: run.id.slice(0, 8),
 			task: run.task,
 			kind: snapshot.kind,
