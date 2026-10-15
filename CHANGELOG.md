@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.6.0 — 2026-10-15
+
 Added:
 
 - **Click a live subagent's row in the status widget to open its tmux pane.** In
@@ -42,6 +44,15 @@ Added:
     same-second tie falls back to tmux's own client order — best effort, not a
     promise that the clicked client wins.
 
+Fixed:
+
+- **`native-web-search` moves to the current `opencode-go` protocol.** The
+  `opencode-go` provider's web search called the legacy `web_search_20250305`
+  tool; it now requests `web_search_20260318` with `allowed_callers: ["direct"]`,
+  matching the direct Anthropic path, with the comments, `SKILL.md` and the test
+  expectation updated to match. Verified live against the opencode-go endpoint:
+  searches return server-side web results and URLs.
+
 Maintenance:
 
 - Enabled codemode for work in this repository (`.pi/settings.json` now declares
@@ -54,6 +65,15 @@ Maintenance:
   `--before` freeze) instead of pinning 1.1.0, so a rebuild picks up the newest
   release and its siblings stay on the same release via npm's own resolution.
   Fixes issue #52.
+
+- **Narrowed the `repo-explorer` control-byte allowlist and tidied the repo.**
+  The browser's test assertion now permits only the three fake-cursor APC markers
+  pi-tui actually emits (`_pi:c`, `_pi:fc`, `_pi:/fc`) instead of a broad
+  character class, so an unexpected control byte in a hostile listing can no
+  longer pass it. The root manifest declares `"type": "module"`; generated
+  `.pi/settings.json` and `.pi/npm/` are ignored, with deliberate per-project
+  package declarations still force-added (`git add -f`); and AGENTS.md's provider
+  test command no longer leaks a `cd`.
 
 ## v1.5.0 — 2026-10-13
 
