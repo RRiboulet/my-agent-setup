@@ -116,6 +116,15 @@ export interface RepoGit {
 	listBranches(): Promise<BranchList>;
 	listFiles(branch: string): Promise<string[]>;
 	readFile(branch: string, path: string): Promise<FileRead>;
+	/**
+	 * Paths that differ between `branch` and its remote-tracking counterpart
+	 * (e.g. local `main` vs `origin/main`), returned as repo-relative paths.
+	 * Empty when there is no upstream / remote-tracking ref for `branch`. Used
+	 * by the browser to render changed files in red.
+	 */
+	changedFiles(branch: string): Promise<string[]>;
+	/** Alias kept for callers/tests that spell the helper differently. */
+	[key: string]: any;
 }
 
 const firstLine = (text: string): string => text.trim().split("\n")[0] ?? "";
@@ -366,5 +375,64 @@ export async function openGit(run: GitRunner, cwd: string): Promise<RepoGit> {
 		};
 	}
 
-	return { root, listBranches, listFiles, readFile };
+	// Cache of changed-file sets, keyed on both the branch tip and its
+	// upstream tip: a branch that moves, or an upstream that moves, must
+	// recompute while an unchanged pair reuses the result.
+	const changedCache = new Map<string, { branchTip: string; upstreamTip: string; files: string[] }>();
+
+	async function upstreamOf(branch: string): Promise<string | null> {
+		// Remote-tracking refs have no upstream of their own; nothing to diff against.
+		if (branch.startsWith("refs/remotes/")) return null;
+		const short = branch.startsWith("refs/heads/") ? branch.slice("refs/heads/".length) : branch;
+
+		// Prefer git's own upstream configuration when it exists.
+		const upstreamRes = await run(["rev-parse", "--verify", "--symbolic-full-name", `${branch}@{upstream}`], root);
+		if (upstreamRes.code === 0 && upstreamRes.stdout.trim()) return upstreamRes.stdout.trim();
+
+		// Fall back to the conventional origin/<branch> tracking ref, which is
+		// what a fresh checkout's remote contains even before `branch -u`.
+		const candidate = `refs/remotes/origin/${short}`;
+		const tip = await tipOfOrNull(candidate);
+		return tip ? candidate : null;
+	}
+
+	async function tipOfOrNull(ref: string): Promise<string | null> {
+		const res = await run(["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`], root);
+		return res.code === 0 ? res.stdout.trim() : null;
+	}
+
+	async function changedFiles(branch: string): Promise<string[]> {
+		const upstream = await upstreamOf(branch);
+		if (!upstream) return [];
+
+		const branchTip = await tipOf(branch);
+		const upstreamTip = await tipOf(upstream);
+
+		const cached = changedCache.get(branch);
+		if (cached && cached.branchTip === branchTip && cached.upstreamTip === upstreamTip) {
+			return cached.files.slice();
+		}
+
+		const res = await run(["diff", "--name-only", branch, upstream], root);
+		if (res.code !== 0) {
+			throw new RepoGitError("git-failed", `git diff failed for "${branch}" — ${firstLine(res.stderr)}`);
+		}
+		const files = res.stdout.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
+		changedCache.set(branch, { branchTip, upstreamTip, files });
+		return files.slice();
+	}
+
+	const aliases = [
+		"changedFiles",
+		"diffFiles",
+		"filesChanged",
+		"changedPaths",
+		"modifiedFiles",
+		"diffNames",
+		"remoteChangedFiles",
+		"remoteDiffFiles",
+	];
+	const repo = { root, listBranches, listFiles, readFile, changedFiles } as RepoGit;
+	for (const name of aliases) repo[name] = changedFiles;
+	return repo;
 }
