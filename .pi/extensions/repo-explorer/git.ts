@@ -378,7 +378,12 @@ export async function openGit(run: GitRunner, cwd: string): Promise<RepoGit> {
 	// Cache of changed-file sets, keyed on both the branch tip and its
 	// upstream tip: a branch that moves, or an upstream that moves, must
 	// recompute while an unchanged pair reuses the result.
-	const changedCache = new Map<string, { branchTip: string; upstreamTip: string; files: string[] }>();
+	const changedCache = new Map<string, { key: string; files: string[] }>();
+
+	async function currentBranchRef(): Promise<string | null> {
+		const res = await run(["symbolic-ref", "-q", "HEAD"], root);
+		return res.code === 0 && res.stdout.trim() ? res.stdout.trim() : null;
+	}
 
 	async function upstreamOf(branch: string): Promise<string | null> {
 		// Remote-tracking refs have no upstream of their own; nothing to diff against.
@@ -401,24 +406,69 @@ export async function openGit(run: GitRunner, cwd: string): Promise<RepoGit> {
 		return res.code === 0 ? res.stdout.trim() : null;
 	}
 
-	async function changedFiles(branch: string): Promise<string[]> {
-		const upstream = await upstreamOf(branch);
-		if (!upstream) return [];
+	async function baseBranchFor(branch: string): Promise<string | null> {
+		const candidates = [
+			"refs/remotes/origin/dev",
+			"refs/heads/dev",
+			"refs/remotes/origin/main",
+			"refs/heads/main",
+		];
+		for (const candidate of candidates) {
+			if (candidate === branch) continue;
+			if (await tipOfOrNull(candidate)) return candidate;
+		}
+		return null;
+	}
 
+	async function changedFiles(branch: string): Promise<string[]> {
 		const branchTip = await tipOf(branch);
-		const upstreamTip = await tipOf(upstream);
+		const upstream = await upstreamOf(branch);
+
+		let cacheKey = branchTip;
+		const collected: string[] = [];
+
+		if (upstream) {
+			const upstreamTip = await tipOf(upstream);
+			cacheKey += `|u:${upstreamTip}|${upstream}`;
+			const res = await run(["diff", "--name-only", branch, upstream], root);
+			if (res.code !== 0) {
+				throw new RepoGitError("git-failed", `git diff failed for "${branch}" — ${firstLine(res.stderr)}`);
+			}
+			collected.push(...res.stdout.split("\n").map((line) => line.trim()).filter((line) => line.length > 0));
+		} else {
+			const base = await baseBranchFor(branch);
+			if (base) {
+				const baseTip = await tipOf(base);
+				const mbRes = await run(["merge-base", branch, base], root);
+				const from = mbRes.code === 0 && mbRes.stdout.trim() ? mbRes.stdout.trim() : baseTip;
+				cacheKey += `|b:${baseTip}|${base}|${from}`;
+				const res = await run(["diff", "--name-only", from, branch], root);
+				if (res.code === 0) {
+					collected.push(...res.stdout.split("\n").map((line) => line.trim()).filter((line) => line.length > 0));
+				}
+			}
+		}
+
+		const headBranch = await currentBranchRef();
+		if (headBranch === branch) {
+			const headTipRes = await run(["rev-parse", "HEAD"], root);
+			const headTip = headTipRes.code === 0 ? headTipRes.stdout.trim() : "";
+			cacheKey += `|h:${headTip}`;
+			for (const args of [["diff", "--name-only", "HEAD"], ["diff", "--name-only", "--cached", "HEAD"]]) {
+				const res = await run(args as string[], root);
+				if (res.code === 0) {
+					collected.push(...res.stdout.split("\n").map((line) => line.trim()).filter((line) => line.length > 0));
+				}
+			}
+		}
 
 		const cached = changedCache.get(branch);
-		if (cached && cached.branchTip === branchTip && cached.upstreamTip === upstreamTip) {
+		if (cached && cached.key === cacheKey) {
 			return cached.files.slice();
 		}
 
-		const res = await run(["diff", "--name-only", branch, upstream], root);
-		if (res.code !== 0) {
-			throw new RepoGitError("git-failed", `git diff failed for "${branch}" — ${firstLine(res.stderr)}`);
-		}
-		const files = res.stdout.split("\n").map((line) => line.trim()).filter((line) => line.length > 0);
-		changedCache.set(branch, { branchTip, upstreamTip, files });
+		const files = [...new Set(collected)];
+		changedCache.set(branch, { key: cacheKey, files });
 		return files.slice();
 	}
 
