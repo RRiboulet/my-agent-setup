@@ -33,6 +33,7 @@ const EXTENSIONS = [
 	"../../session-breakdown.ts",
 	"../../todos.ts",
 	"../index.ts",
+	"../../voice/index.ts",
 ] as const;
 
 // Extension tree files that are not entry points themselves but get imported
@@ -49,6 +50,17 @@ const MODULES: Record<string, string[]> = {
 	"../../repo-explorer/sanitize.ts": ["sanitizeDisplay", "sanitizeFileContent"],
 	"../panel.ts": ["buildEscapeBindArgs", "buildAttachCommand", "buildPanelLaunch"],
 	"../shell.ts": ["shellQuote"],
+	"../../voice/config.ts": ["agentDir", "configPath", "loadConfig", "parseEnvBool", "readConfigFile"],
+	"../../voice/recorder.ts": [
+		"Recorder",
+		"buildCleanupCommand",
+		"buildFetchCommand",
+		"buildStartCommand",
+		"buildStopCommand",
+		"localRecordingPath",
+		"newRecordingId",
+		"remoteRecordingPath",
+	],
 };
 
 for (const relative of EXTENSIONS) {
