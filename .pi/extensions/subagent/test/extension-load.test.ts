@@ -61,6 +61,7 @@ const MODULES: Record<string, string[]> = {
 		"newRecordingId",
 		"remoteRecordingPath",
 	],
+	"../../voice/transcribe.ts": ["TranscribeError", "assertUploadSize", "resolveApiKey", "transcribeAudio"],
 };
 
 for (const relative of EXTENSIONS) {

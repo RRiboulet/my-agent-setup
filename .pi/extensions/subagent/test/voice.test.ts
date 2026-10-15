@@ -39,7 +39,14 @@ import {
 	type Run,
 	type RunResult,
 } from "../../voice/recorder.ts";
-import { formatElapsed, makeSshRun, statusText } from "../../voice/index.ts";
+import {
+	MAX_UPLOAD_BYTES,
+	TranscribeError,
+	resolveApiKey,
+	transcribeAudio,
+	type TranscribeRequest,
+} from "../../voice/transcribe.ts";
+import { createVoiceExtension, formatElapsed, makeSshRun, statusText } from "../../voice/index.ts";
 import { waitFor, withEnv, withTempAgentDir } from "./helpers.ts";
 
 const ID = "0123456789abcdef0123456789abcdef";
@@ -1190,6 +1197,7 @@ interface Capture {
 	command?: CapturedCommand;
 	shortcut?: CapturedShortcut;
 	shutdown: boolean;
+	sent: Array<{ content: unknown; options: unknown }>;
 }
 
 async function loadFactory(): Promise<(pi: unknown) => void> {
@@ -1200,7 +1208,7 @@ async function loadFactory(): Promise<(pi: unknown) => void> {
 }
 
 function captureFactory(factory: (pi: unknown) => void): Capture {
-	const capture: Capture = { shutdown: false };
+	const capture: Capture = { shutdown: false, sent: [] };
 	factory({
 		registerCommand: (name: string, options: Omit<CapturedCommand, "name">) => {
 			capture.command = { name, ...options };
@@ -1210,6 +1218,9 @@ function captureFactory(factory: (pi: unknown) => void): Capture {
 		},
 		on: (event: string) => {
 			if (event === "session_shutdown") capture.shutdown = true;
+		},
+		sendUserMessage: (content: unknown, options?: unknown) => {
+			capture.sent.push({ content, options });
 		},
 	});
 	return capture;
@@ -1243,4 +1254,499 @@ test("status text formats the recording timer and clears on idle", () => {
 	assert.equal(statusText({ phase: "error", failure: "start-failed", message: "x" }), undefined);
 	assert.equal(formatElapsed(0), "0:00");
 	assert.equal(formatElapsed(72), "1:12");
+});
+
+// ---------------------------------------------------------------------------
+// Transcription (transcribe.ts)
+// ---------------------------------------------------------------------------
+
+interface FetchCall {
+	url: string;
+	init: RequestInit;
+}
+
+interface FetchSpy {
+	fetch: typeof fetch;
+	calls: FetchCall[];
+}
+
+function scriptedFetch(respond: (call: FetchCall, index: number) => Response | Promise<Response>): FetchSpy {
+	const calls: FetchCall[] = [];
+	const fetchImpl = async (input: string | URL | Request, init: RequestInit = {}): Promise<Response> => {
+		const call = { url: String(input), init };
+		calls.push(call);
+		return await respond(call, calls.length - 1);
+	};
+	return { fetch: fetchImpl as typeof fetch, calls };
+}
+
+function jsonResponse(text: string, status = 200): Response {
+	return new Response(JSON.stringify({ text }), { status, headers: { "content-type": "application/json" } });
+}
+
+/** A fetch that never answers until its signal aborts. */
+function pendingOnAbortFetch(call: FetchCall): Promise<Response> {
+	return new Promise((_resolve, reject) => {
+		if (call.init.signal?.aborted) {
+			reject(new Error("aborted"));
+			return;
+		}
+		call.init.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
+	});
+}
+
+const TRANSCRIBE_CONFIG = { baseUrl: "https://stt.example/v1", model: "whisper-large", timeoutMs: 5_000 };
+const TRANSCRIBE_AUDIO = Buffer.from("fake-m4a-bytes");
+
+async function callTranscribe(spy: FetchSpy, overrides: Partial<TranscribeRequest> = {}): Promise<string> {
+	return transcribeAudio({
+		audio: TRANSCRIBE_AUDIO,
+		fileName: "pi-voice-0123456789abcdef0123456789abcdef.m4a",
+		config: TRANSCRIBE_CONFIG,
+		fetch: spy.fetch,
+		...overrides,
+	});
+}
+
+test("transcribeAudio posts multipart to {baseUrl}/audio/transcriptions with the key", async () => {
+	const spy = scriptedFetch(() => jsonResponse("hello world"));
+	const text = await callTranscribe(spy, {
+		apiKey: "sk-test",
+		config: { ...TRANSCRIBE_CONFIG, language: "en", prompt: "pi, agent" },
+	});
+	assert.equal(text, "hello world");
+	assert.equal(spy.calls.length, 1);
+	const { url, init } = spy.calls[0];
+	assert.equal(url, "https://stt.example/v1/audio/transcriptions");
+	assert.equal(init.method, "POST");
+	assert.deepEqual(init.headers, { authorization: "Bearer sk-test" });
+	const form = await new Response(init.body as FormData).formData();
+	assert.equal(form.get("model"), "whisper-large");
+	assert.equal(form.get("response_format"), "json");
+	assert.equal(form.get("language"), "en");
+	assert.equal(form.get("prompt"), "pi, agent");
+	const file = form.get("file") as File;
+	assert.equal(file.name, "pi-voice-0123456789abcdef0123456789abcdef.m4a");
+	assert.equal(Buffer.from(await file.arrayBuffer()).toString("utf8"), "fake-m4a-bytes");
+});
+
+test("language and prompt are omitted when unset, and no key means no Authorization header", async () => {
+	const spy = scriptedFetch(() => jsonResponse("ok"));
+	await callTranscribe(spy);
+	const form = await new Response(spy.calls[0].init.body as FormData).formData();
+	assert.equal(form.get("language"), null);
+	assert.equal(form.get("prompt"), null);
+	assert.equal(spy.calls[0].init.headers, undefined);
+});
+
+test("resolveApiKey prefers the explicit key and falls back to ambient OpenAI keys only on the default endpoint", async () => {
+	const registryReturning = (key: string | undefined) => ({ getApiKeyForProvider: async () => key });
+
+	const explicit = { ...DEFAULT_CONFIG, apiKey: "sk-config" };
+	assert.equal(
+		await resolveApiKey({ config: explicit, env: { OPENAI_API_KEY: "sk-env" }, modelRegistry: registryReturning("sk-registry") }),
+		"sk-config",
+	);
+
+	const plain = { ...DEFAULT_CONFIG };
+	assert.equal(
+		await resolveApiKey({ config: plain, env: { OPENAI_API_KEY: "sk-env" }, modelRegistry: registryReturning("sk-registry") }),
+		"sk-env",
+	);
+	assert.equal(await resolveApiKey({ config: plain, env: {}, modelRegistry: registryReturning("sk-registry") }), "sk-registry");
+	assert.equal(await resolveApiKey({ config: plain, env: {}, modelRegistry: registryReturning(undefined) }), undefined);
+
+	const custom = { ...DEFAULT_CONFIG, baseUrl: "https://stt.internal/v1" };
+	assert.equal(
+		await resolveApiKey({ config: custom, env: { OPENAI_API_KEY: "sk-env" }, modelRegistry: registryReturning("sk-registry") }),
+		undefined,
+		"an ambient OpenAI key must not leak to a custom endpoint",
+	);
+	assert.equal(await resolveApiKey({ config: { ...custom, apiKey: "sk-explicit" } }), "sk-explicit");
+});
+
+test("a registry that throws counts as no key", async () => {
+	const plain = { ...DEFAULT_CONFIG };
+	assert.equal(
+		await resolveApiKey({
+			config: plain,
+			env: {},
+			modelRegistry: {
+				getApiKeyForProvider: async () => {
+					throw new Error("no registry");
+				},
+			},
+		}),
+		undefined,
+	);
+});
+
+test("a non-2xx answer is a typed http error with the status and the first body line", async () => {
+	const spy = scriptedFetch(() => new Response("Incorrect API key provided\nsecond line", { status: 401 }));
+	await assert.rejects(callTranscribe(spy, { apiKey: "sk-bad" }), (error: unknown) => {
+		assert.ok(error instanceof TranscribeError);
+		assert.equal(error.failure, "http");
+		assert.equal(error.status, 401);
+		assert.match(error.message, /HTTP 401/);
+		assert.match(error.message, /Incorrect API key provided/);
+		assert.doesNotMatch(error.message, /second line/);
+		return true;
+	});
+});
+
+test("a rejecting fetch is a typed network error carrying the cause", async () => {
+	const spy = scriptedFetch(() => {
+		throw new TypeError("fetch failed", { cause: new Error("connect ECONNREFUSED 127.0.0.1:1") });
+	});
+	await assert.rejects(callTranscribe(spy), (error: unknown) => {
+		assert.ok(error instanceof TranscribeError);
+		assert.equal(error.failure, "network");
+		assert.match(error.message, /fetch failed/);
+		assert.match(error.message, /ECONNREFUSED/);
+		return true;
+	});
+});
+
+test("a 200 without usable text is a typed empty error", async () => {
+	const bodies = [jsonResponse(""), new Response("", { status: 200 }), new Response("server says hi", { status: 200 })];
+	for (const body of bodies) {
+		const spy = scriptedFetch(() => body);
+		await assert.rejects(callTranscribe(spy), (error: unknown) => {
+			assert.ok(error instanceof TranscribeError);
+			assert.equal(error.failure, "empty");
+			return true;
+		});
+	}
+});
+
+test("a 400 naming response_format gets exactly one retry with text", async () => {
+	const spy = scriptedFetch((_call, index) =>
+		index === 0
+			? new Response("Unsupported parameter: 'response_format'", { status: 400 })
+			: new Response("retried transcript", { status: 200, headers: { "content-type": "text/plain" } }),
+	);
+	const text = await callTranscribe(spy, { apiKey: "sk-test" });
+	assert.equal(text, "retried transcript");
+	assert.equal(spy.calls.length, 2);
+	const first = await new Response(spy.calls[0].init.body as FormData).formData();
+	const second = await new Response(spy.calls[1].init.body as FormData).formData();
+	assert.equal(first.get("response_format"), "json");
+	assert.equal(second.get("response_format"), "text");
+	assert.deepEqual(spy.calls[1].init.headers, { authorization: "Bearer sk-test" });
+});
+
+test("a 400 that does not name response_format is not retried", async () => {
+	const spy = scriptedFetch(() => new Response("Bad request: audio too short", { status: 400 }));
+	await assert.rejects(callTranscribe(spy), (error: unknown) => {
+		assert.ok(error instanceof TranscribeError);
+		assert.equal(error.failure, "http");
+		assert.equal(error.status, 400);
+		return true;
+	});
+	assert.equal(spy.calls.length, 1);
+});
+
+test("a retry that fails as well is reported, not repeated again", async () => {
+	const spy = scriptedFetch((_call, index) =>
+		new Response(index === 0 ? "response_format unsupported" : "still bad", { status: 400 }),
+	);
+	await assert.rejects(callTranscribe(spy), (error: unknown) => {
+		assert.ok(error instanceof TranscribeError);
+		assert.equal(error.failure, "http");
+		assert.equal(error.status, 400);
+		assert.match(error.message, /still bad/);
+		return true;
+	});
+	assert.equal(spy.calls.length, 2);
+});
+
+test("an oversized recording is refused before any upload", async () => {
+	const spy = scriptedFetch(() => jsonResponse("never"));
+	await assert.rejects(callTranscribe(spy, { audio: Buffer.alloc(MAX_UPLOAD_BYTES + 1) }), (error: unknown) => {
+		assert.ok(error instanceof TranscribeError);
+		assert.equal(error.failure, "too-large");
+		return true;
+	});
+	assert.equal(spy.calls.length, 0);
+});
+
+test("an upload that outruns the timeout fails as a typed network error", async () => {
+	const spy = scriptedFetch((call) => pendingOnAbortFetch(call));
+	await assert.rejects(callTranscribe(spy, { config: { ...TRANSCRIBE_CONFIG, timeoutMs: 20 } }), (error: unknown) => {
+		assert.ok(error instanceof TranscribeError);
+		assert.equal(error.failure, "network");
+		assert.match(error.message, /timed out after 20 ms/);
+		return true;
+	});
+});
+
+test("aborting the caller signal cancels the request", async () => {
+	const spy = scriptedFetch((call) => pendingOnAbortFetch(call));
+	const controller = new AbortController();
+	const pending = callTranscribe(spy, { signal: controller.signal });
+	await flush();
+	controller.abort();
+	await assert.rejects(pending, (error: unknown) => {
+		assert.ok(error instanceof TranscribeError);
+		assert.equal(error.failure, "network");
+		assert.match(error.message, /cancelled/);
+		return true;
+	});
+});
+
+// ---------------------------------------------------------------------------
+// End-to-end wiring: recorder → transcription → editor (index.ts)
+// ---------------------------------------------------------------------------
+
+interface FlowHarness {
+	command: CapturedCommand;
+	statuses: Array<string | undefined>;
+	notices: string[];
+	pasted: Array<{ raw: string; expanded: string; marker: string | null }>;
+	sent: Array<{ content: unknown; options: unknown }>;
+	runner: RunnerSpy;
+	fetchCalls: FetchCall[];
+	tmpDir: string;
+	ctx: {
+		hasUI: boolean;
+		isIdle(): boolean;
+		modelRegistry: { getApiKeyForProvider(provider: string): Promise<string | undefined> };
+		ui: {
+			setStatus(key: string, text: string | undefined): void;
+			notify(message: string, level?: string): void;
+			pasteToEditor(text: string): void;
+		};
+	};
+	setIdle(value: boolean): void;
+}
+
+interface FlowOptions {
+	/** voice.json contents for this run. */
+	file?: Record<string, unknown>;
+	/** PI_VOICE_* env for this run (the rest of VOICE_ENV is cleared). */
+	env?: Record<string, string | undefined>;
+	respond?: (call: RunCall, index: number) => RunResult | Promise<RunResult>;
+	respondFetch?: (call: FetchCall, index: number) => Response | Promise<Response>;
+	idle?: boolean;
+	/** What ctx.modelRegistry.getApiKeyForProvider("openai") returns. */
+	registryKey?: string;
+}
+
+async function withFlow(options: FlowOptions, fn: (h: FlowHarness) => Promise<void>): Promise<void> {
+	await withTempAgentDir(async (agentDir) => {
+		if (options.file) await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify(options.file));
+		await withEnv({ ...clearVoiceEnv(), OPENAI_API_KEY: undefined, ...options.env }, async () => {
+			const tmpDir = await mkdtemp(path.join(tmpdir(), "voice-flow-"));
+			try {
+				await fn(makeFlowHarness(options, tmpDir));
+			} finally {
+				await rm(tmpDir, { recursive: true, force: true });
+			}
+		});
+	});
+}
+
+function makeFlowHarness(options: FlowOptions, tmpDir: string): FlowHarness {
+	const runner = scriptedRunner(
+		options.respond ??
+			((call) => {
+				if (call.command.startsWith("cat ")) return result(AUDIO);
+				if (call.command.includes("-q")) return result("Recording finished: phone-side m4a");
+				return result();
+			}),
+	);
+	const fetchSpy = scriptedFetch(options.respondFetch ?? (() => jsonResponse("hello from the phone")));
+	const statuses: Array<string | undefined> = [];
+	const notices: string[] = [];
+	const pasted: FlowHarness["pasted"] = [];
+	let idle = options.idle ?? true;
+	const ctx: FlowHarness["ctx"] = {
+		hasUI: true,
+		isIdle: () => idle,
+		modelRegistry: { getApiKeyForProvider: async () => options.registryKey },
+		ui: {
+			setStatus: (_key, text) => statuses.push(text),
+			notify: (message) => notices.push(message),
+			pasteToEditor: (text) => {
+				// Model pi's editor: a paste over 10 lines or 1000 characters
+				// collapses to a marker that is expanded again on submit.
+				const collapsed = text.length > 1_000 || text.split("\n").length > 10;
+				pasted.push({ raw: collapsed ? "[paste #1]" : text, expanded: text, marker: collapsed ? "[paste #1]" : null });
+			},
+		},
+	};
+	const capture = captureFactory((pi) =>
+		createVoiceExtension(pi as Parameters<typeof createVoiceExtension>[0], {
+			run: runner.run,
+			fetch: fetchSpy.fetch,
+			tmpDir,
+		}),
+	);
+	const command = capture.command;
+	assert.ok(command, "the factory must register /voice");
+	return {
+		command,
+		statuses,
+		notices,
+		pasted,
+		sent: capture.sent,
+		runner,
+		fetchCalls: fetchSpy.calls,
+		tmpDir,
+		ctx,
+		setIdle: (value) => {
+			idle = value;
+		},
+	};
+}
+
+/** `/voice` to start, then `/voice` to stop and run the whole chain. */
+async function voiceCycle(h: FlowHarness): Promise<void> {
+	await h.command.handler("", h.ctx);
+	await h.command.handler("", h.ctx);
+}
+
+test("full flow: /voice twice records, transcribes, and pastes the transcript", async () => {
+	await withFlow({ env: { [VOICE_ENV.apiKey]: "sk-flow" } }, async (h) => {
+		await voiceCycle(h);
+
+		assert.equal(h.pasted.length, 1);
+		assert.equal(h.pasted[0].expanded, "hello from the phone");
+		assert.equal(h.pasted[0].marker, null, "a short transcript is pasted verbatim");
+		assert.equal(h.sent.length, 0, "autoSubmit is off by default");
+
+		assert.deepEqual(
+			h.statuses.filter((text) => text !== undefined && !text.startsWith("● rec")),
+			["starting…", "stopping…", "fetching…", "transcribing…"],
+		);
+		assert.equal(h.statuses.at(-1), undefined, "the status key is cleared at idle");
+
+		const commands = h.runner.commands();
+		assert.match(commands[0], /^mkdir -p /);
+		assert.equal(commands[1], buildStopCommand());
+		assert.match(commands[2], /^cat -- "\$HOME\/\.pi-voice\//);
+		assert.match(commands[3], /^rm -f -- "\$HOME\/\.pi-voice\//);
+
+		const { url, init } = h.fetchCalls[0];
+		assert.equal(url, "https://api.openai.com/v1/audio/transcriptions");
+		assert.deepEqual(init.headers, { authorization: "Bearer sk-flow" });
+		const form = await new Response(init.body as FormData).formData();
+		assert.equal(form.get("model"), "gpt-4o-transcribe");
+		assert.equal(form.get("response_format"), "json");
+
+		assert.deepEqual(await readdir(h.tmpDir), [], "the local recording is dropped after a successful paste");
+	});
+});
+
+test("autoSubmit while idle sends the transcript as a user message", async () => {
+	await withFlow({ file: { autoSubmit: true, apiKey: "sk-flow" } }, async (h) => {
+		await voiceCycle(h);
+		assert.equal(h.pasted.length, 0);
+		assert.deepEqual(h.sent, [{ content: "hello from the phone", options: undefined }]);
+	});
+});
+
+test("autoSubmit while streaming queues the transcript as a follow-up", async () => {
+	await withFlow({ file: { autoSubmit: true, apiKey: "sk-flow" }, idle: false }, async (h) => {
+		await voiceCycle(h);
+		assert.equal(h.pasted.length, 0);
+		assert.deepEqual(h.sent, [{ content: "hello from the phone", options: { deliverAs: "followUp" } }]);
+	});
+});
+
+test("a transcript starting with / is content, never a dispatched command", async () => {
+	await withFlow(
+		{
+			file: { autoSubmit: true, apiKey: "sk-flow" },
+			idle: false,
+			respondFetch: () => jsonResponse("/voice this is dictated text"),
+		},
+		async (h) => {
+			await voiceCycle(h);
+			assert.equal(h.sent.length, 1);
+			assert.equal(h.sent[0].content, "/voice this is dictated text");
+			const options = h.sent[0].options as Record<string, unknown> | undefined;
+			assert.deepEqual(options, { deliverAs: "followUp" });
+			assert.equal(Object.hasOwn(options as object, "expandPromptTemplates"), false);
+		},
+	);
+});
+
+test("a large transcript travels through the editor's paste marker and expands back", async () => {
+	const transcript = Array.from({ length: 12 }, (_value, index) => `line ${index + 1}`).join("\n");
+	await withFlow({ file: { apiKey: "sk-flow" }, respondFetch: () => jsonResponse(transcript) }, async (h) => {
+		h.setIdle(false); // the paste path does not care whether the agent is streaming
+		await voiceCycle(h);
+		assert.equal(h.pasted.length, 1);
+		assert.equal(h.pasted[0].marker, "[paste #1]");
+		assert.equal(h.pasted[0].expanded, transcript);
+	});
+});
+
+test("the model registry's OpenAI key is the last fallback on the default endpoint", async () => {
+	await withFlow({ registryKey: "sk-registry" }, async (h) => {
+		await voiceCycle(h);
+		assert.equal(h.pasted.length, 1);
+		assert.deepEqual(h.fetchCalls[0].init.headers, { authorization: "Bearer sk-registry" });
+	});
+});
+
+test("cancel while fetching the audio posts nothing and leaves no temp file", async () => {
+	await withFlow(
+		{
+			env: { [VOICE_ENV.apiKey]: "sk-flow" },
+			respond: (call) => (call.command.startsWith("cat ") ? pendingOnAbort(call.signal) : result()),
+		},
+		async (h) => {
+			await h.command.handler("", h.ctx);
+			const stopping = h.command.handler("", h.ctx);
+			await waitFor(() => h.statuses.includes("fetching…"));
+			await h.command.handler("cancel", h.ctx);
+			await stopping;
+
+			assert.equal(h.fetchCalls.length, 0, "no transcription attempt");
+			assert.equal(h.pasted.length + h.sent.length, 0);
+			assert.deepEqual(await readdir(h.tmpDir), []);
+			assert.equal(h.statuses.at(-1), undefined);
+		},
+	);
+});
+
+test("cancel while transcribing aborts the upload, pastes nothing, and drops the temp file", async () => {
+	await withFlow(
+		{
+			env: { [VOICE_ENV.apiKey]: "sk-flow" },
+			respondFetch: (call) => pendingOnAbortFetch(call),
+		},
+		async (h) => {
+			await h.command.handler("", h.ctx);
+			const stopping = h.command.handler("", h.ctx);
+			await waitFor(() => h.fetchCalls.length === 1);
+			assert.equal(h.statuses.includes("transcribing…"), true);
+			await h.command.handler("cancel", h.ctx);
+			await stopping;
+
+			assert.equal(h.fetchCalls[0].init.signal?.aborted, true, "the upload must be aborted");
+			assert.equal(h.pasted.length + h.sent.length, 0);
+			assert.deepEqual(await readdir(h.tmpDir), []);
+			assert.equal(h.statuses.at(-1), undefined);
+		},
+	);
+});
+
+test("a transcription failure notifies with the kept audio path and leaves the file", async () => {
+	await withFlow(
+		{ env: { [VOICE_ENV.apiKey]: "sk-flow" }, respondFetch: () => new Response("boom: model exploded", { status: 500 }) },
+		async (h) => {
+			await voiceCycle(h);
+			assert.equal(h.pasted.length + h.sent.length, 0);
+			const notice = h.notices.find((message) => message.includes("boom: model exploded"));
+			assert.ok(notice, `expected a transcription failure notice, got: ${h.notices.join(" | ")}`);
+			assert.match(notice, /audio kept at /);
+			const kept = /audio kept at (.+)$/.exec(notice)?.[1];
+			assert.ok(kept);
+			assert.equal((await stat(kept)).size, AUDIO.length);
+			assert.equal(h.statuses.at(-1), undefined);
+		},
+	);
 });

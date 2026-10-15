@@ -19,12 +19,15 @@
  */
 
 import { spawn } from "node:child_process";
+import { readFile, stat } from "node:fs/promises";
+import { basename } from "node:path";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Key } from "@earendil-works/pi-tui";
 
-import { loadConfig } from "./config.ts";
+import { loadConfig, type VoiceConfig } from "./config.ts";
 import { Recorder, type RecorderStatus, type Run } from "./recorder.ts";
+import { assertUploadSize, resolveApiKey, transcribeAudio } from "./transcribe.ts";
 
 /** One status key, one place in the footer. */
 export const VOICE_STATUS_KEY = "voice";
@@ -94,21 +97,76 @@ export function makeSshRun(target: string): Run {
 		});
 }
 
-export default function (pi: ExtensionAPI) {
+/**
+ * Hand the transcript to the session. `autoSubmit` routes it as a user
+ * message — never through exceptions: while the agent is streaming,
+ * `sendUserMessage` routes the conflict to an internal extension error
+ * instead of throwing, so the idle check decides `deliverAs` up front.
+ * Without autoSubmit the text lands in the editor at the cursor (pi's editor
+ * collapses a large paste to a marker and expands it on submit).
+ * `expandPromptTemplates` is deliberately never enabled: a dictated
+ * transcript is content, not a command, even when it starts with `/`.
+ */
+function presentTranscript(
+	pi: ExtensionAPI,
+	config: VoiceConfig,
+	ctx: ExtensionContext | undefined,
+	text: string,
+): void {
+	if (config.autoSubmit) {
+		if (ctx?.isIdle() ?? true) pi.sendUserMessage(text);
+		else pi.sendUserMessage(text, { deliverAs: "followUp" });
+		return;
+	}
+	if (ctx?.hasUI) {
+		ctx.ui.pasteToEditor(text);
+		return;
+	}
+	// No editor to paste into (non-interactive session): submit instead.
+	pi.sendUserMessage(text);
+}
+
+/** Test seams; production callers use the defaults (ssh, global fetch, os.tmpdir()). */
+export interface VoiceSeams {
+	/** Replaces the ssh runner, so tests drive the state machine without a phone. */
+	run?: Run;
+	/** Replaces the global fetch for the transcription POST. */
+	fetch?: typeof fetch;
+	/** Replaces os.tmpdir() for fetched recordings. */
+	tmpDir?: string;
+}
+
+export function createVoiceExtension(pi: ExtensionAPI, seams: VoiceSeams = {}): void {
 	const config = loadConfig();
+	const doFetch = seams.fetch ?? fetch;
 	// The recorder outlives any single ctx (session replacement creates new
 	// ones), so status rendering uses the most recent one.
 	let latest: ExtensionContext | undefined;
 
+	const deliver = async (localPath: string, signal: AbortSignal): Promise<void> => {
+		// Refuse an oversized upload before reading it: the API's cap is
+		// 25 MB, and a recording past it would only come back as a 413.
+		assertUploadSize((await stat(localPath)).size);
+		const audio = await readFile(localPath);
+		const apiKey = await resolveApiKey({ config, modelRegistry: latest?.modelRegistry });
+		const text = await transcribeAudio({
+			audio,
+			fileName: basename(localPath),
+			config,
+			...(apiKey !== undefined ? { apiKey } : {}),
+			fetch: doFetch,
+			signal,
+		});
+		if (signal.aborted) return;
+		presentTranscript(pi, config, latest, text);
+	};
+
 	const recorder = new Recorder({
 		config,
-		run: makeSshRun(config.sshTarget),
+		run: seams.run ?? makeSshRun(config.sshTarget),
 		status: (status) => renderStatus(latest, status),
-		deliver: async (localPath) => {
-			// The hand-off is where transcription and paste land once
-			// transcribe.ts is wired in; until then, say where the audio is.
-			if (latest?.hasUI) latest.ui.notify(`voice: recorded to ${localPath}`, "info");
-		},
+		deliver,
+		...(seams.tmpDir !== undefined ? { tmpDir: seams.tmpDir } : {}),
 	});
 
 	const toggle = async (ctx: ExtensionContext): Promise<void> => {
@@ -158,6 +216,10 @@ export default function (pi: ExtensionAPI) {
 		await recorder.shutdown();
 		latest = undefined;
 	});
+}
+
+export default function (pi: ExtensionAPI): void {
+	createVoiceExtension(pi);
 }
 
 export const __test__ = {
