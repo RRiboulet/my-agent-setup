@@ -254,15 +254,17 @@ test("no rendered line carries a control byte, even for a hostile listing", () =
 	const { component } = browser(HOSTILE_FILES);
 	for (const width of [20, 80]) {
 		for (const line of component.render(width)) {
-			// pi's Input draws its placeholder with reverse-video CSI, and
-			// SelectList/truncateToWidth append a style reset after a truncated
+			// pi's Input wraps its cursor cell in fake-cursor APC markers and
+			// SelectList/truncateToWidth may append a style reset after a truncated
 			// row; those are the only trusted escapes in these lines, so strip
 			// them and require the rest to be free of control bytes. The raw
 			// attacker bytes are not in that allowlist, so removing the
 			// sanitizer makes this fail. `visibleWidth` cannot see the class at
 			// all (it prices C0 bytes at zero), which is why the assertion is on
 			// the raw bytes.
-			const cleaned = line.replace(/\u001b\[(?:0|7|27)m/g, "");
+			const cleaned = line
+				.replace(/\u001b\[(?:0|7|27)m/g, "")
+				.replace(/\u001b_pi:(?:c|fc|\/fc)\u0007/g, "");
 			assert.doesNotMatch(cleaned, /[\u0000-\u001f\u007f-\u009f]/, `width ${width}: ${JSON.stringify(line)}`);
 		}
 	}

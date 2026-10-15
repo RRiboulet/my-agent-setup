@@ -2,4 +2,7 @@ node_modules/
 *.log
 .DS_Store
 .pi/todos/
+# local pi session state (may hold project-level declarations; un-ignore deliberately with git add -f if needed)
+.pi/settings.json
+.pi/npm/
 lab/

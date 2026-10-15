@@ -47,6 +47,8 @@ const MODULES: Record<string, string[]> = {
 	"../../repo-explorer/file-browser.ts": ["FileBrowser", "listDirectory", "parentPath"],
 	"../../repo-explorer/file-transcript.ts": ["formatFileTranscript", "numberLines", "fileMessageRenderer"],
 	"../../repo-explorer/sanitize.ts": ["sanitizeDisplay", "sanitizeFileContent"],
+	"../panel.ts": ["buildEscapeBindArgs", "buildAttachCommand", "buildPanelLaunch"],
+	"../shell.ts": ["shellQuote"],
 };
 
 for (const relative of EXTENSIONS) {

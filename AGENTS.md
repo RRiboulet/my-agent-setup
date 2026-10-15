@@ -158,6 +158,14 @@ work in another project.
 Pi extensions live in `./.pi/extensions` and skills in `./.pi/skills`. When
 working in this repo, add or update them there.
 
+Codemode is enabled for this repo (see `.pi/settings.json`: `defaultTools`
+includes `+codemode`, `codemode.mode` is `on`). Prefer codemode to batch
+independent tool calls, run several calls in parallel, and filter large
+output before it reaches the model; use the direct tools (`read`, `edit`,
+`write`, `bash`) for one-off, single-step work where a script adds no value.
+(`.pi/settings.json` is gitignored on `dev` by design; committed updates
+require `git add -f`.)
+
 Adding a new extension or skill means adding it to the `pi` manifest in
 `package.json` as well: it lives in a dot-prefixed directory, which package
 discovery will not glob, so an unlisted extension installs nowhere.
@@ -190,6 +198,7 @@ one-line-per-run form, and the single-run path is the one that returns output.
 ```bash
 bash .pi/extensions/subagent/test/setup-deps.sh              # once: link pi's packages
 node --test .pi/extensions/subagent/test/*.test.ts
+(cd .pi/extensions/opencode-go-provider && node --test)  # provider package tests (separate tree)
 ```
 
 Run it with `bash` (or `sh`), not as `./setup-deps.sh` — see "Line endings"

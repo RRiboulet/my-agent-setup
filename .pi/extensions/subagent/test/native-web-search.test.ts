@@ -153,7 +153,7 @@ test("the Go request carries the session headers and omits temperature", () => {
 	assert.equal(headers["x-api-key"], "test-key");
 	assert.equal(body.model, "claude-haiku-5-5");
 	assert.equal("temperature" in body, false);
-	assert.equal(body.tools[0].type, "web_search_20250305");
+	assert.equal(body.tools[0].type, "web_search_20260318");
 });
 
 test("temperature is omitted for the whole Go path and kept for the direct default", () => {

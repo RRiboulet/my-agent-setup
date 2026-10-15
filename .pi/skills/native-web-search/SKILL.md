@@ -16,7 +16,7 @@ description: "Trigger native web search. Use when you need quick internet resear
           `web` plugin, with `openai/gpt-4o-mini:online` as its default model id.
        2. `opencode-go` added as the preferred --provider value, invoked through
           the Go API's Anthropic-compatible `/messages` endpoint (native
-          `web_search_20250305`), with `claude-haiku-5-5` as its default model
+          `web_search_20260318`), with `claude-haiku-5-5` as its default model
           id and the `x-opencode-session`/`x-opencode-client` headers the Go API
           requires (a request without a session header is rejected outright).
        3. `pickProvider` extended: upstream `0865c84` already resolved
@@ -79,7 +79,7 @@ Optional flags:
 
 ## Providers
 
-- `opencode-go` (preferred when credentials exist): native `web_search_20250305`
+- `opencode-go` (preferred when credentials exist): native `web_search_20260318`
   through opencode.ai's Go API (`https://opencode.ai/zen/go/v1/messages`),
   billed against the Go plan. Requires a Go API key in `auth.json` under
   `opencode-go` or `OPENCODE_API_KEY` in the environment, and uses a
@@ -90,7 +90,7 @@ Optional flags:
   web-enabled model id such as `openai/gpt-4o-mini:online` or
   `perplexity/sonar`.
 - `openai-codex`: native `web_search` tool through the ChatGPT backend.
-- `anthropic`: native `web_search_20250305` tool (OAuth or API key).
+- `anthropic`: native `web_search_20260318` tool (OAuth or API key).
 
 ## Output expectations
 
