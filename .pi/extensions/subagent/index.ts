@@ -135,12 +135,13 @@
 //     show a pane (`showsPane`, so a queued run is told to wait rather than
 //     handed a popup with nothing in it) and an interrupted one is still
 //     openable; pi must itself be inside tmux, on a server OTHER than the
-//     subagent one, and a client viewing pi's pane must exist (probed by session
-//     AND window, then the most recently active client among those on the window
-//     is passed as `-c <client>` to display-popup, because tmux's own `-t <pane>`
+//     subagent one, and a client viewing pi's pane must exist. All clients are
+//     listed and filtered by the pane's window, then the most recently active
+//     one is passed as `-c <client>` to display-popup: tmux's own `-t <pane>`
 //     client resolution falls back to the most recently active client on the
-//     whole server, and two clients can share a session and window). Only then is
-//     the Escape binding applied and the
+//     pane's session (not the window), and `list-clients -t <session>` misses a
+//     client viewing a grouped session linked to the same window. `-c` also
+//     validates the target. Only then is the Escape binding applied and the
 //     popup launched detached and unref'd — never awaited, because tmux's
 //     display-popup CLI blocks until the popup closes, and never held as a
 //     child handle, because that would keep pi alive after the panel closed.
@@ -965,22 +966,23 @@ async function openSubagentPanel(deps: OpenPanelDeps, runId: string): Promise<vo
 		return;
 	}
 
-	// Resolve the pane's session AND window, then pick a client that is viewing
-	// that window. Asking for `#{client_tty}` with `-t <pane>` is not enough: tmux
-	// resolves it to the most recently active client on the whole server, so with a
-	// second terminal attached the popup would be drawn there instead of over pi.
-	const target = await deps.exec("tmux", ["-S", outerSocket, "display-message", "-p", "-t", outerPane, "#{session_name}\t#{window_id}"]);
-	const [outerSession, outerWindow] = target.stdout.trim().split("\t");
-	if (target.code !== 0 || !outerSession || !outerWindow) {
+	// Scope the popup to a client actually looking at the pane. List EVERY client
+	// and filter by window: `list-clients -t <session>` is not enough, because a
+	// grouped session linked to the same window makes the pane's `#{session_name}`
+	// resolve to a session whose clients are not the ones viewing the pane — the
+	// client looking straight at it would be missed entirely.
+	const target = await deps.exec("tmux", ["-S", outerSocket, "display-message", "-p", "-t", outerPane, "#{window_id}"]);
+	const outerWindow = target.stdout.trim();
+	if (target.code !== 0 || !outerWindow) {
 		notify("That tmux pane is gone.");
 		return;
 	}
-	const clients = await deps.exec("tmux", ["-S", outerSocket, "list-clients", "-t", outerSession, "-F", "#{client_tty}\t#{window_id}\t#{client_activity}"]);
-	// Several clients can be looking at the same window (two terminals attached to
-	// the same session). Pick the most recently active one: that is the terminal
-	// the person just clicked in, and it is the signal tmux itself falls back to
-	// when no client is named. Picking the first listed instead is what drew the
-	// popup over an idle second terminal during validation.
+	// Among the clients on that window, the most recently active one wins. The
+	// tap that fired this handler updated its own client's activity, so that is
+	// usually the clicked client; `client_activity` is whole seconds, though, so a
+	// same-second tie falls back to tmux's own client order. Best effort, not a
+	// guarantee that the clicked client wins.
+	const clients = await deps.exec("tmux", ["-S", outerSocket, "list-clients", "-F", "#{client_tty}\t#{window_id}\t#{client_activity}"]);
 	const client = clients.stdout
 		.split("\n")
 		.map((line) => line.split("\t"))

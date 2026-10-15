@@ -32,13 +32,15 @@ Added:
     (`attach …; unbind -n Escape`). Without that, a single click would swallow
     Escape for every client of that server for the server's lifetime, including
     a direct `pi --attach-subagent` session where Escape is an ordinary key.
-  - The popup is targeted with `-c <client>`, resolved from the clients viewing
-    the pane's session *and* window, picking the most recently active one. tmux's
-    own `-t <pane>` client resolution falls back to the most recently active
-    client on the whole server, so on a machine with a second attached terminal
-    the popup would otherwise be drawn over the wrong one; and two terminals can
-    share a session and window, so the first listed is not necessarily the one
-    being looked at.
+  - The popup is targeted with `-c <client>`: all clients are listed, filtered
+    to those viewing the pane's window, and the most recently active one is
+    chosen. tmux's own `-t <pane>` resolution falls back to the most recently
+    active client on the pane's *session*, so on a machine with a second
+    attached terminal the popup could be drawn over the wrong one; listing every
+    client (rather than `-t <session>`) also catches a client viewing a grouped
+    session linked to the same window. `client_activity` is whole seconds, so a
+    same-second tie falls back to tmux's own client order — best effort, not a
+    promise that the clicked client wins.
 
 Maintenance:
 

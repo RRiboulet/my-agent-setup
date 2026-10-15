@@ -161,13 +161,11 @@ function panelMock(config: {
 	/** `null` means list-clients reports nobody; undefined means a real tty. */
 	clientTty?: string | null;
 	clientFails?: boolean;
-	/** The outer pane's session name; defaults to "pi-1". */
-	sessionName?: string;
 	/** The outer pane's window id; defaults to "@1". */
 	paneWindow?: string;
 	/** The client's current window id; defaults to the pane's window. */
 	clientWindow?: string;
-	/** Explicit client list for the activity selection test. */
+	/** Explicit client list for the activity selection test. Overrides clientTty/clientWindow. */
 	clients?: { tty: string; window: string; activity: number }[];
 	/** Make the pane probe report the pane is gone. */
 	paneGone?: boolean;
@@ -186,13 +184,9 @@ function panelMock(config: {
 		} as never,
 		getRun: (id) => runs.get(id),
 		isShuttingDown: () => config.shuttingDown === true,
-		exec: async (command, args) => {
+			exec: async (command, args) => {
 			execCalls.push({ command, args });
 			const joined = args.join(" ");
-			if (joined.includes("#{session_name}")) {
-				if (config.paneGone) return { ...ok, code: 1, stderr: "can't find pane" };
-				return { ...ok, stdout: `${config.sessionName ?? "pi-1"}\t${config.paneWindow ?? "@1"}\n` };
-			}
 			if (joined.includes("list-clients")) {
 				if (config.clientFails) return { ...ok, code: 1, stderr: "no current client" };
 				const list =
@@ -201,6 +195,10 @@ function panelMock(config: {
 						? []
 						: [{ tty: config.clientTty ?? "/dev/pts/7", window: config.clientWindow ?? "@1", activity: 100 }]);
 				return { ...ok, stdout: list.map((client) => `${client.tty}\t${client.window}\t${client.activity}\n`).join("") };
+			}
+			if (joined.includes("display-message")) {
+				if (config.paneGone) return { ...ok, code: 1, stderr: "can't find pane" };
+				return { ...ok, stdout: `${config.paneWindow ?? "@1"}\n` };
 			}
 			if (joined.includes("has-session")) return config.sessionAlive === false ? { ...ok, code: 1 } : ok;
 			if (joined.includes("detach-client")) return config.bindOk === false ? { ...ok, code: 1 } : ok;
@@ -220,8 +218,8 @@ test("a click on a running row binds Escape, then launches the popup detached", 
 		assert.deepEqual(
 			mock.execCalls.map((call) => call.args.join(" ")),
 			[
-				"-S /tmp/outer.sock display-message -p -t %1 #{session_name}\t#{window_id}",
-				"-S /tmp/outer.sock list-clients -t pi-1 -F #{client_tty}\t#{window_id}\t#{client_activity}",
+				"-S /tmp/outer.sock display-message -p -t %1 #{window_id}",
+				"-S /tmp/outer.sock list-clients -F #{client_tty}\t#{window_id}\t#{client_activity}",
 				`-S ${socket} has-session -t pi-agent-${RUN_ID}`,
 				`-S ${socket} bind -n Escape detach-client`,
 			],
@@ -344,6 +342,25 @@ test("among clients on the pane's window, the most recently active one is target
 		const launch = mock.launches[0] as PanelMock["launches"][number];
 		const clientIndex = launch.args.indexOf("-c") + 1;
 		assert.equal(launch.args[clientIndex], "/dev/pts/2");
+	});
+});
+
+test("a client on another window loses even when its activity is higher", async () => {
+	// The window filter scopes the choice first; activity only breaks ties inside
+	// it. This is what makes a grouped session linked to the same window work.
+	await withEnv({ TMUX: "/tmp/outer.sock,1,0", TMUX_PANE: "%1" }, async () => {
+		const mock = panelMock({
+			runs: [run()],
+			clients: [
+				{ tty: "/dev/pts/1", window: "@1", activity: 100 },
+				{ tty: "/dev/pts/2", window: "@2", activity: 999 },
+			],
+		});
+		await __test__.openSubagentPanel(mock.deps, RUN_ID);
+
+		const launch = mock.launches[0] as PanelMock["launches"][number];
+		const clientIndex = launch.args.indexOf("-c") + 1;
+		assert.equal(launch.args[clientIndex], "/dev/pts/1");
 	});
 });
 
