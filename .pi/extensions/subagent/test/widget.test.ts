@@ -8,12 +8,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 
 import { createStatusWidget, MAX_TASK_LENGTH, MAX_WIDGET_ROWS, renderStatusRows, type StatusRow } from "../widget.ts";
 
 function row(overrides: Partial<StatusRow> = {}): StatusRow {
 	return {
+		runId: "1a2b3c4d-0000-4000-8000-000000000000",
 		id: "1a2b3c4d",
 		task: "investigate the flaky test",
 		kind: "active",
@@ -21,6 +22,16 @@ function row(overrides: Partial<StatusRow> = {}): StatusRow {
 		detail: "active (bash 45s)",
 		...overrides,
 	};
+}
+
+/** A normalised mouse event, as pi's fullscreen dispatcher builds it. */
+function mouse(type: TuiMouseEvent["type"], y: number, button: TuiMouseEvent["button"] = "left"): TuiMouseEvent {
+	return { type, button, x: 0, y, screenX: 0, screenY: y, width: 80, height: 5, shift: false, alt: false, ctrl: false };
+}
+
+/** The installed component for a clickable widget over `rows`. */
+function clickable(rows: StatusRow[], onRowClick: (row: StatusRow) => void, maxRows?: number) {
+	return createStatusWidget({ getRows: () => rows, onRowClick, maxRows })({ requestRender: () => undefined } as never, theme);
 }
 
 /** A stand-in for pi's Theme: `fg` returns the text unchanged. */
@@ -130,4 +141,136 @@ test("the component renders through getRows and truncates to width", () => {
 	assert.equal(visibleWidth(narrow) <= 12, true, `row must fit the viewport, got ${visibleWidth(narrow)} cells: ${narrow}`);
 	// The component interface requires invalidate(); it must be callable and safe.
 	component.invalidate();
+});
+
+test("a left press then click invokes onRowClick with the row under the pointer", () => {
+	const rows = [row({ runId: "aaaa", id: "aaaaaaaa" }), row({ runId: "bbbb", id: "bbbbbbbb" })];
+	const picked: string[] = [];
+	const component = clickable(rows, (r) => picked.push(r.runId));
+
+	assert.equal(component.handleMouse?.(mouse("press", 1))?.handled, true, "the press over a row is consumed");
+	component.handleMouse?.(mouse("release", 1));
+	component.handleMouse?.(mouse("click", 1));
+
+	assert.deepEqual(picked, ["bbbb"]);
+});
+
+test("a click with no press of ours behind it does not fire", () => {
+	const picked: string[] = [];
+	const component = clickable([row()], (r) => picked.push(r.runId));
+
+	// This is exactly what pi's text-selection path produces for an unhandled
+	// press, so it must be inert here.
+	assert.equal(component.handleMouse?.(mouse("click", 0)), undefined);
+	assert.deepEqual(picked, []);
+});
+
+test("the overflow line is not clickable", () => {
+	const rows = Array.from({ length: MAX_WIDGET_ROWS + 2 }, (_value, index) => row({ runId: `r${index}`, id: `0000000${index}` }));
+	const picked: string[] = [];
+	const component = clickable(rows, (r) => picked.push(r.runId));
+
+	const overflowY = MAX_WIDGET_ROWS;
+	assert.equal(component.handleMouse?.(mouse("press", overflowY)), undefined, "a press on '+N more' is not consumed");
+	component.handleMouse?.(mouse("release", overflowY));
+	component.handleMouse?.(mouse("click", overflowY));
+
+	assert.deepEqual(picked, []);
+});
+
+test("wheel, right, middle, move and drag are ignored", () => {
+	const picked: string[] = [];
+	const component = clickable([row()], (r) => picked.push(r.runId));
+
+	for (const event of [mouse("wheel", 0), mouse("press", 0, "right"), mouse("click", 0, "middle"), mouse("move", 0), mouse("drag", 0)]) {
+		assert.equal(component.handleMouse?.(event), undefined, `${event.type}/${event.button} must not be consumed`);
+	}
+	assert.deepEqual(picked, []);
+});
+
+test("an unhandled press clears a row captured by an earlier handled press", () => {
+	const rows = [row({ runId: "aaaa", id: "aaaaaaaa" }), ...Array.from({ length: MAX_WIDGET_ROWS }, () => row())];
+	const picked: string[] = [];
+	const component = clickable(rows, (r) => picked.push(r.runId));
+
+	// A gesture that starts on row 0 and ends with pi synthesising a click on the
+	// overflow line (the unhandled press) must not fire row 0.
+	component.handleMouse?.(mouse("press", 0));
+	component.handleMouse?.(mouse("release", 0));
+	component.handleMouse?.(mouse("press", MAX_WIDGET_ROWS));
+	component.handleMouse?.(mouse("release", MAX_WIDGET_ROWS));
+	component.handleMouse?.(mouse("click", MAX_WIDGET_ROWS));
+
+	assert.deepEqual(picked, []);
+});
+
+test("without onRowClick the component renders identically and has no mouse handler", () => {
+	const rows = [row(), row({ id: "bbbbbbbb" })];
+	const plain = createStatusWidget({ getRows: () => rows, maxRows: 2 })({ requestRender: () => undefined } as never, theme);
+	const wired = createStatusWidget({ getRows: () => rows, maxRows: 2, onRowClick: () => undefined })(
+		{ requestRender: () => undefined } as never,
+		theme,
+	);
+
+	assert.equal(plain.handleMouse, undefined, "the default widget must stay input-inert");
+	assert.equal(typeof wired.handleMouse, "function");
+	assert.deepEqual(plain.render(200), wired.render(200), "wrapping in MouseRegion must not change a single byte");
+});
+
+test("a click whose y does not match the press does not fire (the strip moved)", () => {
+	const rows = [row({ runId: "aaaa", id: "aaaaaaaa" }), row({ runId: "bbbb", id: "bbbbbbbb" })];
+	const picked: string[] = [];
+	const component = clickable(rows, (r) => picked.push(r.runId));
+
+	component.handleMouse?.(mouse("press", 0));
+	component.handleMouse?.(mouse("release", 0));
+	component.handleMouse?.(mouse("click", 1));
+
+	assert.deepEqual(picked, [], "the press y is part of the gesture identity, not just 'a click happened'");
+});
+
+test("a drag fires nothing", () => {
+	const picked: string[] = [];
+	const component = clickable([row()], (r) => picked.push(r.runId));
+
+	component.handleMouse?.(mouse("press", 0));
+	assert.equal(component.handleMouse?.(mouse("drag", 0)), undefined);
+	assert.deepEqual(picked, []);
+});
+
+test("an empty strip has nothing to press", () => {
+	const picked: string[] = [];
+	const component = clickable([], (r) => picked.push(r.runId));
+
+	assert.equal(component.handleMouse?.(mouse("press", 0)), undefined);
+	component.handleMouse?.(mouse("click", 0));
+	assert.deepEqual(picked, []);
+});
+
+test("a cap of zero leaves no clickable row", () => {
+	const rows = [row({ runId: "aaaa", id: "aaaaaaaa" }), row({ runId: "bbbb", id: "bbbbbbbb" })];
+	const picked: string[] = [];
+	const component = clickable(rows, (r) => picked.push(r.runId), 0);
+
+	assert.deepEqual(component.render(200), ["  +2 more"]);
+	assert.equal(component.handleMouse?.(mouse("press", 0)), undefined);
+	component.handleMouse?.(mouse("click", 0));
+	assert.deepEqual(picked, []);
+});
+
+test("a fractional cap cannot make the overflow line clickable", () => {
+	const rows = [row({ runId: "aaaa", id: "aaaaaaaa" }), row({ runId: "bbbb" }), row({ runId: "cccc" })];
+	const picked: string[] = [];
+	const component = clickable(rows, (r) => picked.push(r.runId), 1.9);
+
+	const lines = component.render(200);
+	assert.equal(lines.length, 2, "one visible row plus the overflow line");
+	assert.match(lines[1] as string, /\+2 more/);
+
+	// y=1 is the overflow line: `slice` truncates the cap to one row, so the press
+	// gate must too.
+	assert.equal(component.handleMouse?.(mouse("press", 1)), undefined);
+	component.handleMouse?.(mouse("release", 1));
+	component.handleMouse?.(mouse("click", 1));
+	assert.deepEqual(picked, []);
 });

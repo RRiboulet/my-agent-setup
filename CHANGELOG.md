@@ -4,6 +4,44 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Added:
+
+- **Click a live subagent's row in the status widget to open its tmux pane.** In
+  fullscreen mode a left click (or a tap, under Termux) on a row opens a tmux
+  popup over pi that runs a nested `tmux attach` against the subagent's own
+  socket, so the child's TUI can be watched and steered without leaving the
+  session; Escape closes the popup. A queued row answers that there is no pane
+  yet, a finished or cancelled row reports that it is no longer running, and an
+  interrupted row opens like a running one — that child is still sitting at its
+  prompt. Outside tmux the click prints the `pi --attach-subagent` command
+  instead. This is fullscreen-only and there is deliberately no in-TUI keyboard
+  path yet: pi routes mouse events to components only in fullscreen, so
+  `pi --attach-subagent <id>` remains the regular-mode way in. That is a
+  recorded deviation from pi's "every interaction should have a keyboard path"
+  guidance rather than an oversight; a `/subagents` selector reusing the same
+  opener is filed as a follow-up.
+
+  Three details are load-bearing and easy to undo:
+
+  - The popup is launched detached and unref'd, and is never awaited, because
+    tmux's `display-popup` CLI blocks until the popup closes; awaiting it would
+    stall the extension, and holding the child handle would keep pi alive after
+    the panel closed.
+  - The Escape binding lives in the subagent server's root key table, so the
+    popup's own command removes it when the attach client exits
+    (`attach …; unbind -n Escape`). Without that, a single click would swallow
+    Escape for every client of that server for the server's lifetime, including
+    a direct `pi --attach-subagent` session where Escape is an ordinary key.
+  - The popup is targeted with `-c <client>`: all clients are listed, filtered
+    to those viewing the pane's window, and the most recently active one is
+    chosen. tmux's own `-t <pane>` resolution falls back to the most recently
+    active client on the pane's *session*, so on a machine with a second
+    attached terminal the popup could be drawn over the wrong one; listing every
+    client (rather than `-t <session>`) also catches a client viewing a grouped
+    session linked to the same window. `client_activity` is whole seconds, so a
+    same-second tie falls back to tmux's own client order — best effort, not a
+    promise that the clicked client wins.
+
 Maintenance:
 
 - Enabled codemode for work in this repository (`.pi/settings.json` now declares

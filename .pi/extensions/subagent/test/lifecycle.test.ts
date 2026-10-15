@@ -17,7 +17,7 @@ import { existsSync, watch } from "node:fs";
 import * as path from "node:path";
 import { test } from "node:test";
 
-import subagentExtension, { type RunRecord } from "../index.ts";
+import subagentExtension, { __test__, type RunRecord } from "../index.ts";
 import { getActivityFilePath, readActivityFile } from "../activity.ts";
 import { getInterruptFilePath } from "../interrupt.ts";
 import { LIST_DETAIL_BUDGET } from "../listview.ts";
@@ -31,6 +31,8 @@ interface Harness {
 	tools: Map<string, Record<string, unknown>>;
 	execCalls: { command: string; args: string[] }[];
 	messages: { message: Record<string, unknown>; options: Record<string, unknown> | undefined }[];
+	/** Every ctx.ui.notify call, so guard messages can be asserted. */
+	notifications: { message: string; type: string | undefined }[];
 	/** Make every tmux call against the run's pane fail as if the session were gone. */
 	removeTarget: () => void;
 	/** Fail pane calls once with an unclassifiable error, then behave normally. */
@@ -56,6 +58,12 @@ interface Harness {
 	renderWidget: (width?: number) => string[] | undefined;
 	/** How many times the widget asked the TUI to re-render. */
 	renderRequests: () => number;
+	/**
+	 * Drive one left press/release/click through the installed widget's mouse
+	 * region, as pi's fullscreen dispatcher would. Uses a single component
+	 * instance for the three events, because the press state lives on it.
+	 */
+	clickWidgetRow: (y: number) => void;
 	shutdown: () => Promise<void>;
 	call: (tool: string, params: Record<string, unknown>) => Promise<{ text: string; details: Record<string, unknown> }>;
 	readRuns: () => Promise<RunRecord[]>;
@@ -112,6 +120,7 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 	const handlers = new Map<string, (...args: unknown[]) => unknown>();
 	const execCalls: { command: string; args: string[] }[] = [];
 	const messages: { message: Record<string, unknown>; options: Record<string, unknown> | undefined }[] = [];
+	const notifications: { message: string; type: string | undefined }[] = [];
 	// Flipped by removeTarget() to simulate the user killing the tmux session (or
 	// the server dying) out from under a run.
 	let targetMissing = options.missingTarget === true;
@@ -180,6 +189,12 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 				await options.afterEscapeSent();
 			}
 			if (joined.includes("-V")) return { code: 0, stdout: "tmux 3.3a", stderr: "" };
+			// Panel calls (local patch 17) are answered before the pane-call machinery,
+			// which they must not disturb: the client probe is not a liveness poll.
+			// The failure variants of these guards are unit-tested in panel.test.ts.
+			if (joined.includes("list-clients")) return { code: 0, stdout: "/dev/pts/1\t@1\t100\n", stderr: "" };
+			if (joined.includes("#{window_id}")) return { code: 0, stdout: "@1\n", stderr: "" };
+			if (joined.includes("has-session") || joined.includes("detach-client")) return { code: 0, stdout: "", stderr: "" };
 			const paneCall = joined.includes("capture-pane") || joined.includes("display-message");
 			// A tick starts at its capture-pane, so the counter resets there.
 			if (joined.includes("capture-pane")) countedThisTick = false;
@@ -228,7 +243,9 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 					},
 		model: { provider: "openrouter", id: "parent/model" },
 		ui: {
-			notify: () => undefined,
+			notify: (message: string, type?: string) => {
+				notifications.push({ message, type });
+			},
 			custom: async () => undefined,
 			setWidget: (key: string, content: unknown, opts?: { placement?: string }) => {
 				widgetCalls.push({ key, hasContent: content !== undefined, placement: opts?.placement });
@@ -272,6 +289,7 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 		tools,
 		execCalls,
 		messages,
+		notifications,
 		removeTarget: () => {
 			targetMissing = true;
 		},
@@ -311,6 +329,20 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 			return component({ requestRender: () => (renderRequests += 1) }, fakeTheme).render(width);
 		},
 		renderRequests: () => renderRequests,
+		clickWidgetRow: (y: number) => {
+			const factory = [...widgetComponents.values()].at(-1);
+			assert.ok(factory, "a widget must be installed before it can be clicked");
+			// A fresh instance from the installed factory: pi calls the factory once and
+			// keeps the instance, so this is the same code with the same per-install
+			// state (none survives between the press and the click beyond the closure).
+			const instance = factory({ requestRender: () => (renderRequests += 1) }, fakeTheme) as unknown as {
+				handleMouse?: (event: Record<string, unknown>) => unknown;
+			};
+			const base = { button: "left", x: 0, y, screenX: 0, screenY: y, width: 80, height: 5, shift: false, alt: false, ctrl: false };
+			instance.handleMouse?.({ ...base, type: "press" });
+			instance.handleMouse?.({ ...base, type: "release" });
+			instance.handleMouse?.({ ...base, type: "click" });
+		},
 		shutdown: async () => {
 			await handlers.get("session_shutdown")?.({}, ctx);
 		},
@@ -2205,4 +2237,36 @@ test("a fresh extension load re-registers the management tools", async () => {
 	});
 });
 
+test("clicking a live widget row binds Escape and launches the panel detached", async () => {
+	// The wiring test: installWidget must pass onRowClick, and the click must
+	// reach openSubagentPanel. The guards themselves are covered in panel.test.ts;
+	// this proves the seam between the widget and the extension exists at all, and
+	// that the binding happens before the popup is launched.
+	const launches: { command: string; args: string[]; options: unknown; execCallsAtLaunch: number }[] = [];
+	try {
+		await withHarness(undefined, async (h) => {
+			__test__.setPanelLauncher((command, args, options) =>
+				launches.push({ command, args, options, execCallsAtLaunch: h.execCalls.length }),
+			);
+			await h.call("subagent", { task: "long task" });
+			await waitFor(() => h.renderWidget() !== undefined, 10_000);
 
+			await withEnv({ TMUX: "/tmp/outer.sock,1,0", TMUX_PANE: "%1" }, async () => {
+				h.clickWidgetRow(0);
+				await waitFor(() => launches.length > 0);
+			});
+
+			assert.equal(launches.length, 1);
+			const launch = launches[0] as (typeof launches)[number];
+			assert.equal(launch.command, "tmux");
+			assert.deepEqual(launch.options, { detached: true, stdio: "ignore" });
+			assert.ok(
+				h.execCalls.slice(0, launch.execCallsAtLaunch).some((call) => call.args.includes("detach-client")),
+				"Escape is bound on the subagent server before the popup launches",
+			);
+			assert.deepEqual(h.notifications, [], "a click on a live row is silent");
+		});
+	} finally {
+		__test__.setPanelLauncher();
+	}
+});
