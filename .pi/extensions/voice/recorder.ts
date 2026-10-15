@@ -249,6 +249,11 @@ export class Recorder {
 	 * the message says what to do, and no `-q` is issued.
 	 */
 	async start(): Promise<void> {
+		// A cancel in flight owns the phone until its bounded cleanup lands: a
+		// start now could be stopped by that cleanup's best-effort `-q`, and the
+		// cancel's teardown would wipe the new cycle anyway. Refuse; the caller
+		// retries once the cancel has landed.
+		if (this.#cancelling) return;
 		if (this.#phase !== "idle" && this.#phase !== "error") return;
 
 		const abort = new AbortController();
@@ -308,6 +313,10 @@ export class Recorder {
 	 * failures keep the local copy so the audio is not lost.
 	 */
 	async stop(): Promise<void> {
+		// Same ownership rule as start(): a cancel already stops the recorder
+		// and discards the recording, so a concurrent stop would only add a
+		// second `-q` and race the cleanup.
+		if (this.#cancelling) return;
 		if (this.#phase !== "recording") return;
 		const signal = this.#abort?.signal;
 		if (!signal || !this.#id || !this.#remotePath) {
@@ -388,7 +397,9 @@ export class Recorder {
 	 * Per phase: starting/recording/stopping → best-effort `-q` + remote
 	 * cleanup, never fetch; fetching → drop the partial local file and the
 	 * remote original; transcribing → drop the local copy unless keepAudio.
-	 * Idempotent while running, a no-op when already idle.
+	 * Idempotent while running, a no-op when already idle. While it runs,
+	 * start() and stop() are refused: the cancel owns the phone until its
+	 * cleanup has landed.
 	 */
 	// Not `async`: an async method would wrap the stored promise, and callers
 	// joining an in-flight cancel must get the same promise back.

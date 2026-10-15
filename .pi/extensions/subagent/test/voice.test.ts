@@ -9,7 +9,7 @@
 // extension-load.test.ts.
 
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
@@ -39,7 +39,7 @@ import {
 	type Run,
 	type RunResult,
 } from "../../voice/recorder.ts";
-import { formatElapsed, statusText } from "../../voice/index.ts";
+import { formatElapsed, makeSshRun, statusText } from "../../voice/index.ts";
 import { waitFor, withEnv, withTempAgentDir } from "./helpers.ts";
 
 const ID = "0123456789abcdef0123456789abcdef";
@@ -450,6 +450,17 @@ test("start runs the pinned command and reports starting then recording", async 
 	}
 });
 
+test("bitrateKbps reaches the start command as -b", async () => {
+	const harness = await makeHarness({ respond: () => result(), config: { bitrateKbps: 32 } });
+	try {
+		await harness.recorder.start();
+		assert.match(harness.runner.commands()[0], / -l 60 -e aac -b 32$/);
+	} finally {
+		await settleWithClock(harness.clock, harness.recorder.cancel());
+		await harness.cleanup();
+	}
+});
+
 test("the timer reports whole seconds while recording", async () => {
 	const harness = await makeHarness({ respond: () => result() });
 	try {
@@ -530,6 +541,24 @@ test("a generic start failure reports the exit and stderr", async () => {
 		assert.match(last?.message ?? "", /exit 1/);
 		assert.match(last?.message ?? "", /boom/);
 	} finally {
+		await harness.cleanup();
+	}
+});
+
+test("a failed start is retryable from the error phase", async () => {
+	const harness = await makeHarness({
+		respond: (_call, index) => (index === 0 ? result("", 1, "boom") : result()),
+	});
+	try {
+		await harness.recorder.start();
+		assert.equal(harness.recorder.phase(), "error");
+
+		await harness.recorder.start();
+		assert.equal(harness.recorder.phase(), "recording");
+		assert.equal(harness.runner.calls.length, 2);
+		assert.equal(phases(harness.statuses).at(-1), "recording");
+	} finally {
+		await settleWithClock(harness.clock, harness.recorder.cancel());
 		await harness.cleanup();
 	}
 });
@@ -759,6 +788,11 @@ test("cancel while fetching aborts the fetch and removes the partial local and r
 		assert.equal(harness.delivered.length, 0);
 		assert.deepEqual(await readdir(harness.tmpDir), []);
 		assert.equal(harness.runner.commands().filter((command) => command.includes("rm -f")).length, 1);
+		assert.equal(
+			harness.runner.commands().filter((command) => command.includes("-q")).length,
+			1,
+			"only the stop that completed before fetching may have sent -q",
+		);
 		const fetchCall = harness.runner.calls.find((call) => call.command.startsWith("cat "));
 		assert.equal(fetchCall?.signal.aborted, true);
 	} finally {
@@ -834,6 +868,140 @@ test("cancel after a deliver failure discards the kept audio when keepAudio is o
 		await settleWithClock(harness.clock, harness.recorder.cancel());
 		assert.equal(harness.recorder.phase(), "idle");
 		await assert.rejects(stat(kept), /ENOENT/);
+	} finally {
+		await harness.cleanup();
+	}
+});
+
+test("a start while a cancel is in flight is refused, and the retry works once it lands", async () => {
+	// The phone's recorder is device-global: a start during the cancel's
+	// best-effort `-q` could be stopped by that same `-q`, and the cancel's
+	// teardown would wipe the new cycle anyway. Refuse instead of racing.
+	const harness = await makeHarness({
+		respond: (call, index) => {
+			if (index === 0) return result("", 1, "Recording already in progress!");
+			if (call.command.includes("-q")) return new Promise<RunResult>(() => {}); // cancel parks on its budget
+			return result();
+		},
+		cleanupBudgetMs: 50,
+	});
+	try {
+		await harness.recorder.start();
+		assert.equal(harness.recorder.phase(), "error");
+
+		const cancelling = harness.recorder.cancel();
+		await flush();
+		assert.equal(harness.recorder.phase(), "error", "cancel does not change the phase while it runs");
+
+		await harness.recorder.start();
+		assert.equal(harness.recorder.phase(), "error", "a start during the cancel must be refused");
+		assert.equal(harness.runner.commands().filter((command) => command.startsWith("mkdir")).length, 1);
+
+		await settleWithClock(harness.clock, cancelling);
+		assert.equal(harness.recorder.phase(), "idle");
+
+		await harness.recorder.start(); // the retry lands once the cancel is done
+		assert.equal(harness.recorder.phase(), "recording");
+		assert.equal(harness.runner.commands().filter((command) => command.startsWith("mkdir")).length, 2);
+	} finally {
+		await settleWithClock(harness.clock, harness.recorder.cancel());
+		await harness.cleanup();
+	}
+});
+
+test("a stop while a cancel is in flight is refused", async () => {
+	let stops = 0;
+	const harness = await makeHarness({
+		respond: (call) => {
+			if (call.command.includes("-q")) {
+				stops += 1;
+				// The cancel's best-effort stop parks on its budget; a second
+				// stop (only possible without the guard) answers immediately.
+				if (stops === 1) return new Promise<RunResult>(() => {});
+				return result("No recording to stop");
+			}
+			return result();
+		},
+		cleanupBudgetMs: 50,
+	});
+	try {
+		await harness.recorder.start();
+		const cancelling = harness.recorder.cancel();
+		await flush();
+		assert.equal(harness.recorder.phase(), "recording", "cancel does not change the phase while it runs");
+
+		await harness.recorder.stop();
+		assert.equal(harness.recorder.phase(), "recording", "a stop during the cancel must be refused");
+		assert.equal(harness.runner.commands().filter((command) => command.includes("-q")).length, 1);
+
+		await settleWithClock(harness.clock, cancelling);
+		assert.equal(harness.recorder.phase(), "idle");
+	} finally {
+		await harness.cleanup();
+	}
+});
+
+test("a start that succeeds exactly as cancel lands must not report recording", async () => {
+	// The start's ssh resolves only after the cancel has aborted it; the
+	// post-await check is what keeps the cancel the winner.
+	let release: (() => void) | undefined;
+	const harness = await makeHarness({
+		respond: (call) =>
+			call.command.startsWith("mkdir")
+				? new Promise<RunResult>((resolve) => {
+						release = () => resolve(result());
+					})
+				: result(),
+	});
+	try {
+		const starting = harness.recorder.start();
+		await flush();
+		assert.equal(harness.recorder.phase(), "starting");
+
+		await settleWithClock(harness.clock, harness.recorder.cancel());
+		assert.ok(release, "the start command was issued");
+		release();
+		await starting;
+
+		assert.equal(harness.recorder.phase(), "idle");
+		assert.equal(phases(harness.statuses).includes("recording"), false);
+		assert.equal(harness.clock.pending(), 0, "no recording interval may be left behind");
+	} finally {
+		await harness.cleanup();
+	}
+});
+
+test("a stop that succeeds exactly as cancel lands must not fetch", async () => {
+	// The stop's own `-q` resolves only after a cancel aborted the cycle;
+	// fetching then would transcribe a recording the user cancelled.
+	let release: (() => void) | undefined;
+	const harness = await makeHarness({
+		respond: (call) => {
+			if (call.command.includes("-q")) {
+				if (!release) {
+					return new Promise<RunResult>((resolve) => {
+						release = () => resolve(result());
+					});
+				}
+				return result("No recording to stop");
+			}
+			return result();
+		},
+	});
+	try {
+		await harness.recorder.start();
+		const stopping = harness.recorder.stop();
+		await flush();
+		assert.equal(harness.recorder.phase(), "stopping");
+
+		await settleWithClock(harness.clock, harness.recorder.cancel());
+		assert.ok(release, "the stop command was issued");
+		release();
+		await stopping;
+
+		assert.equal(harness.recorder.phase(), "idle");
+		assert.equal(harness.runner.commands().some((command) => command.startsWith("cat ")), false);
+		assert.equal(harness.delivered.length, 0);
 	} finally {
 		await harness.cleanup();
 	}
@@ -938,6 +1106,68 @@ test("the recorder runs on node's mock timers, not just the injected clock", asy
 	} finally {
 		await rm(tmpDir, { recursive: true, force: true });
 	}
+});
+
+// ---------------------------------------------------------------------------
+// ssh runner (index.ts)
+// ---------------------------------------------------------------------------
+
+/** Put a script named `ssh` first on PATH, exercising the real spawn, stdio
+ * and close bookkeeping in makeSshRun without a phone. */
+async function withFakeSsh(scriptBody: string, fn: (capture: string) => Promise<void>): Promise<void> {
+	const bin = await mkdtemp(path.join(tmpdir(), "voice-ssh-"));
+	const capture = path.join(bin, "args.txt");
+	const script = path.join(bin, "ssh");
+	await writeFile(script, scriptBody);
+	await chmod(script, 0o755);
+	try {
+		await withEnv({ PATH: `${bin}:${process.env.PATH}`, SSH_CAPTURE: capture }, () => fn(capture));
+	} finally {
+		await rm(bin, { recursive: true, force: true });
+	}
+}
+
+test("makeSshRun passes the target and command, preserves binary stdout, and reports stderr and the exit", async () => {
+	await withFakeSsh(
+		[
+			"#!/bin/sh",
+			`printf '%s\\n' "$@" > "$SSH_CAPTURE"`,
+			`printf '\\000\\001fake-m4a'`,
+			`printf 'warn' >&2`,
+			`exit "\${SSH_EXIT:-0}"`,
+			"",
+		].join("\n"),
+		async (capture) => {
+			const run = makeSshRun("phone");
+			const done = await run("echo $HOME", new AbortController().signal);
+			assert.equal(done.code, 0);
+			assert.deepEqual(done.stdout, Buffer.concat([Buffer.from([0, 1]), Buffer.from("fake-m4a")]));
+			assert.equal(done.stderr, "warn");
+			assert.equal(await readFile(capture, "utf8"), "phone\necho $HOME\n");
+
+			await withEnv({ SSH_EXIT: "3" }, async () => {
+				const failed = await run("false", new AbortController().signal);
+				assert.equal(failed.code, 3);
+			});
+		},
+	);
+});
+
+test("makeSshRun kills the child when the signal aborts and resolves with -1", async () => {
+	await withFakeSsh("#!/bin/sh\nexec sleep 30\n", async () => {
+		const controller = new AbortController();
+		const started = makeSshRun("phone")("record", controller.signal);
+		await new Promise((resolve) => setTimeout(resolve, 100)); // let the child spawn
+		controller.abort();
+		const killed = await started;
+		assert.equal(killed.code, -1);
+	});
+});
+
+test("makeSshRun refuses to start when the signal is already aborted", async () => {
+	const controller = new AbortController();
+	controller.abort();
+	await assert.rejects(makeSshRun("phone")("true", controller.signal), /aborted/);
 });
 
 // ---------------------------------------------------------------------------
