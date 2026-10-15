@@ -127,11 +127,31 @@
 //     path, and no flag may make it cheaper. With one or two runs in the session
 //     the output is unchanged.
 //
+// 17. Click-to-open panel (see panel.ts): a click on a live run's widget row
+//     opens a tmux popup over pi's client that runs a nested `tmux attach`
+//     client against the subagent server. panel.ts builds the argv and the
+//     quoting (pure, unit-tested); `openSubagentPanel` here does the guards and
+//     the launch. The guards matter as much as the launch: the run must still
+//     show a pane (`showsPane`, so a queued run is told to wait rather than
+//     handed a popup with nothing in it) and an interrupted one is still
+//     openable; pi must itself be inside tmux, on a server OTHER than the
+//     subagent one, and a client viewing pi's pane must exist (probed by session
+//     AND window, with `-c <client>` passed to display-popup, because tmux's own
+//     `-t <pane>` client resolution falls back to the most recently active
+//     client on the whole server). Only then is the Escape binding applied and the
+//     popup launched detached and unref'd — never awaited, because tmux's
+//     display-popup CLI blocks until the popup closes, and never held as a
+//     child handle, because that would keep pi alive after the panel closed.
+//     The popup command unbinds Escape when it exits: the binding is in the
+//     subagent server's root table, so left in place it would swallow Escape for
+//     every client of that server for the server's lifetime, including a direct
+//     `pi --attach-subagent` session.
+//
 // The child reporter (CHILD_ENV) still reports completion the same way; patch 11
 // only adds the activity snapshot to it, and patch 13 only diverts the aborted
 // settle onto the marker.
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, type Dirent } from "node:fs";
 import { mkdir, readFile, readdir, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -192,6 +212,7 @@ import {
 } from "./activity.ts";
 import { formatUsage, readSessionUsage, type RunUsage } from "./usage.ts";
 import { renderRunList, runHeadline, type ListRow } from "./listview.ts";
+import { buildEscapeBindArgs, buildPanelLaunch } from "./panel.ts";
 import { shellQuote } from "./shell.ts";
 
 const ATTACH_FLAG = "attach-subagent";
@@ -866,6 +887,123 @@ function showsPane(status: RunStatus): boolean {
 	return status === "running" || status === "interrupted";
 }
 
+/** How `openSubagentPanel` starts the popup CLI. */
+type PanelLauncher = (
+	command: string,
+	args: string[],
+	options: { detached: true; stdio: "ignore" },
+	onError: (message: string) => void,
+) => void;
+
+/**
+ * Start the panel popup detached, so pi neither waits for it nor is kept alive
+ * by it, and report a spawn failure through the callback.
+ */
+const defaultPanelLauncher: PanelLauncher = (command, args, options, onError) => {
+	const child = spawn(command, args, options);
+	child.once("error", (error) => onError(error instanceof Error ? error.message : String(error)));
+	child.unref();
+};
+
+// A module-level binding rather than a direct call so the tests never start a
+// real popup (`__test__.setPanelLauncher`, local patch 9). The extension reads
+// it at click time, so a test can substitute it without reloading the factory.
+let panelLauncher: PanelLauncher = defaultPanelLauncher;
+
+/** The slice of the extension `openSubagentPanel` needs, so the guards can be tested without a TUI. */
+interface OpenPanelDeps {
+	/** The context to notify through; undefined outside the TUI. */
+	ui: ExtensionContext | undefined;
+	getRun: (runId: string) => RunRecord | undefined;
+	isShuttingDown: () => boolean;
+	exec: ExtensionAPI["exec"];
+	launch: PanelLauncher;
+}
+
+/**
+ * Open a tmux popup attached to a live run's pane (local patch 17).
+ *
+ * Every guard below exists because the failure it prevents is silent or
+ * confusing: a popup over a nonexistent run, a popup with no pane to show, a
+ * popup with no attached client to draw over, or a popup that flashes open and
+ * immediately closes because the session is gone. The popup itself is launched
+ * last and never awaited — it blocks until closed.
+ */
+async function openSubagentPanel(deps: OpenPanelDeps, runId: string): Promise<void> {
+	const ui = deps.ui;
+	if (!ui || ui.mode !== "tui" || deps.isShuttingDown()) return;
+	const notify = (message: string, type: "info" | "warning" | "error" = "info"): void => ui.ui.notify(message, type);
+	const short = runId.slice(0, 8);
+
+	const run = deps.getRun(runId);
+	if (!run || !holdsChild(run.status)) {
+		// Completed, failed, cancelled or unknown: the child (and its pane) is gone.
+		// NOT `isTerminal`, which also counts `interrupted` — that run is sitting at
+		// a prompt with a pane, and `showsPane` below admits it.
+		notify(`Subagent ${short} is no longer running.`);
+		return;
+	}
+	if (!showsPane(run.status)) {
+		// Only `queued` reaches here: it holds a slot but has no child and no pane.
+		notify(`Subagent ${short} is still queued for a slot — there is no pane to open yet.`);
+		return;
+	}
+
+	const outerSocket = currentTmuxSocket();
+	const outerPane = process.env.TMUX_PANE?.trim();
+	if (!outerSocket || !outerPane) {
+		notify(`Not running inside tmux. Attach with: ${run.attachCommand}`);
+		return;
+	}
+	const socket = tmuxSocketPath();
+	// A pi running inside a subagent pane has currentTmuxSocket() === the subagent
+	// socket; the global Escape binding would then land on pi's own server.
+	if (outerSocket === socket) {
+		notify("The panel is not available from inside a subagent pane.");
+		return;
+	}
+
+	// Resolve the pane's session AND window, then pick a client that is viewing
+	// that window. Asking for `#{client_tty}` with `-t <pane>` is not enough: tmux
+	// resolves it to the most recently active client on the whole server, so with a
+	// second terminal attached the popup would be drawn there instead of over pi.
+	const target = await deps.exec("tmux", ["-S", outerSocket, "display-message", "-p", "-t", outerPane, "#{session_name}\t#{window_id}"]);
+	const [outerSession, outerWindow] = target.stdout.trim().split("\t");
+	if (target.code !== 0 || !outerSession || !outerWindow) {
+		notify("That tmux pane is gone.");
+		return;
+	}
+	const clients = await deps.exec("tmux", ["-S", outerSocket, "list-clients", "-t", outerSession, "-F", "#{client_tty}\t#{window_id}"]);
+	const client = clients.stdout
+		.split("\n")
+		.map((line) => line.split("\t"))
+		.find(([, window]) => window?.trim() === outerWindow)?.[0]
+		?.trim();
+	if (clients.code !== 0 || !client) {
+		notify("No attached tmux client viewing this pane to open the panel in. Attach first, then click again.");
+		return;
+	}
+
+	// Bind only while the server is known to hold the session: the binding is
+	// global to the subagent server, and an empty server would exit and drop it.
+	const alive = await deps.exec("tmux", tmuxArgs("has-session", "-t", run.tmuxSession));
+	if (alive.code !== 0) {
+		notify(`Subagent ${short} has no live tmux session.`);
+		return;
+	}
+
+	const bound = await deps.exec("tmux", buildEscapeBindArgs(socket));
+	if (bound.code !== 0) {
+		notify(`Could not set up the panel's Escape binding: ${bound.stderr.trim() || `tmux exited ${bound.code}`}`, "warning");
+		return;
+	}
+
+	const launch = buildPanelLaunch({ outerSocket, pane: outerPane, client, socket, session: run.tmuxSession, runId: run.id });
+	deps.launch(launch.command, launch.args, { detached: true, stdio: "ignore" }, (message) => {
+		ui.ui.notify(`Could not open panel: ${message}`, "error");
+	});
+}
+
 /**
  * A delay that gives up when its tool call is cancelled.
  *
@@ -1513,7 +1651,22 @@ const installWidget = (): void => {
 			onCreate: (tui) => {
 				widgetTui = tui;
 			},
-		}),
+			onRowClick: (row) => {
+				void openSubagentPanel(
+					{
+						ui: statusUi,
+						getRun: (runId) => runs.get(runId),
+						isShuttingDown: () => shuttingDown,
+						exec: (command, args) => pi.exec(command, args),
+						launch: panelLauncher,
+					},
+					row.runId,
+				).catch((error) => {
+					// The async guards get no caller to surface a throw, and openSubagentPanel
+					// is not allowed to reject into the void.
+					statusUi?.ui.notify(`Could not open panel: ${error instanceof Error ? error.message : String(error)}`, "error");
+				});
+			},		}),
 		{ placement: "aboveEditor" },
 	);
 	widgetInstalled = true;
@@ -2560,6 +2713,7 @@ export const __test__ = {
 	isTerminal,
 	listRow,
 	observationFromRead,
+	openSubagentPanel,
 	readBooleanEnv,
 	readIntEnv,
 	readNonNegativeIntEnv,
@@ -2567,6 +2721,9 @@ export const __test__ = {
 	resolveModel,
 	runDirOwnsLiveTranscript,
 	runSummary,
+	setPanelLauncher: (launcher?: PanelLauncher): void => {
+		panelLauncher = launcher ?? defaultPanelLauncher;
+	},
 	shellQuote,
 	startRepeatingRefresh,
 	statusDetail,

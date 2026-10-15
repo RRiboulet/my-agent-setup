@@ -6,9 +6,9 @@
 // nested tmux client and a tmux format string is exactly the kind of work that
 // cannot be exercised in the unit suite, so everything that CAN be pure — the
 // argv, the nested command string and the quoting — is built here and asserted
-// by `panel.test.ts`. `index.ts` will hold the guards, the `pi.exec` calls and
-// the `spawn`; this branch ships only the pure builders, which the tests drive
-// directly.
+// by `panel.test.ts`. `index.ts` holds the guard ladder, the `pi.exec` calls and
+// the detached `spawn` (see `openSubagentPanel`, local patch 17); this module
+// stays pure and side-effect-free.
 
 import { shellQuote } from "./shell.ts";
 
@@ -46,6 +46,22 @@ export function buildAttachCommand(socket: string, session: string): string {
 }
 
 /**
+ * The command the popup runs: attach to the subagent session, then remove the
+ * Escape binding on the way out.
+ *
+ * The binding is in the subagent server's ROOT table, so it is global to that
+ * server, not to the popup's client: left in place it swallows Escape for every
+ * client of that server for the life of the server, including a direct
+ * `pi --attach-subagent` session, where Escape is an ordinary key. `display-popup
+ * -E` runs this through `/bin/sh -c`, so the unbind is a second command in the
+ * same string; it runs when the attach client exits, which the Escape binding
+ * itself causes.
+ */
+export function buildPopupCommand(socket: string, session: string): string {
+	return `${buildAttachCommand(socket, session)}; tmux -S ${shellQuote(socket)} unbind -n Escape`;
+}
+
+/**
  * The panel's title, derived from the run id.
  *
  * `subagent <id8>` is literal text, never task text. The title is derived here
@@ -70,14 +86,18 @@ function panelTitle(runId: string): string {
 /**
  * The detached tmux CLI that draws the popup over pi's client.
  *
- * `-t` pins the popup to pi's pane; `-E` closes it when the nested command
- * exits; `-w`/`-h` size it relative to the client. The attach command is one
- * argv element, so exactly one layer parses it as shell (tmux's own `sh -c`),
- * which is the layer `buildAttachCommand` quotes for.
+ * `-c` names the client to draw over. `-t <pane>` alone is NOT enough: tmux
+ * resolves the client context to the most recently active client on the whole
+ * server, so on a server with a second attached terminal the popup can land
+ * there instead of over pi. `-E` closes it when the nested command exits;
+ * `-w`/`-h` size it relative to the client. The attach command is one argv
+ * element, so exactly one layer parses it as shell (tmux's own `sh -c`), which
+ * is the layer the builders quote for.
  */
 export function buildPanelLaunch(input: {
 	outerSocket: string;
 	pane: string;
+	client: string;
 	socket: string;
 	session: string;
 	/** The full run id; the title is derived from its first 8 characters. */
@@ -90,6 +110,8 @@ export function buildPanelLaunch(input: {
 			input.outerSocket,
 			"display-popup",
 			"-E",
+			"-c",
+			input.client,
 			"-t",
 			input.pane,
 			"-w",
@@ -98,7 +120,7 @@ export function buildPanelLaunch(input: {
 			"90%",
 			"-T",
 			panelTitle(input.runId),
-			buildAttachCommand(input.socket, input.session),
+			buildPopupCommand(input.socket, input.session),
 		],
 	};
 }
