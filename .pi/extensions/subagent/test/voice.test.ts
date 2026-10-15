@@ -174,8 +174,9 @@ function result(stdout: Buffer | string = "", code = 0, stderr = ""): RunResult 
 	return { code, stdout: Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout), stderr };
 }
 
-/** A command that hangs until its signal aborts — the phone with no network. */
-function pendingOnAbort(signal: AbortSignal): Promise<RunResult> {
+/** A promise that hangs until its signal aborts — the phone with no network,
+ * or an upload endpoint that never answers. */
+function pendingOnAbort<T = RunResult>(signal: AbortSignal): Promise<T> {
 	return new Promise((_resolve, reject) => {
 		if (signal.aborted) {
 			reject(new Error("aborted"));
@@ -1286,13 +1287,7 @@ function jsonResponse(text: string, status = 200): Response {
 
 /** A fetch that never answers until its signal aborts. */
 function pendingOnAbortFetch(call: FetchCall): Promise<Response> {
-	return new Promise((_resolve, reject) => {
-		if (call.init.signal?.aborted) {
-			reject(new Error("aborted"));
-			return;
-		}
-		call.init.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true });
-	});
+	return pendingOnAbort<Response>(call.init.signal as AbortSignal);
 }
 
 const TRANSCRIBE_CONFIG = { baseUrl: "https://stt.example/v1", model: "whisper-large", timeoutMs: 5_000 };
@@ -1501,6 +1496,8 @@ test("aborting the caller signal cancels the request", async () => {
 interface FlowHarness {
 	command: CapturedCommand;
 	statuses: Array<string | undefined>;
+	/** The status key of every setStatus call, so a rename cannot ship unseen. */
+	statusKeys: string[];
 	notices: string[];
 	pasted: Array<{ raw: string; expanded: string; marker: string | null }>;
 	sent: Array<{ content: unknown; options: unknown }>;
@@ -1518,6 +1515,8 @@ interface FlowHarness {
 		};
 	};
 	setIdle(value: boolean): void;
+	/** The editor's text as a submit would read it (paste markers expanded). */
+	submitEditor(): string;
 }
 
 interface FlowOptions {
@@ -1557,20 +1556,26 @@ function makeFlowHarness(options: FlowOptions, tmpDir: string): FlowHarness {
 	);
 	const fetchSpy = scriptedFetch(options.respondFetch ?? (() => jsonResponse("hello from the phone")));
 	const statuses: Array<string | undefined> = [];
+	const statusKeys: string[] = [];
 	const notices: string[] = [];
 	const pasted: FlowHarness["pasted"] = [];
 	let idle = options.idle ?? true;
+	let editor = "";
 	const ctx: FlowHarness["ctx"] = {
 		hasUI: true,
 		isIdle: () => idle,
 		modelRegistry: { getApiKeyForProvider: async () => options.registryKey },
 		ui: {
-			setStatus: (_key, text) => statuses.push(text),
+			setStatus: (key, text) => {
+				statusKeys.push(key);
+				statuses.push(text);
+			},
 			notify: (message) => notices.push(message),
 			pasteToEditor: (text) => {
 				// Model pi's editor: a paste over 10 lines or 1000 characters
-				// collapses to a marker that is expanded again on submit.
+				// collapses to a marker, and a submit reads the expanded text.
 				const collapsed = text.length > 1_000 || text.split("\n").length > 10;
+				editor = text;
 				pasted.push({ raw: collapsed ? "[paste #1]" : text, expanded: text, marker: collapsed ? "[paste #1]" : null });
 			},
 		},
@@ -1587,6 +1592,7 @@ function makeFlowHarness(options: FlowOptions, tmpDir: string): FlowHarness {
 	return {
 		command,
 		statuses,
+		statusKeys,
 		notices,
 		pasted,
 		sent: capture.sent,
@@ -1597,6 +1603,7 @@ function makeFlowHarness(options: FlowOptions, tmpDir: string): FlowHarness {
 		setIdle: (value) => {
 			idle = value;
 		},
+		submitEditor: () => editor,
 	};
 }
 
@@ -1619,6 +1626,7 @@ test("full flow: /voice twice records, transcribes, and pastes the transcript", 
 			h.statuses.filter((text) => text !== undefined && !text.startsWith("● rec")),
 			["starting…", "stopping…", "fetching…", "transcribing…"],
 		);
+		assert.deepEqual([...new Set(h.statusKeys)], ["voice"], "every status write uses the voice key");
 		assert.equal(h.statuses.at(-1), undefined, "the status key is cleared at idle");
 
 		const commands = h.runner.commands();
@@ -1680,6 +1688,7 @@ test("a large transcript travels through the editor's paste marker and expands b
 		assert.equal(h.pasted.length, 1);
 		assert.equal(h.pasted[0].marker, "[paste #1]");
 		assert.equal(h.pasted[0].expanded, transcript);
+		assert.equal(h.submitEditor(), transcript, "a submit reads the full transcript back");
 	});
 });
 
@@ -1734,6 +1743,35 @@ test("cancel while transcribing aborts the upload, pastes nothing, and drops the
 	);
 });
 
+test("a transcription that resolves exactly as cancel lands must not paste", async () => {
+	// The fake fetch ignores the abort and answers with a full response after
+	// the cancel: the post-deliver abort check is the only thing keeping this
+	// transcript out of the editor, so its removal must fail this test.
+	let release: (() => void) | undefined;
+	await withFlow(
+		{
+			env: { [VOICE_ENV.apiKey]: "sk-flow" },
+			respondFetch: () =>
+				new Promise<Response>((resolve) => {
+					release = () => resolve(jsonResponse("too late"));
+				}),
+		},
+		async (h) => {
+			await h.command.handler("", h.ctx);
+			const stopping = h.command.handler("", h.ctx);
+			await waitFor(() => h.fetchCalls.length === 1);
+			await h.command.handler("cancel", h.ctx);
+			assert.ok(release, "the upload was issued");
+			release();
+			await stopping;
+
+			assert.equal(h.pasted.length + h.sent.length, 0, "a cancelled recording is never presented");
+			assert.deepEqual(await readdir(h.tmpDir), []);
+			assert.equal(h.statuses.at(-1), undefined);
+		},
+	);
+});
+
 test("a transcription failure notifies with the kept audio path and leaves the file", async () => {
 	await withFlow(
 		{ env: { [VOICE_ENV.apiKey]: "sk-flow" }, respondFetch: () => new Response("boom: model exploded", { status: 500 }) },
@@ -1749,4 +1787,17 @@ test("a transcription failure notifies with the kept audio path and leaves the f
 			assert.equal(h.statuses.at(-1), undefined);
 		},
 	);
+});
+
+test("keepAudio keeps the audio and tells the user where it is", async () => {
+	await withFlow({ file: { keepAudio: true, apiKey: "sk-flow" } }, async (h) => {
+		await voiceCycle(h);
+		assert.equal(h.pasted.length, 1);
+		const notice = h.notices.find((message) => message.includes("audio kept at"));
+		assert.ok(notice, `expected a kept-audio notice, got: ${h.notices.join(" | ")}`);
+		const kept = /audio kept at (.+)$/.exec(notice)?.[1];
+		assert.ok(kept);
+		assert.equal((await stat(kept)).size, AUDIO.length);
+		assert.deepEqual(await readdir(h.tmpDir), [path.basename(kept)]);
+	});
 });

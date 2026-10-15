@@ -114,10 +114,8 @@ interface PostOutcome {
 	body: string;
 }
 
-interface PostAttempt {
-	outcome?: PostOutcome;
-	failure?: TranscribeError;
-}
+/** One attempt either produced a response or a failure, never both. */
+type PostAttempt = { ok: true; outcome: PostOutcome } | { ok: false; failure: TranscribeError };
 
 function describeError(error: unknown): string {
 	if (!(error instanceof Error)) return String(error);
@@ -152,15 +150,17 @@ async function postOnce(
 			// reported through the status below; the abort is classified next.
 			if (signal.aborted) throw error;
 		}
-		return { outcome: { status: response.status, ok: response.ok, statusText: response.statusText, body } };
+		return { ok: true, outcome: { status: response.status, ok: response.ok, statusText: response.statusText, body } };
 	} catch (error) {
 		if (request.signal?.aborted) {
 			return {
+				ok: false,
 				failure: new TranscribeError("network", "the transcription request was cancelled", { cause: error }),
 			};
 		}
 		if (timeout.aborted) {
 			return {
+				ok: false,
 				failure: new TranscribeError(
 					"network",
 					`the transcription request timed out after ${request.config.timeoutMs} ms`,
@@ -169,6 +169,7 @@ async function postOnce(
 			};
 		}
 		return {
+			ok: false,
 			failure: new TranscribeError("network", `the transcription request failed: ${firstLine(describeError(error))}`, {
 				cause: error,
 			}),
@@ -210,12 +211,12 @@ export async function transcribeAudio(request: TranscribeRequest): Promise<strin
 	const endpoint = `${request.config.baseUrl}/audio/transcriptions`;
 
 	const first = await postOnce(endpoint, request, "json");
-	if (!first.outcome) throw first.failure;
+	if (!first.ok) throw first.failure;
 	if (first.outcome.ok) return transcriptOrThrow(first.outcome, "json");
 
 	if (first.outcome.status === 400 && /response_format/.test(first.outcome.body)) {
 		const retry = await postOnce(endpoint, request, "text");
-		if (!retry.outcome) throw retry.failure;
+		if (!retry.ok) throw retry.failure;
 		if (retry.outcome.ok) return transcriptOrThrow(retry.outcome, "text");
 		throw httpFailure(retry.outcome);
 	}

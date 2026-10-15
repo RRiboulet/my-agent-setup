@@ -184,7 +184,7 @@ export function createVoiceExtension(pi: ExtensionAPI, seams: VoiceSeams = {}): 
 		}
 	};
 
-	pi.registerCommand(VOICE_STATUS_KEY, {
+	pi.registerCommand("voice", {
 		description: "Dictate with the phone as microphone: /voice toggles, /voice cancel aborts",
 		handler: async (args, ctx) => {
 			latest = ctx;
@@ -221,9 +221,3 @@ export function createVoiceExtension(pi: ExtensionAPI, seams: VoiceSeams = {}): 
 export default function (pi: ExtensionAPI): void {
 	createVoiceExtension(pi);
 }
-
-export const __test__ = {
-	statusText,
-	formatElapsed,
-	makeSshRun,
-};
