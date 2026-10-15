@@ -6,8 +6,9 @@
 // nested tmux client and a tmux format string is exactly the kind of work that
 // cannot be exercised in the unit suite, so everything that CAN be pure — the
 // argv, the nested command string and the quoting — is built here and asserted
-// by `panel.test.ts`. `index.ts` is left with the guards, the `pi.exec` calls
-// and the `spawn`, which the tests drive through a fake.
+// by `panel.test.ts`. `index.ts` will hold the guards, the `pi.exec` calls and
+// the `spawn`; this branch ships only the pure builders, which the tests drive
+// directly.
 
 import { shellQuote } from "./shell.ts";
 
@@ -47,15 +48,23 @@ export function buildAttachCommand(socket: string, session: string): string {
 /**
  * The panel's title, derived from the run id.
  *
- * `subagent <id8>` is literal text from an internal UUID, never task text. The
- * title is derived here rather than accepted as a parameter because tmux
- * renders `-T` as a *format string*: `#` starts an expansion (including
- * `#(...)` shell commands), so an arbitrary title — task text is untrusted —
- * would be executed or mangled rather than shown. A UUID has no `#`, so
- * deriving it makes a format trigger impossible by construction.
+ * `subagent <id8>` is literal text, never task text. The title is derived here
+ * rather than accepted as a parameter because tmux renders `-T` as a *format
+ * string*: `#` starts an expansion (including `#(...)` shell commands), so an
+ * arbitrary title would be executed or mangled rather than shown.
+ *
+ * Deriving from a run id is not sufficient on its own: `runId` is a plain
+ * string, and today's `randomUUID()` producers are a convention, not a type.
+ * The `#` check is what actually enforces the invariant, at the one point the
+ * title is composed. Its message deliberately omits the run id so an untrusted
+ * value is never echoed into a log or notification.
  */
 function panelTitle(runId: string): string {
-	return `subagent ${runId.slice(0, 8)}`;
+	const title = `subagent ${runId.slice(0, 8)}`;
+	if (title.includes("#")) {
+		throw new TypeError("refusing to build a panel title from a run id containing '#' (a tmux format metacharacter)");
+	}
+	return title;
 }
 
 /**

@@ -38,7 +38,7 @@ test.
 | `classifier.test.ts` | the status classifier: phase classification, stall/recovery transitions, monotonicity against stale snapshots, `interrupted` authority |
 | `listview.test.ts` | the bounded `subagent_status` list: the total detail budget, `compact`, one-line rows, the withheld-output note, and the run→row projection |
 | `widget.test.ts` | `renderStatusRows` and the widget component: icons, capping, task trimming, width fitting |
-| `panel.test.ts` | the panel builders (`panel.ts`): the Escape bind argv, the nested attach command (both `TMUX` variables unset, quoting), the popup argv, and the run-id-derived title |
+| `panel.test.ts` | the panel builders (`panel.ts`): the Escape bind argv, the nested attach command (both `TMUX` variables unset, quoting), the popup argv, the run-id-derived title, and its refusal of a run id carrying a tmux format metacharacter |
 | `usage.test.ts` | child session usage/cost accounting |
 | `handoff.test.ts` | child launch argv per mode, lineage/fork session seeding, live-branch fork ordering, and the usage baseline |
 | `lifecycle.test.ts` | launch, concurrency queueing, finalisation, failure detection, cancel, status, clean, shutdown stops the watcher, turn-level interrupt, the live widget (install/refresh/clear) |

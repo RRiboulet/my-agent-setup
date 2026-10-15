@@ -28,6 +28,12 @@ function launch(overrides: Partial<Parameters<typeof buildPanelLaunch>[0]> = {})
 	});
 }
 
+/** The value passed to `-T`, computed once from a single launch. */
+function titleOf(runId: string): string {
+	const args = launch({ runId }).args;
+	return args[args.indexOf("-T") + 1] as string;
+}
+
 test("the Escape binding is a root-table bind on the subagent server", () => {
 	assert.deepEqual(buildEscapeBindArgs(SOCKET), ["-S", SOCKET, "bind", "-n", "Escape", "detach-client"]);
 });
@@ -67,8 +73,30 @@ test("the popup launch is the exact tmux argv, with the attach command as one el
 	]);
 });
 
-test("the title is the run id's first 8 characters, never a caller-supplied string", () => {
-	const title = (runId: string) => launch({ runId }).args[launch({ runId }).args.indexOf("-T") + 1];
-	assert.equal(title(RUN_ID), "subagent 1a2b3c4d");
-	assert.equal(title("abcdefgh-rest"), "subagent abcdefgh");
+test("the title is the run id's first 8 characters", () => {
+	assert.equal(titleOf(RUN_ID), "subagent 1a2b3c4d");
+	assert.equal(titleOf("abcdefgh-rest"), "subagent abcdefgh");
+});
+
+test("a run id containing '#' is refused, without echoing the run id", () => {
+	for (const runId of ["#abcdefg-rest", "ab#defgh", "#S-0000-#()"]) {
+		assert.throws(
+			() => titleOf(runId),
+			(error: unknown) =>
+				error instanceof TypeError && !error.message.includes(runId) && !error.message.includes(runId.slice(0, 8)),
+			`runId ${JSON.stringify(runId)} must be refused without echoing it`,
+		);
+	}
+});
+
+test("no '#' can reach the -T format slot", () => {
+	for (const runId of [RUN_ID, "abcdefgh-rest", "01234567", "#abcdefg", "ab#defgh", "#######x"]) {
+		let title: string;
+		try {
+			title = titleOf(runId);
+		} catch {
+			continue; // refused, so nothing reached -T
+		}
+		assert.ok(!title.includes("#"), `title ${JSON.stringify(title)} must not contain '#'`);
+	}
 });
