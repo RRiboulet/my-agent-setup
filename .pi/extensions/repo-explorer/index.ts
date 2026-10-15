@@ -109,9 +109,12 @@ export default function (pi: ExtensionAPI) {
 					const files = await git.listFiles(choice.refname);
 					let changedFiles: string[] = [];
 					try {
-						changedFiles = (await (git as { changedFiles?: (b: string) => Promise<string[]> }).changedFiles?.(choice.refname)) ?? [];
-					} catch {
+						changedFiles = await git.changedFiles(choice.refname);
+					} catch (err) {
 						changedFiles = [];
+						if (err instanceof RepoGitError) {
+							ctx.ui.notify(`repo-explorer: ${sanitizeDisplay(err.message)}`, "warning");
+						}
 					}
 					const picked = await ctx.ui.custom<FileBrowserResult>((tui, theme, keybindings, done) =>
 						new FileBrowser(tui, theme, keybindings, { branchLabel: choice.label, files, initialDir, changedFiles }, done),

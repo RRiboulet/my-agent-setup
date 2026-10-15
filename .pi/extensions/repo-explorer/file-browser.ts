@@ -67,9 +67,7 @@ export interface FileBrowserOptions {
 	/** Directory to open in; "" (the default) is the repository root. */
 	initialDir?: string;
 	/** Optional collection of repo-relative paths rendered in red (changed vs upstream). */
-	changedFiles?: Iterable<string> | Set<string> | string[];
-	/** Catch-all for other spellings tests may use. */
-	[key: string]: unknown;
+	changedFiles?: Iterable<string>;
 }
 
 /** What the browser resolves to: the chosen file, or null when the user backed all the way out. */
@@ -146,40 +144,6 @@ function singleLine(get: () => string, paddingX = 1): Component {
 
 
 
-/** Collect the set of changed paths from whatever spelling a caller used. */
-function collectChangedFiles(options: FileBrowserOptions): Set<string> {
-	const keys = Object.keys(options);
-	const sources: unknown[] = [];
-	for (const key of keys) {
-		const lower = key.toLowerCase();
-		if (
-			lower.includes("change") ||
-			lower.includes("diff") ||
-			lower.includes("modif") ||
-			lower.includes("dirty") ||
-			lower === "red" ||
-			lower.includes("redfile")
-		) {
-			sources.push((options as Record<string, unknown>)[key]);
-		}
-	}
-	const set = new Set<string>();
-	for (const source of sources) {
-		if (source instanceof Set) {
-			for (const v of source) {
-				if (typeof v === "string") set.add(v);
-			}
-		} else if (Array.isArray(source)) {
-			for (const v of source) {
-				if (typeof v === "string") set.add(v);
-			}
-		} else if (typeof source === "string") {
-			set.add(source);
-		}
-	}
-	return set;
-}
-
 export class FileBrowser extends Container implements Focusable {
 	private readonly tui: TUI;
 	private readonly theme: Theme;
@@ -187,6 +151,7 @@ export class FileBrowser extends Container implements Focusable {
 	private readonly files: string[];
 	private readonly branchLabel: string;
 	private readonly changed: Set<string>;
+	private readonly changedDirs: Set<string>;
 	private readonly onDone: (result: FileBrowserResult) => void;
 	private readonly query: Input;
 	private readonly noMatch: Component;
@@ -224,7 +189,15 @@ export class FileBrowser extends Container implements Focusable {
 		this.keybindings = keybindings;
 		this.files = options.files;
 		this.branchLabel = options.branchLabel;
-		this.changed = collectChangedFiles(options);
+		this.changed = new Set(options.changedFiles ?? []);
+		this.changedDirs = new Set();
+		for (const changedPath of this.changed) {
+			let slash = changedPath.indexOf("/");
+			while (slash > 0) {
+				this.changedDirs.add(changedPath.slice(0, slash));
+				slash = changedPath.indexOf("/", slash + 1);
+			}
+		}
 		this.onDone = done;
 		this.dir = options.initialDir ?? "";
 
@@ -288,10 +261,7 @@ export class FileBrowser extends Container implements Focusable {
 		const items: SelectItem[] = shown.map((entry) => {
 			const base = entry.isDir ? `${entry.name}/` : entry.name;
 			const display = sanitizeDisplay(base);
-			const hasChangedDescendant =
-				entry.isDir &&
-				Array.from(this.changed).some((changedPath) => changedPath.startsWith(`${entry.path}/`));
-			const isChanged = this.changed.has(entry.path) || hasChangedDescendant;
+			const isChanged = this.changed.has(entry.path) || (entry.isDir && this.changedDirs.has(entry.path));
 			const label = isChanged ? this.theme.fg("error", display) : display;
 			return {
 				// Display is sanitized; `value` stays the byte-faithful path.
