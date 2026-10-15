@@ -11,6 +11,12 @@ Maintenance:
   codemode is the preferred way to batch, parallelize, or pre-filter tool
   output, with the direct tools kept for one-off single-step work.
 
+- **The devcontainer installs the latest `@earendil-works/pi-coding-agent`.**
+  `.devcontainer/Dockerfile` now tracks `@latest` (with no version pin and no
+  `--before` freeze) instead of pinning 1.1.0, so a rebuild picks up the newest
+  release and its siblings stay on the same release via npm's own resolution.
+  Fixes issue #52.
+
 ## v1.5.0 — 2026-10-13
 
 Added:

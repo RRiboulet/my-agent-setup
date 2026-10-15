@@ -42,9 +42,13 @@ RUN curl -fsSL -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && gh --version \
     && test "${GH_CONFIG_DIR#/home/vscode/.pi}" = "/gh"
 
-ARG PI_AGENT_VERSION=1.1.0
+# Install the newest @earendil-works/pi-coding-agent on every rebuild. Pinning a
+# single version while leaving the sibling ranges (pi-ai, pi-tui, pi-codemode,
+# ...) unpinned is what produced the mixed family in issue #52; tracking
+# `@latest` keeps pi-coding-agent and its siblings from npm's own resolution
+# on the same release. See issue #52.
 RUN npm cache clean --force \
-    && npm install -g --no-audit --no-fund "@earendil-works/pi-coding-agent@${PI_AGENT_VERSION}" \
+    && npm install -g --no-audit --no-fund @earendil-works/pi-coding-agent@latest \
     && pi --version
 
 # Powerlevel10k (standalone; no Oh My Zsh required)
