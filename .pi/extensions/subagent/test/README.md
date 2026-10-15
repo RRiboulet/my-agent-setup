@@ -32,12 +32,13 @@ test.
 | File | Covers |
 |---|---|
 | `export.test.ts` | the `__test__` block in `index.ts` still exists (guards a future re-vendor) |
-| `pure.test.ts` | `shellQuote`, `PI_SUBAGENT_*` env parsing, `isSameOrDescendant`, `resolveModel`, `validateCwd` |
+| `pure.test.ts` | `shellQuote` (now in `shell.ts`), `PI_SUBAGENT_*` env parsing, `isSameOrDescendant`, `resolveModel`, `validateCwd` |
 | `tmux.test.ts` | tmux session/socket naming, command construction, `--attach-subagent` parsing |
 | `status.test.ts` | `runSummary`, `isTerminal`, `holdsChild`, `runDirOwnsLiveTranscript`, `isMissingTmuxTarget`, `statusDetail`, `formatDuration`, `trimPane`, `truncateToolText`, `textFromAssistant` |
 | `classifier.test.ts` | the status classifier: phase classification, stall/recovery transitions, monotonicity against stale snapshots, `interrupted` authority |
 | `listview.test.ts` | the bounded `subagent_status` list: the total detail budget, `compact`, one-line rows, the withheld-output note, and the run→row projection |
 | `widget.test.ts` | `renderStatusRows` and the widget component: icons, capping, task trimming, width fitting |
+| `panel.test.ts` | the panel builders (`panel.ts`): the Escape bind argv, the nested attach command (both `TMUX` variables unset, quoting), the popup argv, and the title's tmux-format invariant |
 | `usage.test.ts` | child session usage/cost accounting |
 | `handoff.test.ts` | child launch argv per mode, lineage/fork session seeding, live-branch fork ordering, and the usage baseline |
 | `lifecycle.test.ts` | launch, concurrency queueing, finalisation, failure detection, cancel, status, clean, shutdown stops the watcher, turn-level interrupt, the live widget (install/refresh/clear) |

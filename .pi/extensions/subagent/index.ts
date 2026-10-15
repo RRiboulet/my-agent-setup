@@ -192,6 +192,7 @@ import {
 } from "./activity.ts";
 import { formatUsage, readSessionUsage, type RunUsage } from "./usage.ts";
 import { renderRunList, runHeadline, type ListRow } from "./listview.ts";
+import { shellQuote } from "./shell.ts";
 
 const ATTACH_FLAG = "attach-subagent";
 const CHILD_ENV = "PI_TMUX_SUBAGENT_CHILD";
@@ -311,11 +312,6 @@ interface RunRecord {
 	interruptedAt?: number;
 	/** Aborted turns this run has settled, taken from the child's marker. */
 	interrupts?: number;
-}
-
-function shellQuote(value: string): string {
-	if (value.length === 0) return "''";
-	return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
 /**
