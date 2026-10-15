@@ -430,21 +430,21 @@ export async function openGit(run: GitRunner, cwd: string): Promise<RepoGit> {
 		if (upstream) {
 			const upstreamTip = await tipOf(upstream);
 			cacheKey += `|u:${upstreamTip}|${upstream}`;
-			const res = await run(["diff", "--name-only", branch, upstream], root);
+			const res = await run(["diff", "--name-only", "-z", branch, upstream], root);
 			if (res.code !== 0) {
 				throw new RepoGitError("git-failed", `git diff failed for "${branch}" — ${firstLine(res.stderr)}`);
 			}
-			collected.push(...res.stdout.split("\n").map((line) => line.trim()).filter((line) => line.length > 0));
-		} else {
+			collected.push(...res.stdout.split("\0").filter((line) => line.length > 0));
+		} else if (!branch.startsWith("refs/remotes/")) {
 			const base = await baseBranchFor(branch);
 			if (base) {
 				const baseTip = await tipOf(base);
 				const mbRes = await run(["merge-base", branch, base], root);
 				const from = mbRes.code === 0 && mbRes.stdout.trim() ? mbRes.stdout.trim() : baseTip;
 				cacheKey += `|b:${baseTip}|${base}|${from}`;
-				const res = await run(["diff", "--name-only", from, branch], root);
+				const res = await run(["diff", "--name-only", "-z", from, branch], root);
 				if (res.code === 0) {
-					collected.push(...res.stdout.split("\n").map((line) => line.trim()).filter((line) => line.length > 0));
+					collected.push(...res.stdout.split("\0").filter((line) => line.length > 0));
 				}
 			}
 		}
@@ -454,10 +454,12 @@ export async function openGit(run: GitRunner, cwd: string): Promise<RepoGit> {
 			const headTipRes = await run(["rev-parse", "HEAD"], root);
 			const headTip = headTipRes.code === 0 ? headTipRes.stdout.trim() : "";
 			cacheKey += `|h:${headTip}`;
-			for (const args of [["diff", "--name-only", "HEAD"], ["diff", "--name-only", "--cached", "HEAD"]]) {
+			const statusRes = await run(["status", "--porcelain"], root);
+			cacheKey += `|s:${statusRes.stdout}`;
+			for (const args of [["diff", "--name-only", "-z", "HEAD"], ["diff", "--name-only", "-z", "--cached", "HEAD"]]) {
 				const res = await run(args as string[], root);
 				if (res.code === 0) {
-					collected.push(...res.stdout.split("\n").map((line) => line.trim()).filter((line) => line.length > 0));
+					collected.push(...res.stdout.split("\0").filter((line) => line.length > 0));
 				}
 			}
 		}
