@@ -1,15 +1,13 @@
 // Pure builders for the click-to-open subagent panel.
 //
-// Clicking a live-subagent row in the status widget opens a tmux popup (drawn
-// over pi's client, on the outer server) that runs a nested `tmux attach`
-// client against the subagent server. Opening a terminal, a nested tmux
-// client and a tmux format string is exactly the kind of work that cannot be
-// exercised in the unit suite, so everything that CAN be pure — the argv, the
-// nested command string and the quoting — is built here and asserted by
-// `panel.test.ts`. `index.ts` is left with the guards, the `pi.exec` calls and
-// the `spawn`, which the tests drive through a fake.
-//
-// See /tmp/subagent-panel-plan.md §3.3 for the design this implements.
+// Clicking a live-subagent row in the status widget is meant to open a tmux
+// popup (drawn over pi's client, on the outer server) that runs a nested
+// `tmux attach` client against the subagent server. Opening a terminal, a
+// nested tmux client and a tmux format string is exactly the kind of work that
+// cannot be exercised in the unit suite, so everything that CAN be pure — the
+// argv, the nested command string and the quoting — is built here and asserted
+// by `panel.test.ts`. `index.ts` is left with the guards, the `pi.exec` calls
+// and the `spawn`, which the tests drive through a fake.
 
 import { shellQuote } from "./shell.ts";
 
@@ -47,14 +45,16 @@ export function buildAttachCommand(socket: string, session: string): string {
 }
 
 /**
- * The panel's title, derived from a run id.
+ * The panel's title, derived from the run id.
  *
- * `subagent <id8>` is deliberately literal text from a UUID: tmux renders `-T`
- * as a *format string*, so a title containing `#` or `%` would be expanded
- * (including `#(...)` shell commands) rather than shown. Task text is
- * untrusted and never becomes the title.
+ * `subagent <id8>` is literal text from an internal UUID, never task text. The
+ * title is derived here rather than accepted as a parameter because tmux
+ * renders `-T` as a *format string*: `#` starts an expansion (including
+ * `#(...)` shell commands), so an arbitrary title — task text is untrusted —
+ * would be executed or mangled rather than shown. A UUID has no `#`, so
+ * deriving it makes a format trigger impossible by construction.
  */
-export function buildPanelTitle(runId: string): string {
+function panelTitle(runId: string): string {
 	return `subagent ${runId.slice(0, 8)}`;
 }
 
@@ -62,22 +62,18 @@ export function buildPanelTitle(runId: string): string {
  * The detached tmux CLI that draws the popup over pi's client.
  *
  * `-t` pins the popup to pi's pane; `-E` closes it when the nested command
- * exits; `-w`/`-h` size it relative to the client. The title is validated
- * rather than escaped: it is a format string, and the only intended source is
- * `buildPanelTitle`, so a caller passing format metacharacters is a bug worth
- * failing on at the boundary (build time and test time) rather than silently
- * expanding untrusted text in the user's terminal.
+ * exits; `-w`/`-h` size it relative to the client. The attach command is one
+ * argv element, so exactly one layer parses it as shell (tmux's own `sh -c`),
+ * which is the layer `buildAttachCommand` quotes for.
  */
 export function buildPanelLaunch(input: {
 	outerSocket: string;
 	pane: string;
 	socket: string;
 	session: string;
-	title: string;
+	/** The full run id; the title is derived from its first 8 characters. */
+	runId: string;
 }): Launch {
-	if (/[#%]/.test(input.title)) {
-		throw new TypeError(`panel title must not contain '#' or '%' (it is a tmux format string): ${input.title}`);
-	}
 	return {
 		command: "tmux",
 		args: [
@@ -92,7 +88,7 @@ export function buildPanelLaunch(input: {
 			"-h",
 			"90%",
 			"-T",
-			input.title,
+			panelTitle(input.runId),
 			buildAttachCommand(input.socket, input.session),
 		],
 	};

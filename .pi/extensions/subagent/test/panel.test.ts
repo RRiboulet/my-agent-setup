@@ -1,4 +1,4 @@
-// Unit tests for the panel builders (plan §3.3).
+// Unit tests for the panel builders.
 //
 // Risk covered: these builders are the entire pure surface of the
 // click-to-open-panel feature. Everything else — the tmux popup, the nested
@@ -11,11 +11,22 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { buildAttachCommand, buildEscapeBindArgs, buildPanelLaunch, buildPanelTitle } from "../panel.ts";
+import { buildAttachCommand, buildEscapeBindArgs, buildPanelLaunch } from "../panel.ts";
 
 const SOCKET = "/home/x/.pi/agent/tmux-subagents.sock";
 const RUN_ID = "1a2b3c4d-0000-4000-8000-000000000000";
 const SESSION = `pi-agent-${RUN_ID}`;
+
+function launch(overrides: Partial<Parameters<typeof buildPanelLaunch>[0]> = {}) {
+	return buildPanelLaunch({
+		outerSocket: "/tmp/outer.sock",
+		pane: "%3",
+		socket: SOCKET,
+		session: SESSION,
+		runId: RUN_ID,
+		...overrides,
+	});
+}
 
 test("the Escape binding is a root-table bind on the subagent server", () => {
 	assert.deepEqual(buildEscapeBindArgs(SOCKET), ["-S", SOCKET, "bind", "-n", "Escape", "detach-client"]);
@@ -37,15 +48,9 @@ test("a socket or session with a space or a quote stays one shell word", () => {
 });
 
 test("the popup launch is the exact tmux argv, with the attach command as one element", () => {
-	const launch = buildPanelLaunch({
-		outerSocket: "/tmp/outer.sock",
-		pane: "%3",
-		socket: SOCKET,
-		session: SESSION,
-		title: "subagent 1a2b3c4d",
-	});
-	assert.equal(launch.command, "tmux");
-	assert.deepEqual(launch.args, [
+	const result = launch();
+	assert.equal(result.command, "tmux");
+	assert.deepEqual(result.args, [
 		"-S",
 		"/tmp/outer.sock",
 		"display-popup",
@@ -62,18 +67,8 @@ test("the popup launch is the exact tmux argv, with the attach command as one el
 	]);
 });
 
-test("the title is the short id, never task text", () => {
-	assert.equal(buildPanelTitle(RUN_ID), "subagent 1a2b3c4d");
-	assert.equal(buildPanelTitle("abcdefgh-rest"), "subagent abcdefgh");
-});
-
-test("a title with format metacharacters is refused, not expanded by tmux", () => {
-	for (const title of ["subagent #(touch /tmp/pwned)", "100% done", "#S"]) {
-		assert.throws(
-			() =>
-				buildPanelLaunch({ outerSocket: "/tmp/outer.sock", pane: "%3", socket: SOCKET, session: SESSION, title }),
-			TypeError,
-			`title ${JSON.stringify(title)} must be refused`,
-		);
-	}
+test("the title is the run id's first 8 characters, never a caller-supplied string", () => {
+	const title = (runId: string) => launch({ runId }).args[launch({ runId }).args.indexOf("-T") + 1];
+	assert.equal(title(RUN_ID), "subagent 1a2b3c4d");
+	assert.equal(title("abcdefgh-rest"), "subagent abcdefgh");
 });
