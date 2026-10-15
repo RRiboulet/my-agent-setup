@@ -259,7 +259,7 @@ export class FileBrowser extends Container implements Focusable {
 	private selectTheme(): SelectListTheme {
 		return {
 			selectedPrefix: (text: string) => this.theme.fg("accent", text),
-			selectedText: (text: string) => this.theme.fg("accent", text),
+			selectedText: (text: string) => text,
 			description: (text: string) => this.theme.fg("muted", text),
 			scrollInfo: (text: string) => this.theme.fg("dim", text),
 			noMatch: (text: string) => this.theme.fg("warning", text),
