@@ -167,6 +167,8 @@ function panelMock(config: {
 	paneWindow?: string;
 	/** The client's current window id; defaults to the pane's window. */
 	clientWindow?: string;
+	/** Explicit client list for the activity selection test. */
+	clients?: { tty: string; window: string; activity: number }[];
 	/** Make the pane probe report the pane is gone. */
 	paneGone?: boolean;
 	sessionAlive?: boolean;
@@ -193,10 +195,12 @@ function panelMock(config: {
 			}
 			if (joined.includes("list-clients")) {
 				if (config.clientFails) return { ...ok, code: 1, stderr: "no current client" };
-				return {
-					...ok,
-					stdout: config.clientTty === null ? "" : `${config.clientTty ?? "/dev/pts/7"}\t${config.clientWindow ?? "@1"}\n`,
-				};
+				const list =
+					config.clients ??
+					(config.clientTty === null
+						? []
+						: [{ tty: config.clientTty ?? "/dev/pts/7", window: config.clientWindow ?? "@1", activity: 100 }]);
+				return { ...ok, stdout: list.map((client) => `${client.tty}\t${client.window}\t${client.activity}\n`).join("") };
 			}
 			if (joined.includes("has-session")) return config.sessionAlive === false ? { ...ok, code: 1 } : ok;
 			if (joined.includes("detach-client")) return config.bindOk === false ? { ...ok, code: 1 } : ok;
@@ -217,7 +221,7 @@ test("a click on a running row binds Escape, then launches the popup detached", 
 			mock.execCalls.map((call) => call.args.join(" ")),
 			[
 				"-S /tmp/outer.sock display-message -p -t %1 #{session_name}\t#{window_id}",
-				"-S /tmp/outer.sock list-clients -t pi-1 -F #{client_tty}\t#{window_id}",
+				"-S /tmp/outer.sock list-clients -t pi-1 -F #{client_tty}\t#{window_id}\t#{client_activity}",
 				`-S ${socket} has-session -t pi-agent-${RUN_ID}`,
 				`-S ${socket} bind -n Escape detach-client`,
 			],
@@ -321,6 +325,25 @@ test("a client attached to the session but showing another window is not used", 
 
 		assert.match(mock.notifications[0]?.message ?? "", /viewing this pane/);
 		assert.deepEqual(mock.launches, []);
+	});
+});
+
+test("among clients on the pane's window, the most recently active one is targeted", async () => {
+	// Two terminals on the same session and window both show the pane; the first
+	// listed is not necessarily the one the person is using.
+	await withEnv({ TMUX: "/tmp/outer.sock,1,0", TMUX_PANE: "%1" }, async () => {
+		const mock = panelMock({
+			runs: [run()],
+			clients: [
+				{ tty: "/dev/pts/1", window: "@1", activity: 100 },
+				{ tty: "/dev/pts/2", window: "@1", activity: 200 },
+			],
+		});
+		await __test__.openSubagentPanel(mock.deps, RUN_ID);
+
+		const launch = mock.launches[0] as PanelMock["launches"][number];
+		const clientIndex = launch.args.indexOf("-c") + 1;
+		assert.equal(launch.args[clientIndex], "/dev/pts/2");
 	});
 });
 

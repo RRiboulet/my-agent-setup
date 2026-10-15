@@ -136,9 +136,11 @@
 //     handed a popup with nothing in it) and an interrupted one is still
 //     openable; pi must itself be inside tmux, on a server OTHER than the
 //     subagent one, and a client viewing pi's pane must exist (probed by session
-//     AND window, with `-c <client>` passed to display-popup, because tmux's own
-//     `-t <pane>` client resolution falls back to the most recently active
-//     client on the whole server). Only then is the Escape binding applied and the
+//     AND window, then the most recently active client among those on the window
+//     is passed as `-c <client>` to display-popup, because tmux's own `-t <pane>`
+//     client resolution falls back to the most recently active client on the
+//     whole server, and two clients can share a session and window). Only then is
+//     the Escape binding applied and the
 //     popup launched detached and unref'd — never awaited, because tmux's
 //     display-popup CLI blocks until the popup closes, and never held as a
 //     child handle, because that would keep pi alive after the panel closed.
@@ -973,12 +975,19 @@ async function openSubagentPanel(deps: OpenPanelDeps, runId: string): Promise<vo
 		notify("That tmux pane is gone.");
 		return;
 	}
-	const clients = await deps.exec("tmux", ["-S", outerSocket, "list-clients", "-t", outerSession, "-F", "#{client_tty}\t#{window_id}"]);
+	const clients = await deps.exec("tmux", ["-S", outerSocket, "list-clients", "-t", outerSession, "-F", "#{client_tty}\t#{window_id}\t#{client_activity}"]);
+	// Several clients can be looking at the same window (two terminals attached to
+	// the same session). Pick the most recently active one: that is the terminal
+	// the person just clicked in, and it is the signal tmux itself falls back to
+	// when no client is named. Picking the first listed instead is what drew the
+	// popup over an idle second terminal during validation.
 	const client = clients.stdout
 		.split("\n")
 		.map((line) => line.split("\t"))
-		.find(([, window]) => window?.trim() === outerWindow)?.[0]
-		?.trim();
+		.filter(([, window]) => window?.trim() === outerWindow)
+		.map(([tty, , activity]) => ({ tty: tty?.trim() ?? "", activity: Number.parseInt(activity ?? "", 10) || 0 }))
+		.filter((entry) => entry.tty)
+		.sort((a, b) => b.activity - a.activity)[0]?.tty;
 	if (clients.code !== 0 || !client) {
 		notify("No attached tmux client viewing this pane to open the panel in. Attach first, then click again.");
 		return;

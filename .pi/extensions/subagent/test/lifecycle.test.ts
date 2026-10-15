@@ -193,7 +193,7 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 			// which they must not disturb: the client probe is not a liveness poll.
 			// The failure variants of these guards are unit-tested in panel.test.ts.
 			if (joined.includes("#{session_name}")) return { code: 0, stdout: "pi-1\t@1\n", stderr: "" };
-			if (joined.includes("list-clients")) return { code: 0, stdout: "/dev/pts/1\t@1\n", stderr: "" };
+			if (joined.includes("list-clients")) return { code: 0, stdout: "/dev/pts/1\t@1\t100\n", stderr: "" };
 			if (joined.includes("has-session") || joined.includes("detach-client")) return { code: 0, stdout: "", stderr: "" };
 			const paneCall = joined.includes("capture-pane") || joined.includes("display-message");
 			// A tick starts at its capture-pane, so the counter resets there.
