@@ -288,7 +288,11 @@ export class FileBrowser extends Container implements Focusable {
 		const items: SelectItem[] = shown.map((entry) => {
 			const base = entry.isDir ? `${entry.name}/` : entry.name;
 			const display = sanitizeDisplay(base);
-			const label = this.changed.has(entry.path) ? this.theme.fg("error", display) : display;
+			const hasChangedDescendant =
+				entry.isDir &&
+				Array.from(this.changed).some((changedPath) => changedPath.startsWith(`${entry.path}/`));
+			const isChanged = this.changed.has(entry.path) || hasChangedDescendant;
+			const label = isChanged ? this.theme.fg("error", display) : display;
 			return {
 				// Display is sanitized; `value` stays the byte-faithful path.
 				value: entry.path,
