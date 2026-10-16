@@ -105,15 +105,6 @@ function isObject(value: unknown): value is Record<string, unknown> {
 	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function bool(value: unknown, fallback: boolean): boolean {
-	return typeof value === "boolean" ? value : fallback;
-}
-
-function num(value: unknown, fallback: number, min: number, max: number): number {
-	if (typeof value !== "number" || !Number.isFinite(value)) return fallback;
-	return Math.min(max, Math.max(min, value));
-}
-
 function str(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim() : undefined;
 }
@@ -176,6 +167,111 @@ export interface LoadConfigOptions {
 	warn?: (message: string) => void;
 }
 
+/** A warning sink; the loader's `warn` and the config parser's are the same shape. */
+type Warn = (message: string) => void;
+
+/**
+ * A layer has nothing to say about a field, so the value already there stands.
+ * Distinct from `undefined`, which is a real value that clears an optional field
+ * (a file `bitrateKbps: null`). The previous twin blocks encoded the same
+ * distinction as "only assign when set", one `if` at a time.
+ */
+const LEAVE = Symbol("leave");
+
+/** One field's two readings: a typed voice.json value, and an env string. */
+interface FieldSpec {
+	readonly key: keyof VoiceConfig;
+	readonly env: string;
+	fromFile(value: unknown, warn: Warn): unknown;
+	fromEnv(value: string | undefined, warn: Warn): unknown;
+}
+
+/** A missing, empty or non-string value leaves the field alone. Used for both
+ * required fields (which keep their default) and optional ones (which stay
+ * absent, so the defaults still compare equal). */
+function stringField(key: keyof VoiceConfig, env: string): FieldSpec {
+	const read = (value: unknown): unknown => str(value) ?? LEAVE;
+	return { key, env, fromFile: read, fromEnv: read };
+}
+
+/** As {@link stringField}, with trailing slashes stripped so the endpoint join
+ * never produces a double slash. */
+function baseUrlField(key: keyof VoiceConfig, env: string): FieldSpec {
+	const read = (value: unknown): unknown => {
+		const raw = str(value);
+		return raw === undefined ? LEAVE : stripTrailingSlashes(raw);
+	};
+	return { key, env, fromFile: read, fromEnv: read };
+}
+
+/** A JSON boolean in the file; `parseEnvBool` for the env, where values are
+ * strings and "false" must not read as present-means-on. */
+function boolField(key: keyof VoiceConfig, env: string): FieldSpec {
+	return {
+		key,
+		env,
+		fromFile: (value) => (typeof value === "boolean" ? value : LEAVE),
+		fromEnv: (value) => parseEnvBool(value) ?? LEAVE,
+	};
+}
+
+/** An integer clamped to [min, max] and rounded, from either layer. */
+function intField(key: keyof VoiceConfig, env: string, min: number, max: number): FieldSpec {
+	const coerce = (value: number): number => Math.round(Math.min(max, Math.max(min, value)));
+	return {
+		key,
+		env,
+		fromFile: (value) => (typeof value === "number" && Number.isFinite(value) ? coerce(value) : LEAVE),
+		fromEnv: (value) => {
+			const parsed = parseEnvInt(value);
+			return parsed === undefined ? LEAVE : coerce(parsed);
+		},
+	};
+}
+
+/** An optional positive integer. A file `null` clears it; a value that is not a
+ * positive integer warns and is ignored. Each layer names the source the reader
+ * saw — the JSON key, or the `PI_VOICE_*` variable. */
+function bitrateField(key: keyof VoiceConfig, env: string): FieldSpec {
+	return {
+		key,
+		env,
+		fromFile: (value, warn) => {
+			if (value === undefined) return LEAVE; // key absent: JSON has no `undefined`
+			if (value === null) return undefined; // explicit clear
+			const bitrate = positiveInt(value);
+			if (bitrate !== undefined) return bitrate;
+			warn(`voice: ignoring bitrateKbps ${JSON.stringify(value)}: expected a positive integer`);
+			return LEAVE;
+		},
+		fromEnv: (value, warn) => {
+			const parsed = parseEnvInt(value);
+			if (parsed === undefined) return LEAVE;
+			const bitrate = positiveInt(parsed);
+			if (bitrate !== undefined) return bitrate;
+			warn(`voice: ignoring ${env}=${value}: expected a positive integer`);
+			return LEAVE;
+		},
+	};
+}
+
+/** Every configurable field, in the order the two hand-written passes applied
+ * them. Adding a field is one entry here, plus its type and default. */
+const FIELDS: readonly FieldSpec[] = [
+	stringField("sshTarget", VOICE_ENV.sshTarget),
+	stringField("recorderPath", VOICE_ENV.recorderPath),
+	intField("maxSeconds", VOICE_ENV.maxSeconds, MAX_SECONDS_MIN, MAX_SECONDS_MAX),
+	bitrateField("bitrateKbps", VOICE_ENV.bitrateKbps),
+	boolField("keepAudio", VOICE_ENV.keepAudio),
+	boolField("autoSubmit", VOICE_ENV.autoSubmit),
+	baseUrlField("baseUrl", VOICE_ENV.baseUrl),
+	stringField("model", VOICE_ENV.model),
+	stringField("apiKey", VOICE_ENV.apiKey),
+	stringField("language", VOICE_ENV.language),
+	stringField("prompt", VOICE_ENV.prompt),
+	intField("timeoutMs", VOICE_ENV.timeoutMs, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS),
+];
+
 export function loadConfig(options: LoadConfigOptions = {}): VoiceConfig {
 	const env = options.env ?? process.env;
 	const path = options.path ?? configPath(env);
@@ -184,61 +280,15 @@ export function loadConfig(options: LoadConfigOptions = {}): VoiceConfig {
 
 	const config: VoiceConfig = { ...DEFAULT_CONFIG };
 
-	if (Object.keys(file).length > 0) {
-		config.sshTarget = str(file.sshTarget) ?? config.sshTarget;
-		config.recorderPath = str(file.recorderPath) ?? config.recorderPath;
-		config.maxSeconds = Math.round(num(file.maxSeconds, config.maxSeconds, MAX_SECONDS_MIN, MAX_SECONDS_MAX));
-		if ("bitrateKbps" in file) {
-			if (file.bitrateKbps === undefined || file.bitrateKbps === null) {
-				config.bitrateKbps = undefined;
-			} else {
-				const bitrate = positiveInt(file.bitrateKbps);
-				if (bitrate !== undefined) config.bitrateKbps = bitrate;
-				else warn?.(`voice: ignoring bitrateKbps ${JSON.stringify(file.bitrateKbps)}: expected a positive integer`);
-			}
-		}
-		if ("keepAudio" in file) config.keepAudio = bool(file.keepAudio, config.keepAudio);
-		if ("autoSubmit" in file) config.autoSubmit = bool(file.autoSubmit, config.autoSubmit);
-		const baseUrl = str(file.baseUrl);
-		if (baseUrl) config.baseUrl = stripTrailingSlashes(baseUrl);
-		config.model = str(file.model) ?? config.model;
-		// Optional fields are only assigned when set: `apiKey: undefined` would
-		// be an own property, and the defaults would stop comparing equal.
-		const fileApiKey = str(file.apiKey);
-		if (fileApiKey) config.apiKey = fileApiKey;
-		const fileLanguage = str(file.language);
-		if (fileLanguage) config.language = fileLanguage;
-		const filePrompt = str(file.prompt);
-		if (filePrompt) config.prompt = filePrompt;
-		config.timeoutMs = Math.round(num(file.timeoutMs, config.timeoutMs, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS));
+	// Later layers win: the file first, then the environment. One loop over the
+	// field table replaces the twin per-field blocks, so adding a field is one
+	// entry there instead of a line in each hand-written pass.
+	for (const field of FIELDS) {
+		const fromFile = field.fromFile(file[field.key], warn);
+		if (fromFile !== LEAVE) (config as Record<string, unknown>)[field.key] = fromFile;
+		const fromEnv = field.fromEnv(env[field.env], warn);
+		if (fromEnv !== LEAVE) (config as Record<string, unknown>)[field.key] = fromEnv;
 	}
-
-	// Environment wins so a one-off run can be redirected without editing files.
-	config.sshTarget = str(env[VOICE_ENV.sshTarget]) ?? config.sshTarget;
-	config.recorderPath = str(env[VOICE_ENV.recorderPath]) ?? config.recorderPath;
-	const envMax = parseEnvInt(env[VOICE_ENV.maxSeconds]);
-	if (envMax !== undefined) config.maxSeconds = Math.round(num(envMax, config.maxSeconds, MAX_SECONDS_MIN, MAX_SECONDS_MAX));
-	const envBitrate = parseEnvInt(env[VOICE_ENV.bitrateKbps]);
-	if (envBitrate !== undefined) {
-		const bitrate = positiveInt(envBitrate);
-		if (bitrate !== undefined) config.bitrateKbps = bitrate;
-		else warn?.(`voice: ignoring ${VOICE_ENV.bitrateKbps}=${env[VOICE_ENV.bitrateKbps]}: expected a positive integer`);
-	}
-	const envKeepAudio = parseEnvBool(env[VOICE_ENV.keepAudio]);
-	if (envKeepAudio !== undefined) config.keepAudio = envKeepAudio;
-	const envAutoSubmit = parseEnvBool(env[VOICE_ENV.autoSubmit]);
-	if (envAutoSubmit !== undefined) config.autoSubmit = envAutoSubmit;
-	const envBaseUrl = str(env[VOICE_ENV.baseUrl]);
-	if (envBaseUrl) config.baseUrl = stripTrailingSlashes(envBaseUrl);
-	config.model = str(env[VOICE_ENV.model]) ?? config.model;
-	const envApiKey = str(env[VOICE_ENV.apiKey]);
-	if (envApiKey) config.apiKey = envApiKey;
-	const envLanguage = str(env[VOICE_ENV.language]);
-	if (envLanguage) config.language = envLanguage;
-	const envPrompt = str(env[VOICE_ENV.prompt]);
-	if (envPrompt) config.prompt = envPrompt;
-	const envTimeout = parseEnvInt(env[VOICE_ENV.timeoutMs]);
-	if (envTimeout !== undefined) config.timeoutMs = Math.round(num(envTimeout, config.timeoutMs, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS));
 
 	return config;
 }
