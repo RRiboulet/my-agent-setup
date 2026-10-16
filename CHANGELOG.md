@@ -114,6 +114,13 @@ Maintenance:
   work behind them, the write-then-cancel race and the barriers around
   `deliver`. No behaviour change.
 
+- **The voice recorder's kept-audio path is a parameter, not a field.** The path
+  a failed or `keepAudio` cycle leaves on disk lived in `#keptPath`, set just
+  before one emitted status and cleared just after, so its value was only
+  meaningful between two adjacent statements. It now rides on the status that
+  names it (`#fail(..., localPath)` and `#finishCycle(localPath)`), which removes
+  the set/clear dance and the ordering contract. No behaviour change.
+
 - **Reviews must be asked for, and take their model from the triage config.**
   `triage_change` is recommendation-only — it never launches a reviewer — but the
   rule that a human approves every review agent lived only in that tool's
