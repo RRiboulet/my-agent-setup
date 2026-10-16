@@ -19,7 +19,8 @@
       ".pi/extensions/review.ts",
       ".pi/extensions/session-breakdown.ts",
       ".pi/extensions/todos.ts",
-      ".pi/extensions/subagent/index.ts"
+      ".pi/extensions/subagent/index.ts",
+      ".pi/extensions/voice/index.ts"
     ],
     "skills": [
       ".pi/skills/commit",
