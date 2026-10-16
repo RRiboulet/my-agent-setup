@@ -72,6 +72,20 @@ Maintenance:
   history, and step 5 brings `dev` up to date. The vendored github skill's
   local adaptation says the same.
 
+- **The commit identity is pinned to a noreply address on every container
+  creation.** Commit metadata is public as soon as a branch is pushed: the
+  author and committer addresses and every `Co-authored-by:` trailer live in the
+  commit object, so a personal address there can only be removed by rewriting
+  the history of every branch and tag — and even then it survives in forks and
+  in GitHub's cached commit views. The container-local `~/.gitconfig` held a
+  personal address, which is how it reached this repository's earlier history.
+  `.devcontainer/postCreate.sh` now sets `user.name`/`user.email` to the GitHub
+  noreply identity on every container creation, which is what makes it outlast a
+  rebuild (home is otherwise discarded with `/home/vscode`). It is applied in
+  `postCreate` rather than the Dockerfile so a personal identity is not baked
+  into an image others may build, and with `--global` rather than `--system`
+  because it is the user's identity, not the machine's.
+
 ## v1.6.0 — 2026-10-15
 
 Added:
