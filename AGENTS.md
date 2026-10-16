@@ -200,6 +200,26 @@ There is no blocking wait, so collecting a result means polling
 `subagent_status` — `subagent_status({ compact: true })` is the cheap
 one-line-per-run form, and the single-run path is the one that returns output.
 
+## Review subagents: ask first, and take the model from the triage config
+
+`triage_change` (the tool) and `/triage` are **recommendation-only**. They gather
+evidence, ask the judge, and return a plan; they never launch a review, switch a
+model, or run a test. Nothing in this repo starts a reviewer on its own.
+
+**Always ask the user before launching a review subagent.** A recommendation is
+not an instruction, and a question that merely *sounds* like it invites a review
+is not approval either: starting a reviewer spends real tokens and runs an
+independent process, so it is the user's call every time. Propose the lenses and
+models, then wait for a yes.
+
+When the user does approve one, the reviewer's `provider`, `model` and
+`thinking` come from the `candidates` in `~/.pi/agent/review-triage.json` — for a
+single change, the model `triage_change` names; for a multi-lens review (which
+`triage_change` does not serve, because it resolves one profile), a model picked
+from that `candidates` list per lens. Never hand-pick a model outside the list:
+if a lens needs a model the config lacks, add it to the config first. Which
+model sits in which capability band is a human judgement, not the agent's.
+
 ## Tests
 
 ```bash

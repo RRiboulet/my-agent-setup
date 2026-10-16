@@ -86,6 +86,18 @@ Maintenance:
   into an image others may build, and with `--global` rather than `--system`
   because it is the user's identity, not the machine's.
 
+- **Reviews must be asked for, and take their model from the triage config.**
+  `triage_change` is recommendation-only — it never launches a reviewer — but the
+  rule that a human approves every review agent lived only in that tool's
+  description, which is not in context unless the tool is called. Three `/voice`
+  review subagents were therefore started on hand-picked models that were not in
+  `~/.pi/agent/review-triage.json`: the triage catalog and the free-form
+  `subagent` overrides had no link between them. `AGENTS.md` now states the rule
+  where every session reads it — always ask the user before starting a review
+  subagent, and take the reviewer's `provider`/`model`/`thinking` from the
+  config's `candidates` rather than hand-picking one, adding a model to the
+  config first if a lens needs one it lacks.
+
 ## v1.6.0 — 2026-10-15
 
 Added:
