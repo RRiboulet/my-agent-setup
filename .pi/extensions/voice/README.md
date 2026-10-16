@@ -1,0 +1,158 @@
+# voice
+
+Dictation with the phone as the microphone. `/voice` starts
+`termux-microphone-record` on a phone reachable over ssh, the second `/voice`
+stops it, fetches the m4a, POSTs it to an OpenAI-compatible
+`/audio/transcriptions` endpoint, and pastes the transcript at the cursor — or
+submits it as a prompt. The container never touches a microphone; everything
+device-side happens on the phone over ssh.
+
+**Ours, not vendored.** `ctrl+shift+r` toggles the same cycle for terminals
+that forward Kitty-protocol keys; `/voice cancel` aborts any phase.
+
+## Usage
+
+```
+/voice          start recording; press again to stop, fetch, transcribe, paste
+/voice cancel   abort the current cycle at any phase
+```
+
+The status line moves `starting…` → `● rec m:ss` → `stopping…` → `fetching…` →
+`transcribing…` and clears when the cycle ends; the footer key is `voice`.
+
+`ctrl+shift+r` needs the Kitty protocol (or modifyOtherKeys): on a legacy
+terminal the keypress is silently ignored, which is why `/voice` is the
+reliable trigger — especially on the phone's soft keyboard.
+
+Where the transcript goes:
+
+- **Default:** pasted into the editor at the cursor. pi collapses a paste over
+  10 lines or 1000 characters into a `[paste #n]` marker and expands it again
+  on submit, so a long dictation is one editor line until you use it.
+- **`autoSubmit: true`:** submitted directly — `sendUserMessage(text)` when the
+  agent is idle, `{ deliverAs: "followUp" }` while it is streaming. Prompt
+  templates are never expanded, so a transcript that starts with `/` is content
+  on this path.
+- **No editor** (non-interactive session): submitted, with the same
+  idle/streaming routing as `autoSubmit`.
+
+Cancel never pastes. Per phase it aborts, stops the phone best-effort when a
+recording may be running, and drops the local and/or remote file: recording
+phases delete the remote original; fetching deletes both; transcribing aborts
+the upload and deletes the local copy. `session_shutdown` runs the same cleanup
+under its own short budget, because pi awaits shutdown handlers with no
+timeout of its own.
+
+## Phone prerequisites
+
+Termux (the terminal app) plus the Termux:API app, on the same phone:
+
+- `pkg install termux-api openssh` — `termux-microphone-record` comes from the
+  termux-api package. The first recording triggers Android's RECORD_AUDIO
+  permission prompt for Termux:API; a denied permission makes the recorder
+  fail.
+- `sshd` running in Termux, the devcontainer's key in `~/.ssh/authorized_keys`,
+  and a host alias in `~/.ssh/config` — the default `sshTarget` is `phone`, and
+  `ssh phone true` should succeed before `/voice` is tried.
+- **Use the absolute recorder path.** The non-interactive ssh `PATH` does not
+  include Termux's `usr/bin`, so a bare `termux-microphone-record` fails there.
+  The default, verified on 2026-10-15, is
+  `/data/data/com.termux/files/usr/bin/termux-microphone-record`; set
+  `recorderPath` if your install lives elsewhere.
+
+Recorder state on the phone is **device-global**: a second start fails with
+`Recording already in progress!`, and *any* `-q` stops whatever is recording.
+The extension sends `-q` only to stop its own cycle (and best-effort on cancel)
+— never as a "fix" for an unexpected state, because that would kill a recording
+it does not own. `maxSeconds` is passed to the phone as `-l`; the local timer
+fires a few seconds later, so the phone's own limit wins. The cap is clamped to
+1–900 seconds and 0 is never sent (`-l <= 0` means "unlimited" to the
+recorder).
+
+## Configuration
+
+`~/.pi/agent/voice.json`, all fields optional, every field also overridable
+with a `PI_VOICE_*` environment variable. A missing file is the normal first
+run; a malformed one warns once and is ignored, because `/voice` must stay
+registered even when the config cannot be read.
+
+| Field | Default | Env | Notes |
+|---|---|---|---|
+| `sshTarget` | `phone` | `PI_VOICE_SSH_TARGET` | ssh alias (or `user@host`) |
+| `recorderPath` | absolute Termux path | `PI_VOICE_RECORDER_PATH` | absolute path on the phone |
+| `maxSeconds` | `120` | `PI_VOICE_MAX_SECONDS` | clamped 1–900; passed as `-l`, never 0 |
+| `bitrateKbps` | unset | `PI_VOICE_BITRATE_KBPS` | optional `-b` encoder bitrate |
+| `keepAudio` | `false` | `PI_VOICE_KEEP_AUDIO` | keep the local m4a after success |
+| `autoSubmit` | `false` | `PI_VOICE_AUTO_SUBMIT` | submit instead of pasting |
+| `baseUrl` | `https://api.openai.com/v1` | `PI_VOICE_BASE_URL` | OpenAI-compatible root; trailing slashes stripped |
+| `model` | `gpt-4o-transcribe` | `PI_VOICE_MODEL` | must accept `response_format` |
+| `apiKey` | unset | `PI_VOICE_API_KEY` | explicit key, see below |
+| `language` | unset | `PI_VOICE_LANGUAGE` | optional hint (`gpt-4o-mini-transcribe` rejects it) |
+| `prompt` | unset | `PI_VOICE_PROMPT` | optional vocabulary/style hint (same caveat) |
+| `timeoutMs` | `60000` | `PI_VOICE_TIMEOUT_MS` | upload timeout, clamped 5000–300000 |
+
+Booleans accept `1/true/yes/on` and `0/false/no/off`; an unrecognised value is
+ignored rather than guessed.
+
+## Transcription and keys
+
+- **Key routing.** An explicit `apiKey` (file or `PI_VOICE_API_KEY`) wins.
+  `OPENAI_API_KEY` and the model registry's OpenAI key are consulted only when
+  `baseUrl` is the OpenAI default, so one provider's credential is never sent
+  to another endpoint. A custom endpoint without an explicit key is called
+  **unauthenticated** — self-hosted servers commonly need none, and a cloud one
+  answers 401 in plain words.
+- **Request.** multipart `file` (the m4a), `model`, `response_format: json`,
+  plus `language`/`prompt` only when set. `response_format` is `json` or
+  `text`; `verbose_json` is never used.
+- **Exactly one retry.** A 400 whose body names `response_format` is retried
+  once with `text` (some compatible servers reject `json`). The retry
+  re-uploads the audio and can be billed twice, which is why nothing else is
+  retried.
+- **25 MB.** The local file is checked before it is read and the buffer before
+  the POST; the API's documented cap is *at most* 25 MB, so exactly 25 MB is
+  still sent.
+- **Failures** are typed (non-2xx / network / empty body / too large) and carry
+  a one-line message; a timeout is 60 s by default.
+
+## Two cautions
+
+- **A failed transcription keeps the recording.** The notice names the path
+  (`handling the recording failed: … — audio kept at <path>`) so it can be
+  retried by hand; this is not governed by `keepAudio`. `/voice cancel` from
+  that error phase removes the file unless `keepAudio: true`.
+- **A pasted transcript is submitted by you, not by the extension.** On the
+  paste path, pressing Enter is a normal editor submission: a transcript that
+  begins with `/` (a registered command) or `!` executes as that command or
+  shell line. Reword it first if the dictation happens to start that way.
+  `autoSubmit` does not have this caveat — it never expands prompt templates.
+
+## Manual checklist
+
+What the unit suite cannot prove — it needs the real phone and an STT key:
+
+1. First `/voice`: grant Android's RECORD_AUDIO permission to Termux:API, speak,
+   `/voice` again — the transcript lands at the cursor.
+2. `/voice cancel` in each phase (starting / recording / fetching /
+   transcribing): no paste, `$HOME/.pi-voice/` on the phone and the local temp
+   dir both empty.
+3. `maxSeconds` expiry with a short cap: the phone stops itself, and the stop
+   path treats `No recording to stop` as success because the file exists and is
+   non-empty.
+4. A second pi session running `/voice` while the phone records: the
+   already-in-progress hint, and nothing on the phone is killed.
+5. Quit pi while recording: shutdown stays bounded and the phone stops.
+6. `bitrateKbps`: `-b` acceptance on your device.
+7. A transcript over 10 lines: the `[paste #n]` marker in the editor and
+   expansion on submit.
+8. Key resolution with no `PI_VOICE_*` vars set, and the airplane-mode failure
+   path.
+
+## Files
+
+| File | Role |
+|---|---|
+| `index.ts` | registration, `/voice`, `ctrl+shift+r`, status rendering, deliver (read → transcribe → present) |
+| `config.ts` | defaults, `voice.json` + `PI_VOICE_*` merge, malformed-file warning |
+| `recorder.ts` | command builders and the recorder state machine (start / stop / cancel / shutdown) |
+| `transcribe.ts` | multipart POST, key routing, typed failures, the single `response_format` retry |

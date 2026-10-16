@@ -4,6 +4,32 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Added:
+
+- **`/voice` — dictate with the phone as the microphone.** `/voice` starts
+  `termux-microphone-record` on a phone reachable over ssh; the second `/voice`
+  stops it, fetches the m4a, and POSTs it to an OpenAI-compatible
+  `/audio/transcriptions` endpoint. The transcript is pasted into the editor at
+  the cursor (a paste over 10 lines or 1000 characters collapses to pi's
+  `[paste #n]` marker and expands again on submit), or submitted as a prompt
+  with `autoSubmit` — plain send when the agent is idle, `deliverAs:
+  "followUp"` while it streams. `/voice cancel` aborts any phase without
+  pasting, and `ctrl+shift+r` toggles the recorder on terminals that forward
+  Kitty-protocol keys.
+
+  The uploader is deliberately narrow. An explicit key wins, and the ambient
+  OpenAI key (environment or model registry) is only sent when `baseUrl` is the
+  OpenAI default — a custom endpoint is called unauthenticated unless it is
+  given a key. The only retry is a single `text`-format re-upload after a 400
+  that names `response_format` (it re-bills, hence exactly one); recordings
+  over the 25 MB cap are refused before the read, the POST has a 60 s timeout,
+  and a failed transcription keeps the recording on disk and says where,
+  rather than losing it.
+
+  Phone prerequisites (Termux + Termux:API, the absolute recorder path and the
+  non-interactive ssh `PATH` caveat), the configuration table and the manual
+  smoke checklist are in `.pi/extensions/voice/README.md`.
+
 ## v1.6.0 — 2026-10-15
 
 Added:
