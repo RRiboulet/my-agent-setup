@@ -49,6 +49,16 @@ Maintenance:
   container-side setup and the post-rebuild contract are documented in
   `.devcontainer/voice-container.md`, with a pointer from the voice README.
 
+  Two details the rebuild contract rests on, both found by exercising the
+  script against a simulated teardown rather than by reading it. Liveness is
+  probed by *connecting* to the daemon's socket (`nc -z -U`), not by testing
+  that the socket file exists: a container teardown SIGKILLs `tailscaled`,
+  which leaves the socket file behind, so an existence check reports a dead
+  daemon as running and skips the launch. And every script here is invoked
+  through an interpreter (`bash`/`sh`): this checkout is bind-mounted with
+  `core.fileMode false`, so the exec bit is not in git and `./script.sh`
+  fails with "Permission denied".
+
 - **The pull request workflow now names its base branch.** `AGENTS.md`'s step 3
   said only `gh pr create --fill`, but this repository's **default branch is
   `main`**, and `gh pr create` without `--base` opens the pull request against
