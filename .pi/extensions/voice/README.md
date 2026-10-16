@@ -73,6 +73,24 @@ fires a few seconds later, so the phone's own limit wins. The cap is clamped to
 1–900 seconds and 0 is never sent (`-l <= 0` means "unlimited" to the
 recorder).
 
+## Container rebuilds
+
+The extension lives in this repo, so a container rebuild costs nothing on
+its own. Three container-side pieces of the `/voice` setup do not survive a
+rebuild — the ssh config under `~/.ssh`, the `netcat-openbsd` package the
+ssh proxy command needs, and the `tailscaled` process that tunnels to the
+phone — and one command puts them all back:
+
+```
+bash /workspace/.devcontainer/restore-post-rebuild.sh
+```
+
+The devcontainer's post-create hook runs it automatically on container
+creation. What the container-side setup is (ssh key, tailscale tunnel, ssh
+config, `voice.json`) and how to redo it from scratch if the pi-config volume
+is ever wiped is documented in `.devcontainer/voice-container.md`, with the
+phone-side steps in the prerequisites above.
+
 ## Configuration
 
 `~/.pi/agent/voice.json`, all fields optional, every field also overridable
