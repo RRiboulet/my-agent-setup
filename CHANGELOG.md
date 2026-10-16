@@ -121,6 +121,18 @@ Maintenance:
   names it (`#fail(..., localPath)` and `#finishCycle(localPath)`), which removes
   the set/clear dance and the ordering contract. No behaviour change.
 
+- **The voice config loader is one field table instead of two hand-written
+  passes.** `loadConfig` applied each of its twelve fields twice, once for
+  `voice.json` and once for `PI_VOICE_*`, and the two blocks were free to drift:
+  a field added to one and not the other would silently stop responding to that
+  layer. Each field now declares both readings once — `stringField`,
+  `baseUrlField`, `boolField`, `intField`, `bitrateField` — in a `FIELDS` table
+  the loader loops over, and a `LEAVE` sentinel says when a layer has nothing to
+  say. That is also how a missing value keeps its default while an explicit
+  `bitrateKbps: null` still clears the field. The file grew by about fifty lines,
+  all of it named per-kind coercion and its reasoning; the point is that no field
+  is written twice, not that the file shrank.
+
 - **Reviews must be asked for, and take their model from the triage config.**
   `triage_change` is recommendation-only — it never launches a reviewer — but the
   rule that a human approves every review agent lived only in that tool's
