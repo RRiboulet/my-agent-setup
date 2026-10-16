@@ -228,7 +228,6 @@ export class Recorder {
 	#localPath: string | undefined;
 	#failure: RecorderFailure | undefined;
 	#message: string | undefined;
-	#keptPath: string | undefined;
 	#cancelling: Promise<void> | undefined;
 	#shutdown: Promise<void> | undefined;
 
@@ -268,7 +267,6 @@ export class Recorder {
 		this.#localPath = localRecordingPath(id, this.#tmpDir);
 		this.#failure = undefined;
 		this.#message = undefined;
-		this.#keptPath = undefined;
 		this.#setPhase("starting");
 
 		const result = await this.#runStage({
@@ -380,18 +378,19 @@ export class Recorder {
 			await this.#deliver(localPath, signal);
 		} catch (error) {
 			if (signal.aborted) return;
-			// Set before #fail so the emitted error status carries localPath
-			// (the snapshot reads it synchronously), cleared once it is out.
-			this.#keptPath = localPath;
-			this.#fail("deliver-failed", `handling the recording failed: ${(error as Error).message}`);
-			this.#keptPath = undefined;
+			// The path travels with the failure status, so a caller can tell the user
+			// where the audio is without a field whose lifetime is an ordering
+			// contract.
+			this.#fail("deliver-failed", `handling the recording failed: ${(error as Error).message}`, localPath);
 			return;
 		}
 		if (signal.aborted) return;
 
-		if (this.#config.keepAudio) this.#keptPath = localPath;
-		else await this.#rmSafe(localPath);
-		this.#finishCycle();
+		if (this.#config.keepAudio) this.#finishCycle(localPath);
+		else {
+			await this.#rmSafe(localPath);
+			this.#finishCycle();
+		}
 	}
 
 	/**
@@ -587,40 +586,41 @@ export class Recorder {
 		});
 	}
 
-	#fail(failure: RecorderFailure, message: string): void {
+	/** `keptPath`, when given, rides on this one emitted status — set before
+	 * `#fail` so an error carries it, and on `#finishCycle` so the idle notice
+	 * can name the audio — rather than living in a field whose value is only
+	 * meaningful between two adjacent statements. */
+	#fail(failure: RecorderFailure, message: string, keptPath?: string): void {
 		this.#failure = failure;
 		this.#message = message;
-		this.#setPhase("error");
+		this.#setPhase("error", keptPath);
 	}
 
-	#setPhase(phase: VoicePhase): void {
+	#setPhase(phase: VoicePhase, keptPath?: string): void {
 		this.#phase = phase;
 		if (phase !== "error") {
 			this.#failure = undefined;
 			this.#message = undefined;
 		}
-		this.#emit();
+		this.#emit(keptPath);
 	}
 
-	#emit(): void {
-		this.#status(this.#snapshot());
+	#emit(keptPath?: string): void {
+		this.#status(this.#snapshot(keptPath));
 	}
 
-	#snapshot(): RecorderStatus {
+	#snapshot(keptPath?: string): RecorderStatus {
 		const status: RecorderStatus = { phase: this.#phase };
 		if (this.#phase === "recording") status.elapsedSeconds = Math.max(0, this.#lastTickSecond);
 		if (this.#failure) status.failure = this.#failure;
 		if (this.#message) status.message = this.#message;
-		if (this.#keptPath) status.localPath = this.#keptPath;
+		if (keptPath) status.localPath = keptPath;
 		return status;
 	}
 
-	#finishCycle(): void {
+	#finishCycle(keptPath?: string): void {
 		this.#clearCycle();
-		// #keptPath intentionally survives into the idle event, so a caller can
-		// tell the user where the audio is; it must not survive past it.
-		this.#setPhase("idle");
-		this.#keptPath = undefined;
+		this.#setPhase("idle", keptPath);
 	}
 
 	#clearCycle(): void {
