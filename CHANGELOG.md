@@ -30,6 +30,24 @@ Added:
   non-interactive ssh `PATH` caveat), the configuration table and the manual
   smoke checklist are in `.pi/extensions/voice/README.md`.
 
+Fixed:
+
+- **A failed local unlink can no longer wedge `/voice` outside `idle`, and a
+  failed `ssh` spawn now says why.** Every *remote* cleanup was already bounded
+  and best-effort, but the local `rm` of the fetched recording was awaited bare:
+  a failing unlink (a read-only temp dir, a path that is not a file) rejected
+  `stop()` or `cancel()` before the state reset, so the recorder parked in
+  `transcribing` and a later `/voice cancel` could not recover it. Local deletes
+  now go through a best-effort `#rmSafe`, so the cycle always lands in `idle`; the
+  recording is left behind rather than the machine never finishing, which is how
+  the remote cleanup already behaved.
+
+  `#runSafe` also returned `undefined` on a thrown runner, so a missing `ssh`
+  binary, a DNS failure and a spawn `ENOENT` all surfaced as the same "the ssh
+  command … did not run". It now carries the thrown cause, and the failure text
+  includes it. `firstLine`/`describeError` moved to a shared `voice/util.ts`
+  because the recorder and transcription each had their own copy.
+
 Maintenance:
 
 - **The `/voice` container side now survives container rebuilds.** `/voice`

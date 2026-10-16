@@ -21,6 +21,7 @@
  */
 
 import { DEFAULT_CONFIG, type VoiceConfig } from "./config.ts";
+import { describeError, firstLine } from "./util.ts";
 
 /** OpenAI's documented upload cap for /audio/transcriptions. */
 export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
@@ -116,17 +117,6 @@ interface PostOutcome {
 
 /** One attempt either produced a response or a failure, never both. */
 type PostAttempt = { ok: true; outcome: PostOutcome } | { ok: false; failure: TranscribeError };
-
-function describeError(error: unknown): string {
-	if (!(error instanceof Error)) return String(error);
-	const cause: unknown = error.cause;
-	if (cause === undefined || cause === null) return error.message;
-	return `${error.message} (${cause instanceof Error ? cause.message : String(cause)})`;
-}
-
-function firstLine(text: string): string {
-	return text.split(/\r?\n/).find((line) => line.trim() !== "") ?? "";
-}
 
 async function postOnce(
 	endpoint: string,
