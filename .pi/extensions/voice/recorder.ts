@@ -39,6 +39,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { DEFAULT_RECORDER_PATH, MAX_SECONDS_MAX, MAX_SECONDS_MIN, type VoiceConfig } from "./config.ts";
+import { describeError, firstLine } from "./util.ts";
 
 /** Remote staging directory. Kept out of the shell's cwd: `$HOME` expands on
  * the phone, and the directory is created by the start command itself. */
@@ -89,6 +90,9 @@ export interface RunResult {
 }
 
 export type Run = (command: string, signal: AbortSignal) => Promise<RunResult>;
+
+/** `#runSafe`'s never-rejecting result: the value, or the thrown cause. */
+type RunOutcome = { ok: true; result: RunResult } | { ok: false; error: unknown };
 
 /** Injectable time, so tests can run a five-minute timer in microseconds. */
 export interface Clock {
@@ -267,7 +271,7 @@ export class Recorder {
 		this.#keptPath = undefined;
 		this.#setPhase("starting");
 
-		const result = await this.#runSafe(
+		const outcome = await this.#runSafe(
 			buildStartCommand({
 				id,
 				maxSeconds: this.#config.maxSeconds,
@@ -278,10 +282,14 @@ export class Recorder {
 		);
 		if (abort.signal.aborted) return; // a cancel owns the outcome now
 
-		if (!result) {
-			this.#fail("start-failed", "the ssh command that starts the recorder did not run");
+		if (!outcome.ok) {
+			this.#fail(
+				"start-failed",
+				`the ssh command that starts the recorder did not run: ${firstLine(describeError(outcome.error))}`,
+			);
 			return;
 		}
+		const result = outcome.result;
 		const output = combinedOutput(result);
 		if (/already in progress/i.test(output)) {
 			this.#fail(
@@ -329,12 +337,16 @@ export class Recorder {
 
 		this.#clearTimer();
 		this.#setPhase("stopping");
-		const stopped = await this.#runSafe(buildStopCommand(this.#config.recorderPath), signal);
+		const stoppedOutcome = await this.#runSafe(buildStopCommand(this.#config.recorderPath), signal);
 		if (signal.aborted) return;
-		if (!stopped) {
-			this.#fail("stop-failed", "the ssh command that stops the recorder did not run");
+		if (!stoppedOutcome.ok) {
+			this.#fail(
+				"stop-failed",
+				`the ssh command that stops the recorder did not run: ${firstLine(describeError(stoppedOutcome.error))}`,
+			);
 			return;
 		}
+		const stopped = stoppedOutcome.result;
 		const tolerated = /no recording to stop/i.test(combinedOutput(stopped));
 		if (stopped.code !== 0 && !tolerated) {
 			this.#fail("stop-failed", `stopping the recorder failed (exit ${stopped.code}): ${firstLine(stopped.stderr)}`);
@@ -342,12 +354,16 @@ export class Recorder {
 		}
 
 		this.#setPhase("fetching");
-		const fetched = await this.#runSafe(buildFetchCommand(id), signal);
+		const fetchedOutcome = await this.#runSafe(buildFetchCommand(id), signal);
 		if (signal.aborted) return;
-		if (!fetched) {
-			this.#fail("fetch-failed", "the ssh command that fetches the recording did not run");
+		if (!fetchedOutcome.ok) {
+			this.#fail(
+				"fetch-failed",
+				`the ssh command that fetches the recording did not run: ${firstLine(describeError(fetchedOutcome.error))}`,
+			);
 			return;
 		}
+		const fetched = fetchedOutcome.result;
 		if (fetched.code !== 0) {
 			this.#fail("fetch-failed", `fetching the recording failed (exit ${fetched.code}): ${firstLine(fetched.stderr)}`);
 			return;
@@ -365,7 +381,7 @@ export class Recorder {
 		if (signal.aborted) {
 			// A cancel landed while the file was being written; it already
 			// swept the directory, so the file we just created would leak.
-			await rm(localPath, { force: true });
+			await this.#rmSafe(localPath);
 			return;
 		}
 
@@ -387,7 +403,7 @@ export class Recorder {
 		if (signal.aborted) return;
 
 		if (this.#config.keepAudio) this.#keptPath = localPath;
-		else await rm(localPath, { force: true });
+		else await this.#rmSafe(localPath);
 		this.#finishCycle();
 	}
 
@@ -450,14 +466,14 @@ export class Recorder {
 			case "error":
 				await this.#bestEffortStop();
 				await this.#cleanupRemote(id);
-				if (localPath && !this.#config.keepAudio) await rm(localPath, { force: true });
+				if (!this.#config.keepAudio) await this.#rmSafe(localPath);
 				break;
 			case "fetching":
-				if (localPath) await rm(localPath, { force: true });
+				await this.#rmSafe(localPath);
 				await this.#cleanupRemote(id);
 				break;
 			case "transcribing":
-				if (localPath && !this.#config.keepAudio) await rm(localPath, { force: true });
+				if (!this.#config.keepAudio) await this.#rmSafe(localPath);
 				break;
 			case "idle":
 				break;
@@ -490,15 +506,39 @@ export class Recorder {
 	async #runBounded(command: string, budgetMs: number): Promise<RunResult | undefined> {
 		const abort = new AbortController();
 		const outcome = await this.#settleWithin(this.#runSafe(command, abort.signal), budgetMs);
-		if (!outcome.ok) abort.abort();
-		return outcome.ok ? outcome.value : undefined;
+		if (!outcome.ok) {
+			abort.abort();
+			return undefined;
+		}
+		return outcome.value.ok ? outcome.value.result : undefined;
 	}
 
-	async #runSafe(command: string, signal: AbortSignal): Promise<RunResult | undefined> {
+	/**
+	 * A run that never rejects: the result and the thrown cause are both
+	 * returned, so the caller can say *why* the command did not run (a missing
+	 * `ssh`, a DNS failure, a spawn `ENOENT`) instead of collapsing every cause
+	 * into "did not run".
+	 */
+	async #runSafe(command: string, signal: AbortSignal): Promise<RunOutcome> {
 		try {
-			return await this.#run(command, signal);
+			return { ok: true, result: await this.#run(command, signal) };
+		} catch (error) {
+			return { ok: false, error };
+		}
+	}
+
+	/**
+	 * Best-effort local delete. A failed unlink (a read-only tmpdir, a path that
+	 * is not a file) must never wedge the cycle in a non-idle phase: the
+	 * recording is left behind rather than the machine never finishing, which is
+	 * how the remote cleanup already behaves.
+	 */
+	async #rmSafe(path: string | undefined): Promise<void> {
+		if (!path) return;
+		try {
+			await rm(path, { force: true });
 		} catch {
-			return undefined;
+			// Intentionally ignored; see above.
 		}
 	}
 
@@ -590,8 +630,4 @@ export class Recorder {
  * printed on whichever stream; the exact one has not been pinned. */
 function combinedOutput(result: RunResult): string {
 	return `${result.stdout.toString("utf8")}\n${result.stderr}`;
-}
-
-function firstLine(text: string): string {
-	return text.split(/\r?\n/).find((line) => line.trim() !== "") ?? "";
 }

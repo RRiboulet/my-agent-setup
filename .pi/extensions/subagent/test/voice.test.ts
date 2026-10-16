@@ -9,7 +9,7 @@
 // extension-load.test.ts.
 
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
@@ -553,6 +553,26 @@ test("a generic start failure reports the exit and stderr", async () => {
 	}
 });
 
+test("a start whose ssh cannot be spawned reports the cause, not a bare 'did not run'", async () => {
+	const harness = await makeHarness({
+		respond: () => {
+			throw new Error("spawn ssh ENOENT");
+		},
+	});
+	try {
+		await harness.recorder.start();
+		const last = harness.statuses.at(-1);
+		assert.equal(last?.phase, "error");
+		assert.equal(last?.failure, "start-failed");
+		// The failure text still says what happened, and now why: the thrown
+		// cause is reported instead of collapsed into "did not run".
+		assert.match(last?.message ?? "", /did not run/);
+		assert.match(last?.message ?? "", /spawn ssh ENOENT/);
+	} finally {
+		await harness.cleanup();
+	}
+});
+
 test("a failed start is retryable from the error phase", async () => {
 	const harness = await makeHarness({
 		respond: (_call, index) => (index === 0 ? result("", 1, "boom") : result()),
@@ -604,6 +624,48 @@ test("stop fetches the audio, writes it 0600, cleans the phone, delivers, then d
 		assert.deepEqual(phases(harness.statuses), ["starting", "recording", "stopping", "fetching", "transcribing", "idle"]);
 		assert.equal(harness.statuses.at(-1)?.localPath, undefined);
 		await assert.rejects(stat(localPath), /ENOENT/);
+	} finally {
+		await harness.cleanup();
+	}
+});
+
+test("a failing local delete is swallowed: stop still reaches idle", async () => {
+	// `deliver` turns the fetched file into a directory, so the recorder's own
+	// rm(localPath, { force: true }) fails with EISDIR. The delete is
+	// best-effort, so the cycle must finish rather than wedge in `transcribing`.
+	const harness = await makeHarness({
+		respond: (call) => (call.command.startsWith("cat ") ? result(AUDIO) : result()),
+		deliver: async (localPath) => {
+			await rm(localPath, { force: true });
+			await mkdir(localPath);
+		},
+	});
+	try {
+		await harness.recorder.start();
+		await harness.recorder.stop();
+		assert.equal(harness.recorder.phase(), "idle");
+		assert.equal(phases(harness.statuses).at(-1), "idle");
+	} finally {
+		await harness.cleanup();
+	}
+});
+
+test("a failing local delete is swallowed: cancel during transcribing still reaches idle", async () => {
+	const harness = await makeHarness({
+		respond: (call) => (call.command.startsWith("cat ") ? result(AUDIO) : result()),
+		deliver: async (localPath, signal) => {
+			await rm(localPath, { force: true });
+			await mkdir(localPath);
+			await pendingOnAbort(signal);
+		},
+	});
+	try {
+		await harness.recorder.start();
+		const stopping = harness.recorder.stop();
+		await waitFor(() => harness.recorder.phase() === "transcribing");
+		await settleWithClock(harness.clock, harness.recorder.cancel());
+		await stopping;
+		assert.equal(harness.recorder.phase(), "idle");
 	} finally {
 		await harness.cleanup();
 	}
