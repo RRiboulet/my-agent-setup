@@ -377,6 +377,8 @@ export class Recorder {
 			await this.#deliver(localPath, signal);
 		} catch (error) {
 			if (signal.aborted) return;
+			// Set before #fail so the emitted error status carries localPath
+			// (the snapshot reads it synchronously), cleared once it is out.
 			this.#keptPath = localPath;
 			this.#fail("deliver-failed", `handling the recording failed: ${(error as Error).message}`);
 			this.#keptPath = undefined;

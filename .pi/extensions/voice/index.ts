@@ -29,8 +29,8 @@ import { loadConfig, type VoiceConfig } from "./config.ts";
 import { Recorder, type RecorderStatus, type Run } from "./recorder.ts";
 import { assertUploadSize, resolveApiKey, transcribeAudio } from "./transcribe.ts";
 
-/** One status key, one place in the footer. */
-export const VOICE_STATUS_KEY = "voice";
+/** The footer key for the voice status; the command name is a literal. */
+const VOICE_STATUS_KEY = "voice";
 
 /** `m:ss` for the recording timer. */
 export function formatElapsed(seconds: number): string {
@@ -103,9 +103,11 @@ export function makeSshRun(target: string): Run {
  * `sendUserMessage` routes the conflict to an internal extension error
  * instead of throwing, so the idle check decides `deliverAs` up front.
  * Without autoSubmit the text lands in the editor at the cursor (pi's editor
- * collapses a large paste to a marker and expands it on submit).
- * `expandPromptTemplates` is deliberately never enabled: a dictated
- * transcript is content, not a command, even when it starts with `/`.
+ * collapses a large paste to a marker and expands it on submit); with no
+ * editor (non-interactive session) it is submitted, under the same idle
+ * check as autoSubmit. `expandPromptTemplates` is deliberately never
+ * enabled: a dictated transcript is content, not a command, even when it
+ * starts with `/`.
  */
 function presentTranscript(
 	pi: ExtensionAPI,
@@ -113,17 +115,15 @@ function presentTranscript(
 	ctx: ExtensionContext | undefined,
 	text: string,
 ): void {
-	if (config.autoSubmit) {
-		if (ctx?.isIdle() ?? true) pi.sendUserMessage(text);
-		else pi.sendUserMessage(text, { deliverAs: "followUp" });
-		return;
-	}
-	if (ctx?.hasUI) {
+	if (!config.autoSubmit && ctx?.hasUI) {
 		ctx.ui.pasteToEditor(text);
 		return;
 	}
-	// No editor to paste into (non-interactive session): submit instead.
-	pi.sendUserMessage(text);
+	// Submit it: either autoSubmit asked for it, or there is no editor to
+	// paste into. Either way a streaming agent would swallow a plain send as
+	// an internal extension error, so the idle check decides up front.
+	if (ctx?.isIdle() ?? true) pi.sendUserMessage(text);
+	else pi.sendUserMessage(text, { deliverAs: "followUp" });
 }
 
 /** Test seams; production callers use the defaults (ssh, global fetch, os.tmpdir()). */

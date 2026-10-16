@@ -1441,6 +1441,17 @@ test("a 400 that does not name response_format is not retried", async () => {
 	assert.equal(spy.calls.length, 1);
 });
 
+test("a non-400 failure that mentions response_format is not retried", async () => {
+	const spy = scriptedFetch(() => new Response("server lost response_format", { status: 500 }));
+	await assert.rejects(callTranscribe(spy), (error: unknown) => {
+		assert.ok(error instanceof TranscribeError);
+		assert.equal(error.failure, "http");
+		assert.equal(error.status, 500);
+		return true;
+	});
+	assert.equal(spy.calls.length, 1, "only a 400 justifies the re-upload");
+});
+
 test("a retry that fails as well is reported, not repeated again", async () => {
 	const spy = scriptedFetch((_call, index) =>
 		new Response(index === 0 ? "response_format unsupported" : "still bad", { status: 400 }),
@@ -1463,6 +1474,13 @@ test("an oversized recording is refused before any upload", async () => {
 		return true;
 	});
 	assert.equal(spy.calls.length, 0);
+});
+
+test("a recording of exactly the 25 MB cap is still uploaded", async () => {
+	const spy = scriptedFetch(() => jsonResponse("boundary"));
+	const text = await callTranscribe(spy, { audio: Buffer.alloc(MAX_UPLOAD_BYTES) });
+	assert.equal(text, "boundary");
+	assert.equal(spy.calls.length, 1, "the cap is inclusive: /audio/transcriptions accepts 'at most' 25 MB");
 });
 
 test("an upload that outruns the timeout fails as a typed network error", async () => {
@@ -1527,6 +1545,8 @@ interface FlowOptions {
 	respond?: (call: RunCall, index: number) => RunResult | Promise<RunResult>;
 	respondFetch?: (call: FetchCall, index: number) => Response | Promise<Response>;
 	idle?: boolean;
+	/** Whether the session has an editor to paste into (default true). */
+	hasUI?: boolean;
 	/** What ctx.modelRegistry.getApiKeyForProvider("openai") returns. */
 	registryKey?: string;
 }
@@ -1534,6 +1554,9 @@ interface FlowOptions {
 async function withFlow(options: FlowOptions, fn: (h: FlowHarness) => Promise<void>): Promise<void> {
 	await withTempAgentDir(async (agentDir) => {
 		if (options.file) await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify(options.file));
+		// Kill the ambient OPENAI_API_KEY too: on the default endpoint it
+		// would shortcut resolveApiKey past the registry fallback that some
+		// of these tests pin.
 		await withEnv({ ...clearVoiceEnv(), OPENAI_API_KEY: undefined, ...options.env }, async () => {
 			const tmpDir = await mkdtemp(path.join(tmpdir(), "voice-flow-"));
 			try {
@@ -1562,7 +1585,7 @@ function makeFlowHarness(options: FlowOptions, tmpDir: string): FlowHarness {
 	let idle = options.idle ?? true;
 	let editor = "";
 	const ctx: FlowHarness["ctx"] = {
-		hasUI: true,
+		hasUI: options.hasUI ?? true,
 		isIdle: () => idle,
 		modelRegistry: { getApiKeyForProvider: async () => options.registryKey },
 		ui: {
@@ -1641,6 +1664,8 @@ test("full flow: /voice twice records, transcribes, and pastes the transcript", 
 		const form = await new Response(init.body as FormData).formData();
 		assert.equal(form.get("model"), "gpt-4o-transcribe");
 		assert.equal(form.get("response_format"), "json");
+		const file = form.get("file") as File;
+		assert.match(file.name, /^pi-voice-[a-f0-9]{32}\.m4a$/, "the multipart filename is the basename, not the temp path");
 
 		assert.deepEqual(await readdir(h.tmpDir), [], "the local recording is dropped after a successful paste");
 	});
@@ -1656,6 +1681,19 @@ test("autoSubmit while idle sends the transcript as a user message", async () =>
 
 test("autoSubmit while streaming queues the transcript as a follow-up", async () => {
 	await withFlow({ file: { autoSubmit: true, apiKey: "sk-flow" }, idle: false }, async (h) => {
+		await voiceCycle(h);
+		assert.equal(h.pasted.length, 0);
+		assert.deepEqual(h.sent, [{ content: "hello from the phone", options: { deliverAs: "followUp" } }]);
+	});
+});
+
+test("without an editor the transcript is submitted, and streaming still queues it", async () => {
+	await withFlow({ file: { apiKey: "sk-flow" }, hasUI: false }, async (h) => {
+		await voiceCycle(h);
+		assert.equal(h.pasted.length, 0);
+		assert.deepEqual(h.sent, [{ content: "hello from the phone", options: undefined }]);
+	});
+	await withFlow({ file: { apiKey: "sk-flow" }, hasUI: false, idle: false }, async (h) => {
 		await voiceCycle(h);
 		assert.equal(h.pasted.length, 0);
 		assert.deepEqual(h.sent, [{ content: "hello from the phone", options: { deliverAs: "followUp" } }]);
@@ -1698,6 +1736,23 @@ test("the model registry's OpenAI key is the last fallback on the default endpoi
 		assert.equal(h.pasted.length, 1);
 		assert.deepEqual(h.fetchCalls[0].init.headers, { authorization: "Bearer sk-registry" });
 	});
+});
+
+test("a custom endpoint never sees an ambient OpenAI key, end to end", async () => {
+	await withFlow(
+		{
+			env: {
+				[VOICE_ENV.baseUrl]: "https://stt.example.test/v1",
+				OPENAI_API_KEY: "sk-ambient",
+			},
+		},
+		async (h) => {
+			await voiceCycle(h);
+			assert.equal(h.pasted.length, 1);
+			assert.equal(h.fetchCalls[0].url, "https://stt.example.test/v1/audio/transcriptions");
+			assert.equal(h.fetchCalls[0].init.headers, undefined, "no ambient key may leave for a custom endpoint");
+		},
+	);
 });
 
 test("cancel while fetching the audio posts nothing and leaves no temp file", async () => {
@@ -1785,6 +1840,28 @@ test("a transcription failure notifies with the kept audio path and leaves the f
 			assert.ok(kept);
 			assert.equal((await stat(kept)).size, AUDIO.length);
 			assert.equal(h.statuses.at(-1), undefined);
+		},
+	);
+});
+
+test("a fetched recording over the 25 MB cap fails locally and keeps the audio", async () => {
+	const tooBig = Buffer.alloc(MAX_UPLOAD_BYTES + 1);
+	await withFlow(
+		{
+			env: { [VOICE_ENV.apiKey]: "sk-flow" },
+			respond: (call) => {
+				if (call.command.startsWith("cat ")) return result(tooBig);
+				if (call.command.includes("-q")) return result("Recording finished: phone-side m4a");
+				return result();
+			},
+		},
+		async (h) => {
+			await voiceCycle(h);
+			assert.equal(h.fetchCalls.length, 0, "an oversized recording is never uploaded");
+			assert.equal(h.pasted.length + h.sent.length, 0);
+			const notice = h.notices.find((message) => message.includes("refusing to upload"));
+			assert.ok(notice, `expected a too-large notice, got: ${h.notices.join(" | ")}`);
+			assert.match(notice, /audio kept at /);
 		},
 	);
 });
