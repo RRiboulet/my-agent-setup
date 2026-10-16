@@ -43,6 +43,26 @@ fi
 # those paths no longer exist, and "ln -sfn" would drop a dangling symlink
 # *inside* the real directories.
 
+# --- git identity ---
+# Commit metadata is public the moment a branch is pushed: the author and
+# committer addresses and every `Co-authored-by:` trailer live in the commit
+# object, so a personal address there can only be removed by rewriting every
+# branch and tag — and even then it survives in forks and in GitHub's cached
+# commit views. Pin the identity to the GitHub noreply address before any commit
+# can be made.
+#
+# Applied here rather than in the Dockerfile because a personal identity does not
+# belong in an image others may build; postCreate re-runs on every container
+# creation, so ~/.gitconfig being container-local and discarded with /home/vscode
+# does not matter. `--global`, matching the scope `git commit` reads and the one
+# a bare `git config user.email` writes.
+#
+# A manual `git config --global user.email` in this container was a personal
+# address, which is how it reached the pushed history; this overwrites it on the
+# next rebuild (or immediately: run the two lines by hand).
+git config --global user.name "RRiboulet"
+git config --global user.email "122018936+RRiboulet@users.noreply.github.com"
+
 # --- clipboard ---
 # The host injects WAYLAND_DISPLAY and DISPLAY into the container, but neither
 # socket exists here. pi's clipboard helper then finds no wl-copy/xclip and
