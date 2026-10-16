@@ -30,6 +30,25 @@ Added:
   non-interactive ssh `PATH` caveat), the configuration table and the manual
   smoke checklist are in `.pi/extensions/voice/README.md`.
 
+Maintenance:
+
+- **The `/voice` container side now survives container rebuilds.** `/voice`
+  drives ssh from this container to the phone through a Tailscale userspace
+  tunnel (`tailscaled --tun=userspace-networking`, a SOCKS5 proxy, because
+  the container has no `/dev/tun`). Most of that setup already lived on the
+  pi-agent-config volume — the ssh key pair and config template, the
+  tailscale binaries and state, `voice.json` — and the extension itself
+  lives in the repo, so a rebuild used to cost exactly three container-layer
+  things: `~/.ssh/config` (home is container-local), the `netcat-openbsd`
+  package the ssh `ProxyCommand` needs, and the `tailscaled` process, which
+  is not an init service. `.devcontainer/restore-post-rebuild.sh`
+  reinstalls, restores and relaunches exactly those three, idempotently (a
+  plain container restart also only needs the daemon relaunched), then
+  verifies the chain with `ssh phone true`; the devcontainer's
+  `postCreateCommand` now runs it on every container creation. The full
+  container-side setup and the post-rebuild contract are documented in
+  `.devcontainer/voice-container.md`, with a pointer from the voice README.
+
 ## v1.6.0 — 2026-10-15
 
 Added:
