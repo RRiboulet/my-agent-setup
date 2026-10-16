@@ -46,7 +46,8 @@ import {
 	transcribeAudio,
 	type TranscribeRequest,
 } from "../../voice/transcribe.ts";
-import { createVoiceExtension, formatElapsed, makeSshRun, statusText } from "../../voice/index.ts";
+import { createVoiceExtension, formatElapsed, statusText } from "../../voice/index.ts";
+import { makeSshRun } from "../../voice/transport.ts";
 import { waitFor, withEnv, withTempAgentDir } from "./helpers.ts";
 
 const ID = "0123456789abcdef0123456789abcdef";

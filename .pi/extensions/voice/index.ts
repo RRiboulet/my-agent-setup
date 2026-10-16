@@ -18,7 +18,6 @@
  * `session_shutdown`.
  */
 
-import { spawn } from "node:child_process";
 import { readFile, stat } from "node:fs/promises";
 import { basename } from "node:path";
 
@@ -28,6 +27,7 @@ import { Key } from "@earendil-works/pi-tui";
 import { loadConfig, type VoiceConfig } from "./config.ts";
 import { Recorder, type RecorderStatus, type Run } from "./recorder.ts";
 import { assertUploadSize, resolveApiKey, transcribeAudio } from "./transcribe.ts";
+import { makeSshRun } from "./transport.ts";
 
 /** The footer key for the voice status; the command name is a literal. */
 const VOICE_STATUS_KEY = "voice";
@@ -69,32 +69,6 @@ function renderStatus(ctx: ExtensionContext | undefined, status: RecorderStatus)
 	} else if (status.phase === "idle" && status.localPath) {
 		ctx.ui.notify(`voice: audio kept at ${status.localPath}`, "info");
 	}
-}
-
-/**
- * The real runner: one `ssh` per remote shell string, stdout collected as
- * Buffers (the fetch streams an m4a through it; `pi.exec` cannot, because it
- * accumulates strings). Abort kills the child; the resulting non-zero close is
- * ignored by the caller, which checks its own signal first.
- */
-export function makeSshRun(target: string): Run {
-	return (command, signal) =>
-		new Promise((resolve, reject) => {
-			if (signal.aborted) {
-				reject(new Error("voice: aborted before ssh started"));
-				return;
-			}
-			const child = spawn("ssh", [target, command], { stdio: ["ignore", "pipe", "pipe"] });
-			const stdout: Buffer[] = [];
-			const stderr: Buffer[] = [];
-			child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
-			child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
-			child.on("error", reject);
-			child.on("close", (code) => {
-				resolve({ code: code ?? -1, stdout: Buffer.concat(stdout), stderr: Buffer.concat(stderr).toString("utf8") });
-			});
-			signal.addEventListener("abort", () => child.kill(), { once: true });
-		});
 }
 
 /**
