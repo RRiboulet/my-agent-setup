@@ -104,6 +104,16 @@ Maintenance:
   into an image others may build, and with `--global` rather than `--system`
   because it is the user's identity, not the machine's.
 
+- **The voice recorder's per-stage cancel and failure guards are one helper
+  now.** `start()` and `stop()` each repeated the same three lines — return if
+  the signal aborted, turn a thrown runner into a "did not run" failure, then
+  read the result — with the abort check appearing six times in `stop()` alone.
+  The architecture review flagged that as the most likely place a future stage
+  omits the check. `#runStage` now owns the pattern for the three command stages
+  (start, stop, fetch); the abort checks that remain are the ones with distinct
+  work behind them, the write-then-cancel race and the barriers around
+  `deliver`. No behaviour change.
+
 - **Reviews must be asked for, and take their model from the triage config.**
   `triage_change` is recommendation-only — it never launches a reviewer — but the
   rule that a human approves every review agent lived only in that tool's
