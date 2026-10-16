@@ -133,6 +133,13 @@ Maintenance:
   all of it named per-kind coercion and its reasoning; the point is that no field
   is written twice, not that the file shrank.
 
+- **The voice ssh transport has its own module.** `makeSshRun` — the one place
+  the extension spawns `ssh`, collects Buffer stdout and kills on abort — lived
+  in `index.ts`, whose stated job is registration and presentation, and was
+  exported only so tests could import it. It now lives in
+  `.pi/extensions/voice/transport.ts`, which is where a second backend (a local
+  recorder instead of ssh) would land.
+
 - **Reviews must be asked for, and take their model from the triage config.**
   `triage_change` is recommendation-only — it never launches a reviewer — but the
   rule that a human approves every review agent lived only in that tool's
