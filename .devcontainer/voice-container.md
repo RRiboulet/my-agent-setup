@@ -105,6 +105,20 @@ plain restart, where only the daemon process is actually missing. Everything
 it touches is reproducible — if a step fails, its output names the next
 command to check.
 
+Two details of the script are load-bearing and easy to "fix" back into bugs:
+
+- **Liveness is probed by connecting to the daemon's socket** (`nc -z -U`),
+  not by testing that the socket *file* exists. A container teardown SIGKILLs
+  `tailscaled`, which leaves the socket file on the volume; an existence check
+  therefore reports a dead daemon as running and skips the launch.
+  `tailscaled` tolerates and replaces a stale socket, so nothing needs
+  deleting first.
+- **Every script here is invoked through an interpreter** (`bash
+  restore-post-rebuild.sh`, `sh start-tailscaled.sh`). This checkout is
+  bind-mounted and has `core.fileMode false`, so the exec bit is not in git;
+  `./script.sh` fails with "Permission denied". The devcontainer's
+  `postCreateCommand` calls `bash` for the same reason.
+
 ## If the pi-config volume is ever wiped
 
 The restore script cannot help here: the key pair, the tailscale binaries and

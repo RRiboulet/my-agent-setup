@@ -39,13 +39,23 @@ fi
 # 3. tailscaled — not an init service: it dies with the container and must be
 #    relaunched. Binaries and state are on the volume, so the node keeps its
 #    tailnet identity and no re-approval is needed.
-if [ -S "$PI/tailscale/tailscaled.sock" ]; then
+#
+#    Liveness is probed by *connecting* to the socket, not by testing for the
+#    file: a container teardown SIGKILLs the daemon, which leaves the socket
+#    file behind, so `[ -S ]` reports a dead daemon as running and the script
+#    then skips the launch. tailscaled tolerates and replaces a stale socket,
+#    so nothing has to be cleaned up first.
+SOCKET="$PI/tailscale/tailscaled.sock"
+if nc -z -U "$SOCKET" 2>/dev/null; then
 	echo "[restore] tailscaled already running"
 else
 	echo "[restore] starting tailscaled (userspace SOCKS5 on 127.0.0.1:1055)"
-	nohup /workspace/.devcontainer/start-tailscaled.sh >"$PI/tailscale/tailscaled.log" 2>&1 &
-	for _ in 1 2 3 4 5 6 7 8; do
-		[ -S "$PI/tailscale/tailscaled.sock" ] && break
+	# `sh <script>` rather than `./<script>`: this bind-mounted checkout has
+	# core.fileMode false, so the exec bit is not in git — the same reason
+	# postCreate.sh is invoked through an interpreter and not directly.
+	nohup sh /workspace/.devcontainer/start-tailscaled.sh >"$PI/tailscale/tailscaled.log" 2>&1 &
+	for _ in 1 2 3 4 5 6 7 8 9 10; do
+		nc -z -U "$SOCKET" 2>/dev/null && break
 		sleep 1
 	done
 fi
