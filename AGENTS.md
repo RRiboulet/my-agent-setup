@@ -95,14 +95,21 @@ Once authenticated:
 1. Work on a branch (see "Branches"), committing as the `.pi/skills/commit/`
    skill directs where it is present.
 2. `git push -u origin <branch>`
-3. `gh pr create --fill` — `--fill` uses the commits for title and body, which
-   this repo's long commit subjects suit. Always say in the body what a reviewer
-   should check and what you verified.
+3. `gh pr create --base dev --fill` — the explicit `--base dev` is not
+   decoration. This repository's **default branch is `main`**, and `gh pr create`
+   with no `--base` opens the pull request against that default, so the
+   unqualified command silently targets `main` — which takes releases only. A
+   branch cut from `dev` then drags every change merged since the last release
+   into `main` with it, because the squash replays the whole branch. `--fill`
+   uses the commits for title and body, which this repo's long commit subjects
+   suit; check the title it produced, since `--fill` falls back to the branch
+   name when it cannot read a single commit. Always say in the body what a
+   reviewer should check and what you verified.
 4. `gh pr merge --squash --delete-branch`. `--delete-branch` is not optional
-   politeness: a squash merge does not put the branch tip in `main`'s history, so
+   politeness: a squash merge does not put the branch tip in `dev`'s history, so
    a later `git branch -d <branch>` fails with "not fully merged" and needs `-D`.
    Letting gh delete both the local and the remote branch avoids both.
-5. Bring `main` up to date: `git checkout main && git pull --ff-only`.
+5. Bring `dev` up to date: `git checkout dev && git pull --ff-only`.
 
 Tags are cut from `main`, never from a feature branch.
 

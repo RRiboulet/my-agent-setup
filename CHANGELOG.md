@@ -49,6 +49,19 @@ Maintenance:
   container-side setup and the post-rebuild contract are documented in
   `.devcontainer/voice-container.md`, with a pointer from the voice README.
 
+- **The pull request workflow now names its base branch.** `AGENTS.md`'s step 3
+  said only `gh pr create --fill`, but this repository's **default branch is
+  `main`**, and `gh pr create` without `--base` opens the pull request against
+  that default — so following the documented command targeted `main`, which
+  takes releases only. Worse, a branch cut from `dev` carries every change
+  merged since the last release, and squashing it into `main` replays all of
+  them there, untagged. (That is exactly what happened once, and `main` had to
+  be restored to the `v1.6.0` tag.) The workflow now spells out `--base dev`
+  with that reasoning, and its steps 4 and 5 stop calling the integration
+  branch `main`: the squash `--delete-branch` rationale is about `dev`'s
+  history, and step 5 brings `dev` up to date. The vendored github skill's
+  local adaptation says the same.
+
 ## v1.6.0 — 2026-10-15
 
 Added:
