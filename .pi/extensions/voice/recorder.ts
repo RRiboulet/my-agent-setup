@@ -271,25 +271,18 @@ export class Recorder {
 		this.#keptPath = undefined;
 		this.#setPhase("starting");
 
-		const outcome = await this.#runSafe(
-			buildStartCommand({
+		const result = await this.#runStage({
+			command: buildStartCommand({
 				id,
 				maxSeconds: this.#config.maxSeconds,
 				...(this.#config.bitrateKbps !== undefined ? { bitrateKbps: this.#config.bitrateKbps } : {}),
 				recorderPath: this.#config.recorderPath,
 			}),
-			abort.signal,
-		);
-		if (abort.signal.aborted) return; // a cancel owns the outcome now
-
-		if (!outcome.ok) {
-			this.#fail(
-				"start-failed",
-				`the ssh command that starts the recorder did not run: ${firstLine(describeError(outcome.error))}`,
-			);
-			return;
-		}
-		const result = outcome.result;
+			signal: abort.signal,
+			failure: "start-failed",
+			what: "starts the recorder",
+		});
+		if (result === undefined) return; // the cancel landed or the failure was reported
 		const output = combinedOutput(result);
 		if (/already in progress/i.test(output)) {
 			this.#fail(
@@ -337,16 +330,13 @@ export class Recorder {
 
 		this.#clearTimer();
 		this.#setPhase("stopping");
-		const stoppedOutcome = await this.#runSafe(buildStopCommand(this.#config.recorderPath), signal);
-		if (signal.aborted) return;
-		if (!stoppedOutcome.ok) {
-			this.#fail(
-				"stop-failed",
-				`the ssh command that stops the recorder did not run: ${firstLine(describeError(stoppedOutcome.error))}`,
-			);
-			return;
-		}
-		const stopped = stoppedOutcome.result;
+		const stopped = await this.#runStage({
+			command: buildStopCommand(this.#config.recorderPath),
+			signal,
+			failure: "stop-failed",
+			what: "stops the recorder",
+		});
+		if (stopped === undefined) return;
 		const tolerated = /no recording to stop/i.test(combinedOutput(stopped));
 		if (stopped.code !== 0 && !tolerated) {
 			this.#fail("stop-failed", `stopping the recorder failed (exit ${stopped.code}): ${firstLine(stopped.stderr)}`);
@@ -354,16 +344,13 @@ export class Recorder {
 		}
 
 		this.#setPhase("fetching");
-		const fetchedOutcome = await this.#runSafe(buildFetchCommand(id), signal);
-		if (signal.aborted) return;
-		if (!fetchedOutcome.ok) {
-			this.#fail(
-				"fetch-failed",
-				`the ssh command that fetches the recording did not run: ${firstLine(describeError(fetchedOutcome.error))}`,
-			);
-			return;
-		}
-		const fetched = fetchedOutcome.result;
+		const fetched = await this.#runStage({
+			command: buildFetchCommand(id),
+			signal,
+			failure: "fetch-failed",
+			what: "fetches the recording",
+		});
+		if (fetched === undefined) return;
 		if (fetched.code !== 0) {
 			this.#fail("fetch-failed", `fetching the recording failed (exit ${fetched.code}): ${firstLine(fetched.stderr)}`);
 			return;
@@ -525,6 +512,34 @@ export class Recorder {
 		} catch (error) {
 			return { ok: false, error };
 		}
+	}
+
+	/**
+	 * Await one command stage under the guards every stage shares: a cancel wins
+	 * over the result, and a thrown runner becomes `failure`, naming the cause.
+	 * Returns `undefined` when the caller must stop — the cancel landed, or the
+	 * failure was reported here — and the run's result otherwise.
+	 *
+	 * This is the single place the "cancel owns the outcome" rule is applied to a
+	 * command, so a new stage cannot forget the check.
+	 */
+	async #runStage(args: {
+		command: string;
+		signal: AbortSignal;
+		failure: RecorderFailure;
+		/** Completes "the ssh command that …" in the did-not-run message. */
+		what: string;
+	}): Promise<RunResult | undefined> {
+		const outcome = await this.#runSafe(args.command, args.signal);
+		if (args.signal.aborted) return undefined;
+		if (!outcome.ok) {
+			this.#fail(
+				args.failure,
+				`the ssh command that ${args.what} did not run: ${firstLine(describeError(outcome.error))}`,
+			);
+			return undefined;
+		}
+		return outcome.result;
 	}
 
 	/**
