@@ -38,10 +38,14 @@ Where the transcript goes:
 
 Cancel never pastes. Per phase it aborts, stops the phone best-effort when a
 recording may be running, and drops the local and/or remote file: recording
-phases delete the remote original; fetching deletes both; transcribing aborts
-the upload and deletes the local copy. `session_shutdown` runs the same cleanup
-under its own short budget, because pi awaits shutdown handlers with no
-timeout of its own.
+phases delete the remote original and any local copy; fetching deletes both;
+transcribing aborts the upload and deletes the local copy — no cancel path
+touches the local file when `keepAudio` is set. While a cancel is in flight the
+status still shows the pre-cancel phase and start/stop are refused, so a
+`/voice` press in that window is ignored (silently in `recording` or `error`,
+as a `busy (…)` notice otherwise) until the status clears.
+`session_shutdown` runs the same cleanup under its own short budget, because pi
+awaits shutdown handlers with no timeout of its own.
 
 ## Phone prerequisites
 
@@ -115,6 +119,23 @@ ignored rather than guessed.
 - **Failures** are typed (non-2xx / network / empty body / too large) and carry
   a one-line message; a timeout is 60 s by default.
 
+## Privacy and retention
+
+The audio exists in three places, briefly:
+
+- **On the phone:** `$HOME/.pi-voice/<id>.m4a`, deleted once the fetch has
+  succeeded (and by any cancel). It deliberately survives a fetch failure or an
+  empty recording — nothing was collected, so it is all that is left — and
+  nothing sweeps a file left behind by a crash mid-cycle; the live smoke test
+  checks for leftovers before a sweeper earns its keep.
+- **Locally:** `<tmpdir>/pi-voice-<id>.m4a`, mode `0600`, deleted after a
+  successful transcription unless `keepAudio` says otherwise, and kept on a
+  transcription failure with the path in the notice.
+- **At the API:** the one POST to `baseUrl` — the OpenAI default, or your own
+  server if you point it there. Nothing else leaves the machine.
+
+The transcript becomes part of the session log like any other input.
+
 ## Two cautions
 
 - **A failed transcription keeps the recording.** The notice names the path
@@ -136,9 +157,10 @@ What the unit suite cannot prove — it needs the real phone and an STT key:
 2. `/voice cancel` in each phase (starting / recording / fetching /
    transcribing): no paste, `$HOME/.pi-voice/` on the phone and the local temp
    dir both empty.
-3. `maxSeconds` expiry with a short cap: the phone stops itself, and the stop
-   path treats `No recording to stop` as success because the file exists and is
-   non-empty.
+3. `maxSeconds` expiry with a short cap: the phone stops itself; the later `-q`
+   may answer `No recording to stop`, which the stop path tolerates on that
+   output alone — the fetch step is what still has to prove audio arrived (exit
+   0, non-empty stdout).
 4. A second pi session running `/voice` while the phone records: the
    already-in-progress hint, and nothing on the phone is killed.
 5. Quit pi while recording: shutdown stays bounded and the phone stops.
