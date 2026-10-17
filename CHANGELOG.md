@@ -146,6 +146,15 @@ Fixed:
   remote original is still removed either way, since `keepAudio` concerns the
   local m4a only.
 
+  A cancel that keeps the file now also says where it is. `#doCancel` ended by
+  emitting a bare idle status, so the recording survived with no path in any
+  notice — the one keep-the-audio path that stayed silent, while a successful
+  cycle and a delivery failure both name the file. It reports the path when a
+  `stat` confirms the file is there, and stays silent otherwise, because naming
+  a path that does not resolve is worse than the silence it replaced. The idle
+  transition itself is now a single `#goIdle`, shared by a finished cycle, a
+  cancel and a shutdown.
+
 Maintenance:
 
 - **The `/voice` container side now survives container rebuilds.** `/voice`
