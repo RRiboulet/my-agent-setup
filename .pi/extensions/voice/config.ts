@@ -27,6 +27,11 @@ export const CONFIG_BASENAME = "voice.json";
 /** The recorder inside Termux, pinned as verified 2026-10-15. */
 export const DEFAULT_RECORDER_PATH = "/data/data/com.termux/files/usr/bin/termux-microphone-record";
 
+/** The recorder path reaches the phone inside a shell string, so pin its shape:
+ * an absolute path of alphanumerics, slashes, dots, underscores and hyphens —
+ * nothing a shell could interpret. */
+export const RECORDER_PATH_PATTERN = /^\/[a-zA-Z0-9/_.-]+$/;
+
 /** Local capture cap. The plan's bound: long enough for a dictation, short
  * enough that a forgotten recording cannot fill the phone. Never 0 — the
  * recorder treats `-l <= 0` as "unlimited". */
@@ -186,12 +191,38 @@ interface FieldSpec {
 	fromEnv(value: string | undefined, warn: Warn): unknown;
 }
 
+/** The shape a recorder path must have, as a sentence for warning/error text. */
+export const RECORDER_PATH_EXPECTATION = "an absolute path with only alphanumerics, '/', '_', '.' and '-'";
+
 /** A missing, empty or non-string value leaves the field alone. Used for both
  * required fields (which keep their default) and optional ones (which stay
  * absent, so the defaults still compare equal). */
 function stringField(key: keyof VoiceConfig, env: string): FieldSpec {
 	const read = (value: unknown): unknown => str(value) ?? LEAVE;
 	return { key, env, fromFile: read, fromEnv: read };
+}
+
+/** A trimmed string that must satisfy `pattern`, or the field warns and keeps
+ * its previous value. Both layers quote the offending value: an env value can
+ * carry newlines and control characters, which would otherwise forge log lines. */
+function patternField(key: keyof VoiceConfig, env: string, pattern: RegExp, expectation: string): FieldSpec {
+	const check = (raw: string, label: string, warn: Warn): unknown => {
+		if (pattern.test(raw)) return raw;
+		warn(`voice: ignoring ${label}: expected ${expectation}`);
+		return LEAVE;
+	};
+	return {
+		key,
+		env,
+		fromFile: (value, warn) => {
+			const raw = str(value);
+			return raw === undefined ? LEAVE : check(raw, `${key} ${JSON.stringify(raw)}`, warn);
+		},
+		fromEnv: (value, warn) => {
+			const raw = str(value);
+			return raw === undefined ? LEAVE : check(raw, `${env}=${JSON.stringify(raw)}`, warn);
+		},
+	};
 }
 
 /** As {@link stringField}, with trailing slashes stripped so the endpoint join
@@ -258,8 +289,8 @@ function bitrateField(key: keyof VoiceConfig, env: string): FieldSpec {
 /** Every configurable field, in the order the two hand-written passes applied
  * them. Adding a field is one entry here, plus its type and default. */
 const FIELDS: readonly FieldSpec[] = [
-	stringField("sshTarget", VOICE_ENV.sshTarget),
-	stringField("recorderPath", VOICE_ENV.recorderPath),
+	patternField("sshTarget", VOICE_ENV.sshTarget, /^[^-]/, "a value that does not start with '-'"),
+	patternField("recorderPath", VOICE_ENV.recorderPath, RECORDER_PATH_PATTERN, RECORDER_PATH_EXPECTATION),
 	intField("maxSeconds", VOICE_ENV.maxSeconds, MAX_SECONDS_MIN, MAX_SECONDS_MAX),
 	bitrateField("bitrateKbps", VOICE_ENV.bitrateKbps),
 	boolField("keepAudio", VOICE_ENV.keepAudio),

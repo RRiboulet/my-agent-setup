@@ -15,6 +15,15 @@ import { spawn } from "node:child_process";
 import type { Run } from "./recorder.ts";
 
 export function makeSshRun(target: string): Run {
+	// Defense-in-depth: `loadConfig` already degrades a dash-leading sshTarget,
+	// so this only fires for a direct caller. `spawn` passes no shell, which
+	// makes the leading `-` the only way to smuggle an ssh option — a prefix
+	// check on the single argv element is the whole guard.
+	if (target.startsWith("-")) {
+		throw new Error(
+			`voice: refusing ssh target ${JSON.stringify(target)}: must not start with '-' (ssh would read it as an option)`,
+		);
+	}
 	return (command, signal) =>
 		new Promise((resolve, reject) => {
 			if (signal.aborted) {

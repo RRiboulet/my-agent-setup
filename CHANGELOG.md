@@ -48,6 +48,31 @@ Fixed:
   includes it. `firstLine`/`describeError` moved to a shared `voice/util.ts`
   because the recorder and transcription each had their own copy.
 
+- **Two config values can no longer reach the phone, or `ssh`, as shell
+  syntax.** Both `recorderPath` and `sshTarget` come from `voice.json` or a
+  `PI_VOICE_*` variable, and both were interpolated into a command unexamined.
+  `recorderPath` is concatenated before the recorder arguments and before `-q`
+  in the stop command, so a value carrying `;`, backticks, `$(…)` or a space
+  ran arbitrary commands on the phone — the recording id was already pinned by
+  `RECORDING_ID_PATTERN`, but this second variable in the same string was left
+  raw. `sshTarget` is passed to `spawn("ssh", [target, command])` as one argv
+  element with no shell, which makes a leading `-` the whole attack: ssh parses
+  it as an option, and `-oProxyCommand=…` executes locally in the container.
+
+  Both are now validated in `config.ts`, where a bad value warns once and the
+  field keeps its default — the same degrade-not-throw contract every other
+  field follows, so `/voice` stays registered and usable (`recorderPath` must
+  be absolute and shell-safe; `sshTarget` must not start with `-`). The
+  command builders and `makeSshRun` keep their own refusal as unreachable
+  defense-in-depth for a directly-constructed `Recorder`. That placement was
+  the review's correction: validating in the builders alone made a bad value
+  throw *after* `start()` had set phase `starting`, stranding the machine there
+  with `/voice cancel` broken too (`buildStopCommand` threw in the same path),
+  and a leading-dash `sshTarget` threw at extension-load time and removed
+  `/voice` altogether. A builder refusal now lands in the retryable `error`
+  phase, and a best-effort stop that refuses is skipped rather than abandoning
+  the cancel's remaining cleanup.
+
 Maintenance:
 
 - **The `/voice` container side now survives container rebuilds.** `/voice`
