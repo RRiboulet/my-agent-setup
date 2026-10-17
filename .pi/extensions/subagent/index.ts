@@ -1452,6 +1452,9 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		run.interruptRequestedAt = undefined;
 		run.error = message;
 		run.finishedAt = Date.now();
+		// Persist the terminal status before the (possibly slow) usage capture so a
+		// tmux-layer failure is never stranded as "running" on disk.
+		await persist();
 		await settleRun(run);
 	};
 
