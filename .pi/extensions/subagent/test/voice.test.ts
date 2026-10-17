@@ -894,9 +894,15 @@ test("cancel while fetching keeps the local copy when keepAudio is set", async (
 			assert.equal(harness.recorder.phase(), "idle");
 			assert.equal(harness.delivered.length, 0, "a cancelled fetch never reaches delivery");
 			const files = await readdir(harness.tmpDir);
+			const reported = keepAudio ? path.join(harness.tmpDir, files[0]) : undefined;
+			assert.equal(
+				harness.statuses.at(-1)?.localPath,
+				reported,
+				"the kept path is reported exactly when the file is there",
+			);
 			if (keepAudio) {
 				assert.equal(files.length, 1, "keepAudio must preserve the local copy across a fetching cancel");
-				assert.equal((await readFile(path.join(harness.tmpDir, files[0]))).length, AUDIO.length);
+				assert.equal((await readFile(reported as string)).length, AUDIO.length);
 			} else {
 				assert.deepEqual(files, [], "without keepAudio the local copy is dropped");
 			}
@@ -927,9 +933,50 @@ test("cancel while transcribing aborts delivery; keepAudio decides the local cop
 			const localPath = harness.delivered[0].localPath;
 			if (keepAudio) assert.equal((await readFile(localPath)).length, AUDIO.length);
 			else await assert.rejects(stat(localPath), /ENOENT/);
+			assert.equal(
+				harness.statuses.at(-1)?.localPath,
+				keepAudio ? localPath : undefined,
+				"a cancel that kept the audio must report where it is",
+			);
 		} finally {
 			await harness.cleanup();
 		}
+	}
+});
+
+test("a keepAudio cancel reports the path only when a file is really there", async () => {
+	// The negative case: cancelling a recording that was never fetched keeps no
+	// file, so the idle status must not name one.
+	const harness = await makeHarness({ respond: () => result(), config: { keepAudio: true } });
+	try {
+		await harness.recorder.start();
+		await settleWithClock(harness.clock, harness.recorder.cancel());
+		assert.equal(harness.recorder.phase(), "idle");
+		assert.equal(harness.statuses.at(-1)?.localPath, undefined, "no fetch means no file to report");
+	} finally {
+		await harness.cleanup();
+	}
+});
+
+test("cancel from a deliver-failed error with keepAudio reports the kept path", async () => {
+	const harness = await makeHarness({
+		respond: (call) => (call.command.startsWith("cat ") ? result(AUDIO) : result()),
+		deliver: async () => {
+			throw new Error("transcription exploded");
+		},
+		config: { keepAudio: true },
+	});
+	try {
+		await harness.recorder.start();
+		await harness.recorder.stop();
+		const kept = harness.statuses.at(-1)?.localPath as string;
+		assert.equal(harness.statuses.at(-1)?.failure, "deliver-failed");
+
+		await settleWithClock(harness.clock, harness.recorder.cancel());
+		assert.equal(harness.recorder.phase(), "idle");
+		assert.equal(harness.statuses.at(-1)?.localPath, kept, "the error state's kept file is still named after the cancel");
+	} finally {
+		await harness.cleanup();
 	}
 });
 

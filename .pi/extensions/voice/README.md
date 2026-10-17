@@ -147,8 +147,9 @@ The audio exists in three places, briefly:
   nothing sweeps a file left behind by a crash mid-cycle; the live smoke test
   checks for leftovers before a sweeper earns its keep.
 - **Locally:** `<tmpdir>/pi-voice-<id>.m4a`, mode `0600`, deleted after a
-  successful transcription unless `keepAudio` says otherwise, and kept on a
-  transcription failure with the path in the notice.
+  successful transcription unless `keepAudio` says otherwise. When a file is
+  kept, the notice names its path — on a transcription failure, and on a cancel
+  that keeps the file with `keepAudio` set.
 - **At the API:** the one POST to `baseUrl` — the OpenAI default, or your own
   server if you point it there. Nothing else leaves the machine.
 
