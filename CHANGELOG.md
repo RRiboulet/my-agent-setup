@@ -6,24 +6,6 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
-- **`/btw` — quick side question, answer kept out of the session.** `/btw why
-  did the test in step 2 fail?` answers from the active conversation with the
-  session's model: pi dispatches commands during streaming, so it works
-  mid-task; the nested `streamSimple` call is one-shot and tool-free; neither
-  the question nor the answer touches the transcript, so later prompts are
-  unaffected (the same contract as opencode's `/btw`). While it runs a
-  status-line indicator shows; the answer then opens in a scrollable overlay —
-  ↑/↓/PgUp/PgDn/Home/End scroll, `C` copies through the system clipboard, Esc
-  closes. The request sees the model-visible context — `buildContextEntries()`,
-  the compaction-aware entry list pi feeds its own model — so compaction and
-  branch summaries count (pinned, at 6 000 characters each) and custom
-  messages count too; thinking and system messages drop, tool calls are marked
-  inline, each tool result or note is truncated at 2 000 characters, and the
-  newest conversation blocks are kept within 60 000, so one noisy tool cannot
-  own the prompt and nothing from before a compaction is silently lost. A
-  session switch or shutdown aborts an in-flight
-  question. One side question runs at a time.
-
 - **`/voice` — dictate with the phone as the microphone.** `/voice` starts
   `termux-microphone-record` on a phone reachable over ssh; the second `/voice`
   stops it, fetches the m4a, and POSTs it to an OpenAI-compatible
