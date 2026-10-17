@@ -534,7 +534,6 @@ export default function (pi: ExtensionAPI) {
 	// "cancelled" outcome and is reported, never thrown.
 	const abortInFlight = () => {
 		controller?.abort();
-		controller = null;
 	};
 	pi.on("session_start", () => abortInFlight());
 	pi.on("session_shutdown", () => abortInFlight());
@@ -567,15 +566,16 @@ export default function (pi: ExtensionAPI) {
 		// Everything from here on owns the single-flight guard: both state
 		// flips sit inside the try so no path can wedge the flag, and the
 		// finally re-clears the status even on the error path.
+		const localController = new AbortController();
 		try {
 			inFlight = true;
-			controller = new AbortController();
+			controller = localController;
 			ctx.ui.setStatus("btw", ctx.ui.theme.fg("accent", "/btw thinking…"));
 
-			const outcome = await askBtw(ctx.model, ctx.modelRegistry, entries, question, controller.signal);
+			const outcome = await askBtw(ctx.model, ctx.modelRegistry, entries, question, localController.signal);
 			// The indicator's job ends with the answer; the overlay takes over.
 			ctx.ui.setStatus("btw", undefined);
-			if (outcome.status === "cancelled") {
+			if (outcome.status === "cancelled" || localController.signal.aborted) {
 				ctx.ui.notify("btw cancelled", "info");
 				return;
 			}
@@ -589,7 +589,7 @@ export default function (pi: ExtensionAPI) {
 			// masquerade as an answer or leave the indicator behind. An abort
 			// during the call's lazy setup surfaces as an "error" stop reason,
 			// so decide by the signal, not by the outcome.
-			if (controller?.signal.aborted) {
+			if (localController.signal.aborted) {
 				ctx.ui.notify("btw cancelled", "info");
 			} else {
 				const message = error instanceof Error ? error.message : String(error);
@@ -597,7 +597,7 @@ export default function (pi: ExtensionAPI) {
 			}
 		} finally {
 			inFlight = false;
-			controller = null;
+			if (controller === localController) controller = null;
 			ctx.ui.setStatus("btw", undefined);
 		}
 	};
