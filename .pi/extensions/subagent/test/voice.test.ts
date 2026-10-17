@@ -24,6 +24,7 @@ import {
 } from "../../voice/config.ts";
 import {
 	CLEANUP_BUDGET_MS,
+	FETCH_BUDGET_MS,
 	RECORDING_ID_PATTERN,
 	Recorder,
 	STOP_GRACE_SECONDS,
@@ -768,6 +769,32 @@ test("a failed fetch keeps the remote copy for another attempt", async () => {
 		assert.match(last?.message ?? "", /cat: no such file/);
 		assert.equal(harness.delivered.length, 0);
 		assert.equal(harness.runner.commands().some((command) => command.includes("rm -f")), false);
+	} finally {
+		await harness.cleanup();
+	}
+});
+
+test("a stalled fetch times out at FETCH_BUDGET_MS and keeps the remote copy", async () => {
+	const harness = await makeHarness({
+		respond: (call) => (call.command.startsWith("cat ") ? pendingOnAbort(call.signal) : result()),
+	});
+	try {
+		await harness.recorder.start();
+		const stopping = harness.recorder.stop();
+		await waitFor(() => harness.recorder.phase() === "fetching");
+
+		await harness.clock.advance(FETCH_BUDGET_MS - 1);
+		assert.equal(harness.recorder.phase(), "fetching", "the fetch must not time out before its budget");
+		await settleWithClock(harness.clock, stopping);
+		const last = harness.statuses.at(-1);
+		assert.equal(last?.phase, "error");
+		assert.equal(last?.failure, "fetch-failed");
+		assert.match(last?.message ?? "", /timed out after/);
+		assert.equal(harness.delivered.length, 0);
+		assert.equal(harness.runner.commands().some((command) => command.includes("rm -f")), false, "a failed fetch keeps the remote copy");
+		const fetchCall = harness.runner.calls.find((call) => call.command.startsWith("cat "));
+		assert.equal(fetchCall?.signal.aborted, true, "the timeout must kill the stalled ssh");
+		assert.equal(harness.clock.pending(), 0, "the fetch budget timer must be cleared");
 	} finally {
 		await harness.cleanup();
 	}
