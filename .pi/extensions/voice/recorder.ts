@@ -13,7 +13,9 @@
  * - Started processes survive a dropped ssh connection, so cancel and shutdown
  *   clean up the remote file themselves instead of trusting the phone.
  * - `ssh` may hang indefinitely (network gone), so every cleanup call is
- *   bounded by a budget and abandoned, not awaited, when it overruns.
+ *   bounded by a budget and abandoned, not awaited, when it overruns, and the
+ *   fetch is bounded too (`FETCH_BUDGET_MS`) so a stalled transfer cannot park
+ *   the cycle in `fetching`.
  *
  * The runner is injected so the whole machine is testable without a phone:
  *
@@ -61,6 +63,12 @@ export const CLEANUP_BUDGET_MS = 2_000;
 /** Bound for the whole `session_shutdown` cleanup. Pi awaits shutdown handlers
  * with no timeout of its own, so the recorder must bound itself. */
 export const SHUTDOWN_BUDGET_MS = 2_500;
+
+/** Bound for the fetch of the recorded m4a. Much larger than the cleanup
+ * budgets because a real recording (up to the 25 MB upload cap) crosses the
+ * network, but finite because a stalled transfer must not park the cycle in
+ * `fetching` until the user cancels. */
+export const FETCH_BUDGET_MS = 120_000;
 
 export type VoicePhase = "idle" | "starting" | "recording" | "stopping" | "fetching" | "transcribing" | "error";
 
@@ -347,6 +355,7 @@ export class Recorder {
 			signal,
 			failure: "fetch-failed",
 			what: "fetches the recording",
+			budgetMs: FETCH_BUDGET_MS,
 		});
 		if (fetched === undefined) return;
 		if (fetched.code !== 0) {
@@ -528,9 +537,40 @@ export class Recorder {
 		failure: RecorderFailure;
 		/** Completes "the ssh command that …" in the did-not-run message. */
 		what: string;
+		/** When set, the command is killed after this long and reported as a
+		 * timeout. The fetch is the only stage that can wait on a slow network. */
+		budgetMs?: number;
 	}): Promise<RunResult | undefined> {
-		const outcome = await this.#runSafe(args.command, args.signal);
+		// A budgeted stage gets its own controller, so a timeout can kill the
+		// command without aborting the cycle the way a cancel does; the cycle
+		// signal is forwarded, so a cancel still ends it. An abort listener added
+		// after the signal is already aborted never fires, so forward that case by
+		// hand rather than leaving the child running until the budget expires.
+		const abort = args.budgetMs === undefined ? undefined : new AbortController();
+		const onCycleAbort = () => abort?.abort();
+		if (abort) {
+			args.signal.addEventListener("abort", onCycleAbort, { once: true });
+			if (args.signal.aborted) abort.abort();
+		}
+
+		let outcome: RunOutcome | undefined;
+		try {
+			const run = this.#runSafe(args.command, abort?.signal ?? args.signal);
+			if (args.budgetMs === undefined) outcome = await run;
+			else {
+				const settled = await this.#settleWithin(run, args.budgetMs);
+				outcome = settled.ok ? settled.value : undefined;
+			}
+		} finally {
+			if (abort) args.signal.removeEventListener("abort", onCycleAbort);
+		}
+
 		if (args.signal.aborted) return undefined;
+		if (outcome === undefined) {
+			abort?.abort();
+			this.#fail(args.failure, `the ssh command that ${args.what} timed out after ${args.budgetMs} ms`);
+			return undefined;
+		}
 		if (!outcome.ok) {
 			this.#fail(
 				args.failure,
