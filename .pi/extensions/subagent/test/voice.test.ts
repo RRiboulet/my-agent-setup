@@ -26,6 +26,8 @@ import {
 	CLEANUP_BUDGET_MS,
 	RECORDING_ID_PATTERN,
 	Recorder,
+	SHUTDOWN_BUDGET_MS,
+	START_SETTLE_BUDGET_MS,
 	STOP_GRACE_SECONDS,
 	buildCleanupCommand,
 	buildFetchCommand,
@@ -798,6 +800,151 @@ test("a deliver failure reports the kept audio path", async () => {
 // ---------------------------------------------------------------------------
 // Cancel, per phase
 // ---------------------------------------------------------------------------
+
+test("cancel during starting waits for the start to settle before stopping, so the phone ends stopped", async () => {
+	// Aborting the client does not stop the remote start command. If `-q` is sent
+	// before the recorder exists it is a no-op, and the recorder then starts and
+	// records until `-l`. Cancel must let the start settle first.
+	let release: (() => void) | undefined;
+	const harness = await makeHarness({
+		respond: (call) => {
+			if (call.command.startsWith("mkdir")) {
+				return new Promise<RunResult>((resolve) => {
+					release = () => resolve(result());
+				});
+			}
+			return result();
+		},
+	});
+	try {
+		const starting = harness.recorder.start();
+		await flush();
+		assert.equal(harness.recorder.phase(), "starting");
+
+		const cancelling = harness.recorder.cancel();
+		await flush();
+		// The start has not settled, so stopping now would race the recorder's launch.
+		assert.equal(harness.runner.commands().some((command) => command.includes("-q")), false);
+		assert.equal(harness.runner.commands().some((command) => command.includes("rm -f")), false);
+		assert.equal(harness.recorder.phase(), "starting");
+
+		assert.ok(release, "the start command was issued");
+		release();
+		await settleWithClock(harness.clock, cancelling);
+		await starting;
+
+		assert.equal(harness.recorder.phase(), "idle");
+		assert.equal(phases(harness.statuses).includes("recording"), false, "a cancelled start must not report recording");
+		assert.equal(harness.runner.commands().filter((command) => command.includes("-q")).length, 1);
+		assert.equal(harness.runner.commands().filter((command) => command.includes("rm -f")).length, 1);
+		assert.equal(harness.clock.pending(), 0);
+	} finally {
+		await harness.cleanup();
+	}
+});
+
+test("cancel during starting gives up on a hung start at the budget and still tries -q", async () => {
+	// A start whose ssh never answers must not hold cancel open forever; the
+	// settle wait is bounded, and the best-effort stop runs afterwards.
+	const harness = await makeHarness({ respond: (call) => (call.command.startsWith("mkdir") ? new Promise<RunResult>(() => {}) : result()) });
+	try {
+		void harness.recorder.start(); // never resolves; the runner ignores abort
+		await flush();
+		assert.equal(harness.recorder.phase(), "starting");
+
+		const cancelling = harness.recorder.cancel();
+		let settled = false;
+		void cancelling.then(() => {
+			settled = true;
+		});
+		await harness.clock.advance(START_SETTLE_BUDGET_MS - 1);
+		assert.equal(settled, false, "cancel must not give up before the settle budget");
+		await settleWithClock(harness.clock, cancelling);
+		assert.equal(harness.recorder.phase(), "idle");
+		assert.equal(harness.runner.commands().filter((command) => command.includes("-q")).length, 1);
+		assert.equal(harness.runner.commands().filter((command) => command.includes("rm -f")).length, 1);
+		assert.equal(harness.clock.pending(), 0);
+	} finally {
+		await harness.cleanup();
+	}
+});
+
+test("shutdown during starting still attempts -q: the settle budget is shorter than the shutdown budget", async () => {
+	// shutdown has no later, so a wait that outlasts it would let a session exit
+	// leave the phone recording. START_SETTLE_BUDGET_MS must stay below
+	// SHUTDOWN_BUDGET_MS so the best-effort -q is spawned before shutdown gives up.
+	assert.ok(START_SETTLE_BUDGET_MS < SHUTDOWN_BUDGET_MS, "the settle wait must not outlast shutdown");
+	const harness = await makeHarness({
+		respond: (call) => (call.command.startsWith("mkdir") ? new Promise<RunResult>(() => {}) : result()),
+	});
+	try {
+		void harness.recorder.start(); // never resolves; the runner ignores abort
+		await flush();
+		assert.equal(harness.recorder.phase(), "starting");
+
+		await settleWithClock(harness.clock, harness.recorder.shutdown());
+		assert.equal(harness.recorder.phase(), "idle");
+		assert.equal(harness.runner.commands().filter((command) => command.includes("-q")).length, 1, "-q must be attempted before shutdown returns");
+		assert.equal(harness.runner.commands().filter((command) => command.includes("rm -f")).length, 1);
+	} finally {
+		await harness.cleanup();
+	}
+});
+
+test("shutdown during starting honors the settle wait instead of aborting the start early", async () => {
+	// Aborting kills the ssh client, so an up-front abort would make the start
+	// settle for the wrong reason and send -q while the recorder is still
+	// launching — the very race this change removes. Shutdown must let the wait run.
+	const harness = await makeHarness({
+		respond: (call) => (call.command.startsWith("mkdir") ? pendingOnAbort(call.signal) : result()),
+	});
+	try {
+		void harness.recorder.start();
+		await flush();
+		const shutting = harness.recorder.shutdown();
+		await harness.clock.advance(START_SETTLE_BUDGET_MS - 1);
+		assert.equal(harness.runner.commands().some((command) => command.includes("-q")), false, "-q must not be sent before the start settles");
+
+		await settleWithClock(harness.clock, shutting);
+		assert.equal(harness.runner.commands().filter((command) => command.includes("-q")).length, 1);
+		assert.equal(harness.recorder.phase(), "idle");
+	} finally {
+		await harness.cleanup();
+	}
+});
+
+test("a start that throws while a cancel waits does not report an error", async () => {
+	// During the settle wait the signal is deliberately still live, so a thrown
+	// runner would otherwise #fail with 'did not run' and toast an error for a
+	// cycle the user already cancelled.
+	let fail: (() => void) | undefined;
+	const harness = await makeHarness({
+		respond: (call) => {
+			if (call.command.startsWith("mkdir")) {
+				return new Promise<RunResult>((_resolve, reject) => {
+					fail = () => reject(new Error("ssh spawn ENOENT"));
+				});
+			}
+			return result();
+		},
+	});
+	try {
+		const starting = harness.recorder.start();
+		await flush();
+		const cancelling = harness.recorder.cancel();
+		await flush();
+
+		assert.ok(fail, "the start command was issued");
+		fail(); // the throw lands while the cancel is parked
+		await settleWithClock(harness.clock, cancelling);
+		await starting;
+
+		assert.equal(phases(harness.statuses).includes("error"), false, "a cancelled start must not report an error");
+		assert.equal(harness.recorder.phase(), "idle");
+	} finally {
+		await harness.cleanup();
+	}
+});
 
 test("cancel while recording stops the phone and drops the remote file without fetching", async () => {
 	const harness = await makeHarness({ respond: () => result() });
