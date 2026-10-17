@@ -38,9 +38,9 @@ Where the transcript goes:
 
 Cancel never pastes. Per phase it aborts, stops the phone best-effort when a
 recording may be running, and drops the local and/or remote file: recording
-phases delete the remote original and any local copy; fetching deletes both;
-transcribing aborts the upload and deletes the local copy — no cancel path
-touches the local file when `keepAudio` is set. While a cancel is in flight the
+phases delete the remote original and any local copy; fetching deletes the
+remote original; transcribing aborts the upload — no cancel path deletes the
+local file when `keepAudio` is set. While a cancel is in flight the
 status still shows the pre-cancel phase and start/stop are refused, so a
 `/voice` press in that window is ignored (silently in `recording` or `error`,
 as a `busy (…)` notice otherwise) until the status clears.

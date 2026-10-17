@@ -844,7 +844,7 @@ test("cancel while stopping aborts the stop and still tries -q and cleanup", asy
 	}
 });
 
-test("cancel while fetching aborts the fetch and removes the partial local and remote files", async () => {
+test("cancel while fetching aborts the fetch, creating no local file and removing the remote original", async () => {
 	const harness = await makeHarness({
 		respond: (call) => (call.command.startsWith("cat ") ? pendingOnAbort(call.signal) : result()),
 	});
@@ -868,6 +868,41 @@ test("cancel while fetching aborts the fetch and removes the partial local and r
 		assert.equal(fetchCall?.signal.aborted, true);
 	} finally {
 		await harness.cleanup();
+	}
+});
+
+test("cancel while fetching keeps the local copy when keepAudio is set", async () => {
+	// The file is written before the bounded cleanupRemote, so parking there puts
+	// the cancel inside the window where the local copy exists while the phase is
+	// still `fetching` — the one cancel path that used to drop it unconditionally.
+	for (const keepAudio of [false, true]) {
+		const harness = await makeHarness({
+			respond: (call) => {
+				if (call.command.startsWith("cat ")) return result(AUDIO);
+				if (call.command.includes("rm -f")) return new Promise<RunResult>(() => {}); // park cleanupRemote
+				return result();
+			},
+			config: { keepAudio },
+		});
+		try {
+			await harness.recorder.start();
+			const stopping = harness.recorder.stop();
+			await waitFor(async () => harness.recorder.phase() === "fetching" && (await readdir(harness.tmpDir)).length === 1);
+
+			await settleWithClock(harness.clock, harness.recorder.cancel());
+			await stopping;
+			assert.equal(harness.recorder.phase(), "idle");
+			assert.equal(harness.delivered.length, 0, "a cancelled fetch never reaches delivery");
+			const files = await readdir(harness.tmpDir);
+			if (keepAudio) {
+				assert.equal(files.length, 1, "keepAudio must preserve the local copy across a fetching cancel");
+				assert.equal((await readFile(path.join(harness.tmpDir, files[0]))).length, AUDIO.length);
+			} else {
+				assert.deepEqual(files, [], "without keepAudio the local copy is dropped");
+			}
+		} finally {
+			await harness.cleanup();
+		}
 	}
 });
 

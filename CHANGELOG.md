@@ -48,6 +48,20 @@ Fixed:
   includes it. `firstLine`/`describeError` moved to a shared `voice/util.ts`
   because the recorder and transcription each had their own copy.
 
+- **A cancel during the fetch no longer deletes a local recording the user asked
+  to keep.** Every cancel surface honoured `keepAudio` except the `fetching`
+  branch, which called the local delete unconditionally — so the README's "no
+  cancel path touches the local file when `keepAudio` is set" was false in the
+  one window where the file actually exists: after it is written and before the
+  phase moves on, which includes the bounded remote-cleanup await. The same
+  unguarded delete sat in the post-write abort check, where a cancel landing
+  during the write dropped the just-written copy. The post-write check still
+  respects `keepAudio`; the cancel's own local delete is now a single guarded
+  step after the per-phase switch, because the bug was one branch forgetting a
+  guard that four branches repeated, and one delete cannot be forgotten. The
+  remote original is still removed either way, since `keepAudio` concerns the
+  local m4a only.
+
 Maintenance:
 
 - **The `/voice` container side now survives container rebuilds.** `/voice`
