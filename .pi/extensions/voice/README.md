@@ -62,7 +62,9 @@ Termux (the terminal app) plus the Termux:API app, on the same phone:
   include Termux's `usr/bin`, so a bare `termux-microphone-record` fails there.
   The default, verified on 2026-10-15, is
   `/data/data/com.termux/files/usr/bin/termux-microphone-record`; set
-  `recorderPath` if your install lives elsewhere.
+  `recorderPath` if your install lives elsewhere. The path must be absolute and
+  shell-safe (letters, digits, `/`, `_`, `.`, `-`); anything else is ignored
+  with a warning and the default is used.
 
 Recorder state on the phone is **device-global**: a second start fails with
 `Recording already in progress!`, and *any* `-q` stops whatever is recording.
@@ -100,8 +102,8 @@ registered even when the config cannot be read.
 
 | Field | Default | Env | Notes |
 |---|---|---|---|
-| `sshTarget` | `phone` | `PI_VOICE_SSH_TARGET` | ssh alias (or `user@host`) |
-| `recorderPath` | absolute Termux path | `PI_VOICE_RECORDER_PATH` | absolute path on the phone |
+| `sshTarget` | `phone` | `PI_VOICE_SSH_TARGET` | ssh alias (or `user@host`); a leading `-` is ignored |
+| `recorderPath` | absolute Termux path | `PI_VOICE_RECORDER_PATH` | absolute, shell-safe path on the phone |
 | `maxSeconds` | `120` | `PI_VOICE_MAX_SECONDS` | clamped 1–900; passed as `-l`, never 0 |
 | `bitrateKbps` | unset | `PI_VOICE_BITRATE_KBPS` | optional `-b` encoder bitrate |
 | `keepAudio` | `false` | `PI_VOICE_KEEP_AUDIO` | keep the local m4a after success |

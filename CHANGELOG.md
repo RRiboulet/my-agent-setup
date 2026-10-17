@@ -68,6 +68,54 @@ Fixed:
 
 - **A subagent that fails at the tmux layer now persists `failed` with its usage.** `markRunFailed` used to write `status: "failed"` before capturing usage, so pollers could observe a `failed` run with no usage (and a crash in that window lost the transcript pointer). Usage and `sessionFile` are now captured before the status flips, and `runs.json` is written once.
 
+- **Two config values can no longer reach the phone, or `ssh`, as shell
+  syntax.** Both `recorderPath` and `sshTarget` come from `voice.json` or a
+  `PI_VOICE_*` variable, and both were interpolated into a command unexamined.
+  `recorderPath` is concatenated before the recorder arguments and before `-q`
+  in the stop command, so a value carrying `;`, backticks, `$(…)` or a space
+  ran arbitrary commands on the phone — the recording id was already pinned by
+  `RECORDING_ID_PATTERN`, but this second variable in the same string was left
+  raw. `sshTarget` is passed to `spawn("ssh", [target, command])` as one argv
+  element with no shell, which makes a leading `-` the whole attack: ssh parses
+  it as an option, and `-oProxyCommand=…` executes locally in the container.
+
+  Both are now validated in `config.ts`, where a bad value warns once and the
+  field keeps its default — the same degrade-not-throw contract every other
+  field follows, so `/voice` stays registered and usable (`recorderPath` must
+  be absolute and shell-safe; `sshTarget` must not start with `-`). The
+  command builders and `makeSshRun` keep their own refusal as unreachable
+  defense-in-depth for a directly-constructed `Recorder`. That placement was
+  the review's correction: validating in the builders alone made a bad value
+  throw *after* `start()` had set phase `starting`, stranding the machine there
+  with `/voice cancel` broken too (`buildStopCommand` threw in the same path),
+  and a leading-dash `sshTarget` threw at extension-load time and removed
+  `/voice` altogether. A builder refusal now lands in the retryable `error`
+  phase, and a best-effort stop that refuses is skipped rather than abandoning
+  the cancel's remaining cleanup.
+
+- **The ssh transport can no longer stream the container out of memory.**
+  `makeSshRun` accumulated every byte of stdout from every `ssh` command without
+  limit, and the 25 MB upload check (`assertUploadSize`) ran only after the whole
+  transfer had been buffered and written to a temp file. A semi-trusted phone —
+  corrupt, compromised, or just `cat`-ing the wrong file — could therefore grow
+  the container's heap and tmpdir without bound before anything objected.
+  Buffering now stops at the upload cap plus a 4 MB slack: the slack is
+  deliberate, so a recording merely over the cap still reaches
+  `assertUploadSize`, whose message names the size and keeps the audio, and only
+  a runaway stream is killed. An overflow drops the partial buffer, kills the
+  child, and surfaces as a `fetch-failed` with "produced more than N bytes of
+  stdout; killed" — the remote copy still survives, as it does for any failed
+  fetch.
+
+  stderr is bounded too, and the adversarial review is why: the phone is the ssh
+  *server*, so it writes to stderr no matter what command was asked for, and a
+  stdout-only cap would have moved the hole rather than closed it. Only the head
+  (64 KB) is retained, and the stream keeps being drained, because a paused pipe
+  would back-pressure the child. Losing the tail of a diagnostic stream is fine;
+  losing the container is not. An overflow still keeps whatever stderr arrived
+  before it, with the overflow notice placed first so the recorder's
+  `firstLine(stderr)` shows the reason rather than a truncated warning.
+
 Maintenance:
 
 - **The `/voice` container side now survives container rebuilds.** `/voice`

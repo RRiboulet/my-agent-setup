@@ -47,7 +47,7 @@ import {
 	type TranscribeRequest,
 } from "../../voice/transcribe.ts";
 import { createVoiceExtension, formatElapsed, statusText } from "../../voice/index.ts";
-import { makeSshRun } from "../../voice/transport.ts";
+import { MAX_SSH_STDERR_BYTES, MAX_SSH_STDOUT_BYTES, makeSshRun } from "../../voice/transport.ts";
 import { waitFor, withEnv, withTempAgentDir } from "./helpers.ts";
 
 const ID = "0123456789abcdef0123456789abcdef";
@@ -258,6 +258,24 @@ test("command builders refuse anything that could not be a recording id", () => 
 	}
 });
 
+test("command builders refuse a recorder path that is not a safe absolute path", () => {
+	for (const recorderPath of [
+		"",
+		"relative/path",
+		"/bin/evil; rm -rf ~",
+		"/bin/evil$(touch /tmp/pwned)",
+		"/bin/evil`touch /tmp/pwned`",
+		"/bin/evil | cat",
+		"/bin/evil && cat",
+		"/bin/evil'\"",
+		"/bin/evil ",
+		" /leading-space",
+	]) {
+		assert.throws(() => buildStartCommand({ id: ID, maxSeconds: 60, recorderPath }), /refusing recorder path/);
+		assert.throws(() => buildStopCommand(recorderPath), /refusing recorder path/);
+	}
+});
+
 test("buildStartCommand refuses out-of-range seconds and bad bitrates", () => {
 	for (const maxSeconds of [0, -1, 901, 1.5, Number.NaN]) {
 		assert.throws(() => buildStartCommand({ id: ID, maxSeconds }), /refusing -l/);
@@ -366,6 +384,92 @@ test("a bad bitrate is warned about and ignored", async () => {
 			assert.equal(warns.length, 1);
 			assert.match(warns[0], /bitrateKbps/);
 		});
+	});
+});
+
+test("an sshTarget starting with a dash is warned about and ignored", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withEnv(clearVoiceEnv(), async () => {
+			await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ sshTarget: "-oProxyCommand=evil" }));
+			const warns: string[] = [];
+			const config = loadConfig({ warn: (message) => warns.push(message) });
+			assert.equal(config.sshTarget, DEFAULT_CONFIG.sshTarget);
+			assert.equal(warns.length, 1);
+			assert.match(warns[0], /sshTarget/);
+			assert.match(warns[0], /start with/);
+		});
+	});
+});
+
+test("a recorderPath that is not a safe absolute path is warned about and ignored", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withEnv(clearVoiceEnv(), async () => {
+			await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ recorderPath: "/bin/evil; rm -rf ~" }));
+			const warns: string[] = [];
+			const config = loadConfig({ warn: (message) => warns.push(message) });
+			assert.equal(config.recorderPath, DEFAULT_RECORDER_PATH);
+			assert.equal(warns.length, 1);
+			assert.match(warns[0], /recorderPath/);
+		});
+	});
+});
+
+test("a dash-leading sshTarget from the env is warned about and ignored", async () => {
+	await withTempAgentDir(async () => {
+		await withEnv(
+			{ ...clearVoiceEnv(), [VOICE_ENV.sshTarget]: "-oProxyCommand=evil" },
+			async () => {
+				const warns: string[] = [];
+				const config = loadConfig({ warn: (message) => warns.push(message) });
+				assert.equal(config.sshTarget, DEFAULT_CONFIG.sshTarget);
+				assert.equal(warns.length, 1);
+				assert.match(warns[0], /PI_VOICE_SSH_TARGET/);
+			},
+		);
+	});
+});
+
+test("an unsafe recorderPath from the env is warned about and ignored", async () => {
+	await withTempAgentDir(async () => {
+		await withEnv(
+			{ ...clearVoiceEnv(), [VOICE_ENV.recorderPath]: "/bin/evil$(touch /tmp/pwned)" },
+			async () => {
+				const warns: string[] = [];
+				const config = loadConfig({ warn: (message) => warns.push(message) });
+				assert.equal(config.recorderPath, DEFAULT_RECORDER_PATH);
+				assert.equal(warns.length, 1);
+				assert.match(warns[0], /PI_VOICE_RECORDER_PATH/);
+			},
+		);
+	});
+});
+
+test("a valid non-default recorderPath from the env survives, trimmed", async () => {
+	await withTempAgentDir(async () => {
+		await withEnv(
+			{ ...clearVoiceEnv(), [VOICE_ENV.recorderPath]: " /opt/rec/bin/rec " },
+			async () => {
+				const warns: string[] = [];
+				const config = loadConfig({ warn: (message) => warns.push(message) });
+				assert.equal(config.recorderPath, "/opt/rec/bin/rec");
+				assert.deepEqual(warns, []);
+			},
+		);
+	});
+});
+
+test("a warning quotes the offending env value so control characters cannot forge log lines", async () => {
+	await withTempAgentDir(async () => {
+		await withEnv(
+			{ ...clearVoiceEnv(), [VOICE_ENV.sshTarget]: "-evil\nvoice: recording ok" },
+			async () => {
+				const warns: string[] = [];
+				loadConfig({ warn: (message) => warns.push(message) });
+				assert.equal(warns.length, 1);
+				assert.equal(warns[0].includes("\n"), false, "the newline must be escaped, not emitted raw");
+				assert.match(warns[0], /\\n/);
+			},
+		);
 	});
 });
 
@@ -588,6 +692,26 @@ test("a failed start is retryable from the error phase", async () => {
 		assert.equal(phases(harness.statuses).at(-1), "recording");
 	} finally {
 		await settleWithClock(harness.clock, harness.recorder.cancel());
+		await harness.cleanup();
+	}
+});
+
+test("a builder refusal on a directly-built Recorder lands in error, not a wedged phase, and cancel still reaches idle", async () => {
+	// loadConfig degrades a bad recorderPath, so this exercises the
+	// defense-in-depth assert that only a direct Recorder construction reaches.
+	const harness = await makeHarness({ respond: () => result(), config: { recorderPath: "/bin/evil; rm -rf ~" } });
+	try {
+		await harness.recorder.start();
+		assert.equal(harness.recorder.phase(), "error", "the refusal must be retryable, not stuck in starting");
+		assert.equal(harness.statuses.at(-1)?.failure, "start-failed");
+		assert.match(harness.statuses.at(-1)?.message ?? "", /building the start command failed/);
+		assert.equal(harness.runner.calls.length, 0, "no ssh command may be issued for a refused path");
+
+		// The stop builder refuses too; cancel must still sweep and reach idle.
+		await settleWithClock(harness.clock, harness.recorder.cancel());
+		assert.equal(harness.recorder.phase(), "idle");
+		assert.equal(harness.clock.pending(), 0);
+	} finally {
 		await harness.cleanup();
 	}
 });
@@ -1239,6 +1363,43 @@ test("makeSshRun refuses to start when the signal is already aborted", async () 
 	const controller = new AbortController();
 	controller.abort();
 	await assert.rejects(makeSshRun("phone")("true", controller.signal), /aborted/);
+});
+
+test("makeSshRun refuses a target that starts with a dash (ssh option injection)", () => {
+	for (const target of ["-oProxyCommand=evil", "-o", "-v", "--"]) {
+		assert.throws(() => makeSshRun(target), /refusing ssh target/);
+	}
+});
+
+test("the ssh stdout cap sits above the upload cap so assertUploadSize still explains an oversized recording", () => {
+	assert.ok(MAX_SSH_STDOUT_BYTES > MAX_UPLOAD_BYTES, "the slack must be positive, not a fixed value to restate");
+});
+
+test("makeSshRun passes output at the cap through", async () => {
+	await withFakeSsh("#!/bin/sh\nprintf '12345'\n", async () => {
+		const done = await makeSshRun("phone", 5)("cat", new AbortController().signal);
+		assert.equal(done.code, 0);
+		assert.equal(done.stdout.toString("utf8"), "12345");
+	});
+});
+
+test("makeSshRun kills a child that streams past the cap and reports the overflow", async () => {
+	await withFakeSsh("#!/bin/sh\nprintf 'warning: phone says hi\\n' >&2\nhead -c 100000 /dev/zero\n", async () => {
+		const done = await makeSshRun("phone", 1_000)("cat big", new AbortController().signal);
+		assert.equal(done.code, -1, "a killed stream is a failed command, not a rejection");
+		assert.equal(done.stdout.length, 0, "the partial buffer must be released, not returned");
+		assert.match(done.stderr, /^voice: the ssh command produced more than 1000 bytes of stdout; killed/);
+		assert.match(done.stderr, /warning: phone says hi/, "earlier stderr diagnostics must survive");
+	});
+});
+
+test("makeSshRun retains only the head of a runaway stderr", async () => {
+	await withFakeSsh("#!/bin/sh\nhead -c 200000 /dev/zero >&2\nprintf 'ok'\n", async () => {
+		const done = await makeSshRun("phone", 1_000_000)("cmd", new AbortController().signal);
+		assert.equal(done.code, 0, "a chatty stderr is not a failed command");
+		assert.equal(done.stdout.toString("utf8"), "ok");
+		assert.equal(done.stderr.length, MAX_SSH_STDERR_BYTES, "stderr must be truncated at the cap, not buffered whole");
+	});
 });
 
 // ---------------------------------------------------------------------------
