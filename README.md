@@ -29,6 +29,7 @@ each entry point explicitly:
 "pi": {
   "extensions": [
     ".pi/extensions/answer.ts",
+    ".pi/extensions/btw.ts",
     ".pi/extensions/continue.ts",
     ".pi/extensions/goal.ts",
     ".pi/extensions/native-web-search.ts",
@@ -78,6 +79,7 @@ inactive. Installed packages are loaded regardless of project trust.
 | `.pi/extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent`, `subagent_status`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel`, `subagent_clean`, a live child-activity phase and a status widget above the editor |
 | `.pi/extensions/todos.ts` | `/todos` TUI and the `todo` tool |
 | `.pi/extensions/answer.ts` | `/answer`: extract questions from the last response and answer them in a focused TUI |
+| `.pi/extensions/btw.ts` | `/btw <question>`: one-shot side question answered from the session's context on the session's model — never added to the transcript, so it cannot steer later prompts. Works while the agent streams; the answer opens in a dismissible, scrollable overlay (`C` copies). **Ours** |
 | `.pi/extensions/continue.ts` | `shift+alt+enter` sends the literal prompt `continue`, but only when the agent is idle, so it never steers or queues a message mid-run. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), unmodified |
 | `.pi/extensions/review.ts` | `/review` and `/end-review`: PR, branch, commit, folder and uncommitted review modes, loop-fixing, custom instructions, project-level `REVIEW_GUIDELINES.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with two local changes — see below |
 | `.pi/extensions/goal.ts` | `/goal` and the `get_goal`/`create_goal`/`update_goal` tools: a long-running objective that auto-continues across turns with an optional token budget, its state appended to the session log and reconstructed on reload/tree navigation. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with two local changes — see below |

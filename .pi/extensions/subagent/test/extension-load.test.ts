@@ -23,6 +23,7 @@ import { test } from "node:test";
 
 const EXTENSIONS = [
 	"../../answer.ts",
+	"../../btw.ts",
 	"../../continue.ts",
 	"../../goal.ts",
 	"../../native-web-search.ts",
