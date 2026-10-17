@@ -434,9 +434,12 @@ export class Recorder {
 			return;
 		}
 		if (signal.aborted) {
-			// A cancel landed while the file was being written; it already
-			// swept the directory, so the file we just created would leak.
-			await this.#rmSafe(localPath);
+			// A cancel landed while the file was being written. Its local delete ran
+			// before the file existed, so without this the file would leak — unless
+			// keepAudio, in which case that delete was skipped on purpose and this
+			// complete recording is meant to stay. (Untested: the write window cannot
+			// be held open with the injected-runner harness.)
+			if (!this.#config.keepAudio) await this.#rmSafe(localPath);
 			return;
 		}
 
@@ -468,13 +471,15 @@ export class Recorder {
 	 * This is the one path allowed to issue `-q` for a recording the extension
 	 * may not own, because the user asked for it explicitly.
 	 *
-	 * Per phase: starting → wait (bounded) for the start command to settle, then
-	 * best-effort `-q` + remote cleanup, never fetch; recording/stopping →
-	 * best-effort `-q` + remote cleanup, never fetch; fetching → drop the partial
-	 * local file and the remote original; transcribing → drop the local copy
-	 * unless keepAudio. Idempotent while running, a no-op when already idle.
-	 * While it runs, start() and stop() are refused: the cancel owns the phone
-	 * until its cleanup has landed.
+	 * Per phase: starting → wait (bounded) for the start command to settle,
+	 * then best-effort `-q` + remote cleanup, never fetch;
+	 * recording/stopping/error → best-effort `-q` + remote cleanup, never
+	 * fetch; fetching → remote cleanup; transcribing → only the aborted
+	 * upload. The local copy is dropped in every phase unless keepAudio — one
+	 * guarded delete after the switch, so no branch can forget the guard.
+	 * Idempotent while running, a no-op when already idle. While it runs,
+	 * start() and stop() are refused: the cancel owns the phone until its
+	 * cleanup has landed.
 	 */
 	// Not `async`: an async method would wrap the stored promise, and callers
 	// joining an in-flight cancel must get the same promise back.
@@ -537,18 +542,21 @@ export class Recorder {
 			case "error":
 				await this.#bestEffortStop();
 				await this.#cleanupRemote(id);
-				if (!this.#config.keepAudio) await this.#rmSafe(localPath);
 				break;
 			case "fetching":
-				await this.#rmSafe(localPath);
 				await this.#cleanupRemote(id);
 				break;
 			case "transcribing":
-				if (!this.#config.keepAudio) await this.#rmSafe(localPath);
-				break;
 			case "idle":
 				break;
 		}
+
+		// The local delete is the one step more than one branch wants, and the
+		// branch that once forgot its keepAudio guard is why this is here rather
+		// than repeated above: one guarded delete makes omission impossible.
+		// keepAudio concerns the local copy only, so the remote cleanup is not
+		// guarded.
+		if (!this.#config.keepAudio) await this.#rmSafe(localPath);
 
 		this.#clearCycle();
 		this.#setPhase("idle");
