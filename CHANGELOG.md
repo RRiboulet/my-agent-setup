@@ -14,10 +14,14 @@ Added:
   unaffected (the same contract as opencode's `/btw`). While it runs a
   status-line indicator shows; the answer then opens in a scrollable overlay —
   ↑/↓/PgUp/PgDn/Home/End scroll, `C` copies through the system clipboard, Esc
-  closes. The transcript serialized into the request drops thinking and
-  system messages, marks tool calls inline, truncates each tool result at
-  2 000 characters and the whole transcript at 60 000, so one noisy tool
-  cannot own the prompt. A session switch or shutdown aborts an in-flight
+  closes. The request sees the model-visible context — `buildContextEntries()`,
+  the compaction-aware entry list pi feeds its own model — so compaction and
+  branch summaries count (pinned, at 6 000 characters each) and custom
+  messages count too; thinking and system messages drop, tool calls are marked
+  inline, each tool result or note is truncated at 2 000 characters, and the
+  newest conversation blocks are kept within 60 000, so one noisy tool cannot
+  own the prompt and nothing from before a compaction is silently lost. A
+  session switch or shutdown aborts an in-flight
   question. One side question runs at a time.
 
 - **`/voice` — dictate with the phone as the microphone.** `/voice` starts

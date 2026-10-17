@@ -29,6 +29,7 @@ each entry point explicitly:
 "pi": {
   "extensions": [
     ".pi/extensions/answer.ts",
+    ".pi/extensions/btw.ts",
     ".pi/extensions/continue.ts",
     ".pi/extensions/goal.ts",
     ".pi/extensions/native-web-search.ts",
