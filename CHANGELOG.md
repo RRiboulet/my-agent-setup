@@ -73,6 +73,29 @@ Fixed:
   phase, and a best-effort stop that refuses is skipped rather than abandoning
   the cancel's remaining cleanup.
 
+- **The ssh transport can no longer stream the container out of memory.**
+  `makeSshRun` accumulated every byte of stdout from every `ssh` command without
+  limit, and the 25 MB upload check (`assertUploadSize`) ran only after the whole
+  transfer had been buffered and written to a temp file. A semi-trusted phone —
+  corrupt, compromised, or just `cat`-ing the wrong file — could therefore grow
+  the container's heap and tmpdir without bound before anything objected.
+  Buffering now stops at the upload cap plus a 4 MB slack: the slack is
+  deliberate, so a recording merely over the cap still reaches
+  `assertUploadSize`, whose message names the size and keeps the audio, and only
+  a runaway stream is killed. An overflow drops the partial buffer, kills the
+  child, and surfaces as a `fetch-failed` with "produced more than N bytes of
+  stdout; killed" — the remote copy still survives, as it does for any failed
+  fetch.
+
+  stderr is bounded too, and the adversarial review is why: the phone is the ssh
+  *server*, so it writes to stderr no matter what command was asked for, and a
+  stdout-only cap would have moved the hole rather than closed it. Only the head
+  (64 KB) is retained, and the stream keeps being drained, because a paused pipe
+  would back-pressure the child. Losing the tail of a diagnostic stream is fine;
+  losing the container is not. An overflow still keeps whatever stderr arrived
+  before it, with the overflow notice placed first so the recorder's
+  `firstLine(stderr)` shows the reason rather than a truncated warning.
+
 Maintenance:
 
 - **The `/voice` container side now survives container rebuilds.** `/voice`

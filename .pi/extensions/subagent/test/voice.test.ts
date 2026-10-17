@@ -47,7 +47,7 @@ import {
 	type TranscribeRequest,
 } from "../../voice/transcribe.ts";
 import { createVoiceExtension, formatElapsed, statusText } from "../../voice/index.ts";
-import { makeSshRun } from "../../voice/transport.ts";
+import { MAX_SSH_STDERR_BYTES, MAX_SSH_STDOUT_BYTES, makeSshRun } from "../../voice/transport.ts";
 import { waitFor, withEnv, withTempAgentDir } from "./helpers.ts";
 
 const ID = "0123456789abcdef0123456789abcdef";
@@ -1369,6 +1369,37 @@ test("makeSshRun refuses a target that starts with a dash (ssh option injection)
 	for (const target of ["-oProxyCommand=evil", "-o", "-v", "--"]) {
 		assert.throws(() => makeSshRun(target), /refusing ssh target/);
 	}
+});
+
+test("the ssh stdout cap sits above the upload cap so assertUploadSize still explains an oversized recording", () => {
+	assert.ok(MAX_SSH_STDOUT_BYTES > MAX_UPLOAD_BYTES, "the slack must be positive, not a fixed value to restate");
+});
+
+test("makeSshRun passes output at the cap through", async () => {
+	await withFakeSsh("#!/bin/sh\nprintf '12345'\n", async () => {
+		const done = await makeSshRun("phone", 5)("cat", new AbortController().signal);
+		assert.equal(done.code, 0);
+		assert.equal(done.stdout.toString("utf8"), "12345");
+	});
+});
+
+test("makeSshRun kills a child that streams past the cap and reports the overflow", async () => {
+	await withFakeSsh("#!/bin/sh\nprintf 'warning: phone says hi\\n' >&2\nhead -c 100000 /dev/zero\n", async () => {
+		const done = await makeSshRun("phone", 1_000)("cat big", new AbortController().signal);
+		assert.equal(done.code, -1, "a killed stream is a failed command, not a rejection");
+		assert.equal(done.stdout.length, 0, "the partial buffer must be released, not returned");
+		assert.match(done.stderr, /^voice: the ssh command produced more than 1000 bytes of stdout; killed/);
+		assert.match(done.stderr, /warning: phone says hi/, "earlier stderr diagnostics must survive");
+	});
+});
+
+test("makeSshRun retains only the head of a runaway stderr", async () => {
+	await withFakeSsh("#!/bin/sh\nhead -c 200000 /dev/zero >&2\nprintf 'ok'\n", async () => {
+		const done = await makeSshRun("phone", 1_000_000)("cmd", new AbortController().signal);
+		assert.equal(done.code, 0, "a chatty stderr is not a failed command");
+		assert.equal(done.stdout.toString("utf8"), "ok");
+		assert.equal(done.stderr.length, MAX_SSH_STDERR_BYTES, "stderr must be truncated at the cap, not buffered whole");
+	});
 });
 
 // ---------------------------------------------------------------------------
