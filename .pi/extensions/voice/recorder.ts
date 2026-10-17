@@ -34,7 +34,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { rm, writeFile } from "node:fs/promises";
+import { rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -364,9 +364,12 @@ export class Recorder {
 			return;
 		}
 		if (signal.aborted) {
-			// A cancel landed while the file was being written; it already
-			// swept the directory, so the file we just created would leak.
-			await this.#rmSafe(localPath);
+			// A cancel landed while the file was being written. Its local delete ran
+			// before the file existed, so without this the file would leak — unless
+			// keepAudio, in which case that delete was skipped on purpose and this
+			// complete recording is meant to stay. (Untested: the write window cannot
+			// be held open with the injected-runner harness.)
+			if (!this.#config.keepAudio) await this.#rmSafe(localPath);
 			return;
 		}
 
@@ -386,10 +389,10 @@ export class Recorder {
 		}
 		if (signal.aborted) return;
 
-		if (this.#config.keepAudio) this.#finishCycle(localPath);
+		if (this.#config.keepAudio) this.#goIdle(localPath);
 		else {
 			await this.#rmSafe(localPath);
-			this.#finishCycle();
+			this.#goIdle();
 		}
 	}
 
@@ -399,10 +402,10 @@ export class Recorder {
 	 * may not own, because the user asked for it explicitly.
 	 *
 	 * Per phase: starting/recording/stopping → best-effort `-q` + remote
-	 * cleanup, never fetch; fetching → drop the partial local file and the
-	 * remote original; transcribing → drop the local copy unless keepAudio.
-	 * Idempotent while running, a no-op when already idle. While it runs,
-	 * start() and stop() are refused: the cancel owns the phone until its
+	 * cleanup, never fetch; fetching → drop the local copy unless keepAudio,
+	 * and the remote original; transcribing → drop the local copy unless
+	 * keepAudio. Idempotent while running, a no-op when already idle. While it
+	 * runs, start() and stop() are refused: the cancel owns the phone until its
 	 * cleanup has landed.
 	 */
 	// Not `async`: an async method would wrap the stored promise, and callers
@@ -434,8 +437,7 @@ export class Recorder {
 
 	async #doShutdown(): Promise<void> {
 		await this.#settleWithin(this.cancel(), SHUTDOWN_BUDGET_MS);
-		this.#clearCycle();
-		this.#setPhase("idle");
+		this.#goIdle();
 	}
 
 	async #doCancel(): Promise<void> {
@@ -452,21 +454,31 @@ export class Recorder {
 			case "error":
 				await this.#bestEffortStop();
 				await this.#cleanupRemote(id);
-				if (!this.#config.keepAudio) await this.#rmSafe(localPath);
 				break;
 			case "fetching":
-				await this.#rmSafe(localPath);
 				await this.#cleanupRemote(id);
 				break;
 			case "transcribing":
-				if (!this.#config.keepAudio) await this.#rmSafe(localPath);
-				break;
 			case "idle":
 				break;
 		}
 
+		// The local delete is the one step more than one branch wants, and the
+		// branch that once forgot its keepAudio guard is why this is here rather
+		// than repeated above: one guarded delete makes omission impossible.
+		// keepAudio concerns the local copy only, so the remote cleanup is not
+		// guarded.
+		if (!this.#config.keepAudio) await this.#rmSafe(localPath);
+
 		this.#clearCycle();
-		this.#setPhase("idle");
+		// A cancel that kept the audio should say where, like every other
+		// keep-the-audio path. `localPath` is only real once the fetch has written
+		// it, so the file decides; nothing deletes it afterwards, because the
+		// post-write check in stop() obeys keepAudio too. A cancel landing during
+		// the write itself can still stat before the file lands and stay silent —
+		// narrow, and the file is left for the user regardless.
+		const kept = this.#config.keepAudio && (await this.#fileExists(localPath)) ? localPath : undefined;
+		this.#goIdle(kept);
 	}
 
 	#tick(): void {
@@ -541,6 +553,20 @@ export class Recorder {
 		return outcome.result;
 	}
 
+	/** Whether `path` names a file, for reporting a kept recording. Any `stat`
+	 * failure counts as absent: naming a path that does not resolve is worse than
+	 * the old silence, and the file is only worth reporting if it is really
+	 * there. */
+	async #fileExists(path: string | undefined): Promise<boolean> {
+		if (!path) return false;
+		try {
+			await stat(path);
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
 	/**
 	 * Best-effort local delete. A failed unlink (a read-only tmpdir, a path that
 	 * is not a file) must never wedge the cycle in a non-idle phase: the
@@ -587,7 +613,7 @@ export class Recorder {
 	}
 
 	/** `keptPath`, when given, rides on this one emitted status — set before
-	 * `#fail` so an error carries it, and on `#finishCycle` so the idle notice
+	 * `#fail` so an error carries it, and on `#goIdle` so the idle notice
 	 * can name the audio — rather than living in a field whose value is only
 	 * meaningful between two adjacent statements. */
 	#fail(failure: RecorderFailure, message: string, keptPath?: string): void {
@@ -618,7 +644,10 @@ export class Recorder {
 		return status;
 	}
 
-	#finishCycle(keptPath?: string): void {
+	/** The one transition to idle: used by a finished cycle, a cancel and a
+	 * shutdown, so the lifecycle lives in one place. `keptPath`, when given, rides
+	 * on the idle status for `renderStatus` to notify about. */
+	#goIdle(keptPath?: string): void {
 		this.#clearCycle();
 		this.#setPhase("idle", keptPath);
 	}

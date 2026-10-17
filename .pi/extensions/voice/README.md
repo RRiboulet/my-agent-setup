@@ -38,9 +38,9 @@ Where the transcript goes:
 
 Cancel never pastes. Per phase it aborts, stops the phone best-effort when a
 recording may be running, and drops the local and/or remote file: recording
-phases delete the remote original and any local copy; fetching deletes both;
-transcribing aborts the upload and deletes the local copy — no cancel path
-touches the local file when `keepAudio` is set. While a cancel is in flight the
+phases delete the remote original and any local copy; fetching deletes the
+remote original; transcribing aborts the upload — no cancel path deletes the
+local file when `keepAudio` is set. While a cancel is in flight the
 status still shows the pre-cancel phase and start/stop are refused, so a
 `/voice` press in that window is ignored (silently in `recording` or `error`,
 as a `busy (…)` notice otherwise) until the status clears.
@@ -147,8 +147,9 @@ The audio exists in three places, briefly:
   nothing sweeps a file left behind by a crash mid-cycle; the live smoke test
   checks for leftovers before a sweeper earns its keep.
 - **Locally:** `<tmpdir>/pi-voice-<id>.m4a`, mode `0600`, deleted after a
-  successful transcription unless `keepAudio` says otherwise, and kept on a
-  transcription failure with the path in the notice.
+  successful transcription unless `keepAudio` says otherwise. When a file is
+  kept, the notice names its path — on a transcription failure, and on a cancel
+  that keeps the file with `keepAudio` set.
 - **At the API:** the one POST to `baseUrl` — the OpenAI default, or your own
   server if you point it there. Nothing else leaves the machine.
 
