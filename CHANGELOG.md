@@ -48,6 +48,8 @@ Fixed:
   includes it. `firstLine`/`describeError` moved to a shared `voice/util.ts`
   because the recorder and transcription each had their own copy.
 
+- **A subagent that fails at the tmux layer now persists `failed` with its usage.** `markRunFailed` used to write `status: "failed"` before capturing usage, so pollers could observe a `failed` run with no usage (and a crash in that window lost the transcript pointer). Usage and `sessionFile` are now captured before the status flips, and `runs.json` is written once.
+
 Maintenance:
 
 - **The `/voice` container side now survives container rebuilds.** `/voice`

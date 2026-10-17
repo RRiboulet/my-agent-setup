@@ -1448,13 +1448,14 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 
 	const markRunFailed = async (run: RunRecord, message: string): Promise<void> => {
 		clearTimer(run.id);
+		// Capture usage (and discover sessionFile) before flipping to "failed", so a
+		// persisted/observable "failed" run never lacks usage or its transcript
+		// pointer. persist() runs once, inside settleRun, after capture.
+		await captureRunUsage(run);
 		run.status = "failed";
 		run.interruptRequestedAt = undefined;
 		run.error = message;
 		run.finishedAt = Date.now();
-		// Persist the terminal status before the (possibly slow) usage capture so a
-		// tmux-layer failure is never stranded as "running" on disk.
-		await persist();
 		await settleRun(run);
 	};
 
