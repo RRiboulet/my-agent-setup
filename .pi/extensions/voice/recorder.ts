@@ -38,7 +38,14 @@ import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { DEFAULT_RECORDER_PATH, MAX_SECONDS_MAX, MAX_SECONDS_MIN, type VoiceConfig } from "./config.ts";
+import {
+	DEFAULT_RECORDER_PATH,
+	MAX_SECONDS_MAX,
+	MAX_SECONDS_MIN,
+	RECORDER_PATH_EXPECTATION,
+	RECORDER_PATH_PATTERN,
+	type VoiceConfig,
+} from "./config.ts";
 import { describeError, firstLine } from "./util.ts";
 
 /** Remote staging directory. Kept out of the shell's cwd: `$HOME` expands on
@@ -128,6 +135,15 @@ function assertRecordingId(id: string): void {
 	}
 }
 
+/** Defense-in-depth: `loadConfig` already degrades an unsafe path to the
+ * default, so this only fires for a caller that built a `Recorder` directly.
+ * Keep it in step with the config layer's message via the shared expectation. */
+function assertRecorderPath(recorderPath: string): void {
+	if (!RECORDER_PATH_PATTERN.test(recorderPath)) {
+		throw new Error(`voice: refusing recorder path ${JSON.stringify(recorderPath)}: expected ${RECORDER_PATH_EXPECTATION}`);
+	}
+}
+
 function assertMaxSeconds(maxSeconds: number): void {
 	if (!Number.isInteger(maxSeconds) || maxSeconds < MAX_SECONDS_MIN || maxSeconds > MAX_SECONDS_MAX) {
 		throw new Error(
@@ -173,12 +189,14 @@ export function buildStartCommand(options: StartCommandOptions): string {
 	assertMaxSeconds(options.maxSeconds);
 	if (options.bitrateKbps !== undefined) assertBitrate(options.bitrateKbps);
 	const recorder = options.recorderPath ?? DEFAULT_RECORDER_PATH;
+	assertRecorderPath(recorder);
 	const args = ["-f", `"${remoteRecordingPath(options.id)}"`, "-l", String(options.maxSeconds), "-e", "aac"];
 	if (options.bitrateKbps !== undefined) args.push("-b", String(options.bitrateKbps));
 	return `mkdir -p "${REMOTE_VOICE_DIR}" && ${recorder} ${args.join(" ")}`;
 }
 
 export function buildStopCommand(recorderPath: string = DEFAULT_RECORDER_PATH): string {
+	assertRecorderPath(recorderPath);
 	return `${recorderPath} -q`;
 }
 
@@ -267,15 +285,26 @@ export class Recorder {
 		this.#localPath = localRecordingPath(id, this.#tmpDir);
 		this.#failure = undefined;
 		this.#message = undefined;
-		this.#setPhase("starting");
 
-		const result = await this.#runStage({
-			command: buildStartCommand({
+		// Build the command before the phase moves: a builder refusal (the
+		// defense-in-depth path assert) must land in `error` — retryable — not
+		// escape as a rejection with the machine stuck in `starting`.
+		let command: string;
+		try {
+			command = buildStartCommand({
 				id,
 				maxSeconds: this.#config.maxSeconds,
 				...(this.#config.bitrateKbps !== undefined ? { bitrateKbps: this.#config.bitrateKbps } : {}),
 				recorderPath: this.#config.recorderPath,
-			}),
+			});
+		} catch (error) {
+			this.#fail("start-failed", `building the start command failed: ${(error as Error).message}`);
+			return;
+		}
+		this.#setPhase("starting");
+
+		const result = await this.#runStage({
+			command,
 			signal: abort.signal,
 			failure: "start-failed",
 			what: "starts the recorder",
@@ -327,9 +356,19 @@ export class Recorder {
 		const localPath = this.#localPath as string;
 
 		this.#clearTimer();
+
+		// Same ordering rule as start(): build before the phase moves, so a
+		// builder refusal lands in `error` instead of wedging `stopping`.
+		let stopCommand: string;
+		try {
+			stopCommand = buildStopCommand(this.#config.recorderPath);
+		} catch (error) {
+			this.#fail("stop-failed", `building the stop command failed: ${(error as Error).message}`);
+			return;
+		}
 		this.#setPhase("stopping");
 		const stopped = await this.#runStage({
-			command: buildStopCommand(this.#config.recorderPath),
+			command: stopCommand,
 			signal,
 			failure: "stop-failed",
 			what: "stops the recorder",
@@ -479,7 +518,15 @@ export class Recorder {
 	}
 
 	async #bestEffortStop(): Promise<void> {
-		await this.#runBounded(buildStopCommand(this.#config.recorderPath), this.#cleanupBudgetMs);
+		// A builder refusal here must not abandon the cancel's remaining cleanup
+		// (the local rm, the remote rm): best-effort means skip, not throw.
+		let command: string;
+		try {
+			command = buildStopCommand(this.#config.recorderPath);
+		} catch {
+			return;
+		}
+		await this.#runBounded(command, this.#cleanupBudgetMs);
 	}
 
 	async #cleanupRemote(id: string | undefined): Promise<void> {
