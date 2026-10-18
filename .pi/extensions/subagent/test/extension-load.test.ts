@@ -23,6 +23,7 @@ import { test } from "node:test";
 
 const EXTENSIONS = [
 	"../../answer.ts",
+	"../../btw/index.ts",
 	"../../continue.ts",
 	"../../goal.ts",
 	"../../native-web-search.ts",
@@ -41,6 +42,23 @@ const EXTENSIONS = [
 // loader. The exports an importer will use are named, so an accidental drop
 // of one fails here instead of at wiring time.
 const MODULES: Record<string, string[]> = {
+	"../../btw/launch.ts": [
+		"buildBtwChildCommand",
+		"buildBtwChildPiArgs",
+		"buildBtwRemainOnExitArgs",
+		"buildBtwSendKeysArgs",
+		"buildBtwSessionCreateArgs",
+		"buildBtwSubmitArgs",
+		"btwForkPath",
+		"btwQuestionPath",
+		"btwRunDir",
+		"btwSessionName",
+		"btwSidePromptPath",
+		"btwSocketPath",
+		"btwTarget",
+		"providerExtensionPath",
+		"requireBtwQuestion",
+	],
 	"../../repo-explorer/git.ts": ["openGit", "RepoGitError"],
 	"../../repo-explorer/runner.ts": ["makeGitRunner"],
 	"../../repo-explorer/branch-menu.ts": ["buildBranchMenu", "resolveBranchChoice", "chooseBranch"],
