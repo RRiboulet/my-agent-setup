@@ -1,4 +1,5 @@
-// Pure builders for the click-to-open subagent panel.
+// Pure builders for the click-to-open subagent panel, reused by the btw side
+// panel.
 //
 // Clicking a live-subagent row in the status widget is meant to open a tmux
 // popup (drawn over pi's client, on the outer server) that runs a nested

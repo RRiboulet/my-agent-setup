@@ -68,6 +68,7 @@ const MODULES: Record<string, string[]> = {
 	"../../repo-explorer/sanitize.ts": ["sanitizeDisplay", "sanitizeFileContent"],
 	"../handoff.ts": [
 		"buildChildPiArgs",
+		"countSessionLines",
 		"forkLiveBranch",
 		"getPiInvocationParts",
 		"requireExistingSession",

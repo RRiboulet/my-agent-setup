@@ -3,8 +3,9 @@
 // A panel is a separate pi process running a fork of the main session in its
 // own tmux session. `index.ts` owns the command, the guards and the side
 // effects; this module owns everything that can be decided from its inputs
-// alone — the scratch paths, the child argv, the tmux argv and the shell
-// command string — so the suite can pin them without a TTY or a tmux server.
+// alone — the scratch paths, the tool allowlist, the side-prompt text, the
+// question validator, the child argv, the tmux argv and the shell command
+// string — so the suite can pin them without a TTY or a tmux server.
 //
 // Two decisions here are load-bearing and explained at their definitions: the
 // per-main-session socket (a shared server would let one panel's close unbind
@@ -43,23 +44,38 @@ export const BTW_SIDE_PROMPT = [
 	"- If the context does not contain the answer, say what is missing instead of guessing.",
 ].join("\n");
 
-/** First 8 characters of a session id, the panel's stable short key. */
-function shortId(sessionId: string): string {
-	return sessionId.slice(0, 8);
+/**
+ * Refuse a relative path, with the reason in the message.
+ *
+ * tmux and the shell never expand `~`, so a caller that passes
+ * `"~/.pi/agent"` would make the path literal and wrong. The guard catches
+ * that at the builder instead of at a failed launch.
+ */
+function requireAbsolute(value: string, label: string): string {
+	if (!path.isAbsolute(value)) {
+		throw new Error(`btw needs an absolute ${label}, got ${JSON.stringify(value)}`);
+	}
+	return value;
 }
 
 /**
- * Join under the agent dir, refusing a relative one.
+ * A session id must be a single, non-dot path component.
  *
- * tmux and the shell never expand `~`, so a caller that passes
- * `"~/.pi/agent"` would make every path here literal and wrong. The guard
- * catches that at the builder instead of at a failed launch.
+ * pi validates its own ids to `[A-Za-z0-9._-]` with alphanumeric ends, but
+ * these builders take whatever a caller passes: a `..` or a `/` would escape
+ * the run directory, and the guard keeps that from becoming exploitable if a
+ * future caller ever takes the id from somewhere else.
  */
-function underAgentDir(agentDir: string, ...parts: string[]): string {
-	if (!path.isAbsolute(agentDir)) {
-		throw new Error(`btw needs an absolute agent directory, got ${JSON.stringify(agentDir)}`);
+function requireSessionId(sessionId: string): string {
+	if (!sessionId || sessionId !== path.basename(sessionId) || sessionId === "." || sessionId === "..") {
+		throw new Error(`btw needs a session id that is one path component, got ${JSON.stringify(sessionId)}`);
 	}
-	return path.join(agentDir, ...parts);
+	return sessionId;
+}
+
+/** Join under the agent dir, refusing a relative one. */
+function underAgentDir(agentDir: string, ...parts: string[]): string {
+	return path.join(requireAbsolute(agentDir, "agent directory"), ...parts);
 }
 
 /**
@@ -71,14 +87,20 @@ function underAgentDir(agentDir: string, ...parts: string[]): string {
  * every other panel still open, and a rebind race could leave a new panel
  * bound to nothing. One socket per main session keeps the borrowed recipe
  * correct and scopes `kill-server` at session end to this session's panel.
+ *
+ * The name carries the FULL session id. pi mints ids with UUIDv7, whose
+ * leading hex digits are a millisecond timestamp: two sessions started within
+ * the same ~65 s window share their first 8 characters, so a shortened id
+ * would collide on this socket and on the session name below. The full id
+ * keeps the socket path well under the ~108-byte sun_path limit.
  */
 export function btwSocketPath(agentDir: string, sessionId: string): string {
-	return underAgentDir(agentDir, `tmux-btw-${shortId(sessionId)}.sock`);
+	return underAgentDir(agentDir, `tmux-btw-${requireSessionId(sessionId)}.sock`);
 }
 
-/** The tmux session name on that socket. */
+/** The tmux session name on that socket; full id for the same reason. */
 export function btwSessionName(sessionId: string): string {
-	return `btw-${shortId(sessionId)}`;
+	return `btw-${requireSessionId(sessionId)}`;
 }
 
 /** The pane every send-keys call addresses. */
@@ -92,7 +114,7 @@ export function btwTarget(sessionId: string): string {
  * must not outlive the panel.
  */
 export function btwRunDir(agentDir: string, sessionId: string): string {
-	return underAgentDir(agentDir, "btw", sessionId);
+	return underAgentDir(agentDir, "btw", requireSessionId(sessionId));
 }
 
 /** The forked transcript the child opens with `--session`. */
@@ -105,7 +127,13 @@ export function btwQuestionPath(agentDir: string, sessionId: string): string {
 	return path.join(btwRunDir(agentDir, sessionId), "question.md");
 }
 
-/** The system-prompt appendix, passed by path to `--append-system-prompt`. */
+/**
+ * The system-prompt appendix, passed by path to `--append-system-prompt`.
+ *
+ * The file must exist before the child launches: pi treats a non-existent
+ * `--append-system-prompt` value as literal text, so a missing file would
+ * silently put this path in the system prompt instead of the instructions.
+ */
 export function btwSidePromptPath(agentDir: string, sessionId: string): string {
 	return path.join(btwRunDir(agentDir, sessionId), "side-prompt.md");
 }
@@ -123,6 +151,9 @@ export function requireBtwQuestion(raw: string): string {
 	if (!question) {
 		throw new Error("A /btw question cannot be empty.");
 	}
+	if (question.includes("\u0000")) {
+		throw new Error("A /btw question cannot contain a NUL byte.");
+	}
 	return question;
 }
 
@@ -136,6 +167,10 @@ export function requireBtwQuestion(raw: string): string {
  * nothing). Explicit `-e` paths survive `--no-extensions`, so a provider
  * listed here is loaded back in. Core providers (anthropic, openai, …) do not
  * belong here.
+ *
+ * A provider missing from this table is not loaded, and the child then dies at
+ * model resolution; `remain-on-exit` keeps the failure visible, but the panel
+ * is dead. Add an entry when a second extension-registered provider appears.
  */
 const PROVIDER_EXTENSIONS: Readonly<Record<string, string>> = {
 	"opencode-go": "../opencode-go-provider/index.ts",
@@ -144,7 +179,9 @@ const PROVIDER_EXTENSIONS: Readonly<Record<string, string>> = {
 /** The absolute entry point for an extension-registered provider, if any. */
 export function providerExtensionPath(provider: string, btwDir: string): string | undefined {
 	const relative = PROVIDER_EXTENSIONS[provider];
-	return relative === undefined ? undefined : path.resolve(btwDir, relative);
+	return relative === undefined
+		? undefined
+		: path.resolve(requireAbsolute(btwDir, "extension directory"), relative);
 }
 
 export interface BtwChildPiSpec {
@@ -169,11 +206,12 @@ export interface BtwChildPiSpec {
 /**
  * The child pi argv.
  *
- * `--no-approve` keeps project-local files out of a panel that has no business
- * acting on the project, and the rest of the `--no-*` flags keep the child's
- * context to the fork plus the side prompt: no skills, prompts, context files
- * or MCP servers. `--tools` is an allowlist, so BTW_TOOLS is the whole
- * registry.
+ * `--no-approve` declines project trust, so trust-gated project config and
+ * resources (settings, extensions, context files) never load; the panel's
+ * read-only tools can still read project files, by design. The rest of the
+ * `--no-*` flags leave the child's context to the fork plus the side prompt:
+ * no skills, prompts, context files or MCP servers. `--tools` is an allowlist,
+ * so BTW_TOOLS is the whole registry.
  *
  * The question travels as `@<file>`, never as text: a question starting with
  * `-` would otherwise be parsed as a flag, and one starting with `@` as an

@@ -35,13 +35,24 @@ import {
 const AGENT_DIR = "/home/x/.pi/agent";
 const BTW_DIR = "/repo/.pi/extensions/btw";
 const SID = "1a2b3c4d-0000-4000-8000-000000000000";
-const SOCKET = `${AGENT_DIR}/tmux-btw-1a2b3c4d.sock`;
-const SESSION = "btw-1a2b3c4d";
+const SOCKET = `${AGENT_DIR}/tmux-btw-${SID}.sock`;
+const SESSION = `btw-${SID}`;
 
 test("the socket, session and target derive from the session id", () => {
 	assert.equal(btwSocketPath(AGENT_DIR, SID), SOCKET);
 	assert.equal(btwSessionName(SID), SESSION);
 	assert.equal(btwTarget(SID), `${SESSION}:0.0`);
+});
+
+test("two UUIDv7 ids sharing a timestamp prefix do not collide", () => {
+	// pi mints session ids with UUIDv7: the leading hex is a millisecond
+	// timestamp, so the first 8 characters repeat for sessions started within
+	// ~65 s. The socket and session name must carry the full id.
+	const first = "01a14e96-1111-7000-8000-000000000001";
+	const second = "01a14e96-2222-7000-8000-000000000002";
+	assert.equal(first.slice(0, 8), second.slice(0, 8));
+	assert.notEqual(btwSocketPath(AGENT_DIR, first), btwSocketPath(AGENT_DIR, second));
+	assert.notEqual(btwSessionName(first), btwSessionName(second));
 });
 
 test("scratch paths are under the full session id, not the short one", () => {
@@ -62,16 +73,24 @@ test("a relative agent dir is refused instead of silently producing tilde paths"
 	}
 });
 
+test("a session id that is not one path component is refused", () => {
+	for (const sessionId of ["", ".", "..", "../evil", "a/b", "/abs"]) {
+		assert.throws(() => btwSocketPath(AGENT_DIR, sessionId), /one path component/);
+		assert.throws(() => btwSessionName(sessionId), /one path component/);
+		assert.throws(() => btwRunDir(AGENT_DIR, sessionId), /one path component/);
+	}
+});
+
 test("an empty or whitespace question is refused", () => {
 	assert.equal(requireBtwQuestion("  why did it fail?  "), "why did it fail?");
 	for (const raw of ["", "   ", "\n\t "]) {
 		assert.throws(() => requireBtwQuestion(raw), /cannot be empty/);
 	}
+	assert.throws(() => requireBtwQuestion("why?\u0000more"), /NUL/);
 });
 
 test("the allowlist is pi's read-only tool set", () => {
 	assert.deepEqual([...BTW_TOOLS], ["read", "grep", "find", "ls"]);
-	assert.ok(!/bash|edit|write|powershell/.test(BTW_TOOLS.join(",")));
 });
 
 test("the side prompt marks the replayed loadout as inapplicable", () => {
@@ -137,6 +156,7 @@ test("the question travels as @file so its text never re-enters argv parsing", (
 test("the provider extension path resolves only for an extension-registered provider", () => {
 	assert.equal(providerExtensionPath("opencode-go", BTW_DIR), "/repo/.pi/extensions/opencode-go-provider/index.ts");
 	assert.equal(providerExtensionPath("anthropic", BTW_DIR), undefined);
+	assert.throws(() => providerExtensionPath("opencode-go", "relative/btw"), /absolute extension directory/);
 });
 
 test("tmux session creation is detached, named and anchored to the main cwd", () => {
@@ -187,7 +207,13 @@ test("send-keys is literal and option-safe; Enter is a separate call", () => {
 	]);
 });
 
-test("the child command execs and shell-quotes every argv element", () => {
+test("the child command execs and shell-quotes the real argv", () => {
+	const command = buildBtwChildCommand(buildBtwChildPiArgs(CHILD_SPEC));
+	assert.ok(command.startsWith("exec "), "exec so pane_dead flips with the child");
+	assert.ok(
+		command.includes(`'@${AGENT_DIR}/btw/${SID}/question.md'`),
+		"the @file argument survives as one quoted word",
+	);
 	assert.equal(
 		buildBtwChildCommand(["/usr/bin/node", "/path with space/cli.js", "it's"]),
 		`exec '/usr/bin/node' '/path with space/cli.js' 'it'"'"'s'`,

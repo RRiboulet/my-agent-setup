@@ -1,4 +1,5 @@
-// Shell quoting, shared by the extension and its panel builders.
+// Shell quoting, shared by the subagent extension, its panel builders and the
+// btw extension.
 //
 // This lives in its own module rather than in `index.ts` because `panel.ts`
 // builds tmux command strings too: importing the quoter from `index.ts` while
