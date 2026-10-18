@@ -45,6 +45,7 @@ const MODULES: Record<string, string[]> = {
 	"../../btw/launch.ts": [
 		"buildBtwChildCommand",
 		"buildBtwChildPiArgs",
+		"buildBtwKillSessionArgs",
 		"buildBtwRemainOnExitArgs",
 		"buildBtwSendKeysArgs",
 		"buildBtwSessionCreateArgs",

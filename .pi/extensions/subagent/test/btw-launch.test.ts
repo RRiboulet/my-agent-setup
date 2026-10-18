@@ -17,6 +17,7 @@ import {
 	BTW_TOOLS,
 	buildBtwChildCommand,
 	buildBtwChildPiArgs,
+	buildBtwKillSessionArgs,
 	buildBtwRemainOnExitArgs,
 	buildBtwSendKeysArgs,
 	buildBtwSessionCreateArgs,
@@ -171,6 +172,16 @@ test("tmux session creation is detached, named and anchored to the main cwd", ()
 		"btw",
 		"-c",
 		"/work/project",
+	]);
+});
+
+test("killing the panel session targets the session on its socket", () => {
+	assert.deepEqual(buildBtwKillSessionArgs({ socket: SOCKET, session: SESSION }), [
+		"-S",
+		SOCKET,
+		"kill-session",
+		"-t",
+		SESSION,
 	]);
 });
 

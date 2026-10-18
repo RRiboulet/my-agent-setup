@@ -262,6 +262,17 @@ export function buildBtwRemainOnExitArgs(input: { socket: string; session: strin
 }
 
 /**
+ * Kill this panel's tmux session.
+ *
+ * Used before a replace and on shutdown; a missing session exits non-zero, so
+ * callers treat that as the expected no-op. Kept separate from the create
+ * builder because the pair is the whole reset and a test pins their order.
+ */
+export function buildBtwKillSessionArgs(input: { socket: string; session: string }): string[] {
+	return ["-S", input.socket, "kill-session", "-t", input.session];
+}
+
+/**
  * Type the child command into the pane.
  *
  * `-l` sends the bytes literally (no key-name lookup) and `--` ends option
