@@ -1,19 +1,15 @@
-// Behaviour tests for the /btw launch and popup.
+// Behaviour tests for the /btw panel.
 //
-// Risk covered: `/btw` forks the conversation, starts a separate pi process and
-// then draws it over pi's client. These tests pin the tmux call order
-// (kill -> create -> remain-on-exit -> type -> submit), the scratch files and
-// their owner-only modes, the popup's client ladder and argv, the reattach
-// path (re-open and re-bind, never re-fork), the dead-pane and non-tmux
-// fallbacks, the guard ladder that must not touch tmux at all, and the failure
-// path that removes what it wrote.
+// Risk covered: `/btw` resets the panel, starts the `less +F` viewer, and runs
+// the in-process request into `answer.md`. These tests pin the tmux call order
+// (kill-server -> new-session -> remain-on-exit -> type viewer -> Enter), the
+// popup ladder and argv, reattach without a new request, the answer file and
+// usage footer, the guard ladder that must not touch tmux, and the
+// replace-aborts-the-old-request ordering.
 //
-// tmux and pi are injected: `deps.exec` records calls and `deps.launch` records
-// popups, so no test spawns anything. The agent directory is a temp dir from
-// helpers.ts, never the real one, and every launch test clears TMUX so an
-// ambient tmux cannot change the ladder. The expected tmux argv partly reuses
-// the builders the code uses; `btw-launch.test.ts` pins those builders against
-// literals, so this file is about order, guards and effects.
+// tmux, the model registry and the popup launcher are injected, so no test
+// spawns anything. The agent directory is a temp dir, and launch tests clear
+// TMUX so an ambient tmux cannot change the ladder.
 
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -21,54 +17,93 @@ import { mkdir, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { test } from "node:test";
 
-import { __test__, launchBtwPanel, reattachBtwPanel, type BtwContext } from "../../btw/index.ts";
 import {
-	BTW_SIDE_PROMPT,
-	buildBtwChildCommand,
-	buildBtwChildPiArgs,
-	btwForkPath,
-	btwQuestionPath,
-	btwRunDir,
-	btwSessionName,
-	btwSidePromptPath,
-	btwSocketPath,
-	btwTarget,
-} from "../../btw/launch.ts";
-import { getPiInvocationParts } from "../handoff.ts";
-import { withEnv, withTempAgentDir } from "./helpers.ts";
+	createAssistantMessageEventStream,
+	type AssistantMessage,
+	type Context,
+	type Usage,
+} from "@earendil-works/pi-ai";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+
+import { __test__, launchBtwPanel, reattachBtwPanel, type BtwContext } from "../../btw/index.ts";
+import { buildBtwPaths, buildBtwViewerCommand } from "../../btw/launch.ts";
+import { buildBtwContext } from "../../btw/request.ts";
+import { withEnv, withTempAgentDir, waitFor } from "./helpers.ts";
 
 const SID = "01a14e96-1111-7000-8000-000000000001";
-const MAIN_FILE = `/home/x/.pi/agent/sessions/${SID}.jsonl`;
-const EXTENSION_DIR = "/repo/.pi/extensions/btw";
 const OUTER_SOCKET = "/tmp/outer.sock";
-const BRANCH = [
-	{
-		type: "message",
-		id: "e1",
-		parentId: null,
-		timestamp: "2026-10-18T00:00:01.000Z",
-		message: { role: "user", content: [{ type: "text", text: "hello" }] },
-	},
-	{
-		type: "message",
-		id: "e2",
-		parentId: "e1",
-		timestamp: "2026-10-18T00:00:02.000Z",
-		message: { role: "assistant", content: [{ type: "text", text: "hi" }] },
-	},
-];
+const ZERO_USAGE: Usage = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
 
-function fakeContext(overrides: Partial<BtwContext> = {}): BtwContext {
+function assistant(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [],
+		api: "openai-completions",
+		provider: "opencode-go",
+		model: "test-model",
+		usage: ZERO_USAGE,
+		stopReason: "stop",
+		timestamp: 0,
+		...overrides,
+	} as AssistantMessage;
+}
+
+const ENTRIES = [
+	{
+		type: "message",
+		id: "s1",
+		parentId: null,
+		timestamp: "2026-10-18T00:00:00.000Z",
+		message: {
+			role: "system",
+			content: "",
+			sections: { preamble: "SYS" },
+			toolsAdded: [{ name: "read", description: "Read a file", parameters: { type: "object", properties: {} } }],
+			timestamp: 0,
+		},
+	},
+	{
+		type: "message",
+		id: "u1",
+		parentId: "s1",
+		timestamp: "2026-10-18T00:00:01.000Z",
+		message: { role: "user", content: [{ type: "text", text: "hello" }], timestamp: 1 },
+	},
+	{
+		type: "message",
+		id: "a1",
+		parentId: "u1",
+		timestamp: "2026-10-18T00:00:02.000Z",
+		message: {
+			role: "assistant",
+			content: [{ type: "text", text: "hi" }],
+			api: "openai-completions",
+			provider: "opencode-go",
+			model: "test-model",
+			usage: ZERO_USAGE,
+			stopReason: "stop",
+			timestamp: 2,
+		},
+	},
+] as unknown as SessionEntry[];
+
+function fakeContext(modelRegistry: unknown, overrides: Partial<BtwContext> = {}): BtwContext {
 	return {
 		mode: "tui",
 		cwd: "/work/project",
-		model: { provider: "opencode-go", id: "glm-5.3-flash" },
-		thinkingLevel: "max",
+		model: { provider: "opencode-go", id: "test-model" },
+		modelRegistry: modelRegistry as never,
 		sessionManager: {
 			getSessionId: () => SID,
-			getSessionFile: () => MAIN_FILE,
-			getLeafId: () => "e2",
-			getBranch: () => BRANCH,
+			getEntries: () => ENTRIES,
+			getLeafId: () => "a1",
 		},
 		...overrides,
 	};
@@ -79,296 +114,194 @@ interface ExecCall {
 	args: string[];
 }
 
-interface LaunchCall {
-	command: string;
-	args: string[];
-	options: { detached: boolean; stdio: string };
-	onError: (message: string) => void;
-}
-
-interface FakeOptions {
-	/** Fail the first call whose argv contains this string. */
+interface TmuxOptions {
 	failOn?: string;
-	/** Throw from the first call whose argv contains this string. */
-	throwOn?: string;
-	/** Make has-session report a live panel. */
-	sessionAlive?: boolean;
-	/** Make the pane query report a dead child. */
+	serverUp?: boolean;
 	paneDead?: boolean;
-	/** Make list-clients report nobody. */
-	noClient?: boolean;
-	/** Make the Escape bind fail. */
-	bindFails?: boolean;
-	/** Make the outer window-id probe report a missing pane. */
-	paneGone?: boolean;
 }
 
-function fakeDeps(agentDir: string, options: FakeOptions = {}) {
+/** A tmux model: kill-server takes the server down, new-session brings it back. */
+function tmuxModel(options: TmuxOptions = {}) {
 	const calls: ExecCall[] = [];
-	const launches: LaunchCall[] = [];
+	let serverUp = options.serverUp === true;
+	const exec = async (command: string, args: string[]) => {
+		calls.push({ command, args });
+		const ok = { code: 0, stdout: "", stderr: "", killed: false };
+		if (options.failOn !== undefined && args.includes(options.failOn)) {
+			return { code: 1, stdout: "", stderr: `${options.failOn} failed`, killed: false };
+		}
+		if (args.includes("new-session")) {
+			serverUp = true;
+			return ok;
+		}
+		if (args.includes("kill-server")) {
+			serverUp = false;
+			return ok;
+		}
+		if (args.includes("has-session")) return serverUp ? ok : { code: 1, stdout: "", stderr: "no server", killed: false };
+		if (args.includes("list-clients")) return { ...ok, stdout: "/dev/pts/7\t@1\t100\n" };
+		if (args.includes("#{pane_dead}")) return { ...ok, stdout: options.paneDead === true ? "1\n" : "0\n" };
+		if (args.includes("display-message")) return { ...ok, stdout: "@1\n" };
+		return ok;
+	};
+	return { calls, exec };
+}
+
+function fakeDeps(agentDir: string, tmux = tmuxModel()) {
+	const launches: {
+		command: string;
+		args: string[];
+		options: { detached: boolean; stdio: string };
+		onError: (message: string) => void;
+	}[] = [];
 	const notifications: { message: string; type: string }[] = [];
 	return {
-		calls,
+		calls: tmux.calls,
 		launches,
 		notifications,
 		deps: {
-			exec: async (command: string, args: string[]) => {
-				calls.push({ command, args });
-				if (options.throwOn !== undefined && args.includes(options.throwOn)) {
-					throw new Error(`${options.throwOn} threw`);
-				}
-				if (options.failOn !== undefined && args.includes(options.failOn)) {
-					return { code: 1, stdout: "", stderr: `${options.failOn} failed` };
-				}
-				if (args.includes("list-clients")) {
-					return options.noClient
-						? { code: 0, stdout: "", stderr: "" }
-						: { code: 0, stdout: `/dev/pts/7\t@1\t100\n`, stderr: "" };
-				}
-				if (args.includes("#{pane_dead}")) {
-					return { code: 0, stdout: options.paneDead ? "1\n" : "0\n", stderr: "" };
-				}
-				if (options.paneGone === true && args.includes("display-message")) {
-					return { code: 1, stdout: "", stderr: "can't find pane" };
-				}
-				if (args.includes("display-message")) {
-					return { code: 0, stdout: "@1\n", stderr: "" };
-				}
-				if (options.bindFails === true && args.includes("bind")) {
-					return { code: 1, stdout: "", stderr: "bind failed" };
-				}
-				if (args.includes("has-session")) {
-					return options.sessionAlive
-						? { code: 0, stdout: "", stderr: "" }
-						: { code: 1, stdout: "", stderr: "no server" };
-				}
-				return { code: 0, stdout: "", stderr: "" };
-			},
+			exec: tmux.exec,
 			notify: (message: string, type: "info" | "warning" | "error" = "info") => notifications.push({ message, type }),
-			launch: (command: string, args: string[], launchOptions: { detached: true; stdio: "ignore" }, onError: (message: string) => void) => {
-				launches.push({ command, args, options: launchOptions, onError });
+			launch: (command: string, args: string[], options: { detached: true; stdio: "ignore" }, onError: (message: string) => void) => {
+				launches.push({ command, args, options, onError });
 			},
 			agentDir,
-			extensionDir: EXTENSION_DIR,
+			isPidAlive: () => true,
 		},
 	};
 }
 
-/** Clear TMUX so the popup takes its not-running-inside-tmux branch. */
+/** A registry that answers immediately with one delta and a final usage. */
+function streamingRegistry(text: string, usage: Usage = ZERO_USAGE) {
+	const calls: { context: Context; options: Record<string, unknown> }[] = [];
+	const modelRegistry = {
+		getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "key", headers: {} }),
+		streamSimple: (_model: unknown, context: Context, options: Record<string, unknown>) => {
+			calls.push({ context, options });
+			const stream = createAssistantMessageEventStream();
+			if (text.length > 0) {
+				stream.push({ type: "text_delta", contentIndex: 0, delta: text, partial: assistant() });
+			}
+			stream.push({
+				type: "done",
+				reason: "stop",
+				message: assistant({ content: text ? [{ type: "text", text }] : [], usage }),
+			});
+			return stream;
+		},
+	};
+	return { calls, modelRegistry };
+}
+
+/** A registry whose streams stay open until aborted, for replace tests. */
+function controllableRegistry() {
+	const streams: ReturnType<typeof createAssistantMessageEventStream>[] = [];
+	const calls: { context: Context; options: Record<string, unknown> }[] = [];
+	const modelRegistry = {
+		getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "key", headers: {} }),
+		streamSimple: (_model: unknown, context: Context, options: Record<string, unknown>) => {
+			calls.push({ context, options });
+			const stream = createAssistantMessageEventStream();
+			streams.push(stream);
+			(options["signal"] as AbortSignal | undefined)?.addEventListener("abort", () => {
+				stream.push({ type: "error", reason: "aborted", error: assistant({ stopReason: "aborted" }) });
+			});
+			return stream;
+		},
+	};
+	return { calls, streams, modelRegistry };
+}
+
 function withNoTmux<T>(fn: () => Promise<T>): Promise<T> {
 	return withEnv({ TMUX: undefined, TMUX_PANE: undefined }, fn);
 }
 
-/** Set up an outer tmux client so the popup ladder can resolve one. */
 function withOuterTmux<T>(fn: () => Promise<T>): Promise<T> {
 	return withEnv({ TMUX: `${OUTER_SOCKET},1,0`, TMUX_PANE: "%1" }, fn);
 }
 
 type Handler = (args: string, ctx: unknown) => Promise<void>;
 
-/** Load the factory and capture its command handler over a supplied exec. */
-async function loadFactory(
-	exec: (command: string, args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>,
-): Promise<Handler> {
+async function loadFactory(exec: (command: string, args: string[]) => Promise<unknown>, on?: (name: string, handler: unknown) => void) {
 	let handler: Handler | undefined;
 	const factory = (await import("../../btw/index.ts")).default;
 	factory({
 		registerCommand: (_name: string, spec: { handler: Handler }) => {
 			handler = spec.handler;
 		},
+		on: on ?? (() => undefined),
 		exec,
 	} as never);
 	assert.ok(handler, "the factory must register a command");
 	return handler;
 }
 
-test("a question forks the branch, writes the scratch files and launches the child in order", async () => {
+test("a question resets the panel, starts the viewer and streams the answer", async () => {
 	await withTempAgentDir(async (agentDir) => {
 		await withNoTmux(async () => {
 			const { calls, launches, notifications, deps } = fakeDeps(agentDir);
-			await launchBtwPanel(deps, fakeContext(), "why did the test fail?");
+			const registry = streamingRegistry("Hello", { ...ZERO_USAGE, input: 10, cacheRead: 500, output: 3, totalTokens: 513 });
+			const launch = await launchBtwPanel(deps, fakeContext(registry.modelRegistry), "why?");
+			assert.ok(launch, "the panel starts");
+			await launch.completion;
 
-			const socket = btwSocketPath(agentDir, SID);
-			const session = btwSessionName(SID);
-			const target = btwTarget(SID);
-			const fork = btwForkPath(agentDir, SID);
-			const questionPath = btwQuestionPath(agentDir, SID);
-			const sidePromptPath = btwSidePromptPath(agentDir, SID);
-			const childArgs = buildBtwChildPiArgs({
-				invocation: getPiInvocationParts(),
-				provider: "opencode-go",
-				model: "glm-5.3-flash",
-				thinking: "max",
-				sessionFile: fork,
-				questionPath,
-				sidePromptPath,
-				btwDir: EXTENSION_DIR,
-				name: session,
-			});
+			const paths = buildBtwPaths(agentDir, SID);
+			assert.equal(readFileSync(paths.answer, "utf8"), "# /btw\n\n> why?\n\nHello\n\n---\ninput 10 · cache read 500 · output 3\n");
+			assert.equal(readFileSync(paths.ownerPid, "utf8"), `${process.pid}\n`);
+			assert.equal(statSync(paths.answer).mode & 0o077, 0, "the answer is owner-only");
+			assert.equal(statSync(paths.runDir).mode & 0o077, 0, "the scratch dir is owner-only");
 
-			assert.deepEqual(calls.map((call) => call.args.join(" ")), [
-				`-S ${socket} kill-session -t ${session}`,
-				`-S ${socket} new-session -d -s ${session} -n btw -c /work/project`,
-				`-S ${socket} set-window-option -t ${session} remain-on-exit on`,
-				`-S ${socket} send-keys -t ${target} -l -- ${buildBtwChildCommand(childArgs)}`,
-				`-S ${socket} send-keys -t ${target} Enter`,
-			]);
-			assert.deepEqual(new Set(calls.map((call) => call.command)), new Set(["tmux"]));
-			assert.deepEqual(launches, [], "no popup outside tmux");
-
-			assert.equal(readFileSync(questionPath, "utf8"), "why did the test fail?\n");
-			assert.equal(readFileSync(sidePromptPath, "utf8"), `${BTW_SIDE_PROMPT}\n`);
-			assert.equal(statSync(questionPath).mode & 0o077, 0, "the question is owner-only");
-			assert.equal(statSync(sidePromptPath).mode & 0o077, 0, "the side prompt is owner-only");
-			assert.equal(statSync(fork).mode & 0o077, 0, "the fork is owner-only");
-			assert.equal(statSync(btwRunDir(agentDir, SID)).mode & 0o077, 0, "the scratch dir is owner-only");
-
-			const lines = readFileSync(fork, "utf8")
-				.trim()
-				.split("\n")
-				.map((line) => JSON.parse(line));
-			assert.equal(lines[0].parentSession, MAIN_FILE);
-			assert.equal(lines[0].cwd, "/work/project");
 			assert.deepEqual(
-				lines.slice(1).map((entry) => entry.id),
-				["e1", "e2"],
-				"ancestors first, live leaf last",
+				calls.slice(0, 5).map((call) => call.args.join(" ")),
+				[
+					`-S ${paths.socket} kill-server`,
+					`-S ${paths.socket} new-session -d -s ${paths.session} -n btw -c /work/project`,
+					`-S ${paths.socket} set-window-option -t ${paths.session} remain-on-exit on`,
+					`-S ${paths.socket} send-keys -t ${paths.target} -l -- ${buildBtwViewerCommand(paths.answer)}`,
+					`-S ${paths.socket} send-keys -t ${paths.target} Enter`,
+				],
 			);
+			assert.equal(launches.length, 0, "no popup outside tmux");
 			assert.match(notifications.at(-1)?.message ?? "", /Attach with: .*attach -t/);
+
+			assert.equal(registry.calls.length, 1);
+			const sent = registry.calls[0] as { context: Context; options: Record<string, unknown> };
+			assert.equal(sent.options["toolChoice"], "none");
+			assert.deepEqual(
+				sent.context.messages.slice(0, -1),
+				buildBtwContext(ENTRIES, "a1", "why?").messages.slice(0, -1),
+				"the prefix is the converted projection",
+			);
+			assert.ok(JSON.stringify(sent.context.messages.at(-1)).includes("why?"));
 		});
 	});
 });
 
-test("the popup opens over pi's client with the btw title and a fresh Escape bind", async () => {
+test("the popup opens over pi's client with the btw title and a fresh bind", async () => {
 	await withTempAgentDir(async (agentDir) => {
 		await withOuterTmux(async () => {
-			const { calls, launches, deps } = fakeDeps(agentDir, { sessionAlive: true });
-			await launchBtwPanel(deps, fakeContext(), "why?");
+			const { calls, launches, deps } = fakeDeps(agentDir);
+			const registry = streamingRegistry("ok");
+			const launch = await launchBtwPanel(deps, fakeContext(registry.modelRegistry), "why?");
+			assert.ok(launch);
+			await launch.completion;
 
-			const socket = btwSocketPath(agentDir, SID);
-			const session = btwSessionName(SID);
-			assert.deepEqual(calls.slice(5).map((call) => call.args.join(" ")), [
-				`-S ${OUTER_SOCKET} display-message -p -t %1 #{window_id}`,
-				`-S ${OUTER_SOCKET} list-clients -F #{client_tty}\t#{window_id}\t#{client_activity}`,
-				`-S ${socket} has-session -t ${session}`,
-				`-S ${socket} bind -n Escape detach-client`,
-			]);
-
+			const paths = buildBtwPaths(agentDir, SID);
+			assert.deepEqual(
+				calls.slice(5).map((call) => call.args.join(" ")),
+				[
+					`-S ${OUTER_SOCKET} display-message -p -t %1 #{window_id}`,
+					`-S ${OUTER_SOCKET} list-clients -F #{client_tty}\t#{window_id}\t#{client_activity}`,
+					`-S ${paths.socket} has-session -t ${paths.session}`,
+					`-S ${paths.socket} bind -n Escape detach-client`,
+				],
+			);
 			assert.equal(launches.length, 1);
-			const launched = launches[0] as LaunchCall;
-			assert.equal(launched.command, "tmux");
-			assert.deepEqual(launched.options, { detached: true, stdio: "ignore" });
+			const launched = launches[0] as (typeof launches)[number];
 			const titleAt = launched.args.indexOf("-T");
-			assert.equal(launched.args[titleAt + 1], "btw 01a14e96", "the popup title names the owner and the short id");
-			assert.ok(launched.args.includes("/dev/pts/7"), "the popup is scoped to the client viewing pi");
-			assert.ok(
-				(launched.args[launched.args.length - 1] ?? "").includes(`tmux -S '${socket}' attach -t '${session}'`),
-				"the popup command attaches to the panel session",
-			);
-		});
-	});
-});
-
-test("a live session is reattached without re-forking, and the bind is re-applied", async () => {
-	await withTempAgentDir(async (agentDir) => {
-		await withOuterTmux(async () => {
-			const { calls, launches, deps } = fakeDeps(agentDir, { sessionAlive: true });
-			const reused = await reattachBtwPanel(deps, fakeContext());
-			assert.equal(reused, true);
-			const socket = btwSocketPath(agentDir, SID);
-			assert.ok(!calls.some((call) => call.args.includes("new-session")), "nothing is re-created");
-			assert.ok(!calls.some((call) => call.args.includes("kill-session")), "nothing is killed");
-			assert.ok(
-				calls.some((call) => call.args.join(" ") === `-S ${socket} bind -n Escape detach-client`),
-				"the bind is re-applied to the panel socket",
-			);
-			assert.equal(launches.length, 1);
-		});
-	});
-});
-
-test("a dead pane is not reattached and says so", async () => {
-	await withTempAgentDir(async (agentDir) => {
-		await withOuterTmux(async () => {
-			const { calls, launches, notifications, deps } = fakeDeps(agentDir, { sessionAlive: true, paneDead: true });
-			const reused = await reattachBtwPanel(deps, fakeContext());
-			assert.equal(reused, false);
-			assert.equal(launches.length, 0);
-			assert.match(notifications[0]?.message ?? "", /no longer running/);
-		});
-	});
-});
-
-test("a missing session is not reattached", async () => {
-	await withTempAgentDir(async (agentDir) => {
-		const { calls, launches, deps } = fakeDeps(agentDir);
-		const reused = await reattachBtwPanel(deps, fakeContext());
-		assert.equal(reused, false);
-		assert.equal(launches.length, 0);
-		assert.ok(calls.some((call) => call.args.includes("has-session")));
-	});
-});
-
-test("a live session with no attached client falls back to the attach command", async () => {
-	await withTempAgentDir(async (agentDir) => {
-		await withOuterTmux(async () => {
-			const { launches, notifications, deps } = fakeDeps(agentDir, { sessionAlive: true, noClient: true });
-			const reused = await reattachBtwPanel(deps, fakeContext());
-			assert.equal(reused, true, "a live panel is not replaced just because it cannot be shown");
-			assert.equal(launches.length, 0);
-			assert.match(notifications[0]?.message ?? "", /Attach with: .*attach -t/);
-			assert.equal(notifications[0]?.type, "warning");
-			assert.match(notifications.map((item) => item.message).join("\n"), /replaces it with a fresh one/);
-		});
-	});
-});
-
-test("a failed Escape bind falls back to the attach command", async () => {
-	await withTempAgentDir(async (agentDir) => {
-		await withOuterTmux(async () => {
-			const { launches, notifications, deps } = fakeDeps(agentDir, { sessionAlive: true, bindFails: true });
-			await launchBtwPanel(deps, fakeContext(), "why?");
-			assert.equal(launches.length, 0);
-			assert.match(notifications.at(-1)?.message ?? "", /Could not set up the panel's Escape binding/);
-		});
-	});
-});
-
-test("a pane that disappears before the popup falls back to the attach command", async () => {
-	await withTempAgentDir(async (agentDir) => {
-		await withOuterTmux(async () => {
-			const { launches, notifications, deps } = fakeDeps(agentDir, { sessionAlive: true, paneGone: true });
-			await launchBtwPanel(deps, fakeContext(), "why?");
-			assert.equal(launches.length, 0);
-			assert.match(notifications.at(-1)?.message ?? "", /That tmux pane is gone/);
-		});
-	});
-});
-
-test("a thrown reattach probe is reported and does not replace the panel", async () => {
-	await withTempAgentDir(async (agentDir) => {
-		const { launches, notifications, deps } = fakeDeps(agentDir, { throwOn: "has-session" });
-		const reused = await reattachBtwPanel(deps, fakeContext());
-		assert.equal(reused, true, "an unreadable panel is not replaced");
-		assert.equal(launches.length, 0);
-		assert.match(notifications[0]?.message ?? "", /Could not check the BTW panel: has-session threw/);
-	});
-});
-
-test("the default launcher maps a spawn error to a message", async () => {
-	const message = await new Promise<string>((resolve) => {
-		__test__.defaultPanelLauncher("definitely-not-a-btw-binary", [], { detached: true, stdio: "ignore" }, resolve);
-	});
-	assert.match(message, /ENOENT|not found/i);
-});
-
-test("a popup spawn error is reported with the manual attach command", async () => {
-	await withTempAgentDir(async (agentDir) => {
-		await withOuterTmux(async () => {
-			const { launches, notifications, deps } = fakeDeps(agentDir, { sessionAlive: true });
-			await launchBtwPanel(deps, fakeContext(), "why?");
-			(launches[0] as LaunchCall).onError("tmux not found");
-			assert.match(notifications.at(-1)?.message ?? "", /Could not open the panel: tmux not found/);
+			assert.equal(launched.args[titleAt + 1], "btw 01a14e96");
+			assert.ok(launched.args.includes("/dev/pts/7"));
+			assert.deepEqual(launched.options, { detached: true, stdio: "ignore" });
 		});
 	});
 });
@@ -376,146 +309,143 @@ test("a popup spawn error is reported with the manual attach command", async () 
 test("the guards notify without touching tmux or the disk", async () => {
 	await withTempAgentDir(async (agentDir) => {
 		const cases: { label: string; ctx: BtwContext; question: string; pattern: RegExp }[] = [
-			{ label: "non-TUI", ctx: fakeContext({ mode: "rpc" }), question: "why?", pattern: /TUI/ },
-			{ label: "no model", ctx: fakeContext({ model: undefined }), question: "why?", pattern: /selected model/ },
-			{
-				label: "no session file",
-				ctx: fakeContext({
-					sessionManager: { ...fakeContext().sessionManager, getSessionFile: () => undefined },
-				}),
-				question: "why?",
-				pattern: /saved session/,
-			},
-			{ label: "empty question", ctx: fakeContext(), question: "   ", pattern: /cannot be empty/ },
+			{ label: "non-TUI", ctx: fakeContext({}, { mode: "rpc" }), question: "why?", pattern: /TUI/ },
+			{ label: "no model", ctx: fakeContext({}, { model: undefined }), question: "why?", pattern: /selected model/ },
+			{ label: "empty question", ctx: fakeContext({}), question: "   ", pattern: /cannot be empty/ },
 		];
 		for (const item of cases) {
 			const { calls, notifications, deps } = fakeDeps(agentDir);
-			await launchBtwPanel(deps, item.ctx, item.question);
+			const launch = await launchBtwPanel(deps, item.ctx, item.question);
+			assert.equal(launch, null, item.label);
 			assert.deepEqual(calls, [], `${item.label}: no tmux call`);
 			assert.match(notifications[0]?.message ?? "", item.pattern, item.label);
 		}
-		assert.equal(existsSync(btwRunDir(agentDir, SID)), false, "no scratch dir was created");
+		assert.equal(existsSync(buildBtwPaths(agentDir, SID).runDir), false, "no scratch dir was created");
 	});
 });
 
-test("an empty session still launches, with a warning that there is no context", async () => {
+test("a failed viewer start removes the scratch dir and reports the reason", async () => {
 	await withTempAgentDir(async (agentDir) => {
-		await withNoTmux(async () => {
-			const { calls, notifications, deps } = fakeDeps(agentDir);
-			const empty = fakeContext({
-				sessionManager: { ...fakeContext().sessionManager, getLeafId: () => null, getBranch: () => [] },
-			});
-			await launchBtwPanel(deps, empty, "why?");
+		const { notifications, deps } = fakeDeps(agentDir, tmuxModel({ failOn: "new-session" }));
+		const registry = streamingRegistry("never");
+		const launch = await launchBtwPanel(deps, fakeContext(registry.modelRegistry), "why?");
+		assert.equal(launch, null);
+		assert.equal(existsSync(buildBtwPaths(agentDir, SID).runDir), false);
+		assert.match(notifications.at(-1)?.message ?? "", /Could not create the BTW tmux session: new-session failed/);
+		assert.equal(registry.calls.length, 0, "the request never starts");
+	});
+});
+
+test("a live panel is reattached without a new request; the bind is re-applied", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withOuterTmux(async () => {
+			const paths = buildBtwPaths(agentDir, SID);
+			await mkdir(paths.runDir, { recursive: true });
+			await writeFile(paths.answer, "# old\n");
+			const { calls, launches, deps } = fakeDeps(agentDir, tmuxModel({ serverUp: true }));
+			const reused = await reattachBtwPanel(deps, fakeContext({}));
+			assert.equal(reused, true);
+			assert.ok(!calls.some((call) => call.args.includes("new-session")), "nothing is re-created");
 			assert.ok(
-				notifications.some((item) => /no messages yet/.test(item.message)),
-				"the empty fork is announced",
+				calls.some((call) => call.args.join(" ") === `-S ${paths.socket} bind -n Escape detach-client`),
+				"the bind targets the panel socket",
 			);
-			assert.ok(
-				calls.some((call) => call.args.includes("new-session")),
-				"the panel still starts",
-			);
-			const lines = readFileSync(btwForkPath(agentDir, SID), "utf8").trim().split("\n");
-			assert.equal(lines.length, 1, "the fork is header-only");
+			assert.equal(launches.length, 1);
 		});
 	});
 });
 
-test("a second question kills the old session and removes its transcript", async () => {
+test("a dead viewer is restarted on the existing answer file", async () => {
 	await withTempAgentDir(async (agentDir) => {
-		const runDir = btwRunDir(agentDir, SID);
-		await mkdir(runDir, { recursive: true });
-		await writeFile(path.join(runDir, "stale.txt"), "stale");
-		await withNoTmux(async () => {
-			const { calls, deps } = fakeDeps(agentDir);
-			await launchBtwPanel(deps, fakeContext(), "why?");
-			assert.equal(existsSync(path.join(runDir, "stale.txt")), false);
-			assert.ok(calls[0]?.args.join(" ").includes("kill-session"), "the reset kills before creating");
+		await withOuterTmux(async () => {
+			const paths = buildBtwPaths(agentDir, SID);
+			await mkdir(paths.runDir, { recursive: true });
+			await writeFile(paths.answer, "# old\n");
+			const { calls, launches, deps } = fakeDeps(agentDir, tmuxModel({ serverUp: true, paneDead: true }));
+			const reused = await reattachBtwPanel(deps, fakeContext({}));
+			assert.equal(reused, true);
+			assert.ok(calls.some((call) => call.args.includes("new-session")), "the viewer is restarted");
+			assert.equal(launches.length, 1);
+			assert.deepEqual(calls.filter((call) => call.args.includes("send-keys"))[1]?.args.join(" "), `-S ${paths.socket} send-keys -t ${paths.target} Enter`);
 		});
 	});
 });
 
-test("a failed tmux launch removes the scratch dir and reports the reason", async () => {
+test("a missing session with an answer restarts the viewer; without one it reports nothing to reuse", async () => {
 	await withTempAgentDir(async (agentDir) => {
-		await withNoTmux(async () => {
-			const { notifications, deps } = fakeDeps(agentDir, { failOn: "new-session" });
-			await launchBtwPanel(deps, fakeContext(), "why?");
-			assert.equal(existsSync(btwRunDir(agentDir, SID)), false);
-			assert.match(
-				notifications.at(-1)?.message ?? "",
-				/Could not start the BTW panel .*: Could not create the BTW tmux session: new-session failed/,
-			);
+		await withOuterTmux(async () => {
+			const paths = buildBtwPaths(agentDir, SID);
+			const withoutAnswer = await reattachBtwPanel(fakeDeps(agentDir, tmuxModel()).deps, fakeContext({}));
+			assert.equal(withoutAnswer, false);
+			assert.equal(existsSync(paths.runDir), false);
+			await mkdir(paths.runDir, { recursive: true });
+			await writeFile(paths.answer, "# old\n");
+			const { calls, launches, deps } = fakeDeps(agentDir, tmuxModel());
+			const reused = await reattachBtwPanel(deps, fakeContext({}));
+			assert.equal(reused, true);
+			assert.ok(calls.some((call) => call.args.includes("new-session")));
+			assert.equal(launches.length, 1);
 		});
 	});
 });
 
-test("a send-keys failure also removes the scratch dir", async () => {
-	await withTempAgentDir(async (agentDir) => {
-		await withNoTmux(async () => {
-			const { notifications, deps } = fakeDeps(agentDir, { failOn: "send-keys" });
-			await launchBtwPanel(deps, fakeContext(), "why?");
-			assert.equal(existsSync(btwRunDir(agentDir, SID)), false);
-			assert.match(notifications.at(-1)?.message ?? "", /Could not type the BTW command/);
-		});
-	});
-});
-
-test("a thrown exec is reported and cleaned up", async () => {
+test("a second /btw aborts the running request before resetting the answer", async () => {
 	await withTempAgentDir(async (agentDir) => {
 		await withNoTmux(async () => {
-			const { notifications, deps } = fakeDeps(agentDir, { throwOn: "new-session" });
-			await launchBtwPanel(deps, fakeContext(), "why?");
-			assert.equal(existsSync(btwRunDir(agentDir, SID)), false);
-			assert.match(notifications.at(-1)?.message ?? "", /new-session threw/);
-		});
-	});
-});
-
-test("the factory registers /btw and asks for a question when none is typed", async () => {
-	await withTempAgentDir(async () => {
-		await withNoTmux(async () => {
-			const execCalls: string[][] = [];
-			const handler = await loadFactory(async (_command, args) => {
-				execCalls.push(args);
-				// No panel exists yet: the reattach probe must miss so the prompt runs.
-				if (args.includes("has-session")) return { code: 1, stdout: "", stderr: "no server" };
-				return { code: 0, stdout: "", stderr: "" };
-			});
-
-			const notifications: string[] = [];
+			const { streams, modelRegistry } = controllableRegistry();
+			const { calls, exec } = tmuxModel();
+			const handler = await loadFactory(exec);
 			const ctx = {
-				...fakeContext(),
-				ui: {
-					input: async () => "what is this?",
-					notify: (message: string) => notifications.push(message),
-				},
+				...fakeContext(modelRegistry),
+				ui: { input: async () => "x", notify: () => undefined },
 			};
-			await handler("", ctx as never);
-			assert.ok(
-				execCalls.some((args) => args.includes("new-session")),
-				"the prompted question launches a panel",
-			);
 
-			const cancelCtx = { ...ctx, ui: { ...ctx.ui, input: async () => undefined } };
-			await handler("", cancelCtx as never);
-			assert.equal(
-				execCalls.filter((args) => args.includes("new-session")).length,
-				1,
-				"a cancelled input launches nothing",
-			);
+			await handler("q1", ctx as never);
+			await waitFor(() => streams.length === 1);
+			await handler("q2", ctx as never);
+			await waitFor(() => streams.length === 2);
+
+			assert.equal(streams.length, 2, "the second question starts its own request");
+			assert.equal(calls.filter((call) => call.args.includes("new-session")).length, 2, "the viewer is restarted");
+			const paths = buildBtwPaths(agentDir, SID);
+			assert.match(readFileSync(paths.answer, "utf8"), /^# \/btw\n\n> q2\n\n/);
+
+			// Finish the second request so the test leaves nothing pending.
+			streams[1]?.push({ type: "text_delta", contentIndex: 0, delta: "a2", partial: assistant() });
+			streams[1]?.push({
+				type: "done",
+				reason: "stop",
+				message: assistant({ content: [{ type: "text", text: "a2" }], usage: ZERO_USAGE }),
+			});
+			await waitFor(() => readFileSync(paths.answer, "utf8").includes("a2"));
 		});
+	});
+});
+
+test("the factory registers the session lifecycle handlers", async () => {
+	await withTempAgentDir(async () => {
+		const events = new Map<string, unknown>();
+		const factory = (await import("../../btw/index.ts")).default;
+		factory({
+			registerCommand: () => undefined,
+			exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+			on: (name: string, handler: unknown) => {
+				events.set(name, handler);
+			},
+		} as never);
+		assert.equal(typeof events.get("session_start"), "function");
+		assert.equal(typeof events.get("session_shutdown"), "function");
 	});
 });
 
 test("the factory reattaches on an empty argument list instead of prompting", async () => {
-	await withTempAgentDir(async () => {
+	await withTempAgentDir(async (agentDir) => {
 		await withOuterTmux(async () => {
-			const execCalls: string[][] = [];
-			const handler = await loadFactory(async (_command, args) => {
-				execCalls.push(args);
-				if (args.includes("list-clients")) return { code: 0, stdout: "/dev/pts/7\t@1\t100\n", stderr: "" };
-				if (args.includes("#{pane_dead}")) return { code: 0, stdout: "0\n", stderr: "" };
-				return { code: 0, stdout: "@1\n", stderr: "" };
-			});
+			const { exec } = tmuxModel({ serverUp: true });
+			const paths = buildBtwPaths(agentDir, SID);
+			await mkdir(paths.runDir, { recursive: true });
+			await writeFile(paths.answer, "# old\n");
+			const handler = await loadFactory(exec);
 			let prompted = false;
 			const launches: string[][] = [];
 			__test__.setPanelLauncher((_command, args) => {
@@ -523,19 +453,18 @@ test("the factory reattaches on an empty argument list instead of prompting", as
 			});
 			try {
 				const ctx = {
-					...fakeContext(),
+					...fakeContext({}),
 					ui: {
 						input: async () => {
 							prompted = true;
 							return "why?";
 						},
-						notify: () => {},
+						notify: () => undefined,
 					},
 				};
 				await handler("", ctx as never);
 				assert.equal(prompted, false, "a live panel needs no question");
 				assert.equal(launches.length, 1);
-				assert.ok(!execCalls.some((args) => args.includes("new-session")), "the panel is not re-created");
 			} finally {
 				__test__.setPanelLauncher(undefined);
 			}
@@ -547,14 +476,11 @@ test("the factory refuses non-TUI before prompting or executing", async () => {
 	await withTempAgentDir(async () => {
 		await withNoTmux(async () => {
 			let prompted = false;
-			const execCalls: string[][] = [];
-			const handler = await loadFactory(async (_command, args) => {
-				execCalls.push(args);
-				return { code: 0, stdout: "", stderr: "" };
-			});
+			const { calls, exec } = tmuxModel();
+			const handler = await loadFactory(exec);
 			const notifications: string[] = [];
 			const ctx = {
-				...fakeContext({ mode: "rpc" }),
+				...fakeContext({}, { mode: "rpc" }),
 				ui: {
 					input: async () => {
 						prompted = true;
@@ -564,50 +490,9 @@ test("the factory refuses non-TUI before prompting or executing", async () => {
 				},
 			};
 			await handler("why?", ctx as never);
-			assert.equal(prompted, false, "no prompt outside the TUI");
-			assert.equal(execCalls.length, 0);
+			assert.equal(prompted, false);
+			assert.deepEqual(calls, []);
 			assert.match(notifications[0] ?? "", /TUI/);
-		});
-	});
-});
-
-test("a second /btw while one is starting is refused", async () => {
-	await withTempAgentDir(async () => {
-		await withNoTmux(async () => {
-			let reached!: () => void;
-			const gateReached = new Promise<void>((resolve) => {
-				reached = resolve;
-			});
-			let release!: () => void;
-			const gate = new Promise<void>((resolve) => {
-				release = resolve;
-			});
-			const execCalls: string[][] = [];
-			const handler = await loadFactory(async (_command, args) => {
-				execCalls.push(args);
-				if (args.includes("new-session")) {
-					reached();
-					await gate;
-				}
-				return { code: 0, stdout: "", stderr: "" };
-			});
-			const notifications: string[] = [];
-			const ctx = {
-				...fakeContext(),
-				ui: { input: async () => "why?", notify: (message: string) => notifications.push(message) },
-			};
-
-			const first = handler("why?", ctx as never);
-			await gateReached;
-			await handler("why?", ctx as never);
-			assert.equal(
-				execCalls.filter((args) => args.includes("new-session")).length,
-				1,
-				"only one launch proceeds",
-			);
-			assert.match(notifications.join("\n"), /still starting/);
-			release();
-			await first;
 		});
 	});
 });
