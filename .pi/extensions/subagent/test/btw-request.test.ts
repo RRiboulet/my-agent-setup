@@ -319,6 +319,102 @@ test("a text answer that also called a tool is kept, with the ignored call repor
 	assert.equal(outcome.ignoredToolCalls, 1, "the dropped call is disclosed");
 });
 
+test("a tool-calling response is continued with a refusal and the final answer wins", async () => {
+	const calls: { context: Context; options: Record<string, unknown> }[] = [];
+	const usage1: Usage = { ...ZERO_USAGE, input: 2, cacheRead: 800_000, output: 4, totalTokens: 800_006 };
+	const usage2: Usage = { ...ZERO_USAGE, input: 9, cacheRead: 800_100, output: 6, totalTokens: 800_115 };
+	const modelRegistry = {
+		getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "key", headers: {} }),
+		streamSimple: (_model: unknown, context: Context, options: Record<string, unknown>) => {
+			calls.push({ context, options });
+			const stream = createAssistantMessageEventStream();
+			if (calls.length === 1) {
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "let me check", partial: assistant() });
+				stream.push({
+					type: "done",
+					reason: "toolUse",
+					message: assistant({
+						content: [
+							{ type: "text", text: "let me check" },
+							{ type: "toolCall", id: "c1", name: "grep", arguments: {} },
+						],
+						stopReason: "toolUse",
+						usage: usage1,
+					}),
+				});
+			} else {
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "the answer", partial: assistant() });
+				stream.push({
+					type: "done",
+					reason: "stop",
+					message: assistant({ content: [{ type: "text", text: "the answer" }], usage: usage2 }),
+				});
+			}
+			return stream;
+		},
+	};
+	const chunks: string[] = [];
+	const outcome = await runBtwRequest({
+		modelRegistry: modelRegistry as never,
+		model: { provider: "opencode-go", id: "test-model" } as never,
+		sessionId: SESSION_ID,
+		entries: ENTRIES,
+		leafId: "a1",
+		question: "why?",
+		onText: (text) => chunks.push(text),
+	});
+
+	assert.equal(calls.length, 2, "the tool-calling response is continued once");
+	const retryMessages = (calls[1] as { context: Context }).context.messages;
+	assert.equal(retryMessages[retryMessages.length - 2]?.role, "assistant", "the model's call is kept");
+	const retryResult = retryMessages[retryMessages.length - 1] as {
+		role: string;
+		toolCallId?: string;
+		content?: { text?: string }[];
+	};
+	assert.equal(retryResult.role, "toolResult");
+	assert.equal(retryResult.toolCallId, "c1");
+	assert.match(retryResult.content?.[0]?.text ?? "", /disabled/i, "the refusal tells the model why");
+	assert.equal(outcome.status, "ok");
+	assert.equal(outcome.status === "ok" ? outcome.text : "", "the answer");
+	assert.equal(outcome.usage?.input, usage1.input + usage2.input, "both attempts are billed");
+	assert.equal(outcome.usage?.cacheRead, usage1.cacheRead + usage2.cacheRead);
+	assert.ok(chunks.join("").includes("tried to use a tool"), "the false start is marked in the stream");
+});
+
+test("a model that keeps calling tools is cut off after one continuation", async () => {
+	let calls = 0;
+	const modelRegistry = {
+		getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "key", headers: {} }),
+		streamSimple: () => {
+			calls += 1;
+			const stream = createAssistantMessageEventStream();
+			stream.push({
+				type: "done",
+				reason: "toolUse",
+				message: assistant({
+					content: [{ type: "toolCall", id: `c${calls}`, name: "read", arguments: {} }],
+					stopReason: "toolUse",
+				}),
+			});
+			return stream;
+		},
+	};
+	const outcome = await runBtwRequest({
+		modelRegistry: modelRegistry as never,
+		model: { provider: "opencode-go", id: "test-model" } as never,
+		sessionId: SESSION_ID,
+		entries: ENTRIES,
+		leafId: "a1",
+		question: "why?",
+		onText: () => undefined,
+	});
+	assert.equal(calls, 2, "the continuation is attempted exactly once");
+	assert.equal(outcome.status, "error");
+	assert.match(outcome.status === "error" ? outcome.message : "", /kept trying to use tools/);
+	assert.equal(outcome.ignoredToolCalls, 1);
+});
+
 test("a failing onText handler is reported through the outcome", async () => {
 	const stream = createAssistantMessageEventStream();
 	const run = runBtwStream(stream, {
