@@ -48,6 +48,19 @@ Fixed:
   includes it. `firstLine`/`describeError` moved to a shared `voice/util.ts`
   because the recorder and transcription each had their own copy.
 
+- **A stalled fetch can no longer park `/voice` in `fetching` forever.** Every
+  cleanup call ran under a budget, but the fetch — the one stage that crosses the
+  network with up to 25 MB — had none. A transfer
+  that stalled (network gone) left the cycle in `fetching` with no local timer
+  to end it; only `/voice cancel` could, and a user who walked away saw the
+  status sit there. The fetch now runs under `FETCH_BUDGET_MS` (two minutes,
+  far larger than the cleanup budgets because a real recording has to cross the
+  link): on overrun the ssh is killed and the failure is reported as
+  `fetch-failed` with "timed out after N ms", keeping the remote copy exactly as
+  any other failed fetch does. The budget is a separate controller forwarded
+  from the cycle signal, so a cancel still ends the fetch immediately — the
+  timeout only fires when nothing else has.
+
 - **A subagent that fails at the tmux layer now persists `failed` with its usage.** `markRunFailed` used to write `status: "failed"` before capturing usage, so pollers could observe a `failed` run with no usage (and a crash in that window lost the transcript pointer). Usage and `sessionFile` are now captured before the status flips, and `runs.json` is written once.
 
 - **Two config values can no longer reach the phone, or `ssh`, as shell
