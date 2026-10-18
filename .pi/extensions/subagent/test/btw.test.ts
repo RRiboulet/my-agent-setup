@@ -124,6 +124,7 @@ interface TmuxOptions {
 function tmuxModel(options: TmuxOptions = {}) {
 	const calls: ExecCall[] = [];
 	let serverUp = options.serverUp === true;
+	let sessionExists = options.serverUp === true;
 	const exec = async (command: string, args: string[]) => {
 		calls.push({ command, args });
 		const ok = { code: 0, stdout: "", stderr: "", killed: false };
@@ -131,14 +132,20 @@ function tmuxModel(options: TmuxOptions = {}) {
 			return { code: 1, stdout: "", stderr: `${options.failOn} failed`, killed: false };
 		}
 		if (args.includes("new-session")) {
+			// Real tmux refuses a duplicate name; a dead pane keeps its session.
+			if (sessionExists) return { code: 1, stdout: "", stderr: "duplicate session", killed: false };
 			serverUp = true;
+			sessionExists = true;
 			return ok;
 		}
 		if (args.includes("kill-server")) {
 			serverUp = false;
+			sessionExists = false;
 			return ok;
 		}
-		if (args.includes("has-session")) return serverUp ? ok : { code: 1, stdout: "", stderr: "no server", killed: false };
+		if (args.includes("has-session")) {
+			return serverUp && sessionExists ? ok : { code: 1, stdout: "", stderr: "no server", killed: false };
+		}
 		if (args.includes("list-clients")) return { ...ok, stdout: "/dev/pts/7\t@1\t100\n" };
 		if (args.includes("#{pane_dead}")) return { ...ok, stdout: options.paneDead === true ? "1\n" : "0\n" };
 		if (args.includes("display-message")) return { ...ok, stdout: "@1\n" };
@@ -167,6 +174,7 @@ function fakeDeps(agentDir: string, tmux = tmuxModel()) {
 			},
 			agentDir,
 			isPidAlive: () => true,
+			blockImages: false,
 		},
 	};
 }
@@ -230,6 +238,7 @@ async function loadFactory(exec: (command: string, args: string[]) => Promise<un
 			handler = spec.handler;
 		},
 		on: on ?? (() => undefined),
+		getSettings: () => ({ images: { blockImages: false } }),
 		exec,
 	} as never);
 	assert.ok(handler, "the factory must register a command");
@@ -267,6 +276,7 @@ test("a question resets the panel, starts the viewer and streams the answer", as
 			assert.equal(registry.calls.length, 1);
 			const sent = registry.calls[0] as { context: Context; options: Record<string, unknown> };
 			assert.equal(sent.options["toolChoice"], undefined, "tool_choice would invalidate the message cache");
+			assert.equal(sent.options["sessionId"], SID, "session affinity uses the main session id");
 			const headers = sent.options["headers"] as Record<string, string>;
 			assert.equal(headers["x-opencode-session"], SID, "the request carries the main session id");
 			assert.deepEqual(
@@ -404,6 +414,7 @@ test("a second /btw aborts the running request before resetting the answer", asy
 
 			await handler("q1", ctx as never);
 			await waitFor(() => streams.length === 1);
+			streams[0]?.push({ type: "text_delta", contentIndex: 0, delta: "old-answer", partial: assistant() });
 			await handler("q2", ctx as never);
 			await waitFor(() => streams.length === 2);
 
@@ -411,6 +422,10 @@ test("a second /btw aborts the running request before resetting the answer", asy
 			assert.equal(calls.filter((call) => call.args.includes("new-session")).length, 2, "the viewer is restarted");
 			const paths = buildBtwPaths(agentDir, SID);
 			assert.match(readFileSync(paths.answer, "utf8"), /^# \/btw\n\n> q2\n\n/);
+			assert.ok(
+				!readFileSync(paths.answer, "utf8").includes("old-answer"),
+				"the aborted request's deltas never land in the new answer file",
+			);
 
 			// Finish the second request so the test leaves nothing pending.
 			streams[1]?.push({ type: "text_delta", contentIndex: 0, delta: "a2", partial: assistant() });
@@ -424,6 +439,120 @@ test("a second /btw aborts the running request before resetting the answer", asy
 	});
 });
 
+test("a multi-line question is quoted line by line in the header", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withNoTmux(async () => {
+			const { deps } = fakeDeps(agentDir);
+			const registry = streamingRegistry("ok");
+			const launch = await launchBtwPanel(deps, fakeContext(registry.modelRegistry), "line one\nline two");
+			assert.ok(launch);
+			await launch.completion;
+			const answer = readFileSync(buildBtwPaths(agentDir, SID).answer, "utf8");
+			assert.match(answer, /^# \/btw\n\n> line one\n> line two\n\n/);
+		});
+	});
+});
+
+test("a provider error lands in the answer footer with its usage", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withNoTmux(async () => {
+			const { notifications, deps } = fakeDeps(agentDir);
+			const modelRegistry = {
+				getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "k", headers: {} }),
+				streamSimple: () => {
+					const stream = createAssistantMessageEventStream();
+					stream.push({
+						type: "error",
+						reason: "error",
+						error: assistant({
+							stopReason: "error",
+							errorMessage: "boom",
+							usage: { ...ZERO_USAGE, input: 5, cacheRead: 700, output: 1, totalTokens: 706 },
+						}),
+					});
+					return stream;
+				},
+			};
+			const launch = await launchBtwPanel(deps, fakeContext(modelRegistry), "why?");
+			assert.ok(launch);
+			await launch.completion;
+			const answer = readFileSync(buildBtwPaths(agentDir, SID).answer, "utf8");
+			assert.match(answer, /error: boom · input 5 · cache read 700 · output 1/);
+			assert.match(notifications.at(-1)?.message ?? "", /BTW: boom/);
+		});
+	});
+});
+
+test("a viewer start that fails after new-session cleans up and reports", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withNoTmux(async () => {
+			const { notifications, deps } = fakeDeps(agentDir, tmuxModel({ failOn: "send-keys" }));
+			const registry = streamingRegistry("never");
+			const launch = await launchBtwPanel(deps, fakeContext(registry.modelRegistry), "why?");
+			assert.equal(launch, null);
+			assert.equal(existsSync(buildBtwPaths(agentDir, SID).runDir), false);
+			assert.match(notifications.at(-1)?.message ?? "", /Could not start the BTW viewer/);
+			assert.equal(registry.calls.length, 0, "the request never starts");
+		});
+	});
+});
+
+test("an unreadable panel state is reported and never replaced", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		const { launches, notifications, deps } = fakeDeps(agentDir);
+		deps.exec = async (_command, args) => {
+			if (args.includes("has-session")) throw new Error("probe failed");
+			return { code: 0, stdout: "", stderr: "", killed: false };
+		};
+		const reused = await reattachBtwPanel(deps, fakeContext({}));
+		assert.equal(reused, true, "an unreadable panel is not replaced");
+		assert.equal(launches.length, 0);
+		assert.match(notifications[0]?.message ?? "", /Could not check the BTW panel/);
+	});
+});
+
+test("a second /btw while one is starting is refused", async () => {
+	await withTempAgentDir(async () => {
+		await withNoTmux(async () => {
+			let reached!: () => void;
+			const gateReached = new Promise<void>((resolve) => {
+				reached = resolve;
+			});
+			let release!: () => void;
+			const gate = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			const calls: { args: string[] }[] = [];
+			const exec = async (_command: string, args: string[]) => {
+				calls.push({ args });
+				if (args.includes("new-session")) {
+					reached();
+					await gate;
+				}
+				return { code: 0, stdout: "", stderr: "", killed: false };
+			};
+			const handler = await loadFactory(exec);
+			const notifications: string[] = [];
+			const ctx = {
+				...fakeContext(streamingRegistry("x").modelRegistry),
+				ui: { input: async () => "q", notify: (message: string) => notifications.push(message) },
+			};
+
+			const first = handler("q1", ctx as never);
+			await gateReached;
+			await handler("q2", ctx as never);
+			assert.equal(
+				calls.filter((call) => call.args.includes("new-session")).length,
+				1,
+				"only one setup proceeds",
+			);
+			assert.match(notifications.join("\n"), /still starting/);
+			release();
+			await first;
+		});
+	});
+});
+
 test("the factory registers the session lifecycle handlers", async () => {
 	await withTempAgentDir(async () => {
 		const events = new Map<string, unknown>();
@@ -431,6 +560,7 @@ test("the factory registers the session lifecycle handlers", async () => {
 		factory({
 			registerCommand: () => undefined,
 			exec: async () => ({ code: 0, stdout: "", stderr: "" }),
+			getSettings: () => ({ images: { blockImages: false } }),
 			on: (name: string, handler: unknown) => {
 				events.set(name, handler);
 			},

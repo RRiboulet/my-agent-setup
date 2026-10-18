@@ -6,6 +6,13 @@
 // effects, and this module owns everything decidable from its inputs — the
 // paths, the tmux argv and the viewer command — so the suite can pin them
 // without a TTY or a tmux server.
+//
+// The private server/session is kept even though its tenant is only a pager:
+// the popup attaches to that server so its root-table Escape binding closes the
+// panel and nothing else, which is the UX this panel promises. The alternative
+// (a transient display-popup on the outer server, closed with `q`) would delete
+// the socket, session, remain-on-exit and target machinery, at the cost of
+// Escape-to-close.
 
 import * as path from "node:path";
 import { shellQuote } from "../subagent/shell.ts";

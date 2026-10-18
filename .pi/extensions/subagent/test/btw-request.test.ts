@@ -22,6 +22,7 @@ import { buildSessionContext, convertToLlm, type SessionEntry } from "@earendil-
 import {
 	BTW_INSTRUCTION,
 	buildBtwContext,
+	buildBtwRequestParts,
 	formatBtwUsage,
 	providerSessionHeaders,
 	runBtwRequest,
@@ -72,9 +73,16 @@ const ENTRIES = [
 		},
 	},
 	{
+		type: "thinking_level_change",
+		id: "t1",
+		parentId: "s1",
+		timestamp: "2026-10-18T00:00:00.500Z",
+		thinkingLevel: "max",
+	},
+	{
 		type: "message",
 		id: "u1",
-		parentId: "s1",
+		parentId: "t1",
 		timestamp: "2026-10-18T00:00:01.000Z",
 		message: { role: "user", content: [{ type: "text", text: "hello" }], timestamp: 1 },
 	},
@@ -156,6 +164,10 @@ test("the context is the converted projection plus one user message", () => {
 	assert.equal((last as { timestamp?: number } | undefined)?.timestamp, 123);
 });
 
+test("the request parts carry the session thinking level", () => {
+	assert.equal(buildBtwRequestParts(ENTRIES, "a1", "why?", 0).thinkingLevel, "max");
+});
+
 test("the prefix is exactly the main pipeline's converted projection", () => {
 	const projection = buildSessionContext(ENTRIES, "cm1");
 	const context = buildBtwContext(ENTRIES, "cm1", "why?");
@@ -168,6 +180,41 @@ test("a null leaf means the current leaf, not an empty path", () => {
 		buildBtwContext(ENTRIES, undefined, "why?", 7),
 		"null must not silently drop the whole history",
 	);
+});
+
+const IMAGE_ENTRIES = [
+	{
+		type: "message",
+		id: "s1",
+		parentId: null,
+		timestamp: "2026-10-18T00:00:00.000Z",
+		message: { role: "system", content: "", sections: { preamble: "SYS" }, timestamp: 0 },
+	},
+	{
+		type: "message",
+		id: "u1",
+		parentId: "s1",
+		timestamp: "2026-10-18T00:00:01.000Z",
+		message: {
+			role: "user",
+			content: [
+				{ type: "text", text: "look at this" },
+				{ type: "image", mimeType: "image/png", data: "AAAA" },
+			],
+			timestamp: 1,
+		},
+	},
+] as unknown as SessionEntry[];
+
+test("blockImages mirrors the main loop's image filter", () => {
+	const blocked = buildBtwContext(IMAGE_ENTRIES, "u1", "why?", 0, { blockImages: true });
+	const kept = buildBtwContext(IMAGE_ENTRIES, "u1", "why?", 0, { blockImages: false });
+	assert.ok(
+		JSON.stringify(blocked).includes("Image reading is disabled."),
+		"the image becomes the main loop's placeholder",
+	);
+	assert.ok(!JSON.stringify(blocked).includes('"type":"image"'), "no image block survives the filter");
+	assert.ok(JSON.stringify(kept).includes('"type":"image"'), "without the setting the image is sent");
 });
 
 test("terminal sequences, C0/C1 controls and bidi overrides are stripped", () => {
@@ -237,12 +284,39 @@ test("a tool-only response is reported with its usage, never executed", async ()
 	stream.push({
 		type: "done",
 		reason: "toolUse",
-		message: assistant({ stopReason: "toolUse", usage }),
+		message: assistant({
+			stopReason: "toolUse",
+			usage,
+			content: [{ type: "toolCall", id: "c1", name: "read", arguments: {} }],
+		}),
 	});
 	const outcome = await run;
 	assert.equal(outcome.status, "error");
 	assert.match(outcome.status === "error" ? outcome.message : "", /tool/);
 	assert.deepEqual(outcome.status === "error" ? outcome.usage : undefined, usage);
+	assert.equal(outcome.ignoredToolCalls, 1);
+});
+
+test("a text answer that also called a tool is kept, with the ignored call reported", async () => {
+	const stream = createAssistantMessageEventStream();
+	const chunks: string[] = [];
+	const run = runBtwStream(stream, { onText: (text) => chunks.push(text) });
+	stream.push({ type: "text_delta", contentIndex: 0, delta: "done", partial: assistant() });
+	stream.push({
+		type: "done",
+		reason: "toolUse",
+		message: assistant({
+			content: [
+				{ type: "text", text: "done" },
+				{ type: "toolCall", id: "c1", name: "write", arguments: {} },
+			],
+			stopReason: "toolUse",
+		}),
+	});
+	const outcome = await run;
+	assert.equal(outcome.status, "ok");
+	assert.equal(outcome.status === "ok" ? outcome.text : "", "done");
+	assert.equal(outcome.ignoredToolCalls, 1, "the dropped call is disclosed");
 });
 
 test("a failing onText handler is reported through the outcome", async () => {
@@ -271,7 +345,7 @@ function fakeRegistry(auth: unknown = { ok: true, apiKey: "key", headers: { "x-t
 	return { calls, stream, modelRegistry };
 }
 
-test("runBtwRequest sends the converted projection with toolChoice none", async () => {
+test("runBtwRequest sends the converted projection without tool_choice", async () => {
 	const { calls, stream, modelRegistry } = fakeRegistry();
 	const chunks: string[] = [];
 	const running = runBtwRequest({
@@ -291,6 +365,8 @@ test("runBtwRequest sends the converted projection with toolChoice none", async 
 	assert.equal(calls.length, 1);
 	const sent = calls[0] as { context: Context; options: Record<string, unknown> };
 	assert.equal(sent.options["toolChoice"], undefined, "tool_choice would invalidate the message cache");
+	assert.equal(sent.options["sessionId"], SESSION_ID, "session affinity uses the main session id");
+	assert.equal(sent.options["reasoning"], "max", "the session thinking level is forwarded");
 	assert.equal(sent.options["apiKey"], "key");
 	const headers = sent.options["headers"] as Record<string, string>;
 	assert.equal(headers["x-opencode-session"], SESSION_ID, "the MAIN session id pins the cache lineage");

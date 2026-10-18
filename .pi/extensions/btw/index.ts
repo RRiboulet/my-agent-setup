@@ -58,6 +58,8 @@ export interface BtwDeps {
 	agentDir: string;
 	/** Process liveness for the owner-pid reap; injected so tests can fake it. */
 	isPidAlive: (pid: number) => boolean;
+	/** Mirror the main loop's image-blocking wrapper when the setting is on. */
+	blockImages: boolean;
 }
 
 /** The slice of pi's command context the launch core reads. */
@@ -105,17 +107,21 @@ async function runTmux(deps: BtwDeps, args: string[], what: string): Promise<voi
 }
 
 /**
- * Kill the panel's tmux server.
+ * Kill the panel's tmux server, reporting whether the command exited 0.
  *
- * A missing server exits non-zero, which is the normal first-run case, so the
- * result is deliberately ignored; the catch covers a thrown exec (for example
- * an aborted turn).
+ * A missing server exits non-zero, which is the normal first-run case; the
+ * boolean lets `destroyPanel` skip its confirmation probe on a clean kill
+ * without ever reading a failure as success.
  */
-async function killPanel(deps: BtwDeps, paths: BtwPaths): Promise<void> {
+async function killPanel(deps: BtwDeps, paths: BtwPaths): Promise<boolean> {
 	try {
-		await deps.exec("tmux", buildBtwKillServerArgs({ socket: paths.socket }), { timeout: TMUX_TIMEOUT_MS });
+		const result = await deps.exec("tmux", buildBtwKillServerArgs({ socket: paths.socket }), {
+			timeout: TMUX_TIMEOUT_MS,
+		});
+		return result.code === 0;
 	} catch {
 		// Nothing to kill, or the abort already tore the command down.
+		return false;
 	}
 }
 
@@ -164,14 +170,17 @@ async function readOwnerPid(paths: BtwPaths): Promise<number | undefined> {
  * not be unlinked under it.
  */
 async function destroyPanel(deps: BtwDeps, paths: BtwPaths): Promise<void> {
-	await killPanel(deps, paths);
-	try {
-		const still = await deps.exec("tmux", ["-S", paths.socket, "has-session", "-t", paths.session], {
-			timeout: TMUX_TIMEOUT_MS,
-		});
-		if (still.code === 0 || still.killed) return;
-	} catch {
-		return;
+	// A clean kill means the server is gone; only an ambiguous result needs the
+	// confirmation probe.
+	if (!(await killPanel(deps, paths))) {
+		try {
+			const still = await deps.exec("tmux", ["-S", paths.socket, "has-session", "-t", paths.session], {
+				timeout: TMUX_TIMEOUT_MS,
+			});
+			if (still.code === 0 || still.killed) return;
+		} catch {
+			return;
+		}
 	}
 	await rm(paths.runDir, { recursive: true, force: true }).catch(() => undefined);
 	await rm(paths.socket, { force: true }).catch(() => undefined);
@@ -409,6 +418,10 @@ export async function reattachBtwPanel(deps: BtwDeps, ctx: BtwContext): Promise<
 			return false;
 		}
 		try {
+			// The session may still exist (a viewer that exited leaves a dead
+			// pane), and new-session refuses a duplicate name; the socket is
+			// per-session, so killing it first is scoped and cheap.
+			await killPanel(deps, paths);
 			await startViewer(deps, paths, ctx.cwd);
 		} catch (error) {
 			deps.notify(`Could not reopen the BTW panel: ${messageOf(error)}`, "warning");
@@ -426,12 +439,17 @@ export async function reattachBtwPanel(deps: BtwDeps, ctx: BtwContext): Promise<
 
 /** Append the outcome to the answer file, where the viewer sees it. */
 async function appendFooter(deps: BtwDeps, paths: BtwPaths, outcome: BtwOutcome): Promise<void> {
+	const toolNote =
+		outcome.ignoredToolCalls === undefined
+			? undefined
+			: `${outcome.ignoredToolCalls} tool call${outcome.ignoredToolCalls === 1 ? "" : "s"} ignored`;
+	const withToolNote = (text: string): string => (toolNote === undefined ? text : `${text} · ${toolNote}`);
 	const summary =
 		outcome.status === "ok"
-			? formatBtwUsage(outcome.usage)
+			? withToolNote(formatBtwUsage(outcome.usage))
 			: outcome.status === "cancelled"
-				? `cancelled${outcome.usage ? ` · ${formatBtwUsage(outcome.usage)}` : ""}`
-				: `error: ${outcome.message}${outcome.usage ? ` · ${formatBtwUsage(outcome.usage)}` : ""}`;
+				? withToolNote(`cancelled${outcome.usage ? ` · ${formatBtwUsage(outcome.usage)}` : ""}`)
+				: withToolNote(`error: ${outcome.message}${outcome.usage ? ` · ${formatBtwUsage(outcome.usage)}` : ""}`);
 	await appendFile(paths.answer, `${FOOTER}${sanitizeAnswerText(summary)}\n`, "utf8").catch(() => undefined);
 	if (outcome.status === "error") deps.notify(`BTW: ${outcome.message}`, "error");
 }
@@ -491,6 +509,7 @@ export async function launchBtwPanel(deps: BtwDeps, ctx: BtwContext, rawQuestion
 				modelRegistry: ctx.modelRegistry,
 				model,
 				sessionId,
+				blockImages: deps.blockImages,
 				entries: ctx.sessionManager.getEntries(),
 				leafId: ctx.sessionManager.getLeafId(),
 				question,
@@ -509,13 +528,18 @@ export async function launchBtwPanel(deps: BtwDeps, ctx: BtwContext, rawQuestion
 
 export default function btwExtension(pi: ExtensionAPI): void {
 	let active: BtwLaunch | undefined;
-	const depsFor = (ctx: ExtensionContext): BtwDeps => ({
-		exec: (command, argv, options) => pi.exec(command, argv, options),
-		launch: (command, argv, options, onError) => panelLauncher(command, argv, options, onError),
-		notify: (message, type = "info") => ctx.ui.notify(message, type),
-		agentDir: getAgentDir(),
-		isPidAlive: defaultIsPidAlive,
-	});
+	let starting = false;
+	const depsFor = (ctx: ExtensionContext): BtwDeps => {
+		const settings = pi.getSettings();
+		return {
+			exec: (command, argv, options) => pi.exec(command, argv, options),
+			launch: (command, argv, options, onError) => panelLauncher(command, argv, options, onError),
+			notify: (message, type = "info") => ctx.ui.notify(message, type),
+			agentDir: getAgentDir(),
+			isPidAlive: defaultIsPidAlive,
+			blockImages: settings.images?.blockImages === true,
+		};
+	};
 	const stopActive = async (): Promise<void> => {
 		const current = active;
 		active = undefined;
@@ -533,13 +557,32 @@ export default function btwExtension(pi: ExtensionAPI): void {
 				ctx.ui.notify("BTW needs the TUI.", "warning");
 				return;
 			}
-			const typed = args.trim();
-			if (!typed && (await reattachBtwPanel(depsFor(ctx), ctx))) return;
-			const question = typed || (await ctx.ui.input("BTW question:", "ask about this conversation"));
-			if (!question?.trim()) return;
-			await stopActive();
-			const launch = await launchBtwPanel(depsFor(ctx), ctx, question);
-			if (launch) active = launch;
+			if (starting) {
+				// The setup owns the run dir and socket until it hands back a
+				// launch; a second command in that window would interleave rm,
+				// mkdir and new-session on the same paths.
+				ctx.ui.notify("BTW is still starting the previous panel.", "warning");
+				return;
+			}
+			starting = true;
+			try {
+				const typed = args.trim();
+				if (!typed && (await reattachBtwPanel(depsFor(ctx), ctx))) return;
+				const question = typed || (await ctx.ui.input("BTW question:", "ask about this conversation"));
+				if (!question?.trim()) return;
+				await stopActive();
+				const launch = await launchBtwPanel(depsFor(ctx), ctx, question);
+				if (launch) {
+					active = launch;
+					// The completion holds the launch's closure; drop the slot once
+					// it finishes so the entries snapshot is not retained.
+					void launch.completion.finally(() => {
+						if (active === launch) active = undefined;
+					});
+				}
+			} finally {
+				starting = false;
+			}
 		},
 	});
 

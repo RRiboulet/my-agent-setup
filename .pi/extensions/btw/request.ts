@@ -21,8 +21,24 @@
 // declared for prefix parity, the new user message asks the model not to use
 // them, and a tool call that produces no text is reported as an error rather
 // than executed.
+//
+// One caveat is structural. The agent loop applies `transformContext` - the
+// extension `context` handlers and, for a `before_agent_start` forced prompt, a
+// collapsed system message - before streaming, and no extension API runs that
+// chain. This request therefore matches a session without context-rewriting
+// state; on a session with an active `/goal` the forced system prompt differs
+// at byte 0, so the cache misses and the conversation is re-billed, and goal UI
+// messages the main request strips are visible to the side model.
 
-import type { Api, AssistantMessage, AssistantMessageEventStream, Context, Model, Usage } from "@earendil-works/pi-ai";
+import type {
+	Api,
+	AssistantMessage,
+	AssistantMessageEventStream,
+	Context,
+	Message,
+	Model,
+	Usage,
+} from "@earendil-works/pi-ai";
 import {
 	buildSessionContext,
 	convertToLlm,
@@ -35,8 +51,15 @@ import { stripTerminalSequences } from "@earendil-works/pi-tui";
 export const BTW_INSTRUCTION =
 	"This is a /btw side question. Answer it from the conversation above, without calling any tools. Do not use or offer to use tools; if the conversation does not contain the answer, say what is missing.";
 
+const IMAGE_BLOCKED_TEXT = "Image reading is disabled.";
+
 function messageOf(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/** Attach the ignored-tool-call count only when there is one, so outcomes stay exact. */
+function withIgnored<T extends { status: string; usage?: Usage }>(outcome: T, ignored: number | undefined): T {
+	return ignored === undefined ? outcome : { ...outcome, ignoredToolCalls: ignored };
 }
 
 /**
@@ -71,7 +94,42 @@ export function providerSessionHeaders(
 }
 
 /**
- * The exact context the side request sends.
+ * Replace image blocks with the main loop's placeholder when `images.blockImages`
+ * is on, mirroring its `convertToLlmWithBlockImages` wrapper (consecutive
+ * placeholders collapse the same way). Without this, an image in the history
+ * would diverge the prefix and a vision-less model could reject the request.
+ */
+function withoutImageBlocks(messages: Message[]): Message[] {
+	return messages.map((message) => {
+		if (message.role !== "user" && message.role !== "toolResult") return message;
+		const content = (message as { content?: unknown }).content;
+		if (!Array.isArray(content) || !content.some((part) => (part as { type?: string }).type === "image")) {
+			return message;
+		}
+		const filtered = content
+			.map((part) => ((part as { type?: string }).type === "image" ? { type: "text", text: IMAGE_BLOCKED_TEXT } : part))
+			.filter(
+				(part, index, all) =>
+					!(
+						(part as { type?: string }).type === "text" &&
+						(part as { text?: string }).text === IMAGE_BLOCKED_TEXT &&
+						index > 0 &&
+						(all[index - 1] as { type?: string }).type === "text" &&
+						(all[index - 1] as { text?: string }).text === IMAGE_BLOCKED_TEXT
+					),
+			);
+		return { ...message, content: filtered } as Message;
+	});
+}
+
+export interface BtwRequestParts {
+	context: Context;
+	/** The session's thinking level, forwarded as the request's `reasoning`. */
+	thinkingLevel: string | undefined;
+}
+
+/**
+ * The exact context the side request sends, plus the session thinking level.
  *
  * `buildSessionContext` is the same projection pi resolves for its own next
  * request, and `convertToLlm` is the same conversion the agent loop runs before
@@ -80,23 +138,39 @@ export function providerSessionHeaders(
  * Passing `systemPrompt` or `tools` would prepend a second, different leading
  * system message and break the cache, so neither is set.
  */
+export function buildBtwRequestParts(
+	entries: readonly SessionEntry[],
+	leafId: string | null | undefined,
+	question: string,
+	now = Date.now(),
+	options: { blockImages?: boolean } = {},
+): BtwRequestParts {
+	const projection = buildSessionContext(entries as SessionEntry[], leafId ?? undefined);
+	const converted = convertToLlm(projection.messages);
+	return {
+		context: {
+			messages: [
+				...(options.blockImages === true ? withoutImageBlocks(converted) : converted),
+				{
+					role: "user",
+					content: [{ type: "text", text: `${BTW_INSTRUCTION}\n\n${question}` }],
+					timestamp: now,
+				},
+			],
+		},
+		thinkingLevel: projection.thinkingLevel,
+	};
+}
+
+/** The context alone, for callers that do not need the thinking level. */
 export function buildBtwContext(
 	entries: readonly SessionEntry[],
 	leafId: string | null | undefined,
 	question: string,
 	now = Date.now(),
+	options: { blockImages?: boolean } = {},
 ): Context {
-	const projection = buildSessionContext(entries as SessionEntry[], leafId ?? undefined);
-	return {
-		messages: [
-			...convertToLlm(projection.messages),
-			{
-				role: "user",
-				content: [{ type: "text", text: `${BTW_INSTRUCTION}\n\n${question}` }],
-				timestamp: now,
-			},
-		],
-	};
+	return buildBtwRequestParts(entries, leafId, question, now, options).context;
 }
 
 /**
@@ -116,9 +190,9 @@ export function sanitizeAnswerText(text: string): string {
 }
 
 export type BtwOutcome =
-	| { status: "ok"; text: string; usage?: Usage }
-	| { status: "cancelled"; usage?: Usage }
-	| { status: "error"; message: string; usage?: Usage };
+	| { status: "ok"; text: string; usage?: Usage; ignoredToolCalls?: number }
+	| { status: "cancelled"; usage?: Usage; ignoredToolCalls?: number }
+	| { status: "error"; message: string; usage?: Usage; ignoredToolCalls?: number };
 
 export interface BtwStreamRun {
 	/** Receives each sanitized text delta in stream order. */
@@ -131,10 +205,12 @@ export interface BtwStreamRun {
  *
  * Text deltas are sanitized and forwarded as they arrive, so the viewer can
  * follow the answer; the final message maps an aborted/error stop reason to an
- * outcome instead of letting a failure masquerade as an answer. A failure to
- * record a delta stops the run rather than throwing out of the outcome
- * contract. The returned `text` is trimmed for validation; the streamed deltas
- * are not, so the answer file can differ from it in surrounding whitespace.
+ * outcome instead of letting a failure masquerade as an answer. Tool calls are
+ * never executed; a response that carries them reports how many were ignored,
+ * so an answer that says it did work cannot read as done. A failure to record a
+ * delta stops the run rather than throwing out of the outcome contract. The
+ * returned `text` is trimmed for validation; the streamed deltas are not, so
+ * the answer file can differ from it in surrounding whitespace.
  */
 export async function runBtwStream(stream: AssistantMessageEventStream, run: BtwStreamRun): Promise<BtwOutcome> {
 	let final: AssistantMessage | undefined;
@@ -163,31 +239,41 @@ export async function runBtwStream(stream: AssistantMessageEventStream, run: Btw
 		}
 	}
 
+	const source = failure ?? final;
+	const ignoredToolCalls = source?.content.filter((block) => block.type === "toolCall").length ?? 0;
+	const ignored = ignoredToolCalls > 0 ? ignoredToolCalls : undefined;
+
 	if (run.signal?.aborted || final?.stopReason === "aborted" || failure?.stopReason === "aborted") {
-		return { status: "cancelled", usage: (failure ?? final)?.usage };
+		return withIgnored({ status: "cancelled" as const, usage: source?.usage }, ignored);
 	}
 	if (failure !== undefined || final?.stopReason === "error") {
-		return {
-			status: "error",
-			message: failure?.errorMessage ?? final?.errorMessage ?? "the model call failed",
-			usage: (failure ?? final)?.usage,
-		};
+		return withIgnored(
+			{
+				status: "error" as const,
+				message: failure?.errorMessage ?? final?.errorMessage ?? "the model call failed",
+				usage: source?.usage,
+			},
+			ignored,
+		);
 	}
 	if (final === undefined) {
 		return { status: "error", message: "the stream ended without a response" };
 	}
 	const text = chunks.join("").trim();
 	if (text.length === 0) {
-		return {
-			status: "error",
-			message:
-				final.stopReason === "toolUse"
-					? "the model tried to use a tool; the side panel is text-only, so ask again"
-					: "the model returned no text",
-			usage: final.usage,
-		};
+		return withIgnored(
+			{
+				status: "error" as const,
+				message:
+					final.stopReason === "toolUse"
+						? "the model tried to use a tool; the side panel is text-only, so ask again"
+						: "the model returned no text",
+				usage: final.usage,
+			},
+			ignored,
+		);
 	}
-	return { status: "ok", text, usage: final.usage };
+	return withIgnored({ status: "ok" as const, text, usage: final.usage }, ignored);
 }
 
 export interface BtwRequestDeps {
@@ -199,6 +285,8 @@ export interface BtwRequestDeps {
 	leafId?: string | null;
 	question: string;
 	signal?: AbortSignal;
+	/** Mirror the main loop's image-blocking wrapper when the setting is on. */
+	blockImages?: boolean;
 	onText: (text: string) => void | Promise<void>;
 }
 
@@ -206,8 +294,9 @@ export interface BtwRequestDeps {
  * One-shot side request on the session's model.
  *
  * The auth lookup and the `streamSimple` call live here, with `runBtwStream`,
- * so the whole request shape — including the session routing headers and the
- * deliberate absence of `tool_choice` — is tested as one unit.
+ * so the whole request shape — the session routing headers, the session
+ * thinking level, the image-blocking mirror and the deliberate absence of
+ * `tool_choice` — is tested as one unit.
  */
 export async function runBtwRequest(deps: BtwRequestDeps): Promise<BtwOutcome> {
 	let auth: Awaited<ReturnType<ModelRegistry["getApiKeyAndHeaders"]>>;
@@ -218,16 +307,26 @@ export async function runBtwRequest(deps: BtwRequestDeps): Promise<BtwOutcome> {
 	}
 	if (auth.ok === false) return { status: "error", message: auth.error };
 
+	const parts = buildBtwRequestParts(deps.entries, deps.leafId, deps.question, Date.now(), {
+		blockImages: deps.blockImages,
+	});
+
 	let stream: AssistantMessageEventStream;
 	try {
 		const headers = {
 			...providerSessionHeaders(deps.model, deps.sessionId),
 			...(auth.headers ?? {}),
 		};
-		stream = deps.modelRegistry.streamSimple(deps.model, buildBtwContext(deps.entries, deps.leafId, deps.question), {
+		stream = deps.modelRegistry.streamSimple(deps.model, parts.context, {
 			apiKey: auth.apiKey,
 			headers,
 			signal: deps.signal,
+			// The same routing/thinking fields the main request carries. The
+			// sessionId feeds provider session affinity (OpenRouter's headers);
+			// reasoning mirrors the session's thinking level, which Anthropic's
+			// cache key also includes.
+			sessionId: deps.sessionId,
+			reasoning: parts.thinkingLevel as never,
 			// No toolChoice: setting it changes the provider's cache key (see the
 			// module header). The declared tools stay in the prefix; the
 			// instruction asks the model not to use them.
