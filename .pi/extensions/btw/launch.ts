@@ -103,9 +103,16 @@ export function btwSessionName(sessionId: string): string {
 	return `btw-${requireSessionId(sessionId)}`;
 }
 
-/** The pane every send-keys call addresses. */
+/**
+ * The target every send-keys or capture call addresses.
+ *
+ * A session target resolves to its active pane, which is the only pane in a
+ * one-window panel. This deliberately avoids `:0.0`: a fresh tmux server reads
+ * `~/.tmux.conf`, and with `base-index`/`pane-base-index` configured the first
+ * window or pane is not index zero.
+ */
 export function btwTarget(sessionId: string): string {
-	return `${btwSessionName(sessionId)}:0.0`;
+	return btwSessionName(sessionId);
 }
 
 /**
@@ -136,6 +143,30 @@ export function btwQuestionPath(agentDir: string, sessionId: string): string {
  */
 export function btwSidePromptPath(agentDir: string, sessionId: string): string {
 	return path.join(btwRunDir(agentDir, sessionId), "side-prompt.md");
+}
+
+/** Every path one panel owns, derived from the agent dir and session id. */
+export interface BtwPaths {
+	socket: string;
+	session: string;
+	target: string;
+	runDir: string;
+	fork: string;
+	question: string;
+	sidePrompt: string;
+}
+
+/** Build the path set once, so a caller never mixes a short and a full id. */
+export function buildBtwPaths(agentDir: string, sessionId: string): BtwPaths {
+	return {
+		socket: btwSocketPath(agentDir, sessionId),
+		session: btwSessionName(sessionId),
+		target: btwTarget(sessionId),
+		runDir: btwRunDir(agentDir, sessionId),
+		fork: btwForkPath(agentDir, sessionId),
+		question: btwQuestionPath(agentDir, sessionId),
+		sidePrompt: btwSidePromptPath(agentDir, sessionId),
+	};
 }
 
 /**
@@ -256,17 +287,20 @@ export function buildBtwSessionCreateArgs(input: { socket: string; session: stri
 /**
  * Keep the pane visible after the child exits, so a crash can be read instead
  * of the panel vanishing; liveness is `has-session` plus `#{pane_dead}`.
+ *
+ * The target is the session, not `<session>:0`: a fresh server reads the
+ * user's tmux config, where `base-index` can make the first window non-zero.
  */
 export function buildBtwRemainOnExitArgs(input: { socket: string; session: string }): string[] {
-	return ["-S", input.socket, "set-window-option", "-t", `${input.session}:0`, "remain-on-exit", "on"];
+	return ["-S", input.socket, "set-window-option", "-t", input.session, "remain-on-exit", "on"];
 }
 
 /**
  * Kill this panel's tmux session.
  *
  * Used before a replace and on shutdown; a missing session exits non-zero, so
- * callers treat that as the expected no-op. Kept separate from the create
- * builder because the pair is the whole reset and a test pins their order.
+ * callers ignore the result. Kept separate from the create builder because the
+ * pair is the whole reset, and `btw.test.ts` pins their order.
  */
 export function buildBtwKillSessionArgs(input: { socket: string; session: string }): string[] {
 	return ["-S", input.socket, "kill-session", "-t", input.session];

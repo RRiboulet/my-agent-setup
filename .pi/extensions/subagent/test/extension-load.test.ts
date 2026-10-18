@@ -46,6 +46,7 @@ const MODULES: Record<string, string[]> = {
 		"buildBtwChildCommand",
 		"buildBtwChildPiArgs",
 		"buildBtwKillSessionArgs",
+		"buildBtwPaths",
 		"buildBtwRemainOnExitArgs",
 		"buildBtwSendKeysArgs",
 		"buildBtwSessionCreateArgs",

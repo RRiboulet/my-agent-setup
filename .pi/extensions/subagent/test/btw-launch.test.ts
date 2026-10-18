@@ -18,6 +18,7 @@ import {
 	buildBtwChildCommand,
 	buildBtwChildPiArgs,
 	buildBtwKillSessionArgs,
+	buildBtwPaths,
 	buildBtwRemainOnExitArgs,
 	buildBtwSendKeysArgs,
 	buildBtwSessionCreateArgs,
@@ -42,7 +43,20 @@ const SESSION = `btw-${SID}`;
 test("the socket, session and target derive from the session id", () => {
 	assert.equal(btwSocketPath(AGENT_DIR, SID), SOCKET);
 	assert.equal(btwSessionName(SID), SESSION);
-	assert.equal(btwTarget(SID), `${SESSION}:0.0`);
+	assert.equal(btwTarget(SID), SESSION, "a session target avoids the base-index assumption");
+});
+
+test("buildBtwPaths returns every path from one agent dir and session id", () => {
+	const runDir = `${AGENT_DIR}/btw/${SID}`;
+	assert.deepEqual(buildBtwPaths(AGENT_DIR, SID), {
+		socket: SOCKET,
+		session: SESSION,
+		target: SESSION,
+		runDir,
+		fork: `${runDir}/fork.jsonl`,
+		question: `${runDir}/question.md`,
+		sidePrompt: `${runDir}/side-prompt.md`,
+	});
 });
 
 test("two UUIDv7 ids sharing a timestamp prefix do not collide", () => {
@@ -191,29 +205,29 @@ test("remain-on-exit keeps a crashed child visible", () => {
 		SOCKET,
 		"set-window-option",
 		"-t",
-		`${SESSION}:0`,
+		SESSION,
 		"remain-on-exit",
 		"on",
 	]);
 });
 
 test("send-keys is literal and option-safe; Enter is a separate call", () => {
-	assert.deepEqual(buildBtwSendKeysArgs({ socket: SOCKET, target: `${SESSION}:0.0`, command: "--not-a-flag; echo hi" }), [
+	assert.deepEqual(buildBtwSendKeysArgs({ socket: SOCKET, target: SESSION, command: "--not-a-flag; echo hi" }), [
 		"-S",
 		SOCKET,
 		"send-keys",
 		"-t",
-		`${SESSION}:0.0`,
+		SESSION,
 		"-l",
 		"--",
 		"--not-a-flag; echo hi",
 	]);
-	assert.deepEqual(buildBtwSubmitArgs({ socket: SOCKET, target: `${SESSION}:0.0` }), [
+	assert.deepEqual(buildBtwSubmitArgs({ socket: SOCKET, target: SESSION }), [
 		"-S",
 		SOCKET,
 		"send-keys",
 		"-t",
-		`${SESSION}:0.0`,
+		SESSION,
 		"Enter",
 	]);
 });

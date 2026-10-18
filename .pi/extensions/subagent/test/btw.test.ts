@@ -8,7 +8,9 @@
 //
 // tmux and pi are injected: `deps.exec` records calls, and the factory is
 // driven with a fake pi API the way continue.test.ts does. The agent directory
-// is a temp dir from helpers.ts, never the real one.
+// is a temp dir from helpers.ts, never the real one. The expected tmux argv
+// partly reuses the builders the code uses; `btw-launch.test.ts` pins those
+// builders against literals, so this file is about order, guards and effects.
 
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -73,7 +75,14 @@ interface ExecCall {
 	args: string[];
 }
 
-function fakeDeps(agentDir: string, options: { failOn?: string } = {}) {
+interface FakeOptions {
+	/** Fail the first call whose argv contains this string. */
+	failOn?: string;
+	/** Throw from the first call whose argv contains this string. */
+	throwOn?: string;
+}
+
+function fakeDeps(agentDir: string, options: FakeOptions = {}) {
 	const calls: ExecCall[] = [];
 	const notifications: { message: string; type: string }[] = [];
 	return {
@@ -82,6 +91,9 @@ function fakeDeps(agentDir: string, options: { failOn?: string } = {}) {
 		deps: {
 			exec: async (command: string, args: string[]) => {
 				calls.push({ command, args });
+				if (options.throwOn !== undefined && args.includes(options.throwOn)) {
+					throw new Error(`${options.throwOn} threw`);
+				}
 				if (options.failOn !== undefined && args.includes(options.failOn)) {
 					return { code: 1, stdout: "", stderr: `${options.failOn} failed` };
 				}
@@ -92,6 +104,22 @@ function fakeDeps(agentDir: string, options: { failOn?: string } = {}) {
 			extensionDir: EXTENSION_DIR,
 		},
 	};
+}
+
+type Handler = (args: string, ctx: unknown) => Promise<void>;
+
+/** Load the factory and capture its command handler over a supplied exec. */
+async function loadFactory(exec: (command: string, args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>): Promise<Handler> {
+	let handler: Handler | undefined;
+	const factory = (await import("../../btw/index.ts")).default;
+	factory({
+		registerCommand: (_name: string, spec: { handler: Handler }) => {
+			handler = spec.handler;
+		},
+		exec,
+	} as never);
+	assert.ok(handler, "the factory must register a command");
+	return handler;
 }
 
 test("a question forks the branch, writes the scratch files and launches the child in order", async () => {
@@ -120,7 +148,7 @@ test("a question forks the branch, writes the scratch files and launches the chi
 		assert.deepEqual(calls.map((call) => call.args.join(" ")), [
 			`-S ${socket} kill-session -t ${session}`,
 			`-S ${socket} new-session -d -s ${session} -n btw -c /work/project`,
-			`-S ${socket} set-window-option -t ${session}:0 remain-on-exit on`,
+			`-S ${socket} set-window-option -t ${session} remain-on-exit on`,
 			`-S ${socket} send-keys -t ${target} -l -- ${buildBtwChildCommand(childArgs)}`,
 			`-S ${socket} send-keys -t ${target} Enter`,
 		]);
@@ -173,14 +201,23 @@ test("the guards notify without touching tmux or the disk", async () => {
 	});
 });
 
-test("a pi already on the btw socket refuses to nest", async () => {
+test("an empty session still launches, with a warning that there is no context", async () => {
 	await withTempAgentDir(async (agentDir) => {
 		const { calls, notifications, deps } = fakeDeps(agentDir);
-		await withEnv({ TMUX: `${btwSocketPath(agentDir, SID)},1234,0` }, async () => {
-			await launchBtwPanel(deps, fakeContext(), "why?");
+		const empty = fakeContext({
+			sessionManager: { ...fakeContext().sessionManager, getLeafId: () => null, getBranch: () => [] },
 		});
-		assert.deepEqual(calls, []);
-		assert.match(notifications[0]?.message ?? "", /inside its own panel/);
+		await launchBtwPanel(deps, empty, "why?");
+		assert.ok(
+			notifications.some((item) => /no messages yet/.test(item.message)),
+			"the empty fork is announced",
+		);
+		assert.ok(
+			calls.some((call) => call.args.includes("new-session")),
+			"the panel still starts",
+		);
+		const lines = readFileSync(btwForkPath(agentDir, SID), "utf8").trim().split("\n");
+		assert.equal(lines.length, 1, "the fork is header-only");
 	});
 });
 
@@ -203,27 +240,36 @@ test("a failed tmux launch removes the scratch dir and reports the reason", asyn
 		assert.equal(existsSync(btwRunDir(agentDir, SID)), false);
 		assert.match(
 			notifications.at(-1)?.message ?? "",
-			/Could not start the BTW panel: Could not create the BTW tmux session: new-session failed/,
+			/Could not start the BTW panel .*: Could not create the BTW tmux session: new-session failed/,
 		);
+	});
+});
+
+test("a send-keys failure also removes the scratch dir", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		const { notifications, deps } = fakeDeps(agentDir, { failOn: "send-keys" });
+		await launchBtwPanel(deps, fakeContext(), "why?");
+		assert.equal(existsSync(btwRunDir(agentDir, SID)), false);
+		assert.match(notifications.at(-1)?.message ?? "", /Could not type the BTW command/);
+	});
+});
+
+test("a thrown exec is reported and cleaned up", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		const { notifications, deps } = fakeDeps(agentDir, { throwOn: "new-session" });
+		await launchBtwPanel(deps, fakeContext(), "why?");
+		assert.equal(existsSync(btwRunDir(agentDir, SID)), false);
+		assert.match(notifications.at(-1)?.message ?? "", /new-session threw/);
 	});
 });
 
 test("the factory registers /btw and asks for a question when none is typed", async () => {
 	await withTempAgentDir(async () => {
-		type Handler = (args: string, ctx: unknown) => Promise<void>;
-		let handler: Handler | undefined;
 		const execCalls: string[][] = [];
-		const factory = (await import("../../btw/index.ts")).default;
-		factory({
-			registerCommand: (_name: string, spec: { handler: Handler }) => {
-				handler = spec.handler;
-			},
-			exec: async (_command: string, args: string[]) => {
-				execCalls.push(args);
-				return { code: 0, stdout: "", stderr: "" };
-			},
-		} as never);
-		assert.ok(handler, "the factory must register a command");
+		const handler = await loadFactory(async (_command, args) => {
+			execCalls.push(args);
+			return { code: 0, stdout: "", stderr: "" };
+		});
 
 		const notifications: string[] = [];
 		const ctx = {
@@ -234,11 +280,79 @@ test("the factory registers /btw and asks for a question when none is typed", as
 			},
 		};
 		await handler("", ctx as never);
-		assert.ok(execCalls.some((args) => args.includes("new-session")), "the prompted question launches a panel");
+		assert.ok(
+			execCalls.some((args) => args.includes("new-session")),
+			"the prompted question launches a panel",
+		);
 
 		const before = execCalls.length;
 		const cancelCtx = { ...ctx, ui: { ...ctx.ui, input: async () => undefined } };
 		await handler("", cancelCtx as never);
 		assert.equal(execCalls.length, before, "a cancelled input launches nothing");
+	});
+});
+
+test("the factory refuses non-TUI before prompting or executing", async () => {
+	await withTempAgentDir(async () => {
+		let prompted = false;
+		const execCalls: string[][] = [];
+		const handler = await loadFactory(async (_command, args) => {
+			execCalls.push(args);
+			return { code: 0, stdout: "", stderr: "" };
+		});
+		const notifications: string[] = [];
+		const ctx = {
+			...fakeContext({ mode: "rpc" }),
+			ui: {
+				input: async () => {
+					prompted = true;
+					return "why?";
+				},
+				notify: (message: string) => notifications.push(message),
+			},
+		};
+		await handler("why?", ctx as never);
+		assert.equal(prompted, false, "no prompt outside the TUI");
+		assert.equal(execCalls.length, 0);
+		assert.match(notifications[0] ?? "", /TUI/);
+	});
+});
+
+test("a second /btw while one is starting is refused", async () => {
+	await withTempAgentDir(async () => {
+		let reached!: () => void;
+		const gateReached = new Promise<void>((resolve) => {
+			reached = resolve;
+		});
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const execCalls: string[][] = [];
+		const handler = await loadFactory(async (_command, args) => {
+			execCalls.push(args);
+			if (args.includes("new-session")) {
+				reached();
+				await gate;
+			}
+			return { code: 0, stdout: "", stderr: "" };
+		});
+		const notifications: string[] = [];
+		const ctx = {
+			...fakeContext(),
+			ui: { input: async () => "why?", notify: (message: string) => notifications.push(message) },
+		};
+
+		const first = handler("why?", ctx as never);
+		await gateReached;
+		await handler("why?", ctx as never);
+		assert.equal(
+			execCalls.filter((args) => args.includes("new-session")).length,
+			1,
+			"only one launch proceeds",
+		);
+		assert.match(notifications.join("\n"), /still starting/);
+		release();
+		await first;
 	});
 });
