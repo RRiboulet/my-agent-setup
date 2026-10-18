@@ -11,7 +11,11 @@
  *   never issues `-q` as a repair for an unexpected state; only `/voice cancel`
  *   (an explicit user action) does, as a best-effort cleanup.
  * - Started processes survive a dropped ssh connection, so cancel and shutdown
- *   clean up the remote file themselves instead of trusting the phone.
+ *   clean up the remote file themselves instead of trusting the phone. The same
+ *   is true of a start command still in flight: killing the ssh client does not
+ *   stop the remote shell, which can launch the recorder *after* a `-q` sent
+ *   now has come back "No recording to stop". Cancel therefore waits (bounded)
+ *   for an in-flight start to settle before stopping it.
  * - `ssh` may hang indefinitely (network gone), so every cleanup call is
  *   bounded by a budget and abandoned, not awaited, when it overruns, and the
  *   fetch is bounded too (`FETCH_BUDGET_MS`) so a stalled transfer cannot park
@@ -40,7 +44,14 @@ import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { DEFAULT_RECORDER_PATH, MAX_SECONDS_MAX, MAX_SECONDS_MIN, type VoiceConfig } from "./config.ts";
+import {
+	DEFAULT_RECORDER_PATH,
+	MAX_SECONDS_MAX,
+	MAX_SECONDS_MIN,
+	RECORDER_PATH_EXPECTATION,
+	RECORDER_PATH_PATTERN,
+	type VoiceConfig,
+} from "./config.ts";
 import { describeError, firstLine } from "./util.ts";
 
 /** Remote staging directory. Kept out of the shell's cwd: `$HOME` expands on
@@ -59,6 +70,16 @@ export const STOP_GRACE_SECONDS = 3;
 
 /** Bound for one cleanup call (stop/rm over ssh) before it is abandoned. */
 export const CLEANUP_BUDGET_MS = 2_000;
+
+/** How long a cancel waits for an in-flight start command to settle before it
+ * aborts the client and sends `-q` anyway. Aborting the client does not stop
+ * the remote command, so a `-q` sent too early is a no-op that orphans the
+ * recording; this is the bounded wait that lets the recorder exist first.
+ *
+ * Kept strictly below SHUTDOWN_BUDGET_MS: shutdown has no later, so the wait
+ * must never push its own best-effort `-q` past the budget shutdown is willing
+ * to await, or a session exit could leave the phone recording. */
+export const START_SETTLE_BUDGET_MS = 2_000;
 
 /** Bound for the whole `session_shutdown` cleanup. Pi awaits shutdown handlers
  * with no timeout of its own, so the recorder must bound itself. */
@@ -136,6 +157,15 @@ function assertRecordingId(id: string): void {
 	}
 }
 
+/** Defense-in-depth: `loadConfig` already degrades an unsafe path to the
+ * default, so this only fires for a caller that built a `Recorder` directly.
+ * Keep it in step with the config layer's message via the shared expectation. */
+function assertRecorderPath(recorderPath: string): void {
+	if (!RECORDER_PATH_PATTERN.test(recorderPath)) {
+		throw new Error(`voice: refusing recorder path ${JSON.stringify(recorderPath)}: expected ${RECORDER_PATH_EXPECTATION}`);
+	}
+}
+
 function assertMaxSeconds(maxSeconds: number): void {
 	if (!Number.isInteger(maxSeconds) || maxSeconds < MAX_SECONDS_MIN || maxSeconds > MAX_SECONDS_MAX) {
 		throw new Error(
@@ -181,12 +211,14 @@ export function buildStartCommand(options: StartCommandOptions): string {
 	assertMaxSeconds(options.maxSeconds);
 	if (options.bitrateKbps !== undefined) assertBitrate(options.bitrateKbps);
 	const recorder = options.recorderPath ?? DEFAULT_RECORDER_PATH;
+	assertRecorderPath(recorder);
 	const args = ["-f", `"${remoteRecordingPath(options.id)}"`, "-l", String(options.maxSeconds), "-e", "aac"];
 	if (options.bitrateKbps !== undefined) args.push("-b", String(options.bitrateKbps));
 	return `mkdir -p "${REMOTE_VOICE_DIR}" && ${recorder} ${args.join(" ")}`;
 }
 
 export function buildStopCommand(recorderPath: string = DEFAULT_RECORDER_PATH): string {
+	assertRecorderPath(recorderPath);
 	return `${recorderPath} -q`;
 }
 
@@ -238,6 +270,11 @@ export class Recorder {
 	#message: string | undefined;
 	#cancelling: Promise<void> | undefined;
 	#shutdown: Promise<void> | undefined;
+	/** The current start stage's promise, so a cancel can wait for it to settle.
+	 * It must stay the `#runStage` promise, not the raw run: the check inside
+	 * `#runStage` is what lets the cancel win, and it has to run before the
+	 * settle wait can resolve. */
+	#startRun: Promise<RunResult | undefined> | undefined;
 
 	constructor(deps: RecorderDeps) {
 		this.#run = deps.run;
@@ -275,19 +312,33 @@ export class Recorder {
 		this.#localPath = localRecordingPath(id, this.#tmpDir);
 		this.#failure = undefined;
 		this.#message = undefined;
-		this.#setPhase("starting");
 
-		const result = await this.#runStage({
-			command: buildStartCommand({
+		// Build the command before the phase moves: a builder refusal (the
+		// defense-in-depth path assert) must land in `error` — retryable — not
+		// escape as a rejection with the machine stuck in `starting`.
+		let command: string;
+		try {
+			command = buildStartCommand({
 				id,
 				maxSeconds: this.#config.maxSeconds,
 				...(this.#config.bitrateKbps !== undefined ? { bitrateKbps: this.#config.bitrateKbps } : {}),
 				recorderPath: this.#config.recorderPath,
-			}),
+			});
+		} catch (error) {
+			this.#fail("start-failed", `building the start command failed: ${(error as Error).message}`);
+			return;
+		}
+
+		// Assigned before the phase is emitted, so a status callback that calls
+		// cancel() re-entrantly still finds the promise to wait on.
+		this.#startRun = this.#runStage({
+			command,
 			signal: abort.signal,
 			failure: "start-failed",
 			what: "starts the recorder",
 		});
+		this.#setPhase("starting");
+		const result = await this.#startRun;
 		if (result === undefined) return; // the cancel landed or the failure was reported
 		const output = combinedOutput(result);
 		if (/already in progress/i.test(output)) {
@@ -335,9 +386,19 @@ export class Recorder {
 		const localPath = this.#localPath as string;
 
 		this.#clearTimer();
+
+		// Same ordering rule as start(): build before the phase moves, so a
+		// builder refusal lands in `error` instead of wedging `stopping`.
+		let stopCommand: string;
+		try {
+			stopCommand = buildStopCommand(this.#config.recorderPath);
+		} catch (error) {
+			this.#fail("stop-failed", `building the stop command failed: ${(error as Error).message}`);
+			return;
+		}
 		this.#setPhase("stopping");
 		const stopped = await this.#runStage({
-			command: buildStopCommand(this.#config.recorderPath),
+			command: stopCommand,
 			signal,
 			failure: "stop-failed",
 			what: "stops the recorder",
@@ -407,12 +468,13 @@ export class Recorder {
 	 * This is the one path allowed to issue `-q` for a recording the extension
 	 * may not own, because the user asked for it explicitly.
 	 *
-	 * Per phase: starting/recording/stopping → best-effort `-q` + remote
-	 * cleanup, never fetch; fetching → drop the partial local file and the
-	 * remote original; transcribing → drop the local copy unless keepAudio.
-	 * Idempotent while running, a no-op when already idle. While it runs,
-	 * start() and stop() are refused: the cancel owns the phone until its
-	 * cleanup has landed.
+	 * Per phase: starting → wait (bounded) for the start command to settle, then
+	 * best-effort `-q` + remote cleanup, never fetch; recording/stopping →
+	 * best-effort `-q` + remote cleanup, never fetch; fetching → drop the partial
+	 * local file and the remote original; transcribing → drop the local copy
+	 * unless keepAudio. Idempotent while running, a no-op when already idle.
+	 * While it runs, start() and stop() are refused: the cancel owns the phone
+	 * until its cleanup has landed.
 	 */
 	// Not `async`: an async method would wrap the stored promise, and callers
 	// joining an in-flight cancel must get the same promise back.
@@ -451,8 +513,22 @@ export class Recorder {
 		const phase = this.#phase;
 		const id = this.#id;
 		const localPath = this.#localPath;
-		this.#abort?.abort();
+		// Captured before any await: `#clearCycle` nulls `#abort`, and a shutdown
+		// could reach it while this cancel is still parked, so the abort must read
+		// the controller now, not after the wait.
+		const abort = this.#abort;
 		this.#clearTimer();
+
+		// Aborting the client does not stop the remote start command: it can
+		// launch the recorder *after* a `-q` sent now has already answered "No
+		// recording to stop", orphaning a device-global recording until `-l`.
+		// Let the start settle (bounded) so the recorder exists before stopping,
+		// then abort a client that overran the budget. The start's continuation is
+		// kept off a later cycle by the cancel check in #runStage, not by this abort.
+		if (phase === "starting") {
+			await this.#settleWithin(this.#startRun ?? Promise.resolve(), START_SETTLE_BUDGET_MS);
+		}
+		abort?.abort();
 
 		switch (phase) {
 			case "starting":
@@ -488,7 +564,15 @@ export class Recorder {
 	}
 
 	async #bestEffortStop(): Promise<void> {
-		await this.#runBounded(buildStopCommand(this.#config.recorderPath), this.#cleanupBudgetMs);
+		// A builder refusal here must not abandon the cancel's remaining cleanup
+		// (the local rm, the remote rm): best-effort means skip, not throw.
+		let command: string;
+		try {
+			command = buildStopCommand(this.#config.recorderPath);
+		} catch {
+			return;
+		}
+		await this.#runBounded(command, this.#cleanupBudgetMs);
 	}
 
 	async #cleanupRemote(id: string | undefined): Promise<void> {
@@ -565,7 +649,11 @@ export class Recorder {
 			if (abort) args.signal.removeEventListener("abort", onCycleAbort);
 		}
 
-		if (args.signal.aborted) return undefined;
+		// A cancel owns the outcome even before it aborts: while it waits for a
+		// start to settle the signal is deliberately still live, so a settled or
+		// thrown command here must yield to the cancel rather than report a
+		// success or failure the user already cancelled.
+		if (args.signal.aborted || this.#cancelling !== undefined) return undefined;
 		if (outcome === undefined) {
 			abort?.abort();
 			this.#fail(args.failure, `the ssh command that ${args.what} timed out after ${args.budgetMs} ms`);
@@ -671,6 +759,7 @@ export class Recorder {
 		this.#localPath = undefined;
 		this.#recordingStartedAt = 0;
 		this.#lastTickSecond = -1;
+		this.#startRun = undefined;
 	}
 
 	#clearTimer(): void {

@@ -40,10 +40,18 @@ Cancel never pastes. Per phase it aborts, stops the phone best-effort when a
 recording may be running, and drops the local and/or remote file: recording
 phases delete the remote original and any local copy; fetching deletes both;
 transcribing aborts the upload and deletes the local copy — no cancel path
-touches the local file when `keepAudio` is set. While a cancel is in flight the
-status still shows the pre-cancel phase and start/stop are refused, so a
-`/voice` press in that window is ignored (silently in `recording` or `error`,
-as a `busy (…)` notice otherwise) until the status clears.
+touches the local file when `keepAudio` is set. From `starting` it first waits
+(up to a few seconds) for the start command to settle: killing the ssh client
+does not stop the remote shell, so a `-q` sent immediately can come back "No
+recording to stop" and leave the recorder to launch and run until `-l`. When the
+start settles within that wait the recorder exists before it is stopped; a start
+that is still unsettled when the wait expires is aborted and gets the same
+best-effort `-q` as before, so only a start slower than the budget can still be
+orphaned. The whole cancel is bounded (settle, then stop and cleanup, each under
+its own budget — worst case a few seconds), and while it runs the status still
+shows the pre-cancel phase and start/stop are refused, so a `/voice` press in
+that window is ignored (silently in `recording` or `error`, as a `busy (…)`
+notice otherwise) until the status clears.
 `session_shutdown` runs the same cleanup under its own short budget, because pi
 awaits shutdown handlers with no timeout of its own.
 
@@ -62,7 +70,9 @@ Termux (the terminal app) plus the Termux:API app, on the same phone:
   include Termux's `usr/bin`, so a bare `termux-microphone-record` fails there.
   The default, verified on 2026-10-15, is
   `/data/data/com.termux/files/usr/bin/termux-microphone-record`; set
-  `recorderPath` if your install lives elsewhere.
+  `recorderPath` if your install lives elsewhere. The path must be absolute and
+  shell-safe (letters, digits, `/`, `_`, `.`, `-`); anything else is ignored
+  with a warning and the default is used.
 
 Recorder state on the phone is **device-global**: a second start fails with
 `Recording already in progress!`, and *any* `-q` stops whatever is recording.
@@ -100,8 +110,8 @@ registered even when the config cannot be read.
 
 | Field | Default | Env | Notes |
 |---|---|---|---|
-| `sshTarget` | `phone` | `PI_VOICE_SSH_TARGET` | ssh alias (or `user@host`) |
-| `recorderPath` | absolute Termux path | `PI_VOICE_RECORDER_PATH` | absolute path on the phone |
+| `sshTarget` | `phone` | `PI_VOICE_SSH_TARGET` | ssh alias (or `user@host`); a leading `-` is ignored |
+| `recorderPath` | absolute Termux path | `PI_VOICE_RECORDER_PATH` | absolute, shell-safe path on the phone |
 | `maxSeconds` | `120` | `PI_VOICE_MAX_SECONDS` | clamped 1–900; passed as `-l`, never 0 |
 | `bitrateKbps` | unset | `PI_VOICE_BITRATE_KBPS` | optional `-b` encoder bitrate |
 | `keepAudio` | `false` | `PI_VOICE_KEEP_AUDIO` | keep the local m4a after success |
