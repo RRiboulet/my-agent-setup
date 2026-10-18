@@ -266,7 +266,9 @@ test("a question resets the panel, starts the viewer and streams the answer", as
 
 			assert.equal(registry.calls.length, 1);
 			const sent = registry.calls[0] as { context: Context; options: Record<string, unknown> };
-			assert.equal(sent.options["toolChoice"], "none");
+			assert.equal(sent.options["toolChoice"], undefined, "tool_choice would invalidate the message cache");
+			const headers = sent.options["headers"] as Record<string, string>;
+			assert.equal(headers["x-opencode-session"], SID, "the request carries the main session id");
 			assert.deepEqual(
 				sent.context.messages.slice(0, -1),
 				buildBtwContext(ENTRIES, "a1", "why?").messages.slice(0, -1),

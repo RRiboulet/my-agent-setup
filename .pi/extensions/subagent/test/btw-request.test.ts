@@ -23,11 +23,13 @@ import {
 	BTW_INSTRUCTION,
 	buildBtwContext,
 	formatBtwUsage,
+	providerSessionHeaders,
 	runBtwRequest,
 	runBtwStream,
 	sanitizeAnswerText,
 } from "../../btw/request.ts";
 
+const SESSION_ID = "01a14e96-1111-7000-8000-000000000001";
 const ZERO_USAGE: Usage = {
 	input: 0,
 	output: 0,
@@ -202,14 +204,14 @@ test("an error event maps to an error outcome, never an answer", async () => {
 	const stream = createAssistantMessageEventStream();
 	const run = runBtwStream(stream, { onText: () => undefined });
 	stream.push({ type: "error", reason: "error", error: assistant({ stopReason: "error", errorMessage: "boom" }) });
-	assert.deepEqual(await run, { status: "error", message: "boom" });
+	assert.deepEqual(await run, { status: "error", message: "boom", usage: ZERO_USAGE });
 });
 
 test("an aborted response maps to cancelled", async () => {
 	const stream = createAssistantMessageEventStream();
 	const run = runBtwStream(stream, { onText: () => undefined });
 	stream.push({ type: "error", reason: "aborted", error: assistant({ stopReason: "aborted" }) });
-	assert.deepEqual(await run, { status: "cancelled" });
+	assert.deepEqual(await run, { status: "cancelled", usage: ZERO_USAGE });
 });
 
 test("an aborted signal cancels even after a normal stop", async () => {
@@ -218,14 +220,29 @@ test("an aborted signal cancels even after a normal stop", async () => {
 	const stream = createAssistantMessageEventStream();
 	const run = runBtwStream(stream, { onText: () => undefined, signal: controller.signal });
 	stream.push({ type: "done", reason: "stop", message: assistant({ content: [{ type: "text", text: "x" }] }) });
-	assert.deepEqual(await run, { status: "cancelled" });
+	assert.deepEqual(await run, { status: "cancelled", usage: ZERO_USAGE });
 });
 
 test("a response with no text is an error, not an empty answer", async () => {
 	const stream = createAssistantMessageEventStream();
 	const run = runBtwStream(stream, { onText: () => undefined });
 	stream.push({ type: "done", reason: "stop", message: assistant() });
-	assert.deepEqual(await run, { status: "error", message: "the model returned no text" });
+	assert.deepEqual(await run, { status: "error", message: "the model returned no text", usage: ZERO_USAGE });
+});
+
+test("a tool-only response is reported with its usage, never executed", async () => {
+	const stream = createAssistantMessageEventStream();
+	const run = runBtwStream(stream, { onText: () => undefined });
+	const usage: Usage = { ...ZERO_USAGE, input: 3, cacheRead: 800_000, output: 2, totalTokens: 800_005 };
+	stream.push({
+		type: "done",
+		reason: "toolUse",
+		message: assistant({ stopReason: "toolUse", usage }),
+	});
+	const outcome = await run;
+	assert.equal(outcome.status, "error");
+	assert.match(outcome.status === "error" ? outcome.message : "", /tool/);
+	assert.deepEqual(outcome.status === "error" ? outcome.usage : undefined, usage);
 });
 
 test("a failing onText handler is reported through the outcome", async () => {
@@ -260,6 +277,7 @@ test("runBtwRequest sends the converted projection with toolChoice none", async 
 	const running = runBtwRequest({
 		modelRegistry: modelRegistry as never,
 		model: { provider: "opencode-go", id: "test-model" } as never,
+		sessionId: SESSION_ID,
 		entries: ENTRIES,
 		leafId: "cm1",
 		question: "why?",
@@ -272,8 +290,12 @@ test("runBtwRequest sends the converted projection with toolChoice none", async 
 
 	assert.equal(calls.length, 1);
 	const sent = calls[0] as { context: Context; options: Record<string, unknown> };
-	assert.equal(sent.options["toolChoice"], "none");
+	assert.equal(sent.options["toolChoice"], undefined, "tool_choice would invalidate the message cache");
 	assert.equal(sent.options["apiKey"], "key");
+	const headers = sent.options["headers"] as Record<string, string>;
+	assert.equal(headers["x-opencode-session"], SESSION_ID, "the MAIN session id pins the cache lineage");
+	assert.equal(headers["x-opencode-client"], "pi");
+	assert.equal(headers["x-test"], "1", "auth headers are preserved");
 	assert.deepEqual(sent.context.messages.slice(0, -1), buildBtwContext(ENTRIES, "cm1", "why?").messages.slice(0, -1));
 	assert.equal(sent.context.messages.at(-1)?.role, "user");
 	assert.ok(JSON.stringify(sent.context.messages.at(-1)).includes("why?"));
@@ -287,6 +309,7 @@ test("auth failure is an error outcome and never opens a stream", async () => {
 	const outcome = await runBtwRequest({
 		modelRegistry: modelRegistry as never,
 		model: { provider: "opencode-go", id: "test-model" } as never,
+		sessionId: SESSION_ID,
 		entries: ENTRIES,
 		leafId: "cm1",
 		question: "why?",
@@ -294,6 +317,18 @@ test("auth failure is an error outcome and never opens a stream", async () => {
 	});
 	assert.deepEqual(outcome, { status: "error", message: "no key" });
 	assert.equal(calls.length, 0);
+});
+
+test("session routing headers are only added for opencode providers", () => {
+	assert.deepEqual(providerSessionHeaders({ provider: "opencode-go", baseUrl: "https://opencode.ai/go" }, SESSION_ID), {
+		"x-opencode-session": SESSION_ID,
+		"x-opencode-client": "pi",
+	});
+	assert.deepEqual(providerSessionHeaders({ provider: "custom", baseUrl: "https://opencode.ai/v1" }, SESSION_ID), {
+		"x-opencode-session": SESSION_ID,
+		"x-opencode-client": "pi",
+	});
+	assert.deepEqual(providerSessionHeaders({ provider: "anthropic", baseUrl: "https://api.anthropic.com" }, SESSION_ID), {});
 });
 
 test("the usage footer names the cache read", () => {

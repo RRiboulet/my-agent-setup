@@ -426,13 +426,13 @@ export async function reattachBtwPanel(deps: BtwDeps, ctx: BtwContext): Promise<
 
 /** Append the outcome to the answer file, where the viewer sees it. */
 async function appendFooter(deps: BtwDeps, paths: BtwPaths, outcome: BtwOutcome): Promise<void> {
-	const text =
+	const summary =
 		outcome.status === "ok"
 			? formatBtwUsage(outcome.usage)
 			: outcome.status === "cancelled"
-				? "cancelled"
-				: `error: ${outcome.message}`;
-	await appendFile(paths.answer, `${FOOTER}${sanitizeAnswerText(text)}\n`, "utf8").catch(() => undefined);
+				? `cancelled${outcome.usage ? ` · ${formatBtwUsage(outcome.usage)}` : ""}`
+				: `error: ${outcome.message}${outcome.usage ? ` · ${formatBtwUsage(outcome.usage)}` : ""}`;
+	await appendFile(paths.answer, `${FOOTER}${sanitizeAnswerText(summary)}\n`, "utf8").catch(() => undefined);
 	if (outcome.status === "error") deps.notify(`BTW: ${outcome.message}`, "error");
 }
 
@@ -490,6 +490,7 @@ export async function launchBtwPanel(deps: BtwDeps, ctx: BtwContext, rawQuestion
 			outcome = await runBtwRequest({
 				modelRegistry: ctx.modelRegistry,
 				model,
+				sessionId,
 				entries: ctx.sessionManager.getEntries(),
 				leafId: ctx.sessionManager.getLeafId(),
 				question,

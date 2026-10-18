@@ -59,7 +59,7 @@ const MODULES: Record<string, string[]> = {
 		"btwTarget",
 		"requireBtwQuestion",
 	],
-	"../../btw/request.ts": ["buildBtwContext", "formatBtwUsage", "runBtwRequest", "runBtwStream", "sanitizeAnswerText"],
+	"../../btw/request.ts": ["buildBtwContext", "formatBtwUsage", "providerSessionHeaders", "runBtwRequest", "runBtwStream", "sanitizeAnswerText"],
 	"../../repo-explorer/git.ts": ["openGit", "RepoGitError"],
 	"../../repo-explorer/runner.ts": ["makeGitRunner"],
 	"../../repo-explorer/branch-menu.ts": ["buildBranchMenu", "resolveBranchChoice", "chooseBranch"],
