@@ -537,7 +537,14 @@ function runDirOwnsLiveTranscript(run: RunRecord, runs: Map<string, RunRecord>):
 	return false;
 }
 
-function getPiInvocationParts(): string[] {
+/**
+ * The argv prefix that starts a new pi process for a child.
+ *
+ * Exported for the btw extension, which launches a forked side session in its
+ * own tmux session (`.pi/extensions/btw/launch.ts`); the subagent extension is
+ * the other caller.
+ */
+export function getPiInvocationParts(): string[] {
 	const currentScript = process.argv[1];
 	if (currentScript && existsSync(currentScript)) {
 		return [process.execPath, currentScript];

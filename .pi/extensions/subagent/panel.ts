@@ -9,6 +9,9 @@
 // by `panel.test.ts`. `index.ts` holds the guard ladder, the `pi.exec` calls and
 // the detached `spawn` (see `openSubagentPanel`, local patch 17); this module
 // stays pure and side-effect-free.
+//
+// The btw extension reuses these builders for its own panel, passing
+// `titlePrefix: "btw"`; nothing else in the argv varies between the callers.
 
 import { shellQuote } from "./shell.ts";
 
@@ -62,12 +65,14 @@ export function buildPopupCommand(socket: string, session: string): string {
 }
 
 /**
- * The panel's title, derived from the run id.
+ * The panel's title: `<titlePrefix> <id8>`, the prefix naming the owning
+ * extension (`subagent` by default, `btw` for the side-panel extension).
  *
- * `subagent <id8>` is literal text, never task text. The title is derived here
- * rather than accepted as a parameter because tmux renders `-T` as a *format
- * string*: `#` starts an expansion (including `#(...)` shell commands), so an
- * arbitrary title would be executed or mangled rather than shown.
+ * The id half is derived, never task text, because tmux renders `-T` as a
+ * *format string*: `#` starts an expansion (including `#(...)` shell commands),
+ * so an arbitrary title would be executed or mangled rather than shown. The
+ * prefix is a literal the caller owns, and the `#` check below covers the
+ * composed title, so neither half can smuggle a metacharacter in.
  *
  * Deriving from a run id is not sufficient on its own: `runId` is a plain
  * string, and today's `randomUUID()` producers are a convention, not a type.
@@ -75,10 +80,10 @@ export function buildPopupCommand(socket: string, session: string): string {
  * title is composed. Its message deliberately omits the run id so an untrusted
  * value is never echoed into a log or notification.
  */
-function panelTitle(runId: string): string {
-	const title = `subagent ${runId.slice(0, 8)}`;
+function panelTitle(runId: string, titlePrefix: string): string {
+	const title = `${titlePrefix} ${runId.slice(0, 8)}`;
 	if (title.includes("#")) {
-		throw new TypeError("refusing to build a panel title from a run id containing '#' (a tmux format metacharacter)");
+		throw new TypeError("refusing to build a panel title containing '#' (a tmux format metacharacter)");
 	}
 	return title;
 }
@@ -102,6 +107,11 @@ export function buildPanelLaunch(input: {
 	session: string;
 	/** The full run id; the title is derived from its first 8 characters. */
 	runId: string;
+	/**
+	 * Names the owning extension in the popup title. Defaults to `subagent`;
+	 * the btw extension passes `btw`.
+	 */
+	titlePrefix?: string;
 }): Launch {
 	return {
 		command: "tmux",
@@ -119,7 +129,7 @@ export function buildPanelLaunch(input: {
 			"-h",
 			"90%",
 			"-T",
-			panelTitle(input.runId),
+			panelTitle(input.runId, input.titlePrefix ?? "subagent"),
 			buildPopupCommand(input.socket, input.session),
 		],
 	};

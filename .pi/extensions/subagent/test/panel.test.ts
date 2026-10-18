@@ -34,8 +34,8 @@ function launch(overrides: Partial<Parameters<typeof buildPanelLaunch>[0]> = {})
 }
 
 /** The value passed to `-T`, computed once from a single launch. */
-function titleOf(runId: string): string {
-	const args = launch({ runId }).args;
+function titleOf(runId: string, titlePrefix?: string): string {
+	const args = launch(titlePrefix === undefined ? { runId } : { runId, titlePrefix }).args;
 	return args[args.indexOf("-T") + 1] as string;
 }
 
@@ -89,6 +89,15 @@ test("the popup launch is the exact tmux argv, with the popup command as one ele
 test("the title is the run id's first 8 characters", () => {
 	assert.equal(titleOf(RUN_ID), "subagent 1a2b3c4d");
 	assert.equal(titleOf("abcdefgh-rest"), "subagent abcdefgh");
+});
+
+test("a title prefix names the owning extension", () => {
+	assert.equal(titleOf(RUN_ID, "btw"), "btw 1a2b3c4d");
+	assert.equal(titleOf("abcdefgh-rest", "btw"), "btw abcdefgh");
+});
+
+test("a '#' in the prefix is refused like one in the run id", () => {
+	assert.throws(() => titleOf(RUN_ID, "#btw"), TypeError);
 });
 
 test("a run id containing '#' is refused, without echoing the run id", () => {
