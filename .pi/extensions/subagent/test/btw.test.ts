@@ -97,6 +97,10 @@ interface FakeOptions {
 	paneDead?: boolean;
 	/** Make list-clients report nobody. */
 	noClient?: boolean;
+	/** Make the Escape bind fail. */
+	bindFails?: boolean;
+	/** Make the outer window-id probe report a missing pane. */
+	paneGone?: boolean;
 }
 
 function fakeDeps(agentDir: string, options: FakeOptions = {}) {
@@ -124,8 +128,14 @@ function fakeDeps(agentDir: string, options: FakeOptions = {}) {
 				if (args.includes("#{pane_dead}")) {
 					return { code: 0, stdout: options.paneDead ? "1\n" : "0\n", stderr: "" };
 				}
+				if (options.paneGone === true && args.includes("display-message")) {
+					return { code: 1, stdout: "", stderr: "can't find pane" };
+				}
 				if (args.includes("display-message")) {
 					return { code: 0, stdout: "@1\n", stderr: "" };
+				}
+				if (options.bindFails === true && args.includes("bind")) {
+					return { code: 1, stdout: "", stderr: "bind failed" };
 				}
 				if (args.includes("has-session")) {
 					return options.sessionAlive
@@ -265,9 +275,13 @@ test("a live session is reattached without re-forking, and the bind is re-applie
 			const { calls, launches, deps } = fakeDeps(agentDir, { sessionAlive: true });
 			const reused = await reattachBtwPanel(deps, fakeContext());
 			assert.equal(reused, true);
+			const socket = btwSocketPath(agentDir, SID);
 			assert.ok(!calls.some((call) => call.args.includes("new-session")), "nothing is re-created");
 			assert.ok(!calls.some((call) => call.args.includes("kill-session")), "nothing is killed");
-			assert.ok(calls.some((call) => call.args.join(" ").includes("bind -n Escape")), "the bind is re-applied");
+			assert.ok(
+				calls.some((call) => call.args.join(" ") === `-S ${socket} bind -n Escape detach-client`),
+				"the bind is re-applied to the panel socket",
+			);
 			assert.equal(launches.length, 1);
 		});
 	});
@@ -303,8 +317,49 @@ test("a live session with no attached client falls back to the attach command", 
 			assert.equal(reused, true, "a live panel is not replaced just because it cannot be shown");
 			assert.equal(launches.length, 0);
 			assert.match(notifications[0]?.message ?? "", /Attach with: .*attach -t/);
+			assert.equal(notifications[0]?.type, "warning");
+			assert.match(notifications.map((item) => item.message).join("\n"), /replaces it with a fresh one/);
 		});
 	});
+});
+
+test("a failed Escape bind falls back to the attach command", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withOuterTmux(async () => {
+			const { launches, notifications, deps } = fakeDeps(agentDir, { sessionAlive: true, bindFails: true });
+			await launchBtwPanel(deps, fakeContext(), "why?");
+			assert.equal(launches.length, 0);
+			assert.match(notifications.at(-1)?.message ?? "", /Could not set up the panel's Escape binding/);
+		});
+	});
+});
+
+test("a pane that disappears before the popup falls back to the attach command", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withOuterTmux(async () => {
+			const { launches, notifications, deps } = fakeDeps(agentDir, { sessionAlive: true, paneGone: true });
+			await launchBtwPanel(deps, fakeContext(), "why?");
+			assert.equal(launches.length, 0);
+			assert.match(notifications.at(-1)?.message ?? "", /That tmux pane is gone/);
+		});
+	});
+});
+
+test("a thrown reattach probe is reported and does not replace the panel", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		const { launches, notifications, deps } = fakeDeps(agentDir, { throwOn: "has-session" });
+		const reused = await reattachBtwPanel(deps, fakeContext());
+		assert.equal(reused, true, "an unreadable panel is not replaced");
+		assert.equal(launches.length, 0);
+		assert.match(notifications[0]?.message ?? "", /Could not check the BTW panel: has-session threw/);
+	});
+});
+
+test("the default launcher maps a spawn error to a message", async () => {
+	const message = await new Promise<string>((resolve) => {
+		__test__.defaultPanelLauncher("definitely-not-a-btw-binary", [], { detached: true, stdio: "ignore" }, resolve);
+	});
+	assert.match(message, /ENOENT|not found/i);
 });
 
 test("a popup spawn error is reported with the manual attach command", async () => {

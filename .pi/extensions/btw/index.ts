@@ -129,18 +129,33 @@ async function cleanupPanel(deps: BtwDeps, paths: BtwPaths): Promise<void> {
 	await rm(paths.runDir, { recursive: true, force: true }).catch(() => undefined);
 }
 
-/** True when the panel's tmux session exists and its child has not exited. */
-async function panelIsLive(deps: BtwDeps, paths: BtwPaths): Promise<boolean> {
-	const alive = await deps.exec("tmux", ["-S", paths.socket, "has-session", "-t", paths.session], {
-		timeout: TMUX_TIMEOUT_MS,
-	});
-	if (alive.code !== 0) return false;
-	const dead = await deps.exec("tmux", ["-S", paths.socket, "display-message", "-p", "-t", paths.session, "#{pane_dead}"], {
-		timeout: TMUX_TIMEOUT_MS,
-	});
-	// A query that cannot answer is treated as live: replacing a panel that may
-	// still be running is worse than attaching to one that is not.
-	return dead.code !== 0 || dead.stdout.trim() !== "1";
+/** What the tmux server says about a panel session. */
+type PanelState = "missing" | "dead" | "live" | "unknown";
+
+/**
+ * Probe the panel's tmux session and its child.
+ *
+ * `unknown` exists for a thrown exec (an aborted turn): the caller must not
+ * replace a panel it could not inspect, and must not pretend it is live either.
+ */
+async function panelState(deps: BtwDeps, paths: BtwPaths): Promise<PanelState> {
+	try {
+		const alive = await deps.exec("tmux", ["-S", paths.socket, "has-session", "-t", paths.session], {
+			timeout: TMUX_TIMEOUT_MS,
+		});
+		if (alive.code !== 0) return "missing";
+		const dead = await deps.exec(
+			"tmux",
+			["-S", paths.socket, "display-message", "-p", "-t", paths.session, "#{pane_dead}"],
+			{ timeout: TMUX_TIMEOUT_MS },
+		);
+		// A query that cannot answer is treated as live: replacing a panel that
+		// may still be running is worse than attaching to one that is not.
+		return dead.code === 0 && dead.stdout.trim() === "1" ? "dead" : "live";
+	} catch (error) {
+		deps.notify(`Could not check the BTW panel: ${messageOf(error)}`, "error");
+		return "unknown";
+	}
 }
 
 /**
@@ -151,6 +166,13 @@ async function panelIsLive(deps: BtwDeps, paths: BtwPaths): Promise<boolean> {
  * panel is shown. The binding is re-applied on every open: the popup's exit
  * command unbinds Escape, so a reattach without a fresh bind would leave
  * Escape falling through to the child.
+ *
+ * Two limits are deliberate. A popup tmux itself rejects after the detached
+ * spawn (the client detached in between, tmux too old) exits unobserved; only a
+ * spawn error is reportable. And the unbind runs in the old popup's shell when
+ * it exits, so kill-then-reopen can in principle land `unbind` after the new
+ * `bind`; the bind is re-applied on every open, and the panel's own socket
+ * bounds any stale binding to this one session's server.
  */
 async function openBtwPopup(deps: BtwDeps, paths: BtwPaths, sessionId: string): Promise<boolean> {
 	const attach = buildAttachCommand(paths.socket, paths.session);
@@ -241,18 +263,21 @@ export async function reattachBtwPanel(deps: BtwDeps, ctx: BtwContext): Promise<
 	} catch {
 		return false;
 	}
-	const alive = await deps.exec("tmux", ["-S", paths.socket, "has-session", "-t", paths.session], {
-		timeout: TMUX_TIMEOUT_MS,
-	});
-	if (alive.code !== 0) return false;
-	const dead = await deps.exec("tmux", ["-S", paths.socket, "display-message", "-p", "-t", paths.session, "#{pane_dead}"], {
-		timeout: TMUX_TIMEOUT_MS,
-	});
-	if (dead.code === 0 && dead.stdout.trim() === "1") {
+	const state = await panelState(deps, paths);
+	if (state === "missing") return false;
+	if (state === "unknown") {
+		// The probe told the user what went wrong; replacing a panel we could not
+		// inspect would be the worse guess.
+		return true;
+	}
+	if (state === "dead") {
 		deps.notify("The previous BTW panel is no longer running; ask a new question to start one.", "warning");
 		return false;
 	}
-	await openBtwPopup(deps, paths, sessionId);
+	const shown = await openBtwPopup(deps, paths, sessionId);
+	if (!shown) {
+		deps.notify("The running BTW panel was left in place; /btw <question> replaces it with a fresh one.", "info");
+	}
 	return true;
 }
 
@@ -410,4 +435,5 @@ export const __test__ = {
 	setPanelLauncher: (launcher?: PanelLauncher): void => {
 		panelLauncher = launcher ?? defaultPanelLauncher;
 	},
+	defaultPanelLauncher,
 };
