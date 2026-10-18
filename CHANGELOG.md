@@ -98,6 +98,28 @@ Fixed:
   before it, with the overflow notice placed first so the recorder's
   `firstLine(stderr)` shows the reason rather than a truncated warning.
 
+- **Cancelling a `/voice` that is still starting can no longer orphan the
+  phone recording.** `termux-microphone-record` runs on the phone, and killing
+  the local `ssh` client does not stop the remote command: cancel's `-q` could
+  arrive while the start was still in flight, come back "No recording to stop",
+  and then watch the recorder launch and record until `-l` — up to 900 seconds,
+  device-global, with the phase already back at `idle`. Cancel from `starting`
+  now waits (bounded, `START_SETTLE_BUDGET_MS`) for the start command to settle
+  first, so the recorder exists before the best-effort `-q` is sent; only then
+  does it abort the client. If the start never settles, the wait times out and
+  cancel proceeds with the same best-effort stop and cleanup as before.
+
+  The wait reopens the ordering question the old code answered carelessly: a
+  start that settles precisely as cancel lands must not run its success path and
+  flip the phase back to `recording`. That is handled where every other
+  cancel-versus-command decision is — `#runStage` now treats a set `#cancelling`
+  as the cancel owning the outcome even before it aborts, so a start that
+  settles or throws while the cancel waits yields instead of reporting. And
+  `START_SETTLE_BUDGET_MS` is kept below `SHUTDOWN_BUDGET_MS`, so `session_shutdown`
+  runs the same settle wait and still reaches its best-effort `-q` before its
+  own budget gives up, rather than letting a session exit leave the phone
+  recording.
+
 Maintenance:
 
 - **The `/voice` container side now survives container rebuilds.** `/voice`
