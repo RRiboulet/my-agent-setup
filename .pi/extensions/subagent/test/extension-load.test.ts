@@ -61,7 +61,7 @@ const MODULES: Record<string, string[]> = {
 		"providerExtensionPath",
 		"requireBtwQuestion",
 	],
-	"../../btw/request.ts": ["buildBtwContext", "formatBtwUsage", "runBtwStream", "sanitizeAnswerText"],
+	"../../btw/request.ts": ["buildBtwContext", "formatBtwUsage", "runBtwRequest", "runBtwStream", "sanitizeAnswerText"],
 	"../../repo-explorer/git.ts": ["openGit", "RepoGitError"],
 	"../../repo-explorer/runner.ts": ["makeGitRunner"],
 	"../../repo-explorer/branch-menu.ts": ["buildBranchMenu", "resolveBranchChoice", "chooseBranch"],

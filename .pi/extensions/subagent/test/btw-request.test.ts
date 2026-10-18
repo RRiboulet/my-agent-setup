@@ -1,22 +1,29 @@
 // Tests for the /btw request core.
 //
 // Risk covered: this module is the entire cache story. If the context is not
-// exactly the session projection plus one user message — or if a `systemPrompt`
-// or `tools` override creeps in — the provider prefix stops matching the main
-// request and every question silently re-bills the whole conversation. The
-// stream mapping is the second risk: an aborted or failed response must never
-// be presented as an answer.
+// the session projection *converted to LLM messages* plus one user message — or
+// if a `systemPrompt`/`tools` override creeps in, or `toolChoice` stops being
+// `none` — the provider prefix stops matching the main request and every
+// question silently re-bills the whole conversation. The stream mapping is the
+// second risk: an aborted or failed response must never be presented as an
+// answer.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createAssistantMessageEventStream, type AssistantMessage, type Usage } from "@earendil-works/pi-ai";
-import { buildSessionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import {
+	createAssistantMessageEventStream,
+	type AssistantMessage,
+	type Context,
+	type Usage,
+} from "@earendil-works/pi-ai";
+import { buildSessionContext, convertToLlm, type SessionEntry } from "@earendil-works/pi-coding-agent";
 
 import {
 	BTW_INSTRUCTION,
 	buildBtwContext,
 	formatBtwUsage,
+	runBtwRequest,
 	runBtwStream,
 	sanitizeAnswerText,
 } from "../../btw/request.ts";
@@ -44,6 +51,10 @@ function assistant(overrides: Partial<AssistantMessage> = {}): AssistantMessage 
 	} as AssistantMessage;
 }
 
+// A session with the entry types that make the projection differ from the wire
+// transcript: a system delta, a normal exchange, a compaction summary and a
+// custom message. Without convertToLlm those last two reach the provider as
+// `compactionSummary` and `custom` roles.
 const ENTRIES = [
 	{
 		type: "message",
@@ -81,30 +92,90 @@ const ENTRIES = [
 			timestamp: 2,
 		},
 	},
+	{
+		type: "compaction",
+		id: "c1",
+		parentId: "a1",
+		timestamp: "2026-10-18T00:00:03.000Z",
+		summary: "Earlier we discussed the parser.",
+		tokensBefore: 100,
+		systemMessage: {
+			role: "system",
+			content: "",
+			sections: { preamble: "SYS", tools: "- read: read a file" },
+			toolsAdded: [{ name: "read", description: "Read a file", parameters: { type: "object", properties: {} } }],
+			timestamp: 3,
+		},
+	},
+	{
+		type: "custom_message",
+		id: "cm1",
+		parentId: "c1",
+		timestamp: "2026-10-18T00:00:04.000Z",
+		customType: "note",
+		content: [{ type: "text", text: "remember the flag" }],
+		display: true,
+	},
 ] as unknown as SessionEntry[];
 
-test("the request context is the session projection plus one user message", () => {
-	const projection = buildSessionContext(ENTRIES, "a1");
-	const context = buildBtwContext(ENTRIES, "a1", "why?", 123);
+const LLM_ROLES = new Set(["system", "user", "assistant", "toolResult"]);
+
+test("the context is the converted projection plus one user message", () => {
+	const context = buildBtwContext(ENTRIES, "cm1", "why?", 123);
 
 	assert.equal(context.systemPrompt, undefined, "no second system prompt is prepended");
 	assert.equal(context.tools, undefined, "no tools override is prepended");
-	assert.equal(context.messages.length, projection.messages.length + 1);
-	assert.deepEqual(context.messages.slice(0, -1), projection.messages, "the cached prefix is untouched");
 	assert.equal(context.messages[0]?.role, "system", "the projection's own system message leads");
+
+	const roles = new Set(context.messages.map((message) => message.role));
+	for (const role of roles) {
+		assert.ok(LLM_ROLES.has(role), `role ${role} is not an LLM message role`);
+	}
+	assert.ok(!roles.has("compactionSummary"), "the summary must be converted, not sent raw");
+	assert.ok(!roles.has("custom"), "custom messages must be converted, not sent raw");
+	assert.ok(
+		context.messages.some(
+			(message) => message.role === "user" && JSON.stringify(message.content).includes("Earlier we discussed the parser."),
+		),
+		"the compaction summary survives as a user message",
+	);
+	assert.ok(
+		context.messages.some(
+			(message) => message.role === "user" && JSON.stringify(message.content).includes("remember the flag"),
+		),
+		"the custom message survives as a user message",
+	);
 
 	const last = context.messages.at(-1);
 	assert.equal(last?.role, "user");
 	const text = (last?.content as { type: string; text: string }[])[0]?.text ?? "";
-	assert.ok(text.startsWith(BTW_INSTRUCTION), "the side instruction rides in the new message");
-	assert.ok(text.endsWith("why?"), "the question follows the instruction");
+	assert.ok(text.startsWith(BTW_INSTRUCTION));
+	assert.ok(text.endsWith("why?"));
 	assert.equal((last as { timestamp?: number } | undefined)?.timestamp, 123);
 });
 
-test("terminal sequences and C0 controls are stripped, newlines and tabs kept", () => {
+test("the prefix is exactly the main pipeline's converted projection", () => {
+	const projection = buildSessionContext(ENTRIES, "cm1");
+	const context = buildBtwContext(ENTRIES, "cm1", "why?");
+	assert.deepEqual(context.messages.slice(0, -1), convertToLlm(projection.messages));
+});
+
+test("a null leaf means the current leaf, not an empty path", () => {
+	assert.deepEqual(
+		buildBtwContext(ENTRIES, null, "why?", 7),
+		buildBtwContext(ENTRIES, undefined, "why?", 7),
+		"null must not silently drop the whole history",
+	);
+});
+
+test("terminal sequences, C0/C1 controls and bidi overrides are stripped", () => {
 	assert.equal(sanitizeAnswerText("a\x1b[31mred\x1b[0m b"), "ared b");
 	assert.equal(sanitizeAnswerText("x\u0000y\u0007z"), "xyz");
+	assert.equal(sanitizeAnswerText("a\rb"), "ab", "CR is a C0 control and must not survive");
+	assert.equal(sanitizeAnswerText("\u009B2J"), "2J", "the 8-bit CSI introducer is a C1 control");
+	assert.equal(sanitizeAnswerText("\u202Eevil\u202C"), "evil", "bidi overrides are not display text");
 	assert.equal(sanitizeAnswerText("line\nnext\tend"), "line\nnext\tend");
+	assert.equal(sanitizeAnswerText("x\x1b[3"), "x[3", "a split sequence loses its ESC and becomes inert text");
 });
 
 test("text deltas stream through and the final usage is returned", async () => {
@@ -157,15 +228,72 @@ test("a response with no text is an error, not an empty answer", async () => {
 	assert.deepEqual(await run, { status: "error", message: "the model returned no text" });
 });
 
-test("deltas are sanitized before they reach the viewer", async () => {
+test("a failing onText handler is reported through the outcome", async () => {
 	const stream = createAssistantMessageEventStream();
-	const chunks: string[] = [];
-	const run = runBtwStream(stream, { onText: (text) => chunks.push(text) });
-	stream.push({ type: "text_delta", contentIndex: 0, delta: "a\x1b[31m", partial: assistant() });
-	stream.push({ type: "done", reason: "stop", message: assistant({ content: [{ type: "text", text: "a" }] }) });
+	const run = runBtwStream(stream, {
+		onText: () => {
+			throw new Error("disk full");
+		},
+	});
+	stream.push({ type: "text_delta", contentIndex: 0, delta: "x", partial: assistant() });
 	const outcome = await run;
+	assert.equal(outcome.status, "error");
+	assert.match(outcome.status === "error" ? outcome.message : "", /disk full/);
+});
+
+function fakeRegistry(auth: unknown = { ok: true, apiKey: "key", headers: { "x-test": "1" } }) {
+	const calls: { model: unknown; context: Context; options: Record<string, unknown> }[] = [];
+	const stream = createAssistantMessageEventStream();
+	const modelRegistry = {
+		getApiKeyAndHeaders: async () => auth,
+		streamSimple: (model: unknown, context: Context, options: Record<string, unknown>) => {
+			calls.push({ model, context, options });
+			return stream;
+		},
+	};
+	return { calls, stream, modelRegistry };
+}
+
+test("runBtwRequest sends the converted projection with toolChoice none", async () => {
+	const { calls, stream, modelRegistry } = fakeRegistry();
+	const chunks: string[] = [];
+	const running = runBtwRequest({
+		modelRegistry: modelRegistry as never,
+		model: { provider: "opencode-go", id: "test-model" } as never,
+		entries: ENTRIES,
+		leafId: "cm1",
+		question: "why?",
+		onText: (text) => chunks.push(text),
+	});
+	stream.push({ type: "text_delta", contentIndex: 0, delta: "answer", partial: assistant() });
+	const usage: Usage = { ...ZERO_USAGE, input: 1, cacheRead: 500, output: 2, totalTokens: 503 };
+	stream.push({ type: "done", reason: "stop", message: assistant({ content: [{ type: "text", text: "answer" }], usage }) });
+	const outcome = await running;
+
+	assert.equal(calls.length, 1);
+	const sent = calls[0] as { context: Context; options: Record<string, unknown> };
+	assert.equal(sent.options["toolChoice"], "none");
+	assert.equal(sent.options["apiKey"], "key");
+	assert.deepEqual(sent.context.messages.slice(0, -1), buildBtwContext(ENTRIES, "cm1", "why?").messages.slice(0, -1));
+	assert.equal(sent.context.messages.at(-1)?.role, "user");
+	assert.ok(JSON.stringify(sent.context.messages.at(-1)).includes("why?"));
+	assert.deepEqual(chunks, ["answer"]);
 	assert.equal(outcome.status, "ok");
-	assert.deepEqual(chunks, ["a"]);
+	assert.deepEqual(outcome.status === "ok" ? outcome.usage : undefined, usage);
+});
+
+test("auth failure is an error outcome and never opens a stream", async () => {
+	const { calls, modelRegistry } = fakeRegistry({ ok: false, error: "no key" });
+	const outcome = await runBtwRequest({
+		modelRegistry: modelRegistry as never,
+		model: { provider: "opencode-go", id: "test-model" } as never,
+		entries: ENTRIES,
+		leafId: "cm1",
+		question: "why?",
+		onText: () => undefined,
+	});
+	assert.deepEqual(outcome, { status: "error", message: "no key" });
+	assert.equal(calls.length, 0);
 });
 
 test("the usage footer names the cache read", () => {

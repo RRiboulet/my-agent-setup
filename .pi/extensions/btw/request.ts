@@ -2,43 +2,59 @@
 // conversation.
 //
 // The request is the session's own projection - the messages the next main turn
-// would send, including the system message that carries the prompt and the tool
-// declarations - plus one user message holding the side question. Nothing
-// overrides the system prompt or the tool loadout, and `toolChoice` is "none",
-// so the provider prefix is byte-identical to the main request: the whole
-// conversation is served from the prompt cache and only the question is new.
+// would send - plus one user message holding the side question. `convertToLlm`
+// is applied to the projection first, because its roles are AgentMessage roles
+// (`compactionSummary`, `branchSummary`, `custom`, `bashExecution`) that the
+// main pipeline rewrites into LLM messages before sending. Skipping that
+// conversion changes the request exactly on compacted sessions - the sessions
+// whose context is too expensive to re-send - and can be rejected outright by
+// OpenAI-compatible providers.
 //
-// That is the point of this module. The child-process design rebuilt the prompt
-// and the tool list in a forked session, so the prefix never matched and every
-// question re-billed the whole context at full input price.
+// With that conversion in place, nothing overrides the system prompt or the
+// tool loadout, so the provider prefix matches the main request and the whole
+// conversation is served from the prompt cache. `toolChoice: "none"` keeps the
+// model from calling the declared tools; it is a request field rather than
+// prompt content, though note that some providers (Anthropic, per its prompt
+// cache documentation) invalidate message blocks when `tool_choice` changes,
+// which the cache measurement has to confirm on the provider actually in use.
 
-import type { AssistantMessage, AssistantMessageEventStream, Context, Usage } from "@earendil-works/pi-ai";
-import { buildSessionContext, type SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { Api, AssistantMessage, AssistantMessageEventStream, Context, Model, Usage } from "@earendil-works/pi-ai";
+import {
+	buildSessionContext,
+	convertToLlm,
+	type ModelRegistry,
+	type SessionEntry,
+} from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
 
 /** Tells the model what this request is, without touching the cached prefix. */
 export const BTW_INSTRUCTION =
 	"This is a /btw side question. Answer it from the conversation above. You have no tools here, so do not offer to run or change anything; if the conversation does not contain the answer, say what is missing.";
 
+function messageOf(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
 /**
  * The exact context the side request sends.
  *
- * `buildSessionContext` is the same projection pi feeds its own next request:
- * it resolves compaction summaries, branch summaries and the system-message
- * deltas that carry the prompt and tool declarations. Passing `systemPrompt` or
- * `tools` here would prepend a second, different leading system message and
- * break the cache, so neither is set.
+ * `buildSessionContext` is the same projection pi resolves for its own next
+ * request, and `convertToLlm` is the same conversion the agent loop runs before
+ * streaming. `leafId: null` is normalized to `undefined` ("the current leaf")
+ * because `null` means an empty path - the question alone, with no history.
+ * Passing `systemPrompt` or `tools` would prepend a second, different leading
+ * system message and break the cache, so neither is set.
  */
 export function buildBtwContext(
 	entries: readonly SessionEntry[],
-	leafId: string | null,
+	leafId: string | null | undefined,
 	question: string,
 	now = Date.now(),
 ): Context {
-	const projection = buildSessionContext(entries as SessionEntry[], leafId);
+	const projection = buildSessionContext(entries as SessionEntry[], leafId ?? undefined);
 	return {
 		messages: [
-			...(projection.messages as unknown as Context["messages"]),
+			...convertToLlm(projection.messages),
 			{
 				role: "user",
 				content: [{ type: "text", text: `${BTW_INSTRUCTION}\n\n${question}` }],
@@ -49,13 +65,19 @@ export function buildBtwContext(
 }
 
 /**
- * Remove terminal escape sequences and C0 controls from streamed answer text.
+ * Remove terminal escape sequences and control characters from answer text.
  *
  * The answer can quote hostile tool output, and the viewer is a real terminal
- * program; a control sequence in the file would be obeyed by it.
+ * program; a control sequence in the file would be obeyed by it. Both C0 and C1
+ * controls go, as do the bidi overrides that can reorder a line; newlines and
+ * tabs stay. A sequence split across two deltas loses its ESC byte here and
+ * degrades to inert literal text.
  */
 export function sanitizeAnswerText(text: string): string {
-	return stripTerminalSequences(text).replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+	return stripTerminalSequences(text).replace(
+		/[\u0000-\u0008\u000B-\u001F\u007F-\u009F\u200E\u200F\u202A-\u202E\u2066-\u2069]/g,
+		"",
+	);
 }
 
 export type BtwOutcome =
@@ -74,7 +96,10 @@ export interface BtwStreamRun {
  *
  * Text deltas are sanitized and forwarded as they arrive, so the viewer can
  * follow the answer; the final message maps an aborted/error stop reason to an
- * outcome instead of letting a failure masquerade as an answer.
+ * outcome instead of letting a failure masquerade as an answer. A failure to
+ * record a delta stops the run rather than throwing out of the outcome
+ * contract. The returned `text` is trimmed for validation; the streamed deltas
+ * are not, so the answer file can differ from it in surrounding whitespace.
  */
 export async function runBtwStream(stream: AssistantMessageEventStream, run: BtwStreamRun): Promise<BtwOutcome> {
 	let final: AssistantMessage | undefined;
@@ -86,7 +111,11 @@ export async function runBtwStream(stream: AssistantMessageEventStream, run: Btw
 			const text = sanitizeAnswerText(event.delta);
 			if (text.length > 0) {
 				chunks.push(text);
-				await run.onText(text);
+				try {
+					await run.onText(text);
+				} catch (error) {
+					return { status: "error", message: `could not record the answer: ${messageOf(error)}` };
+				}
 			}
 			continue;
 		}
@@ -113,6 +142,49 @@ export async function runBtwStream(stream: AssistantMessageEventStream, run: Btw
 		return { status: "error", message: "the model returned no text" };
 	}
 	return { status: "ok", text, usage: final.usage };
+}
+
+export interface BtwRequestDeps {
+	modelRegistry: ModelRegistry;
+	model: Model<Api>;
+	entries: readonly SessionEntry[];
+	leafId?: string | null;
+	question: string;
+	signal?: AbortSignal;
+	onText: (text: string) => void | Promise<void>;
+}
+
+/**
+ * One-shot side request on the session's model.
+ *
+ * The auth lookup and the `streamSimple` call live here, with `runBtwStream`,
+ * so the tool-free property this module documents is the property it tests:
+ * a bare context builder cannot guarantee `toolChoice`.
+ */
+export async function runBtwRequest(deps: BtwRequestDeps): Promise<BtwOutcome> {
+	let auth: Awaited<ReturnType<ModelRegistry["getApiKeyAndHeaders"]>>;
+	try {
+		auth = await deps.modelRegistry.getApiKeyAndHeaders(deps.model);
+	} catch (error) {
+		return { status: "error", message: messageOf(error) };
+	}
+	if (auth.ok === false) return { status: "error", message: auth.error };
+
+	let stream: AssistantMessageEventStream;
+	try {
+		stream = deps.modelRegistry.streamSimple(deps.model, buildBtwContext(deps.entries, deps.leafId, deps.question), {
+			apiKey: auth.apiKey,
+			headers: auth.headers,
+			signal: deps.signal,
+			// Tool-free without touching the prefix: tool_choice is a request
+			// field, and the tool declarations stay in the transcript's system
+			// message on both the main request and this one.
+			toolChoice: "none",
+		});
+	} catch (error) {
+		return { status: "error", message: messageOf(error) };
+	}
+	return runBtwStream(stream, { onText: deps.onText, signal: deps.signal });
 }
 
 /** The answer file's footer, and the measurement the cache gate reads. */
