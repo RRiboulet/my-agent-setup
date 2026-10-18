@@ -109,7 +109,8 @@ export function buildPanelLaunch(input: {
 	runId: string;
 	/**
 	 * Names the owning extension in the popup title. Defaults to `subagent`;
-	 * the btw extension passes `btw`.
+	 * the btw extension passes `btw`. A blank value falls back to the default
+	 * rather than composing a title with a leading space.
 	 */
 	titlePrefix?: string;
 }): Launch {
@@ -129,7 +130,7 @@ export function buildPanelLaunch(input: {
 			"-h",
 			"90%",
 			"-T",
-			panelTitle(input.runId, input.titlePrefix ?? "subagent"),
+			panelTitle(input.runId, input.titlePrefix?.trim() || "subagent"),
 			buildPopupCommand(input.socket, input.session),
 		],
 	};

@@ -96,6 +96,12 @@ test("a title prefix names the owning extension", () => {
 	assert.equal(titleOf("abcdefgh-rest", "btw"), "btw abcdefgh");
 });
 
+test("a blank title prefix falls back to the default", () => {
+	assert.equal(titleOf(RUN_ID, ""), "subagent 1a2b3c4d");
+	assert.equal(titleOf(RUN_ID, "  "), "subagent 1a2b3c4d");
+	assert.equal(titleOf(RUN_ID, " btw "), "btw 1a2b3c4d");
+});
+
 test("a '#' in the prefix is refused like one in the run id", () => {
 	assert.throws(() => titleOf(RUN_ID, "#btw"), TypeError);
 });
@@ -113,13 +119,15 @@ test("a run id containing '#' is refused, without echoing the run id", () => {
 
 test("no '#' can reach the -T format slot", () => {
 	for (const runId of [RUN_ID, "abcdefgh-rest", "01234567", "#abcdefg", "ab#defgh", "#######x"]) {
-		let title: string;
-		try {
-			title = titleOf(runId);
-		} catch {
-			continue; // refused, so nothing reached -T
+		for (const titlePrefix of [undefined, "subagent", "btw", "#btw", "bt#w", "###", " btw "]) {
+			let title: string;
+			try {
+				title = titleOf(runId, titlePrefix);
+			} catch {
+				continue; // refused, so nothing reached -T
+			}
+			assert.ok(!title.includes("#"), `title ${JSON.stringify(title)} must not contain '#'`);
 		}
-		assert.ok(!title.includes("#"), `title ${JSON.stringify(title)} must not contain '#'`);
 	}
 });
 
