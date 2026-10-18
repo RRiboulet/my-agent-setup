@@ -20,7 +20,7 @@ import {
 } from "./launch.ts";
 import { formatBtwUsage, runBtwRequest, sanitizeAnswerText, type BtwOutcome } from "./request.ts";
 
-const DESCRIPTION = "Ask a side question from this conversation in a separate panel; nothing is added to the transcript.";
+const DESCRIPTION = "Open a side-question panel that asks for the question and answers without adding anything to the transcript.";
 /** Every tmux call is bounded: a wedged server must not hang the command handler. */
 const TMUX_TIMEOUT_MS = 5_000;
 const FOOTER = "\n\n---\n";
@@ -557,6 +557,13 @@ export default function btwExtension(pi: ExtensionAPI): void {
 				ctx.ui.notify("BTW needs the TUI.", "warning");
 				return;
 			}
+			if (args.trim().length > 0) {
+				// The command takes no arguments: the question comes from the input
+				// prompt, so spaces and punctuation in it cannot be parsed as
+				// command arguments or lost on the way in.
+				ctx.ui.notify("BTW takes no arguments: run /btw and the panel will ask for the question.", "warning");
+				return;
+			}
 			if (starting) {
 				// The setup owns the run dir and socket until it hands back a
 				// launch; a second command in that window would interleave rm,
@@ -566,10 +573,14 @@ export default function btwExtension(pi: ExtensionAPI): void {
 			}
 			starting = true;
 			try {
-				const typed = args.trim();
-				if (!typed && (await reattachBtwPanel(depsFor(ctx), ctx))) return;
-				const question = typed || (await ctx.ui.input("BTW question:", "ask about this conversation"));
-				if (!question?.trim()) return;
+				// The command is deliberately argument-free. An empty submission
+				// reopens the existing panel; a question starts (or replaces) one.
+				const question = await ctx.ui.input("BTW question:", "type a question, or submit empty to reopen the panel");
+				if (question === undefined) return; // cancelled
+				if (!question.trim()) {
+					await reattachBtwPanel(depsFor(ctx), ctx);
+					return;
+				}
 				await stopActive();
 				const launch = await launchBtwPanel(depsFor(ctx), ctx, question);
 				if (launch) {

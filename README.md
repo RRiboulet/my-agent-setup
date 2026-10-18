@@ -86,7 +86,7 @@ inactive. Installed packages are loaded regardless of project trust.
 | `.pi/extensions/repo-explorer/` | `/explore`: browse a branch's file tree with a directory-by-directory fuzzy filter and print a file into the transcript, or quick-open `/explore <path> [branch]` / `<branch>:<path>` to skip the menus. Read-only git resolved against the session cwd; the process runner, branch menu, browser, transcript renderer, display sanitizer and argument grammar are separate internals. **Ours** |
 | `.pi/extensions/review-triage/` | `triage_change` tool and `/triage`: measure a finished change from its git diff, ask a calibrated decision model (Jev, via `ctx.modelRegistry.classify()`) whether it needs an adversarial and/or complexity review, how hard each should push and which allowed model should run it, and return a depth-runged, fallback-chained plan for the `subagent` tool. Policy (judge model, candidates, thresholds, chains) lives in `~/.pi/agent/review-triage.json`; the verdict is appended to the session for audit. **Ours** |
 | `.pi/extensions/voice/` | `/voice`: dictation with the phone as microphone — start `termux-microphone-record` over ssh, fetch the m4a, transcribe it through an OpenAI-compatible `/audio/transcriptions` endpoint, and paste the transcript at the cursor (or submit it with `autoSubmit`). `/voice cancel` aborts; `ctrl+shift+r` toggles on Kitty-protocol terminals. **Ours** |
-| `.pi/extensions/btw/` | `/btw <question>`: a side question answered in-process by the session's own model from the exact conversation prefix, so the provider prompt cache is reused; the streaming answer is shown by a `less +F` viewer in its own tmux popup. Neither the question nor the answer enters the transcript. Escape returns to pi while the answer keeps running; `/btw` reopens the panel and `/btw <question>` replaces it. **Ours** |
+| `.pi/extensions/btw/` | `/btw`: opens a panel and asks for the question (submit it empty to reopen a running panel), then answers in-process from the exact conversation prefix, so the provider prompt cache is reused; the streaming answer is shown by a `less +F` viewer in its own tmux popup. Neither the question nor the answer enters the transcript. Escape returns to pi while the answer keeps running; a new question replaces the panel. **Ours** |
 | `.pi/extensions/opencode-go-provider/` | An `opencode-go` provider for `/model`: fast GLM, Kimi, MiniMax, Qwen, DeepSeek and Grok models via opencode.ai's Go API, with the correct wire protocol per model (Anthropic, OpenAI Completions, Responses) and a per-account usage-budget widget below the editor. **Vendored** from [monotykamary/pi-opencode-go-provider](https://github.com/monotykamary/pi-opencode-go-provider) (MIT), byte-identical to upstream — see below |
 | `.pi/skills/native-web-search/` | Script + docs for the above. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/native-web-search/`, with local provider patches: OpenRouter support, an `opencode-go` default through the Go API's Anthropic-compatible endpoint, unknown-provider rejection, and a test seam (`__test__` + direct-invocation guard). The two must travel together |
 | `.pi/skills/commit/` | Conventional Commits subjects, and the branch-per-change rule from `AGENTS.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/commit/SKILL.md`, with two local adaptations |
@@ -97,10 +97,13 @@ inactive. Installed packages are loaded regardless of project trust.
 | `REVIEW_GUIDELINES.md` | Project-level review guidelines read by `/review` — branch hygiene, token rules, changelog shape, PR workflow, line endings |
 | `pi-session.sh` | Launch pi under tmux with an OpenRouter model |
 
-`/btw` notes: the request reuses the main conversation's prompt prefix — no
-system-prompt or tool-list override — but the provider's cache only stays warm
-for a few minutes of idle time, so the first question after a gap pays full
-price once (and warms the cache for the next main turn). Escape closes the
+`/btw` notes: the command takes no arguments — it always asks for the question
+(submit it empty to reopen a running panel), so spaces and punctuation in it
+cannot be lost. The request reuses the main
+conversation's prompt prefix — no system-prompt or tool-list override — but the
+provider's cache only stays warm for a few minutes of idle time, so the first
+question after a gap pays full price once (and warms the cache for the next
+main turn). Escape closes the
 popup and never reaches the viewer; the answer keeps streaming into its file.
 Copying text out needs nested tmux copy-mode (`C-b C-b`, because the outer
 client keeps the prefix). `q` in the pager exits it, and the next `/btw`

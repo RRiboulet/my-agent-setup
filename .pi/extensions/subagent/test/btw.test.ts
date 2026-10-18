@@ -407,15 +407,16 @@ test("a second /btw aborts the running request before resetting the answer", asy
 			const { streams, modelRegistry } = controllableRegistry();
 			const { calls, exec } = tmuxModel();
 			const handler = await loadFactory(exec);
+			const questions = ["q1", "q2"];
 			const ctx = {
 				...fakeContext(modelRegistry),
-				ui: { input: async () => "x", notify: () => undefined },
+				ui: { input: async () => questions.shift() ?? "x", notify: () => undefined },
 			};
 
-			await handler("q1", ctx as never);
+			await handler("", ctx as never);
 			await waitFor(() => streams.length === 1);
 			streams[0]?.push({ type: "text_delta", contentIndex: 0, delta: "old-answer", partial: assistant() });
-			await handler("q2", ctx as never);
+			await handler("", ctx as never);
 			await waitFor(() => streams.length === 2);
 
 			assert.equal(streams.length, 2, "the second question starts its own request");
@@ -538,9 +539,9 @@ test("a second /btw while one is starting is refused", async () => {
 				ui: { input: async () => "q", notify: (message: string) => notifications.push(message) },
 			};
 
-			const first = handler("q1", ctx as never);
+			const first = handler("", ctx as never);
 			await gateReached;
-			await handler("q2", ctx as never);
+			await handler("", ctx as never);
 			assert.equal(
 				calls.filter((call) => call.args.includes("new-session")).length,
 				1,
@@ -549,6 +550,31 @@ test("a second /btw while one is starting is refused", async () => {
 			assert.match(notifications.join("\n"), /still starting/);
 			release();
 			await first;
+		});
+	});
+});
+
+test("the factory refuses arguments and asks for the question instead", async () => {
+	await withTempAgentDir(async () => {
+		await withNoTmux(async () => {
+			let prompted = false;
+			const { calls, exec } = tmuxModel();
+			const handler = await loadFactory(exec);
+			const notifications: string[] = [];
+			const ctx = {
+				...fakeContext({}),
+				ui: {
+					input: async () => {
+						prompted = true;
+						return "why?";
+					},
+					notify: (message: string) => notifications.push(message),
+				},
+			};
+			await handler("why did the test fail?", ctx as never);
+			assert.equal(prompted, false, "arguments are not accepted as a question");
+			assert.deepEqual(calls, [], "nothing is started");
+			assert.match(notifications[0] ?? "", /takes no arguments/);
 		});
 	});
 });
@@ -570,7 +596,7 @@ test("the factory registers the session lifecycle handlers", async () => {
 	});
 });
 
-test("the factory reattaches on an empty argument list instead of prompting", async () => {
+test("the factory reopens the panel when the question is submitted empty", async () => {
 	await withTempAgentDir(async (agentDir) => {
 		await withOuterTmux(async () => {
 			const { exec } = tmuxModel({ serverUp: true });
@@ -578,7 +604,7 @@ test("the factory reattaches on an empty argument list instead of prompting", as
 			await mkdir(paths.runDir, { recursive: true });
 			await writeFile(paths.answer, "# old\n");
 			const handler = await loadFactory(exec);
-			let prompted = false;
+			let submitted = false;
 			const launches: string[][] = [];
 			__test__.setPanelLauncher((_command, args) => {
 				launches.push(args);
@@ -588,18 +614,35 @@ test("the factory reattaches on an empty argument list instead of prompting", as
 					...fakeContext({}),
 					ui: {
 						input: async () => {
-							prompted = true;
-							return "why?";
+							submitted = true;
+							return "";
 						},
 						notify: () => undefined,
 					},
 				};
 				await handler("", ctx as never);
-				assert.equal(prompted, false, "a live panel needs no question");
-				assert.equal(launches.length, 1);
+				assert.equal(submitted, true, "the panel always asks for a question first");
+				assert.equal(launches.length, 1, "empty input reopens the live panel");
 			} finally {
 				__test__.setPanelLauncher(undefined);
 			}
+		});
+	});
+});
+
+test("the factory does nothing when the question prompt is cancelled", async () => {
+	await withTempAgentDir(async () => {
+		await withNoTmux(async () => {
+			const { calls, exec } = tmuxModel();
+			const handler = await loadFactory(exec);
+			const notifications: string[] = [];
+			const ctx = {
+				...fakeContext({}),
+				ui: { input: async () => undefined, notify: (message: string) => notifications.push(message) },
+			};
+			await handler("", ctx as never);
+			assert.deepEqual(calls, [], "nothing is started");
+			assert.deepEqual(notifications, [], "a cancel is silent");
 		});
 	});
 });

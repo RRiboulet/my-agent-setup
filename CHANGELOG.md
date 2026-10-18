@@ -6,10 +6,13 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
-- **`/btw` — ask a side question without polluting the conversation.** `/btw
-  <question>` answers in-process from the active conversation and shows the
-  streaming answer in a `less +F` viewer in its own tmux popup; neither the
-  question nor the answer is added to the transcript.
+- **`/btw` — ask a side question without polluting the conversation.** `/btw`
+  opens a panel and asks for the question (an empty submission reopens a running
+  panel); the answer is produced in-process from the active conversation and
+  shown in a `less +F` viewer in its own tmux popup. Neither the question nor
+  the answer is added to the transcript. The command deliberately takes no
+  arguments, so spaces and punctuation in the question cannot be parsed as
+  command input.
 
   The request reuses the main conversation's exact prompt prefix —
   `buildSessionContext()` run through pi's own `convertToLlm()`, no
