@@ -23,9 +23,9 @@
 // than executed.
 //
 // One caveat is structural. The agent loop applies `transformContext` - the
-// extension `context` handlers and, for a `before_agent_start` forced prompt, a
-// collapsed system message - before streaming, and no extension API runs that
-// chain. This request therefore matches a session without context-rewriting
+// extension `context` handlers, the hidden-declarations projection, and, for a
+// `before_agent_start` forced prompt, a collapsed system message - before
+// streaming, and no extension API runs that chain. This request therefore matches a session without context-rewriting
 // state; on a session with an active `/goal` the forced system prompt differs
 // at byte 0, so the cache misses and the conversation is re-billed, and goal UI
 // messages the main request strips are visible to the side model.
@@ -37,6 +37,7 @@ import type {
 	Context,
 	Message,
 	Model,
+	ThinkingLevel,
 	Usage,
 } from "@earendil-works/pi-ai";
 import {
@@ -46,6 +47,16 @@ import {
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences } from "@earendil-works/pi-tui";
+
+/**
+ * `off` means "no reasoning" to every provider; pi's agent loop drops it before
+ * dispatch, so the side request must too. Forwarding the literal "off" makes
+ * the Anthropic adapter enable a 1024-token thinking budget the main request
+ * does not have.
+ */
+export function reasoningOption(thinkingLevel: string | undefined): ThinkingLevel | undefined {
+	return thinkingLevel === undefined || thinkingLevel === "off" ? undefined : (thinkingLevel as ThinkingLevel);
+}
 
 /** Tells the model what this request is, without touching the cached prefix. */
 export const BTW_INSTRUCTION =
@@ -225,6 +236,8 @@ export interface BtwStreamRun {
 	/** Receives each sanitized text delta in stream order. */
 	onText: (text: string) => void | Promise<void>;
 	signal?: AbortSignal;
+	/** Aborts the upstream request when `onText` fails, so it is not left running unbilled. */
+	abort?: () => void;
 }
 
 /**
@@ -260,6 +273,7 @@ async function runBtwStreamDetailed(stream: AssistantMessageEventStream, run: Bt
 				try {
 					await run.onText(text);
 				} catch (error) {
+					run.abort?.();
 					return { outcome: { status: "error", message: `could not record the answer: ${messageOf(error)}` }, toolCalls: [] };
 				}
 			}
@@ -336,6 +350,8 @@ export interface BtwRequestDeps {
 	leafId?: string | null;
 	question: string;
 	signal?: AbortSignal;
+	/** Aborts the in-flight request when writing the answer fails. */
+	abort?: () => void;
 	/** Mirror the main loop's image-blocking wrapper when the setting is on. */
 	blockImages?: boolean;
 	onText: (text: string) => void | Promise<void>;
@@ -374,7 +390,7 @@ export async function runBtwRequest(deps: BtwRequestDeps): Promise<BtwOutcome> {
 		// reasoning mirrors the session's thinking level, which Anthropic's
 		// cache key also includes.
 		sessionId: deps.sessionId,
-		reasoning: parts.thinkingLevel as never,
+		reasoning: reasoningOption(parts.thinkingLevel),
 		// No toolChoice: setting it changes the provider's cache key (see the
 		// module header). The declared tools stay in the prefix; the
 		// instruction asks the model not to use them.
@@ -394,7 +410,11 @@ export async function runBtwRequest(deps: BtwRequestDeps): Promise<BtwOutcome> {
 		} catch (error) {
 			return { status: "error", message: messageOf(error), usage };
 		}
-		const result = await runBtwStreamDetailed(stream, { onText: deps.onText, signal: deps.signal });
+		const result = await runBtwStreamDetailed(stream, {
+			onText: deps.onText,
+			signal: deps.signal,
+			abort: deps.abort,
+		});
 		usage = addUsage(usage, result.outcome.usage);
 		if (result.toolCalls.length === 0 || result.final === undefined || result.outcome.status === "cancelled") {
 			return { ...result.outcome, usage };
@@ -419,15 +439,4 @@ export async function runBtwRequest(deps: BtwRequestDeps): Promise<BtwOutcome> {
 		await deps.onText(TOOL_RETRY_MARKER);
 	}
 	return { status: "error", message: "the model kept trying to use tools", usage };
-}
-
-/** The answer file's footer, and the measurement the cache gate reads. */
-export function formatBtwUsage(usage: Usage | undefined): string {
-	if (usage === undefined) return "";
-	const number = (value: number): string => value.toLocaleString("en-US");
-	const parts = [`input ${number(usage.input)}`];
-	if (usage.cacheRead > 0) parts.push(`cache read ${number(usage.cacheRead)}`);
-	if (usage.cacheWrite > 0) parts.push(`cache write ${number(usage.cacheWrite)}`);
-	parts.push(`output ${number(usage.output)}`);
-	return parts.join(" · ");
 }

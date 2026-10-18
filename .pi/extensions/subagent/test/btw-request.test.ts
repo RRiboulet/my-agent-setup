@@ -23,8 +23,8 @@ import {
 	BTW_INSTRUCTION,
 	buildBtwContext,
 	buildBtwRequestParts,
-	formatBtwUsage,
 	providerSessionHeaders,
+	reasoningOption,
 	runBtwRequest,
 	runBtwStream,
 	sanitizeAnswerText,
@@ -168,6 +168,15 @@ test("the request parts carry the session thinking level", () => {
 	assert.equal(buildBtwRequestParts(ENTRIES, "a1", "why?", 0).thinkingLevel, "max");
 });
 
+test("the thinking level drops 'off', the way the main loop does", () => {
+	// Forwarding the literal "off" makes the Anthropic adapter enable a
+	// thinking budget the main request does not have.
+	assert.equal(reasoningOption("off"), undefined);
+	assert.equal(reasoningOption(undefined), undefined);
+	assert.equal(reasoningOption("max"), "max");
+	assert.equal(reasoningOption("medium"), "medium");
+});
+
 test("the prefix is exactly the main pipeline's converted projection", () => {
 	const projection = buildSessionContext(ENTRIES, "cm1");
 	const context = buildBtwContext(ENTRIES, "cm1", "why?");
@@ -200,6 +209,7 @@ const IMAGE_ENTRIES = [
 			content: [
 				{ type: "text", text: "look at this" },
 				{ type: "image", mimeType: "image/png", data: "AAAA" },
+				{ type: "image", mimeType: "image/png", data: "BBBB" },
 			],
 			timestamp: 1,
 		},
@@ -214,6 +224,8 @@ test("blockImages mirrors the main loop's image filter", () => {
 		"the image becomes the main loop's placeholder",
 	);
 	assert.ok(!JSON.stringify(blocked).includes('"type":"image"'), "no image block survives the filter");
+	const placeholders = JSON.stringify(blocked).match(/Image reading is disabled\./g) ?? [];
+	assert.equal(placeholders.length, 1, "consecutive images collapse to one placeholder, like the main loop");
 	assert.ok(JSON.stringify(kept).includes('"type":"image"'), "without the setting the image is sent");
 });
 
@@ -366,6 +378,12 @@ test("a tool-calling response is continued with a refusal and the final answer w
 
 	assert.equal(calls.length, 2, "the tool-calling response is continued once");
 	const retryMessages = (calls[1] as { context: Context }).context.messages;
+	const firstMessages = (calls[0] as { context: Context }).context.messages;
+	assert.deepEqual(
+		retryMessages.slice(0, firstMessages.length),
+		firstMessages,
+		"the retried request resends attempt 1's messages unchanged",
+	);
 	assert.equal(retryMessages[retryMessages.length - 2]?.role, "assistant", "the model's call is kept");
 	const retryResult = retryMessages[retryMessages.length - 1] as {
 		role: string;
@@ -415,17 +433,22 @@ test("a model that keeps calling tools is cut off after one continuation", async
 	assert.equal(outcome.ignoredToolCalls, 1);
 });
 
-test("a failing onText handler is reported through the outcome", async () => {
+test("a failing onText handler is reported through the outcome and aborts the request", async () => {
 	const stream = createAssistantMessageEventStream();
+	let aborted = false;
 	const run = runBtwStream(stream, {
 		onText: () => {
 			throw new Error("disk full");
+		},
+		abort: () => {
+			aborted = true;
 		},
 	});
 	stream.push({ type: "text_delta", contentIndex: 0, delta: "x", partial: assistant() });
 	const outcome = await run;
 	assert.equal(outcome.status, "error");
 	assert.match(outcome.status === "error" ? outcome.message : "", /disk full/);
+	assert.equal(aborted, true, "the upstream request is not left running unbilled");
 });
 
 function fakeRegistry(auth: unknown = { ok: true, apiKey: "key", headers: { "x-test": "1" } }) {
@@ -491,6 +514,26 @@ test("auth failure is an error outcome and never opens a stream", async () => {
 	assert.equal(calls.length, 0);
 });
 
+test("a synchronous streamSimple failure is an error outcome", async () => {
+	const modelRegistry = {
+		getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "key", headers: {} }),
+		streamSimple: () => {
+			throw new Error("boom");
+		},
+	};
+	const outcome = await runBtwRequest({
+		modelRegistry: modelRegistry as never,
+		model: { provider: "opencode-go", id: "test-model" } as never,
+		sessionId: SESSION_ID,
+		entries: ENTRIES,
+		leafId: "cm1",
+		question: "why?",
+		onText: () => undefined,
+	});
+	assert.equal(outcome.status, "error");
+	assert.match(outcome.status === "error" ? outcome.message : "", /boom/);
+});
+
 test("session routing headers are only added for opencode providers", () => {
 	assert.deepEqual(providerSessionHeaders({ provider: "opencode-go", baseUrl: "https://opencode.ai/go" }, SESSION_ID), {
 		"x-opencode-session": SESSION_ID,
@@ -501,19 +544,4 @@ test("session routing headers are only added for opencode providers", () => {
 		"x-opencode-client": "pi",
 	});
 	assert.deepEqual(providerSessionHeaders({ provider: "anthropic", baseUrl: "https://api.anthropic.com" }, SESSION_ID), {});
-});
-
-test("the usage footer names the cache read", () => {
-	const text = formatBtwUsage({
-		input: 1354,
-		output: 510,
-		cacheRead: 591232,
-		cacheWrite: 0,
-		totalTokens: 593096,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-	});
-	assert.match(text, /input 1,354/);
-	assert.match(text, /cache read 591,232/);
-	assert.match(text, /output 510/);
-	assert.equal(formatBtwUsage(undefined), "");
 });

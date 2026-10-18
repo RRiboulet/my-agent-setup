@@ -62,8 +62,8 @@ const MODULES: Record<string, string[]> = {
 	"../../btw/request.ts": [
 		"buildBtwContext",
 		"buildBtwRequestParts",
-		"formatBtwUsage",
 		"providerSessionHeaders",
+		"reasoningOption",
 		"runBtwRequest",
 		"runBtwStream",
 		"sanitizeAnswerText",

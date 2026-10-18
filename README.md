@@ -106,8 +106,8 @@ question after a gap pays full price once (and warms the cache for the next
 main turn). Escape closes the
 popup and never reaches the viewer; the answer keeps streaming into its file.
 Copying text out needs nested tmux copy-mode (`C-b C-b`, because the outer
-client keeps the prefix). `q` in the pager exits it, and the next `/btw`
-restarts the viewer on the same answer. On a session with an active `/goal` the
+client keeps the prefix). In the pager, `Ctrl+C` stops following and then `q`
+exits; the next `/btw` restarts the viewer on the same answer. On a session with an active `/goal` the
 main request's forced system prompt differs, so the panel may re-bill the
 context and show goal notes; `.pi/extensions/btw/request.ts` documents that
 limitation.

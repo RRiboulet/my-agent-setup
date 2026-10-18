@@ -25,7 +25,7 @@ import {
 } from "@earendil-works/pi-ai";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
-import { __test__, launchBtwPanel, reattachBtwPanel, type BtwContext } from "../../btw/index.ts";
+import { __test__, formatBtwUsage, launchBtwPanel, reattachBtwPanel, type BtwContext } from "../../btw/index.ts";
 import { buildBtwPaths, buildBtwViewerCommand } from "../../btw/launch.ts";
 import { buildBtwContext } from "../../btw/request.ts";
 import { withEnv, withTempAgentDir, waitFor } from "./helpers.ts";
@@ -118,6 +118,10 @@ interface TmuxOptions {
 	failOn?: string;
 	serverUp?: boolean;
 	paneDead?: boolean;
+	/** The outer pane's `display-message` resolves no window. */
+	paneGone?: boolean;
+	/** `list-clients` lists nothing. */
+	noClient?: boolean;
 }
 
 /** A tmux model: kill-server takes the server down, new-session brings it back. */
@@ -146,9 +150,15 @@ function tmuxModel(options: TmuxOptions = {}) {
 		if (args.includes("has-session")) {
 			return serverUp && sessionExists ? ok : { code: 1, stdout: "", stderr: "no server", killed: false };
 		}
-		if (args.includes("list-clients")) return { ...ok, stdout: "/dev/pts/7\t@1\t100\n" };
+		if (args.includes("list-clients")) {
+			return options.noClient === true ? { ...ok, stdout: "" } : { ...ok, stdout: "/dev/pts/7\t@1\t100\n" };
+		}
 		if (args.includes("#{pane_dead}")) return { ...ok, stdout: options.paneDead === true ? "1\n" : "0\n" };
-		if (args.includes("display-message")) return { ...ok, stdout: "@1\n" };
+		if (args.includes("display-message")) {
+			return options.paneGone === true
+				? { code: 1, stdout: "", stderr: "can't find pane", killed: false }
+				: { ...ok, stdout: "@1\n" };
+		}
 		return ok;
 	};
 	return { calls, exec };
@@ -315,6 +325,26 @@ test("the popup opens over pi's client with the btw title and a fresh bind", asy
 			assert.ok(launched.args.includes("/dev/pts/7"));
 			assert.deepEqual(launched.options, { detached: true, stdio: "ignore" });
 		});
+	});
+});
+
+test("the popup reports a vanished pane, no client and a failed bind", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		const cases: { label: string; tmux: ReturnType<typeof tmuxModel>; pattern: RegExp }[] = [
+			{ label: "pane gone", tmux: tmuxModel({ paneGone: true }), pattern: /pane is gone/ },
+			{ label: "no client", tmux: tmuxModel({ noClient: true }), pattern: /No attached tmux client/ },
+			{ label: "bind failed", tmux: tmuxModel({ failOn: "bind" }), pattern: /Escape binding/ },
+		];
+		for (const item of cases) {
+			await withOuterTmux(async () => {
+				const { notifications, deps } = fakeDeps(agentDir, item.tmux);
+				const registry = streamingRegistry("ok");
+				const launch = await launchBtwPanel(deps, fakeContext(registry.modelRegistry), "why?");
+				assert.ok(launch, `${item.label}: the request still runs`);
+				await launch.completion;
+				assert.match(notifications.map((entry) => entry.message).join("\n"), item.pattern, item.label);
+			});
+		}
 	});
 });
 
@@ -498,6 +528,67 @@ test("a viewer start that fails after new-session cleans up and reports", async 
 	});
 });
 
+test("a replace that cannot close the old server keeps the old answer and reports it", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withNoTmux(async () => {
+			const paths = buildBtwPaths(agentDir, SID);
+			await mkdir(paths.runDir, { recursive: true });
+			await writeFile(paths.answer, "# old\n");
+			// The server is up and kill-server fails, so the panel may still be live.
+			const { notifications, deps } = fakeDeps(agentDir, tmuxModel({ serverUp: true, failOn: "kill-server" }));
+			const registry = streamingRegistry("never");
+			const launch = await launchBtwPanel(deps, fakeContext(registry.modelRegistry), "why?");
+			assert.equal(launch, null, "the replace is refused");
+			assert.equal(readFileSync(paths.answer, "utf8"), "# old\n", "the old answer is not unlinked under a live viewer");
+			assert.match(notifications.at(-1)?.message ?? "", /still running/);
+			assert.equal(registry.calls.length, 0, "the request never starts");
+		});
+	});
+});
+
+test("the blockImages setting reaches the side request", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withNoTmux(async () => {
+			const { deps } = fakeDeps(agentDir);
+			deps.blockImages = true;
+			const registry = streamingRegistry("ok");
+			const imageEntries = [
+				...ENTRIES.slice(0, 2),
+				{
+					type: "message",
+					id: "i1",
+					parentId: "a1",
+					timestamp: "2026-10-18T00:00:03.000Z",
+					message: {
+						role: "user",
+						content: [
+							{ type: "text", text: "look" },
+							{ type: "image", mimeType: "image/png", data: "AAAA" },
+						],
+						timestamp: 3,
+					},
+				},
+			] as unknown as SessionEntry[];
+			const ctx = fakeContext(registry.modelRegistry, {
+				sessionManager: {
+					getSessionId: () => SID,
+					getEntries: () => imageEntries,
+					getLeafId: () => "i1",
+				},
+			});
+			const launch = await launchBtwPanel(deps, ctx, "why?");
+			assert.ok(launch);
+			await launch.completion;
+			const sent = registry.calls[0] as { context: Context };
+			assert.ok(
+				JSON.stringify(sent.context).includes("Image reading is disabled."),
+				"the setting mirrors pi's image filter into the request",
+			);
+			assert.ok(!JSON.stringify(sent.context).includes('"type":"image"'));
+		});
+	});
+});
+
 test("an unreadable panel state is reported and never replaced", async () => {
 	await withTempAgentDir(async (agentDir) => {
 		const { launches, notifications, deps } = fakeDeps(agentDir);
@@ -605,6 +696,7 @@ test("the factory reopens the panel when the question is submitted empty", async
 			await writeFile(paths.answer, "# old\n");
 			const handler = await loadFactory(exec);
 			let submitted = false;
+			let title = "";
 			const launches: string[][] = [];
 			__test__.setPanelLauncher((_command, args) => {
 				launches.push(args);
@@ -613,8 +705,9 @@ test("the factory reopens the panel when the question is submitted empty", async
 				const ctx = {
 					...fakeContext({}),
 					ui: {
-						input: async () => {
+						input: async (prompt: string) => {
 							submitted = true;
+							title = prompt;
 							return "";
 						},
 						notify: () => undefined,
@@ -622,10 +715,28 @@ test("the factory reopens the panel when the question is submitted empty", async
 				};
 				await handler("", ctx as never);
 				assert.equal(submitted, true, "the panel always asks for a question first");
+				assert.match(title, /reopen/, "the empty-submit contract is visible in the prompt itself");
 				assert.equal(launches.length, 1, "empty input reopens the live panel");
 			} finally {
 				__test__.setPanelLauncher(undefined);
 			}
+		});
+	});
+});
+
+test("the factory says so when an empty submission has nothing to reopen", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withNoTmux(async () => {
+			const { calls, exec } = tmuxModel();
+			const handler = await loadFactory(exec);
+			const notifications: string[] = [];
+			const ctx = {
+				...fakeContext({}),
+				ui: { input: async () => "", notify: (message: string) => notifications.push(message) },
+			};
+			await handler("", ctx as never);
+			assert.ok(calls.some((call) => call.args.includes("has-session")), "the panel state is probed");
+			assert.match(notifications.join("\n"), /No BTW panel is running/);
 		});
 	});
 });
@@ -670,4 +781,21 @@ test("the factory refuses non-TUI before prompting or executing", async () => {
 			assert.match(notifications[0] ?? "", /TUI/);
 		});
 	});
+});
+
+test("the usage footer names the cache read and the cache write", () => {
+	const text = formatBtwUsage({
+		input: 1354,
+		output: 510,
+		cacheRead: 591232,
+		cacheWrite: 4096,
+		totalTokens: 597192,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	});
+	assert.match(text, /input 1,354/);
+	assert.match(text, /cache read 591,232/);
+	assert.match(text, /cache write 4,096/);
+	assert.match(text, /output 510/);
+	assert.equal(formatBtwUsage(undefined), "");
+	assert.equal(formatBtwUsage({ ...ZERO_USAGE }), "input 0 · output 0", "a zero usage stays terse");
 });

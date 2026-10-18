@@ -4,6 +4,7 @@ import { appendFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:
 import * as path from "node:path";
 
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Usage } from "@earendil-works/pi-ai";
 
 import { buildAttachCommand, buildEscapeBindArgs, buildPanelLaunch } from "../subagent/panel.ts";
 import {
@@ -18,7 +19,7 @@ import {
 	requireBtwQuestion,
 	type BtwPaths,
 } from "./launch.ts";
-import { formatBtwUsage, runBtwRequest, sanitizeAnswerText, type BtwOutcome } from "./request.ts";
+import { runBtwRequest, sanitizeAnswerText, type BtwOutcome } from "./request.ts";
 
 const DESCRIPTION = "Open a side-question panel that asks for the question and answers without adding anything to the transcript.";
 /** Every tmux call is bounded: a wedged server must not hang the command handler. */
@@ -126,23 +127,50 @@ async function killPanel(deps: BtwDeps, paths: BtwPaths): Promise<boolean> {
 }
 
 /**
+ * Kill the panel's server and report whether it is gone.
+ *
+ * A clean kill (exit 0) means gone. On an ambiguous result the has-session
+ * probe decides: a live session, a thrown probe or a timed-out one all count
+ * as alive, so every caller keeps the answer and the socket for a later retry.
+ */
+async function closePanelServer(deps: BtwDeps, paths: BtwPaths): Promise<boolean> {
+	if (await killPanel(deps, paths)) return true;
+	try {
+		const still = await deps.exec("tmux", ["-S", paths.socket, "has-session", "-t", paths.session], {
+			timeout: TMUX_TIMEOUT_MS,
+		});
+		return still.code !== 0 && still.killed !== true;
+	} catch {
+		return false;
+	}
+}
+
+/**
  * Kill this panel's server and recreate its scratch directory.
  *
- * The remove sits between the kill and the mkdir, so a replace cannot inherit
- * the previous answer. The owner is the main pi process: a later start or sweep
+ * The remove sits between a confirmed close and the mkdir, so a replace cannot
+ * inherit the previous answer and a server that would not die cannot take that
+ * answer down with it. The owner is the main pi process: a later start or sweep
  * reaps this panel only when this pid is gone, which is what makes a second
  * live pi on the same session id safe.
  */
 async function resetPanel(deps: BtwDeps, paths: BtwPaths): Promise<void> {
-	await killPanel(deps, paths);
+	if (!(await closePanelServer(deps, paths))) {
+		throw new Error("the previous BTW panel is still running; close it and try again");
+	}
 	await rm(paths.runDir, { recursive: true, force: true });
 	await mkdir(paths.runDir, { recursive: true, mode: 0o700 });
 	await writeFile(paths.ownerPid, `${process.pid}\n`, { encoding: "utf8", mode: 0o600 });
 }
 
-/** Remove the run dir after a failed setup, best effort. */
+/**
+ * Remove the run dir after a failed setup, best effort.
+ *
+ * A server that would not close keeps its dir, the same rule as destroyPanel:
+ * a failed kill never unlinks an answer under a possibly live viewer.
+ */
 async function cleanupPanel(deps: BtwDeps, paths: BtwPaths): Promise<void> {
-	await killPanel(deps, paths);
+	if (!(await closePanelServer(deps, paths))) return;
 	await rm(paths.runDir, { recursive: true, force: true }).catch(() => undefined);
 }
 
@@ -170,18 +198,7 @@ async function readOwnerPid(paths: BtwPaths): Promise<number | undefined> {
  * not be unlinked under it.
  */
 async function destroyPanel(deps: BtwDeps, paths: BtwPaths): Promise<void> {
-	// A clean kill means the server is gone; only an ambiguous result needs the
-	// confirmation probe.
-	if (!(await killPanel(deps, paths))) {
-		try {
-			const still = await deps.exec("tmux", ["-S", paths.socket, "has-session", "-t", paths.session], {
-				timeout: TMUX_TIMEOUT_MS,
-			});
-			if (still.code === 0 || still.killed) return;
-		} catch {
-			return;
-		}
-	}
+	if (!(await closePanelServer(deps, paths))) return;
 	await rm(paths.runDir, { recursive: true, force: true }).catch(() => undefined);
 	await rm(paths.socket, { force: true }).catch(() => undefined);
 }
@@ -420,8 +437,10 @@ export async function reattachBtwPanel(deps: BtwDeps, ctx: BtwContext): Promise<
 		try {
 			// The session may still exist (a viewer that exited leaves a dead
 			// pane), and new-session refuses a duplicate name; the socket is
-			// per-session, so killing it first is scoped and cheap.
-			await killPanel(deps, paths);
+			// per-session, so closing it first is scoped and cheap.
+			if (!(await closePanelServer(deps, paths))) {
+				throw new Error("the previous BTW panel is still running; close it and try again");
+			}
 			await startViewer(deps, paths, ctx.cwd);
 		} catch (error) {
 			deps.notify(`Could not reopen the BTW panel: ${messageOf(error)}`, "warning");
@@ -432,9 +451,20 @@ export async function reattachBtwPanel(deps: BtwDeps, ctx: BtwContext): Promise<
 	}
 	const shown = await openBtwPopup(deps, paths, sessionId);
 	if (!shown) {
-		deps.notify("The running BTW panel was left in place; /btw <question> replaces it with a fresh one.", "info");
+		deps.notify("The running BTW panel was left in place; run /btw and submit a question to replace it.", "info");
 	}
 	return true;
+}
+
+/** The answer file's footer. */
+export function formatBtwUsage(usage: Usage | undefined): string {
+	if (usage === undefined) return "";
+	const number = (value: number): string => value.toLocaleString("en-US");
+	const parts = [`input ${number(usage.input)}`];
+	if (usage.cacheRead > 0) parts.push(`cache read ${number(usage.cacheRead)}`);
+	if (usage.cacheWrite > 0) parts.push(`cache write ${number(usage.cacheWrite)}`);
+	parts.push(`output ${number(usage.output)}`);
+	return parts.join(" · ");
 }
 
 /** Append the outcome to the answer file, where the viewer sees it. */
@@ -514,6 +544,7 @@ export async function launchBtwPanel(deps: BtwDeps, ctx: BtwContext, rawQuestion
 				leafId: ctx.sessionManager.getLeafId(),
 				question,
 				signal: controller.signal,
+				abort: () => controller.abort(),
 				onText: async (text) => {
 					await appendFile(paths.answer, text, "utf8");
 				},
@@ -573,16 +604,24 @@ export default function btwExtension(pi: ExtensionAPI): void {
 			}
 			starting = true;
 			try {
+				const deps = depsFor(ctx);
 				// The command is deliberately argument-free. An empty submission
 				// reopens the existing panel; a question starts (or replaces) one.
-				const question = await ctx.ui.input("BTW question:", "type a question, or submit empty to reopen the panel");
+				// The hint rides in the title: pi's input component ignores the
+				// placeholder argument, so a hint passed there is never rendered.
+				const question = await ctx.ui.input(
+					"BTW question (submit empty to reopen the panel):",
+					"ask about this conversation",
+				);
 				if (question === undefined) return; // cancelled
 				if (!question.trim()) {
-					await reattachBtwPanel(depsFor(ctx), ctx);
+					if (!(await reattachBtwPanel(deps, ctx))) {
+						deps.notify("No BTW panel is running; type a question to start one.", "info");
+					}
 					return;
 				}
 				await stopActive();
-				const launch = await launchBtwPanel(depsFor(ctx), ctx, question);
+				const launch = await launchBtwPanel(deps, ctx, question);
 				if (launch) {
 					active = launch;
 					// The completion holds the launch's closure; drop the slot once
