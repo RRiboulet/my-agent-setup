@@ -80,10 +80,10 @@ This must ALWAYS be printed right after a session was started and once again at 
 - Default socket path to use unless you must isolate further: `SOCKET="${PI_TMUX_SOCKET_DIR:-${TMPDIR:-/tmp}/pi-tmux-sockets}/pi.sock"`.
 - **Use `-S` (a socket *path*), never `-L` (a socket *name* under tmux's own directory).** The two address different servers: a `-L` call looks at `<tmux tmpdir>/tmux-<uid>/<name>` and will not see a session created with `-S`. Upstream mixed the two in a few examples; every command here uses `-S`.
 
-<!-- LOCAL ADAPTATION B: our subagent extension is a second owner of tmux
-     sessions, and upstream has no such thing. The rules that keep the two from
+<!-- LOCAL ADAPTATION B: our subagent and btw extensions own tmux sessions too,
+     and upstream has no such thing. The rules that keep the three owners from
      stepping on each other, and the reason find-sessions.sh --all does not show
-     subagent sessions. -->
+     their sessions. -->
 
 ## Relationship to the subagent extension
 
@@ -94,6 +94,14 @@ This must ALWAYS be printed right after a session was started and once again at 
 - The helpers warn when no socket is given and `$TMUX` is set, because a bare `tmux` then follows `$TMUX` — inside a subagent shell that is the subagent socket. Always pass `-S`; the warning is the guard rail.
 - Names on the skill socket are `pi-<slug>` (`pi-python`, `pi-lldb`). `pi-agent-` is reserved for subagents; treat it as a name space this skill does not use.
 - To inspect or steer a *subagent* session, use the extension's own tools (`subagent_status`, the attach command it prints), not this skill.
+
+### Relationship to the btw extension
+
+`.pi/extensions/btw/` shows a side answer in a `less +F` viewer that runs in one tmux session per main pi session, named `btw-<session-id>`, on a socket at **`<pi agent dir>/tmux-btw-<session-id>.sock`** (`getAgentDir()`, usually `~/.pi/agent`). One socket per main session is deliberate: the popup's root-table Escape binding is global to its server, and a teardown must not reach another session's panel. So:
+
+- Do **not** create sessions on a `tmux-btw-*.sock` socket, and do **not** `kill-server` or `kill-session` a `btw-*` session — the extension owns its lifetime and reaps it by the owner pid it recorded.
+- `btw-` is reserved, like `pi-agent-`; this skill's own names stay `pi-<slug>`.
+- To reach a panel, use `/btw` (the popup) or the attach command the extension prints. `find-sessions.sh --all` scans only `PI_TMUX_SOCKET_DIR`, so it never shows a btw or subagent session.
 
 ## Targeting panes and naming
 

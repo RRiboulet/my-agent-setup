@@ -1,10 +1,11 @@
 # Subagent extension tests
 
-Unit and behaviour tests for `.pi/extensions/` — the `subagent/` tree, plus the
-sibling `todos.ts` tool (`todos-tool.test.ts`), which lives here because this is
-where the test harness and the linked pi packages are. Node runs these `.ts`
-files directly (native type stripping) — there is no build step and no compiler
-in the loop, so type errors are not caught here.
+Unit and behaviour tests for `.pi/extensions/` — the `subagent/` tree, the
+sibling `btw/` extension, plus the sibling `todos.ts` tool (`todos-tool.test.ts`),
+which lives here because this is where the test harness and the linked pi
+packages are. Node runs these `.ts` files directly (native type stripping) —
+there is no build step and no compiler in the loop, so type errors are not
+caught here.
 
 ## Running
 
@@ -41,6 +42,10 @@ test.
 | `panel.test.ts` | the panel builders (`panel.ts`): the Escape bind argv, the nested attach command (both `TMUX` variables unset, quoting), the popup argv, the run-id-derived title, its refusal of a run id carrying a tmux format metacharacter, and the `openSubagentPanel` guards (missing/queued/terminal run, non-tmux, no attached client, dead session, failed bind, non-TUI/shutdown) via a fake exec + popup launcher |
 | `usage.test.ts` | child session usage/cost accounting |
 | `handoff.test.ts` | child launch argv per mode, lineage/fork session seeding, live-branch fork ordering, and the usage baseline |
+| `btw-launch.test.ts` | the sibling `.pi/extensions/btw/launch.ts`: paths (the per-session socket from the full session id, the 0700 run dir, `answer.md`, `owner.pid`), the `exec less +F -- <answer>` viewer command, the tmux argv with session targets and `kill-server`, and the question / absolute-path / session-id guards |
+| `btw.test.ts` | the `/btw` command wiring: reset and viewer start, the popup ladder/argv/title, reattach with and without an answer, restarting a dead viewer, the answer/usage/error footers, the guard ladder, replace ordering, multi-line question headers, and the factory's prompt/reattach/non-TUI/starting paths |
+| `btw-lifecycle.test.ts` | the owner-pid lifecycle: the start and shutdown reason tables, the live-owner guard on both paths, missing and malformed owner files, kill→delete ordering, the failed-kill retry that keeps the answer and socket, the cross-session sweep, stray files in the root, and idempotency |
+| `btw-request.test.ts` | the sibling `.pi/extensions/btw/request.ts`: the projection→`convertToLlm` prefix with no system/tools override, the deliberate absence of `tool_choice`, the main-session routing header, `reasoning`/`sessionId`, the `blockImages` mirror, the sanitizer, and the stream / tool-call-continuation outcomes |
 | `lifecycle.test.ts` | launch, concurrency queueing, finalisation, failure detection, cancel, status, clean, shutdown stops the watcher, turn-level interrupt, the live widget (install/refresh/clear), and the widget→panel wiring (a click binds Escape then launches the popup detached, through a fake launcher) |
 | `interrupt.test.ts` | the `interrupt.json` marker (validation, reading, writing), the child reporter's abort path, and the parent lifecycle of an interrupted run |
 | `session-breakdown.test.ts` | the vendored `/session-breakdown`: aggregation over fixture session trees, its four `LOCAL PATCH` hunks — agent-dir roots, inherited-prefix exclusion, the footer note (including that it reaches both the TUI and the non-interactive path), and the `__test__` surface — the upstream behaviours re-vendored on 2026-10-05 (faux/test-provider sessions skipped, only models that produced a message counted, cost/session + provider grouping), which ship untested upstream, and the four metric tables' exact layout plus both palette choosers (pinned against the pre-2026-10-08-dedup output) |
