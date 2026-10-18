@@ -132,6 +132,28 @@ Fixed:
   runs the same settle wait and still reaches its best-effort `-q` before its
   own budget gives up, rather than letting a session exit leave the phone
   recording.
+- **A cancel during the fetch no longer deletes a local recording the user asked
+  to keep.** Every cancel surface honoured `keepAudio` except the `fetching`
+  branch, which called the local delete unconditionally — so the README's "no
+  cancel path touches the local file when `keepAudio` is set" was false in the
+  one window where the file actually exists: after it is written and before the
+  phase moves on, which includes the bounded remote-cleanup await. The same
+  unguarded delete sat in the post-write abort check, where a cancel landing
+  during the write dropped the just-written copy. The post-write check still
+  respects `keepAudio`; the cancel's own local delete is now a single guarded
+  step after the per-phase switch, because the bug was one branch forgetting a
+  guard that four branches repeated, and one delete cannot be forgotten. The
+  remote original is still removed either way, since `keepAudio` concerns the
+  local m4a only.
+
+  A cancel that keeps the file now also says where it is. `#doCancel` ended by
+  emitting a bare idle status, so the recording survived with no path in any
+  notice — the one keep-the-audio path that stayed silent, while a successful
+  cycle and a delivery failure both name the file. It reports the path when a
+  `stat` confirms the file is there, and stays silent otherwise, because naming
+  a path that does not resolve is worse than the silence it replaced. The idle
+  transition itself is now a single `#goIdle`, shared by a finished cycle, a
+  cancel and a shutdown.
 
 Maintenance:
 

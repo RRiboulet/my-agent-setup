@@ -23,6 +23,7 @@ import { test } from "node:test";
 
 const EXTENSIONS = [
 	"../../answer.ts",
+	"../../btw/index.ts",
 	"../../continue.ts",
 	"../../goal.ts",
 	"../../native-web-search.ts",
@@ -41,6 +42,25 @@ const EXTENSIONS = [
 // loader. The exports an importer will use are named, so an accidental drop
 // of one fails here instead of at wiring time.
 const MODULES: Record<string, string[]> = {
+	"../../btw/launch.ts": [
+		"buildBtwChildCommand",
+		"buildBtwChildPiArgs",
+		"buildBtwKillSessionArgs",
+		"buildBtwPaths",
+		"buildBtwRemainOnExitArgs",
+		"buildBtwSendKeysArgs",
+		"buildBtwSessionCreateArgs",
+		"buildBtwSubmitArgs",
+		"btwForkPath",
+		"btwQuestionPath",
+		"btwRunDir",
+		"btwSessionName",
+		"btwSidePromptPath",
+		"btwSocketPath",
+		"btwTarget",
+		"providerExtensionPath",
+		"requireBtwQuestion",
+	],
 	"../../repo-explorer/git.ts": ["openGit", "RepoGitError"],
 	"../../repo-explorer/runner.ts": ["makeGitRunner"],
 	"../../repo-explorer/branch-menu.ts": ["buildBranchMenu", "resolveBranchChoice", "chooseBranch"],
@@ -48,6 +68,15 @@ const MODULES: Record<string, string[]> = {
 	"../../repo-explorer/file-browser.ts": ["FileBrowser", "listDirectory", "parentPath"],
 	"../../repo-explorer/file-transcript.ts": ["formatFileTranscript", "numberLines", "fileMessageRenderer"],
 	"../../repo-explorer/sanitize.ts": ["sanitizeDisplay", "sanitizeFileContent"],
+	"../handoff.ts": [
+		"buildChildPiArgs",
+		"countSessionLines",
+		"forkLiveBranch",
+		"getPiInvocationParts",
+		"requireExistingSession",
+		"seedLineageSession",
+		"usesSessionFile",
+	],
 	"../panel.ts": ["buildEscapeBindArgs", "buildAttachCommand", "buildPanelLaunch"],
 	"../shell.ts": ["shellQuote"],
 	"../../voice/config.ts": ["agentDir", "configPath", "loadConfig", "parseEnvBool", "readConfigFile"],

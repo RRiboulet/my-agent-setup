@@ -166,6 +166,7 @@ import {
 	buildChildPiArgs,
 	countSessionLines,
 	forkLiveBranch,
+	getPiInvocationParts,
 	requireExistingSession,
 	seedLineageSession,
 	usesSessionFile,
@@ -535,20 +536,6 @@ function runDirOwnsLiveTranscript(run: RunRecord, runs: Map<string, RunRecord>):
 		if (isSameOrDescendant(run.runDir, other.sessionFile)) return true;
 	}
 	return false;
-}
-
-function getPiInvocationParts(): string[] {
-	const currentScript = process.argv[1];
-	if (currentScript && existsSync(currentScript)) {
-		return [process.execPath, currentScript];
-	}
-
-	const execName = path.basename(process.execPath).toLowerCase();
-	if (!/^(node|bun)(\.exe)?$/.test(execName)) {
-		return [process.execPath];
-	}
-
-	return ["pi"];
 }
 
 function textFromAssistant(message: Record<string, unknown>): string {
