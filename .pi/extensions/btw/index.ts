@@ -163,16 +163,6 @@ async function resetPanel(deps: BtwDeps, paths: BtwPaths): Promise<void> {
 	await writeFile(paths.ownerPid, `${process.pid}\n`, { encoding: "utf8", mode: 0o600 });
 }
 
-/**
- * Remove the run dir after a failed setup, best effort.
- *
- * A server that would not close keeps its dir, the same rule as destroyPanel:
- * a failed kill never unlinks an answer under a possibly live viewer.
- */
-async function cleanupPanel(deps: BtwDeps, paths: BtwPaths): Promise<void> {
-	if (!(await closePanelServer(deps, paths))) return;
-	await rm(paths.runDir, { recursive: true, force: true }).catch(() => undefined);
-}
 
 /**
  * Read the owner pid of a panel directory. A missing or malformed file counts
@@ -469,6 +459,9 @@ export function formatBtwUsage(usage: Usage | undefined): string {
 
 /** Append the outcome to the answer file, where the viewer sees it. */
 async function appendFooter(deps: BtwDeps, paths: BtwPaths, outcome: BtwOutcome): Promise<void> {
+	// A sibling pi that reset this run dir under us owns the answer file now;
+	// writing the footer into it would interleave two answers.
+	if ((await readOwnerPid(paths)) !== process.pid) return;
 	const toolNote =
 		outcome.ignoredToolCalls === undefined
 			? undefined
@@ -483,10 +476,18 @@ async function appendFooter(deps: BtwDeps, paths: BtwPaths, outcome: BtwOutcome)
 	await appendFile(paths.answer, `${FOOTER}${sanitizeAnswerText(summary)}\n`, "utf8").catch(() => undefined);
 	if (outcome.status === "error") deps.notify(`BTW: ${outcome.message}`, "error");
 	// A zero cache read is the one failure the footer cannot show (it omits
-	// the `cache read` segment when the value is 0), so it is notified too: the
-	// first question after an idle gap legitimately misses, any other means an
-	// invariant above is broken and the session is being re-billed in full.
-	if (outcome.status === "ok" && outcome.usage !== undefined && outcome.usage.cacheRead === 0) {
+	// the `cache read` segment when the value is 0), so it is notified too — but
+	// only when the context was large enough that a cache read was clearly
+	// expected. A short session, or the first question after an idle gap,
+	// cold-starts with a small `input` that the footer already shows; warning
+	// those trains the user to distrust the warning.
+	const ZERO_CACHE_WARN_INPUT_TOKENS = 20_000;
+	if (
+		outcome.status === "ok" &&
+		outcome.usage !== undefined &&
+		outcome.usage.cacheRead === 0 &&
+		outcome.usage.input >= ZERO_CACHE_WARN_INPUT_TOKENS
+	) {
 		deps.notify("BTW: the answer reported 0 cached tokens read — the cache invariants in CACHE.md are broken", "warning");
 	}
 }
@@ -533,7 +534,7 @@ export async function launchBtwPanel(deps: BtwDeps, ctx: BtwContext, rawQuestion
 		await startViewer(deps, paths, ctx.cwd);
 		await openBtwPopup(deps, paths, sessionId);
 	} catch (error) {
-		await cleanupPanel(deps, paths);
+		await destroyPanel(deps, paths);
 		deps.notify(`Could not start the BTW panel: ${messageOf(error)}`, "error");
 		return null;
 	}
@@ -553,6 +554,14 @@ export async function launchBtwPanel(deps: BtwDeps, ctx: BtwContext, rawQuestion
 				signal: controller.signal,
 				abort: () => controller.abort(),
 				onText: async (text) => {
+					// A second pi on the same session id resets this run dir under us
+					// and writes its own owner pid; appending then interleaves two
+					// answers into one file. Stop the request instead of writing into
+					// a panel this process no longer owns.
+					if ((await readOwnerPid(paths)) !== process.pid) {
+						controller.abort();
+						return;
+					}
 					await appendFile(paths.answer, text, "utf8");
 				},
 			});
@@ -576,6 +585,11 @@ export default function btwExtension(pi: ExtensionAPI): void {
 			agentDir: getAgentDir(),
 			isPidAlive: defaultIsPidAlive,
 			blockImages: settings.images?.blockImages === true,
+			// The main loop forwards these so the provider maps thinking and
+			// attributes the request identically; see request.ts.
+			thinkingBudgets: settings.thinkingBudgets,
+			thinkingLevel: pi.getThinkingLevel(),
+			enableInstallTelemetry: settings.enableInstallTelemetry === true,
 		};
 	};
 	const stopActive = async (): Promise<void> => {
@@ -633,7 +647,7 @@ export default function btwExtension(pi: ExtensionAPI): void {
 					active = launch;
 					// The completion holds the launch's closure; drop the slot once
 					// it finishes so the entries snapshot is not retained.
-					void launch.completion.finally(() => {
+					void launch.completion.catch(() => undefined).finally(() => {
 						if (active === launch) active = undefined;
 					});
 				}

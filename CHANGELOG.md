@@ -30,8 +30,19 @@ Added:
   `session_start` reaps only dead owners (a live sibling process keeps its
   panel), `session_shutdown` kills the server before deleting the answer and
   the socket, and `reload` keeps it. Known limits: the first question after an
-  idle gap pays full price once, the viewer renders raw Markdown, and a session
-  with an active `/goal` diverges from the main request's forced system prompt.
+  idle gap pays full price once, the viewer renders raw Markdown, and a
+  session with an active `/goal` diverges from the main request's forced system
+  prompt.
+
+  A pre-merge review hardened parity and ownership. The side request now
+  forwards the resolved thinking level (not the projection's `"off"` default)
+  and the settings' thinking budgets so the provider maps `reasoning` through
+  the same tables, reproduces the telemetry attribution headers the main loop
+  merges, and sums ignored tool-call counts across the continuation. The
+  answer-file appender checks the owner pid and stops instead of
+  interleaving into a panel a sibling pi reset under it, and the zero-cache
+  warning only fires when `input` is large enough that a cache read was
+  expected, so a short cold start no longer trains the user to distrust it.
 
 - **`/voice` — dictate with the phone as the microphone.** `/voice` starts
   `termux-microphone-record` on a phone reachable over ssh; the second `/voice`

@@ -9,6 +9,8 @@
 // answer.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import * as path from "node:path";
 import { test } from "node:test";
 
 import {
@@ -430,7 +432,47 @@ test("a model that keeps calling tools is cut off after one continuation", async
 	assert.equal(calls, 2, "the continuation is attempted exactly once");
 	assert.equal(outcome.status, "error");
 	assert.match(outcome.status === "error" ? outcome.message : "", /kept trying to use tools/);
-	assert.equal(outcome.ignoredToolCalls, 1);
+	assert.equal(outcome.ignoredToolCalls, 2, "both attempts' ignored calls count, not just the last");
+});
+
+test("a tool-calling attempt followed by a text answer reports the ignored call", async () => {
+	let calls = 0;
+	const modelRegistry = {
+		getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "key", headers: {} }),
+		streamSimple: () => {
+			calls += 1;
+			const stream = createAssistantMessageEventStream();
+			if (calls === 1) {
+				stream.push({
+					type: "done",
+					reason: "toolUse",
+					message: assistant({
+						content: [
+							{ type: "text", text: "checking" },
+							{ type: "toolCall", id: "c1", name: "grep", arguments: {} },
+						],
+						stopReason: "toolUse",
+					}),
+				});
+			} else {
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "the answer", partial: assistant() });
+				stream.push({ type: "done", reason: "stop", message: assistant({ content: [{ type: "text", text: "the answer" }] }) });
+			}
+			return stream;
+		},
+	};
+	const outcome = await runBtwRequest({
+		modelRegistry: modelRegistry as never,
+		model: { provider: "opencode-go", id: "test-model" } as never,
+		sessionId: SESSION_ID,
+		entries: ENTRIES,
+		leafId: "a1",
+		question: "why?",
+		onText: () => undefined,
+	});
+	assert.equal(calls, 2, "the false start is continued once");
+	assert.equal(outcome.status, "ok");
+	assert.equal(outcome.ignoredToolCalls, 1, "the attempt-1 call is disclosed even though attempt 2 succeeded");
 });
 
 test("a failing onText handler is reported through the outcome and aborts the request", async () => {
@@ -544,4 +586,89 @@ test("session routing headers are only added for opencode providers", () => {
 		"x-opencode-client": "pi",
 	});
 	assert.deepEqual(providerSessionHeaders({ provider: "anthropic", baseUrl: "https://api.anthropic.com" }, SESSION_ID), {});
+});
+
+test("attribution headers mirror the main loop when install telemetry is on", () => {
+	const on = { enableInstallTelemetry: true };
+	assert.deepEqual(providerSessionHeaders({ provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1" }, SESSION_ID, on), {
+		"HTTP-Referer": "https://pi.dev",
+		"X-OpenRouter-Title": "pi",
+		"X-OpenRouter-Categories": "cli-agent",
+	});
+	assert.deepEqual(providerSessionHeaders({ provider: "nvidia", baseUrl: "https://integrate.api.nvidia.com/v1" }, SESSION_ID, on), {
+		"X-BILLING-INVOKE-ORIGIN": "Pi",
+	});
+	assert.deepEqual(providerSessionHeaders({ provider: "cloudflare-ai-gateway", baseUrl: "https://gateway.ai.cloudflare.com" }, SESSION_ID, on), {
+		"User-Agent": "pi-coding-agent",
+	});
+	assert.deepEqual(providerSessionHeaders({ provider: "anthropic", baseUrl: "https://api.anthropic.com" }, SESSION_ID, on), {});
+});
+
+test("attribution headers stay off when telemetry is off or only PI_TELEMETRY says yes", () => {
+	const openrouter = { provider: "openrouter", baseUrl: "https://openrouter.ai/api/v1" };
+	assert.deepEqual(providerSessionHeaders(openrouter, SESSION_ID, { enableInstallTelemetry: false }), {});
+	assert.deepEqual(providerSessionHeaders(openrouter, SESSION_ID, {}), {});
+	process.env.PI_TELEMETRY = "yes";
+	try {
+		assert.deepEqual(providerSessionHeaders(openrouter, SESSION_ID, { enableInstallTelemetry: false }), {
+			"HTTP-Referer": "https://pi.dev",
+			"X-OpenRouter-Title": "pi",
+			"X-OpenRouter-Categories": "cli-agent",
+		});
+	} finally {
+		delete process.env.PI_TELEMETRY;
+	}
+});
+
+test("runBtwRequest forwards the main loop's thinking budgets", async () => {
+	const { calls, stream, modelRegistry } = fakeRegistry();
+	stream.push({ type: "text_delta", contentIndex: 0, delta: "answer", partial: assistant() });
+	stream.push({ type: "done", reason: "stop", message: assistant({ content: [{ type: "text", text: "answer" }] }) });
+	const budgets = { minimal: 1024, low: 2048, medium: 4096, high: 8192 };
+	await runBtwRequest({
+		modelRegistry: modelRegistry as never,
+		model: { provider: "anthropic", id: "test-model" } as never,
+		sessionId: SESSION_ID,
+		entries: ENTRIES,
+		leafId: "cm1",
+		question: "why?",
+		thinkingBudgets: budgets,
+		onText: () => undefined,
+	});
+	const sent = calls[0] as { options: Record<string, unknown> };
+	assert.deepEqual(sent.options["thinkingBudgets"], budgets, "the provider maps thinking through the same budgets");
+});
+
+test("the resolved thinking level wins over the projection's default", async () => {
+	// A branch with no thinking_level_change entry makes the projection read
+	// "off" (session-manager.js:147), while the main request resolves the
+	// session level through settings — pi's getThinkingLevel().
+	const noThinkingEntries = ENTRIES.filter((entry) => entry.type !== "thinking_level_change") as SessionEntry[];
+	assert.equal(buildBtwRequestParts(noThinkingEntries, "a1", "why?").thinkingLevel, "off", "the projection defaults to off");
+	assert.equal(
+		buildBtwRequestParts(noThinkingEntries, "a1", "why?", 0, { thinkingLevel: "medium" }).thinkingLevel,
+		"medium",
+		"the resolved level is forwarded so reasoning matches the main request",
+	);
+});
+
+// The request core mirrors two pi internals that are NOT exported — the image-
+// block placeholder (`sdk.js`) and the attribution-header set
+// (`provider-attribution.js`). Both were compared line by line and are correct
+// today; if pi ever changes them, the side request silently diverges from the
+// main request and the cache misses. This guard fails on either side drifting.
+test("the mirrored pi internals have not drifted", () => {
+	const REPO_ROOT = path.resolve(new URL("../../../..", import.meta.url).pathname);
+	const requestSrc = readFileSync(path.join(REPO_ROOT, ".pi/extensions/btw/request.ts"), "utf8");
+	const piDist = path.join(REPO_ROOT, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "core");
+	const sdk = readFileSync(path.join(piDist, "sdk.js"), "utf8");
+	const attribution = readFileSync(path.join(piDist, "provider-attribution.js"), "utf8");
+
+	assert.ok(requestSrc.includes('"Image reading is disabled."'), "btw mirrors the placeholder");
+	assert.ok(sdk.includes("Image reading is disabled"), "pi's sdk still uses the same placeholder");
+
+	for (const literal of ["https://pi.dev", "cli-agent", "X-BILLING-INVOKE-ORIGIN", "pi-coding-agent"]) {
+		assert.ok(attribution.includes(literal), `pi's provider-attribution still sends ${literal}`);
+		assert.ok(requestSrc.includes(literal), `btw still mirrors ${literal}`);
+	}
 });

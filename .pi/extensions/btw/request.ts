@@ -101,24 +101,34 @@ function addUsage(left: Usage | undefined, right: Usage | undefined): Usage | un
 }
 
 /**
- * The per-session routing headers pi's own request path adds.
+ * The per-session headers pi's own request path adds.
  *
- * The SDK applies `mergeProviderAttributionHeaders` before dispatch, including
- * `x-opencode-session` for opencode providers; a raw `modelRegistry.streamSimple`
- * call (the only request API an extension has) skips that transform. On
- * opencode-go the header is mandatory — a request without it is refused with
- * `MissingSessionID` — and it is also what pins the prompt-cache lineage, so
- * passing the MAIN session id is precisely what lets this request reuse the
- * main conversation's cache.
+ * The SDK merges `mergeProviderAttributionHeaders` before dispatch, which a raw
+ * `modelRegistry.streamSimple` call (the only request API an extension has)
+ * skips. Two groups are reproduced here, both from pi's unexported
+ * `dist/core/provider-attribution.js`:
  *
- * Mirrors pi's rule: provider `opencode`/`opencode-go`, or an opencode.ai host.
- * The telemetry attribution headers other providers use are not needed for
- * routing and are left to the SDK path.
+ * - Session routing: on opencode providers `x-opencode-session` is mandatory
+ *   (a request without it is refused with `MissingSessionID`) and is what pins
+ *   the prompt-cache lineage, so the MAIN session id is sent — precisely what
+ *   lets this request reuse the main conversation's cache.
+ * - Telemetry attribution: the per-provider headers OpenRouter / NVIDIA NIM /
+ *   Cloudflare read to bucket the request. The main loop sends them whenever
+ *   install telemetry is on; dropping them would make side requests attribute
+ *   to no app.
  */
 export function providerSessionHeaders(
 	model: Pick<Model<Api>, "provider" | "baseUrl">,
 	sessionId: string,
+	options: { enableInstallTelemetry?: boolean } = {},
 ): Record<string, string> {
+	return {
+		...attributionHeaders(model, installTelemetryEnabled(options.enableInstallTelemetry)),
+		...sessionRoutingHeaders(model, sessionId),
+	};
+}
+
+function sessionRoutingHeaders(model: Pick<Model<Api>, "provider" | "baseUrl">, sessionId: string): Record<string, string> {
 	let host: string | undefined;
 	try {
 		host = typeof model.baseUrl === "string" ? new URL(model.baseUrl).hostname : undefined;
@@ -129,6 +139,43 @@ export function providerSessionHeaders(
 		return {};
 	}
 	return { "x-opencode-session": sessionId, "x-opencode-client": "pi" };
+}
+
+function attributionHeaders(model: Pick<Model<Api>, "provider" | "baseUrl">, enabled: boolean): Record<string, string> {
+	if (!enabled) return {};
+	let host: string | undefined;
+	try {
+		host = typeof model.baseUrl === "string" ? new URL(model.baseUrl).hostname : undefined;
+	} catch {
+		host = undefined;
+	}
+	if (model.provider === "openrouter" || (typeof model.baseUrl === "string" && model.baseUrl.includes("openrouter.ai"))) {
+		return {
+			"HTTP-Referer": "https://pi.dev",
+			"X-OpenRouter-Title": "pi",
+			"X-OpenRouter-Categories": "cli-agent",
+		};
+	}
+	if (model.provider === "nvidia" || host === "integrate.api.nvidia.com") {
+		return { "X-BILLING-INVOKE-ORIGIN": "Pi" };
+	}
+	if (
+		model.provider === "cloudflare-workers-ai" ||
+		model.provider === "cloudflare-ai-gateway" ||
+		host === "api.cloudflare.com" ||
+		host === "gateway.ai.cloudflare.com"
+	) {
+		return { "User-Agent": "pi-coding-agent" };
+	}
+	return {};
+}
+
+/** Pi's `isInstallTelemetryEnabled`, reproduced: the `PI_TELEMETRY` env flag wins
+ * when set, otherwise the settings flag decides. */
+function installTelemetryEnabled(enableInstallTelemetry: boolean | undefined): boolean {
+	const env = process.env.PI_TELEMETRY;
+	if (env !== undefined) return env === "1" || env.toLowerCase() === "true" || env.toLowerCase() === "yes";
+	return enableInstallTelemetry === true;
 }
 
 /**
@@ -181,7 +228,7 @@ export function buildBtwRequestParts(
 	leafId: string | null | undefined,
 	question: string,
 	now = Date.now(),
-	options: { blockImages?: boolean } = {},
+	options: { blockImages?: boolean; thinkingLevel?: string } = {},
 ): BtwRequestParts {
 	const projection = buildSessionContext(entries as SessionEntry[], leafId ?? undefined);
 	const converted = convertToLlm(projection.messages);
@@ -196,7 +243,12 @@ export function buildBtwRequestParts(
 				},
 			],
 		},
-		thinkingLevel: projection.thinkingLevel,
+		// The projection reads `"off"` when the branch carries no
+		// `thinking_level_change` entry, while the main request resolves the
+		// session's thinking level through settings. The resolved level wins so
+		// both requests carry the same `reasoning`; the projection is the
+		// fallback for callers (tests) that do not have it.
+		thinkingLevel: options.thinkingLevel ?? projection.thinkingLevel,
 	};
 }
 
@@ -354,6 +406,12 @@ export interface BtwRequestDeps {
 	abort?: () => void;
 	/** Mirror the main loop's image-blocking wrapper when the setting is on. */
 	blockImages?: boolean;
+	/** The main loop's thinking budgets; the provider maps the thinking level through them. */
+	thinkingBudgets?: { minimal?: number; low?: number; medium?: number; high?: number };
+	/** The session's resolved thinking level (pi's `getThinkingLevel()`), forwarded as `reasoning`. */
+	thinkingLevel?: string;
+	/** Whether install telemetry is on; gates the attribution headers. */
+	enableInstallTelemetry?: boolean;
 	onText: (text: string) => void | Promise<void>;
 }
 
@@ -376,9 +434,10 @@ export async function runBtwRequest(deps: BtwRequestDeps): Promise<BtwOutcome> {
 
 	const parts = buildBtwRequestParts(deps.entries, deps.leafId, deps.question, Date.now(), {
 		blockImages: deps.blockImages,
+		thinkingLevel: deps.thinkingLevel,
 	});
 	const headers = {
-		...providerSessionHeaders(deps.model, deps.sessionId),
+		...providerSessionHeaders(deps.model, deps.sessionId, { enableInstallTelemetry: deps.enableInstallTelemetry }),
 		...(auth.headers ?? {}),
 	};
 	const options = {
@@ -391,6 +450,10 @@ export async function runBtwRequest(deps: BtwRequestDeps): Promise<BtwOutcome> {
 		// cache key also includes.
 		sessionId: deps.sessionId,
 		reasoning: reasoningOption(parts.thinkingLevel),
+		// The main loop forwards its thinking budgets so the provider maps the
+		// thinking level identically; a default-budget mapping here could pin a
+		// different cache lineage for sessions with custom budgets.
+		...(deps.thinkingBudgets !== undefined ? { thinkingBudgets: deps.thinkingBudgets } : {}),
 		// No toolChoice: setting it changes the provider's cache key (see the
 		// module header). The declared tools stay in the prefix; the
 		// instruction asks the model not to use them.
@@ -403,6 +466,7 @@ export async function runBtwRequest(deps: BtwRequestDeps): Promise<BtwOutcome> {
 	const MAX_ATTEMPTS = 2;
 	let messages: Message[] = parts.context.messages;
 	let usage: Usage | undefined;
+	let ignoredTotal = 0;
 	for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt += 1) {
 		let stream: AssistantMessageEventStream;
 		try {
@@ -416,15 +480,19 @@ export async function runBtwRequest(deps: BtwRequestDeps): Promise<BtwOutcome> {
 			abort: deps.abort,
 		});
 		usage = addUsage(usage, result.outcome.usage);
+		// Every attempt's ignored calls count, not just the last one: a model
+		// that calls tools on both attempts billed-and-ignored two, and the
+		// footer must be able to say so.
+		ignoredTotal += result.outcome.ignoredToolCalls ?? 0;
 		if (result.toolCalls.length === 0 || result.final === undefined || result.outcome.status === "cancelled") {
-			return { ...result.outcome, usage };
+			return withIgnored({ ...result.outcome, usage }, ignoredTotal > 0 ? ignoredTotal : undefined);
 		}
 		if (attempt === MAX_ATTEMPTS - 1) {
 			return {
 				status: "error",
 				message: "the model kept trying to use tools; the side panel is text-only, so ask again",
 				usage,
-				ignoredToolCalls: result.toolCalls.length,
+				ignoredToolCalls: ignoredTotal,
 			};
 		}
 		const toolResults = result.toolCalls.map((call) => ({

@@ -106,8 +106,9 @@ question after a gap pays full price once (and warms the cache for the next
 main turn). Escape closes the
 popup and never reaches the viewer; the answer keeps streaming into its file.
 Copying text out needs nested tmux copy-mode (`C-b C-b`, because the outer
-client keeps the prefix). The viewer is a plain `tail -F` pane, so it scrolls natively (copy
-mode, mouse wheel) like the subagent attach views; the next `/btw` restarts
+client keeps the prefix). The viewer is a plain `tail -F` pane, so it scrolls natively — copy mode
+(`C-b [`), and the mouse wheel where the tmux config sets `set -g mouse on` (the
+devcontainer's does) — like the subagent attach views; the next `/btw` restarts
 the viewer on the same answer. On a session with an active `/goal` the
 main request's forced system prompt differs, so the panel may re-bill the
 context and show goal notes; `.pi/extensions/btw/request.ts` documents that

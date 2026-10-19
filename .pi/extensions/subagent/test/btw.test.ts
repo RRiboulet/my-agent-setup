@@ -249,6 +249,7 @@ async function loadFactory(exec: (command: string, args: string[]) => Promise<un
 		},
 		on: on ?? (() => undefined),
 		getSettings: () => ({ images: { blockImages: false } }),
+		getThinkingLevel: () => "high",
 		exec,
 	} as never);
 	assert.ok(handler, "the factory must register a command");
@@ -507,6 +508,62 @@ test("an answer that reads no cache warns instead of failing quietly", async () 
 	});
 });
 
+test("a small cold start does not warn about a zero cache read", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withNoTmux(async () => {
+			const { notifications, deps } = fakeDeps(agentDir);
+			const registry = streamingRegistry("Hello", {
+				...ZERO_USAGE,
+				input: 4_000,
+				cacheRead: 0,
+				output: 3,
+				totalTokens: 4_003,
+			});
+			const launch = await launchBtwPanel(deps, fakeContext(registry.modelRegistry), "why?");
+			assert.ok(launch);
+			await launch.completion;
+			assert.ok(
+				!notifications.some((n) => /0 cached tokens read/.test(n.message)),
+				"a short cold start is not warned; the footer's input already shows the size",
+			);
+		});
+	});
+});
+
+test("a sibling reset under a streaming answer stops the write instead of interleaving", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withNoTmux(async () => {
+			const { deps } = fakeDeps(agentDir);
+			const paths = buildBtwPaths(agentDir, SID);
+			let pushSecond: (() => void) | undefined;
+			const modelRegistry = {
+				getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "key", headers: {} }),
+				streamSimple: (_model: unknown, _context: Context, options: Record<string, unknown>) => {
+					const stream = createAssistantMessageEventStream();
+					stream.push({ type: "text_delta", contentIndex: 0, delta: "first-", partial: assistant() });
+					pushSecond = () => {
+						stream.push({ type: "text_delta", contentIndex: 0, delta: "second-", partial: assistant() });
+					};
+					(options["signal"] as AbortSignal | undefined)?.addEventListener("abort", () => {
+						stream.push({ type: "error", reason: "aborted", error: assistant({ stopReason: "aborted" }) });
+					});
+					return stream;
+				},
+			};
+			const launch = await launchBtwPanel(deps, fakeContext(modelRegistry), "why?");
+			assert.ok(launch);
+			await waitFor(() => readFileSync(paths.answer, "utf8").includes("first-"));
+			// a second pi on this session id resets the run dir under us
+			await writeFile(paths.ownerPid, `${process.pid + 1}\n`);
+			pushSecond?.();
+			await launch.completion;
+			const answer = readFileSync(paths.answer, "utf8");
+			assert.ok(answer.includes("first-"), "the delta this process owned is kept");
+			assert.ok(!answer.includes("second-"), "the sibling's answer is not interleaved into ours");
+		});
+	});
+});
+
 test("a provider error lands in the answer footer with its usage", async () => {
 	await withTempAgentDir(async (agentDir) => {
 		await withNoTmux(async () => {
@@ -701,6 +758,7 @@ test("the factory registers the session lifecycle handlers", async () => {
 			registerCommand: () => undefined,
 			exec: async () => ({ code: 0, stdout: "", stderr: "" }),
 			getSettings: () => ({ images: { blockImages: false } }),
+			getThinkingLevel: () => "high",
 			on: (name: string, handler: unknown) => {
 				events.set(name, handler);
 			},

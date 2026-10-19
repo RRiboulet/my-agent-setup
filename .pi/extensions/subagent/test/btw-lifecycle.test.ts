@@ -1,11 +1,12 @@
 // Lifecycle tests for /btw panel reaping.
 //
-// Risk covered: a side panel is a second pi process with a tmux session, a
-// an answer file (a Markdown copy of the side answer) and a socket file. Leaving any of
-// them behind after a crash is both litter and a small disclosure; killing a
-// panel whose owner is still running is worse. These tests pin the reason
-// table, the owner-pid guard on both start and shutdown, the cross-session
-// sweep, the kill-before-delete order, the failed-kill retry and idempotency.
+// Risk covered: a panel is a viewer in its own tmux session plus an answer
+// file (`answer.md`) and a socket file, all owned by this pi process. Leaving
+// any of them behind after a crash is both litter and a small disclosure;
+// killing a panel whose owner is still running is worse. These tests pin the
+// reason table, the owner-pid guard on both start and shutdown, the cross-
+// session sweep, the kill-before-delete order, the failed-kill retry and
+// idempotency.
 
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
