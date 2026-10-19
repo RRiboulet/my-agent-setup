@@ -112,7 +112,13 @@ export interface VoiceSeams {
 }
 
 export function createVoiceExtension(pi: ExtensionAPI, seams: VoiceSeams = {}): void {
-	const config = loadConfig();
+	// Config warnings are collected rather than printed: `loadConfig` runs while
+	// the extension is loading, before any ctx exists, and nothing in pi's
+	// interactive mode captures `console.*`, so a stderr warning would be
+	// invisible in the TUI — a rejected shortcut would silently fall back to the
+	// defaults. They are shown once, at the first `session_start`.
+	const configWarnings: string[] = [];
+	const config = loadConfig({ warn: (message) => configWarnings.push(message) });
 	const doFetch = seams.fetch ?? fetch;
 	// The recorder outlives any single ctx (session replacement creates new
 	// ones), so status rendering uses the most recent one.
@@ -181,8 +187,9 @@ export function createVoiceExtension(pi: ExtensionAPI, seams: VoiceSeams = {}): 
 	});
 
 	// The ids are config strings, so the cast is the runtime validator's
-	// (`shortcutField`) word, not the compiler's — an unparseable id never
-	// reaches here. An empty list disables the shortcut entirely.
+	// (`shortcutField` → `parseShortcutIds`) word, not the compiler's: a value
+	// that is not a pi key, or is one pi can never match with that modifier,
+	// never reaches here. An empty list disables the shortcut entirely.
 	for (const id of config.shortcut) {
 		pi.registerShortcut(id as KeyId, {
 			description: "Dictate (toggle the phone recorder)",
@@ -191,6 +198,13 @@ export function createVoiceExtension(pi: ExtensionAPI, seams: VoiceSeams = {}): 
 			},
 		});
 	}
+
+	pi.on("session_start", async (_event, ctx) => {
+		for (const warning of configWarnings.splice(0)) {
+			if (ctx.hasUI) ctx.ui.notify(warning, "warning");
+			else console.warn(warning);
+		}
+	});
 
 	pi.on("session_shutdown", async () => {
 		await recorder.shutdown();

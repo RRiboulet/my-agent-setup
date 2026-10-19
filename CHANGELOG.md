@@ -23,16 +23,27 @@ Added:
 
   The setting takes a single id, a comma-separated string, or an array, and is
   validated against pi's own key grammar at the config boundary — the base-key
-  set is derived from pi's exported `Key`, with a test that round-trips every id
-  `parseKey` can produce, so a key added to pi is not silently refused here. A
-  comma-based or `+`-based key (`ctrl+,`, `ctrl++`) is read as one id rather than
-  a broken list. An empty list disables the shortcut, and an unparseable value
-  warns and keeps the previous setting so a typo cannot take the toggle away;
-  the warning names the bad entry, because the fallback (defaults still bound)
-  would otherwise make a rejected rebind look like a working one. `alt+r` is two
-  bytes on a legacy transport, so a link that delivers ESC and `r` more than
-  ~10 ms apart reads ESC as an interrupt instead — `PI_TUI_ESC_TIMEOUT` is the
-  lever, and the README says so.
+  set is derived from pi's exported `Key`, with tests that round-trip ids
+  `parseKey` produces and cross-check `matchesKey` in both directions, so a key
+  added to pi is not silently refused here. Validation does not stop at the
+  grammar: `ctrl+f5` and `alt+escape` parse but can never fire, because pi
+  refuses a modifier on `escape` and on `f1`–`f12`, so those are rejected too
+  rather than registered as dead keys. A comma-based or `+`-based key (`ctrl+,`,
+  `ctrl++`) is read as one id rather than a broken list. `[]` or `""` disables
+  the shortcut, from the file or the environment. **One invalid entry rejects the
+  whole value** and keeps the previous setting — the same all-or-nothing rule as
+  every other voice field — so a typo cannot take the toggle away, including by
+  half-applying a list.
+
+  A rejected value is now reported where it can be seen. It used to go through
+  `console.warn` at extension load, and pi's interactive mode never captures
+  `console.*`, so a mistyped override silently left the defaults bound and looked
+  like a shortcut that simply did not work. Warnings are collected while the
+  config loads and shown once, as a notification, at `session_start`; a headless
+  session still gets them on stderr. `alt+r` itself is two bytes on a legacy
+  transport, so a link that delivers ESC and `r` more than ~10 ms apart reads ESC
+  as an interrupt instead — `PI_TUI_ESC_TIMEOUT` is the lever, and the README
+  says so.
 
 ## v1.7.0 — 2026-10-19
 

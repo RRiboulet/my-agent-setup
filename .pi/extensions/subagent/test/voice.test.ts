@@ -52,7 +52,7 @@ import {
 } from "../../voice/transcribe.ts";
 import { createVoiceExtension, formatElapsed, statusText } from "../../voice/index.ts";
 import { normalizeKeyId, parseShortcutIds } from "../../voice/shortcut.ts";
-import { parseKey } from "@earendil-works/pi-tui";
+import { matchesKey, parseKey } from "@earendil-works/pi-tui";
 import { MAX_SSH_STDERR_BYTES, MAX_SSH_STDOUT_BYTES, makeSshRun } from "../../voice/transport.ts";
 import { waitFor, withEnv, withTempAgentDir } from "./helpers.ts";
 
@@ -560,6 +560,7 @@ test("normalizeKeyId accepts pi's grammar and rejects anything else", () => {
 	assert.equal(normalizeKeyId("ctrl+alt+]"), "ctrl+alt+]");
 	assert.equal(normalizeKeyId("PageUp"), "pageup");
 	assert.equal(normalizeKeyId("f12"), "f12");
+	assert.equal(normalizeKeyId("escape"), "escape");
 	assert.equal(normalizeKeyId("+"), "+");
 	assert.equal(normalizeKeyId("ctrl+space"), "ctrl+space");
 	assert.equal(normalizeKeyId("ctrl+super+k"), "ctrl+super+k");
@@ -576,52 +577,81 @@ test("normalizeKeyId accepts pi's grammar and rejects anything else", () => {
 	assert.equal(normalizeKeyId("ctrl+shift+r+r"), undefined);
 	assert.equal(normalizeKeyId("ctrl+++"), undefined);
 	assert.equal(normalizeKeyId("ctrl+shift+alt+super+ctrl+r"), undefined);
-});
 
-/**
- * The drift guard the reviews asked for: the accepted ids are tied to pi's own
- * parser instead of to a hand-copied list. `parseKey` is the function `matchesKey`
- * uses, so every id it can produce must be one `normalizeKeyId` accepts — if pi
- * gains a key, this fails rather than silently refusing it.
- */
-test("normalizeKeyId accepts every id pi's own parser can produce", () => {
-	const sequences = [
-		"\x1br", // alt+r, the legacy form
-		"\x12", // ctrl+r
-		"\x1b[114;6u", // shift+ctrl+r, Kitty
-		"\x1b[27;5;43~", // ctrl++, modifyOtherKeys
-		"\x1b[43;5u", // ctrl++, Kitty
-		"\x1b[27;5;44~", // ctrl+,
-		"\x1b[Z", // shift+tab
-		"\x1b\r", // alt+enter
-		"\x1b[5~", // pageUp
-		"\x00", // ctrl+space
-	];
-	for (const sequence of sequences) {
-		const parsed = parseKey(sequence);
-		assert.ok(parsed, `${JSON.stringify(sequence)} should parse to a key id`);
-		assert.notEqual(normalizeKeyId(parsed), undefined, `normalizeKeyId must accept pi's own ${parsed}`);
+	// Grammatical but dead: pi's matcher refuses a modified escape or f-key
+	// outright, so registering one would be a shortcut that never fires.
+	for (const id of ["alt+escape", "ctrl+esc", "ctrl+f5", "shift+f12", "alt+super+f1"]) {
+		assert.equal(normalizeKeyId(id), undefined, `${id} can never match, so it is refused`);
 	}
 });
 
-test("parseShortcutIds reads a string, a comma-separated string and an array, deduping", () => {
+/**
+ * `matchesKey` agrees with the refusal above, and agrees with the ids we keep.
+ * This is the check that makes the module's premise testable: for a sample of
+ * sequences, whatever pi's own parser says about a sequence is what we accept.
+ */
+test("normalizeKeyId agrees with matchesKey about which ids can fire", () => {
+	const cases: Array<[sequence: string, id: string]> = [
+		["\x1br", "alt+r"], // alt+r, the legacy form
+		["\x12", "ctrl+r"],
+		["\x1b[114;6u", "shift+ctrl+r"], // Kitty
+		["\x1b[27;5;43~", "ctrl++"], // modifyOtherKeys
+		["\x1b[27;5;44~", "ctrl+,"],
+		["\x1b[Z", "shift+tab"],
+		["\x1b\r", "alt+enter"],
+		["\x1b[5~", "pageUp"],
+		["\x1b[15~", "f5"],
+		["\x1b", "escape"],
+	];
+	for (const [sequence, id] of cases) {
+		assert.equal(parseKey(sequence), id, `${JSON.stringify(sequence)} parses to ${id}`);
+		assert.equal(normalizeKeyId(id), id.toLowerCase(), `we accept ${id}`);
+		assert.equal(matchesKey(sequence, id), true, `pi matches ${id}`);
+	}
+	// The refusal is not a guess: pi really cannot match these.
+	for (const [sequence, id] of [
+		["\x1b\x1b", "alt+escape"],
+		["\x1b[15;5~", "ctrl+f5"],
+		["\x1b[24;2~", "shift+f12"],
+	] as Array<[string, string]>) {
+		assert.equal(normalizeKeyId(id), undefined, `we refuse ${id}`);
+		assert.equal(matchesKey(sequence, id), false, `pi cannot match ${id}`);
+	}
+});
+
+test("parseShortcutIds reads a string, a list and an array, and rejects a bad value whole", () => {
 	const warns: string[] = [];
 	const warn = (message: string) => warns.push(message);
 	assert.deepEqual(parseShortcutIds("alt+r", "file", warn), ["alt+r"]);
 	assert.deepEqual(parseShortcutIds("ctrl+shift+r, ALT+R", "file", warn), ["ctrl+shift+r", "alt+r"]);
 	assert.deepEqual(parseShortcutIds(["alt+r", "alt+r", "f12"], "file", warn), ["alt+r", "f12"]);
-	assert.deepEqual(parseShortcutIds("ctrl+shift+r, nope, bogus", "file", warn), ["ctrl+shift+r"]);
-	assert.equal(warns.length, 2, "each bad entry warns once");
-	assert.deepEqual(parseShortcutIds("", "file", warn), []);
+	assert.deepEqual(parseShortcutIds("", "file", warn), [], "an empty setting disables");
+	assert.deepEqual(parseShortcutIds("   ", "file", warn), []);
 	assert.deepEqual(parseShortcutIds([], "file", warn), []);
-	assert.deepEqual(parseShortcutIds(42, "file", warn), []);
-	assert.equal(warns.length, 3, "each bad entry and the wrong type warn once");
-	assert.match(warns[2], /expected a pi key/);
+	assert.equal(warns.length, 0);
+
+	// One bad entry rejects the whole value, so the caller keeps what it had.
+	assert.equal(parseShortcutIds("ctrl+shift+r, nope", "file", warn), undefined);
+	assert.equal(parseShortcutIds(["alt+r", 42], "file", warn), undefined);
+	assert.equal(parseShortcutIds([""], "file", warn), undefined, '[""] is not the same as []');
+	assert.equal(parseShortcutIds(42, "file", warn), undefined);
+	assert.equal(parseShortcutIds(null, "file", warn), undefined);
+	assert.equal(warns.length, 5, "each rejection warns once");
 
 	// A key whose own id contains the separator is read whole, not as a list.
 	assert.deepEqual(parseShortcutIds("ctrl+,", "file", warn), ["ctrl+,"]);
 	assert.deepEqual(parseShortcutIds("ctrl++", "file", warn), ["ctrl++"]);
 	assert.deepEqual(parseShortcutIds(["ctrl+,", "alt+r"], "file", warn), ["ctrl+,", "alt+r"]);
+
+	// Modifier order is not an identity: these name one physical key.
+	assert.deepEqual(parseShortcutIds("ctrl+shift+r, shift+ctrl+r", "file", warn), ["ctrl+shift+r"]);
+	assert.deepEqual(parseShortcutIds(["shift+ctrl+r", "ctrl+shift+r"], "file", warn), ["shift+ctrl+r"]);
+
+	// A comma key inside a list keeps the entry the user actually wrote in the warning.
+	warns.length = 0;
+	assert.equal(parseShortcutIds("alt+r,ctrl+,", "file", warn), undefined);
+	assert.equal(warns.length, 1);
+	assert.match(warns[0], /array/);
 });
 
 test("shortcut: defaults, file, env, invalid and disabled", async () => {
@@ -644,13 +674,13 @@ test("shortcut: defaults, file, env, invalid and disabled", async () => {
 			);
 			assert.deepEqual(loadConfig({ warn: () => {} }).shortcut, ["ctrl+r", "alt+r"]);
 
-			// An invalid entry warns and is dropped; a value with nothing usable
-			// keeps the default rather than silently disabling the shortcut.
+			// One bad entry rejects the whole value: the field keeps its default
+			// rather than half-applying, the same rule as every other field.
 			await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ shortcut: ["ctrl+r", "nope"] }));
 			const warns: string[] = [];
 			assert.deepEqual(
 				loadConfig({ warn: (message) => warns.push(message) }).shortcut,
-				["ctrl+r"],
+				[...DEFAULT_SHORTCUTS],
 			);
 			assert.equal(warns.length, 1);
 			assert.match(warns[0], /nope/);
@@ -671,6 +701,16 @@ test("shortcut: defaults, file, env, invalid and disabled", async () => {
 			);
 			assert.equal(wrongType.length, 1);
 			assert.match(wrongType[0], /expected a pi key/);
+
+			// An id that is grammatical but can never fire is refused too.
+			await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ shortcut: "ctrl+f5" }));
+			const dead: string[] = [];
+			assert.deepEqual(
+				loadConfig({ warn: (message) => dead.push(message) }).shortcut,
+				[...DEFAULT_SHORTCUTS],
+			);
+			assert.equal(dead.length, 1);
+			assert.match(dead[0], /takes no modifier/);
 
 			// Explicitly empty disables the shortcut.
 			await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ shortcut: [] }));
@@ -693,6 +733,22 @@ test("shortcut: defaults, file, env, invalid and disabled", async () => {
 			);
 			assert.equal(warns.length, 1);
 		});
+
+		// An empty env value disables, like an empty file value.
+		await withEnv({ ...clearVoiceEnv(), [VOICE_ENV.shortcut]: "" }, async () => {
+			assert.deepEqual(loadConfig({ warn: () => {} }).shortcut, []);
+		});
+	});
+});
+
+test("loadConfig's returned shortcut array cannot mutate the default", async () => {
+	await withTempAgentDir(async () => {
+		await withEnv(clearVoiceEnv(), async () => {
+			const first = loadConfig({ warn: () => {} });
+			first.shortcut.push("f12");
+			assert.deepEqual(loadConfig({ warn: () => {} }).shortcut, [...DEFAULT_SHORTCUTS]);
+			assert.deepEqual(DEFAULT_CONFIG.shortcut, [...DEFAULT_SHORTCUTS]);
+		});
 	});
 });
 
@@ -709,6 +765,46 @@ test("the factory registers exactly the configured shortcuts", async () => {
 			await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ shortcut: [] }));
 			const disabled = captureFactory(await loadFactory());
 			assert.deepEqual(disabled.shortcuts, [], "an empty shortcut list registers no key");
+		});
+	});
+});
+
+test("a rejected shortcut setting is reported in the UI, once, at session start", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withEnv(clearVoiceEnv(), async () => {
+			// A rejected override used to warn through console.warn, which pi's TUI
+			// never shows: the shortcut silently stayed at its default. It now rides
+			// on session_start, where ctx.ui.notify is visible.
+			await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ shortcut: "ctrl+f5" }));
+			const capture = captureFactory(await loadFactory());
+			assert.deepEqual(
+				capture.shortcuts.map((shortcut) => shortcut.id),
+				["ctrl+shift+r", "alt+r"],
+				"the default still applies",
+			);
+
+			const notices: Array<{ message: string; type: string }> = [];
+			const ctx = { hasUI: true, ui: { notify: (message: string, type: string) => notices.push({ message, type }) } };
+			for (const handler of capture.sessionStart) await handler({}, ctx);
+			assert.equal(notices.length, 1);
+			assert.match(notices[0].message, /ctrl\+f5/);
+			assert.equal(notices[0].type, "warning");
+
+			// Drained: a second session start does not repeat it.
+			for (const handler of capture.sessionStart) await handler({}, ctx);
+			assert.equal(notices.length, 1);
+		});
+	});
+});
+
+test("a clean config notifies nothing at session start", async () => {
+	await withTempAgentDir(async () => {
+		await withEnv(clearVoiceEnv(), async () => {
+			const capture = captureFactory(await loadFactory());
+			const notices: string[] = [];
+			const ctx = { hasUI: true, ui: { notify: (message: string) => notices.push(message) } };
+			for (const handler of capture.sessionStart) await handler({}, ctx);
+			assert.deepEqual(notices, []);
 		});
 	});
 });
@@ -1847,6 +1943,8 @@ interface Capture {
 	shortcuts: CapturedShortcut[];
 	shutdown: boolean;
 	sent: Array<{ content: unknown; options: unknown }>;
+	/** Handlers registered for lifecycle events, so a test can fire one. */
+	sessionStart: Array<(event: unknown, ctx: unknown) => Promise<void> | void>;
 }
 
 async function loadFactory(): Promise<(pi: unknown) => void> {
@@ -1857,7 +1955,7 @@ async function loadFactory(): Promise<(pi: unknown) => void> {
 }
 
 function captureFactory(factory: (pi: unknown) => void): Capture {
-	const capture: Capture = { shortcuts: [], shutdown: false, sent: [] };
+	const capture: Capture = { shortcuts: [], shutdown: false, sent: [], sessionStart: [] };
 	factory({
 		registerCommand: (name: string, options: Omit<CapturedCommand, "name">) => {
 			capture.command = { name, ...options };
@@ -1865,8 +1963,9 @@ function captureFactory(factory: (pi: unknown) => void): Capture {
 		registerShortcut: (id: string, options: Omit<CapturedShortcut, "id">) => {
 			capture.shortcuts.push({ id, ...options });
 		},
-		on: (event: string) => {
+		on: (event: string, handler: (event: unknown, ctx: unknown) => Promise<void> | void) => {
 			if (event === "session_shutdown") capture.shutdown = true;
+			if (event === "session_start") capture.sessionStart.push(handler);
 		},
 		sendUserMessage: (content: unknown, options?: unknown) => {
 			capture.sent.push({ content, options });

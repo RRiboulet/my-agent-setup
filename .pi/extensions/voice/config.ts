@@ -23,6 +23,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { parseShortcutIds } from "./shortcut.ts";
+import type { Warn } from "./util.ts";
 
 export const CONFIG_BASENAME = "voice.json";
 
@@ -191,11 +192,7 @@ export interface LoadConfigOptions {
 	warn?: (message: string) => void;
 }
 
-/** A warning sink; the loader's `warn` and the config parser's are the same shape. */
-type Warn = (message: string) => void;
-
-/**
- * A layer has nothing to say about a field, so the value already there stands.
+/** A layer has nothing to say about a field, so the value already there stands.
  * Distinct from `undefined`, which is a real value that clears an optional field
  * (a file `bitrateKbps: null`). The previous twin blocks encoded the same
  * distinction as "only assign when set", one `if` at a time.
@@ -279,32 +276,22 @@ function intField(key: keyof VoiceConfig, env: string, min: number, max: number)
 	};
 }
 
-/** One or more pi key ids. A string (comma-separated) or an array of strings;
- * each is normalised and validated, and an entry that is not a key id warns and
- * is dropped. A value with no usable entry leaves the field alone, so a typo
- * cannot remove the shortcut. `[]` and `""` are accepted and disable it. */
+/** One or more pi key ids. A string (a single id or a comma-separated list) or
+ * an array; each entry is validated, and **one bad entry rejects the whole
+ * value** — the field keeps its previous setting, like every other field in the
+ * table. `[]` and `""` are accepted and disable the shortcut. */
 function shortcutField(key: keyof VoiceConfig, env: string): FieldSpec {
 	const read = (value: unknown, label: string, warn: Warn): unknown => {
 		if (value === undefined || value === null) return LEAVE;
-		// An explicitly empty setting disables the shortcut rather than warning:
-		// the owner wrote it on purpose.
-		if (typeof value === "string" && value.trim() === "") return [];
-		if (Array.isArray(value) && value.length === 0) return [];
-		// A wrong type is a config mistake, not an empty setting: parseShortcutIds
-		// warns and returns [], which makes this LEAVE, so the mistake cannot
-		// silently remove the shortcut.
 		const ids = parseShortcutIds(value, label, warn);
-		return ids.length > 0 ? ids : LEAVE;
+		return ids === undefined ? LEAVE : ids;
 	};
 	return {
 		key,
 		env,
-		fromFile: (value, warn) =>
-			read(value, `shortcut ${JSON.stringify(value)}`, warn),
-		fromEnv: (value, warn) => {
-			if (value === undefined || value.trim() === "") return LEAVE;
-			return read(value, `${env}=${JSON.stringify(value)}`, warn);
-		},
+		fromFile: (value, warn) => read(value, `shortcut ${JSON.stringify(value)}`, warn),
+		fromEnv: (value, warn) =>
+			value === undefined ? LEAVE : read(value, `${env}=${JSON.stringify(value)}`, warn),
 	};
 }
 

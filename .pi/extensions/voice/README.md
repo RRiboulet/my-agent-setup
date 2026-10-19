@@ -39,6 +39,14 @@ better; `ctrl+r` is the other natural choice, though it also triggers a
 built-in-conflict warning and shadows `app.session.rename` in the main
 editor (rename still works in the session selector).
 
+A value is validated against pi's key grammar **and** against what pi can
+actually match: `ctrl+f5` and `alt+escape` are grammatical but can never fire
+(pi refuses modifiers on `escape` and `f1`–`f12`), so they are rejected. Every
+rejected value falls back to the previous setting — the defaults, normally —
+and the reason is shown once as a warning at session start, because a
+rejected override that silently kept the default would look like a working
+shortcut.
+
 Where the transcript goes:
 
 - **Default:** pasted into the editor at the cursor. pi collapses a paste over
@@ -137,7 +145,7 @@ registered even when the config cannot be read.
 | `language` | unset | `PI_VOICE_LANGUAGE` | optional hint (`gpt-4o-mini-transcribe` rejects it) |
 | `prompt` | unset | `PI_VOICE_PROMPT` | optional vocabulary/style hint (same caveat) |
 | `timeoutMs` | `60000` | `PI_VOICE_TIMEOUT_MS` | upload timeout, clamped 5000–300000 |
-| `shortcut` | `["ctrl+shift+r", "alt+r"]` | `PI_VOICE_SHORTCUT` | pi key id(s) that toggle the recorder; an array, a single id, or a comma-separated list. `[]` or `""` in `voice.json` disables it (the env var has no disable form). A comma-based key (`ctrl+,`) is read as one id, so it cannot share the string form with another — use the array form |
+| `shortcut` | `["ctrl+shift+r", "alt+r"]` | `PI_VOICE_SHORTCUT` | pi key id(s) that toggle the recorder; an array, a single id, or a comma-separated list. `[]` or `""` disables it, in the file **or** the env var. **One invalid entry rejects the whole value** and keeps the previous setting, like every other field. A comma-based key (`ctrl+,`) is read as one id, so it cannot share the string form with another — use the array form. `escape` and `f1`–`f12` take no modifier |
 
 Booleans accept `1/true/yes/on` and `0/false/no/off`; an unrecognised value is
 ignored rather than guessed.
