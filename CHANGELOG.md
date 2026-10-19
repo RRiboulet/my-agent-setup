@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.8.0 — 2026-10-19
+
 Added:
 
 - **`/voice` is now controllable from the keyboard on the phone.** The toggle
