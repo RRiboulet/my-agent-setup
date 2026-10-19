@@ -42,6 +42,7 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
+import * as path from "node:path";
 import { CURRENT_SESSION_VERSION } from "@earendil-works/pi-coding-agent";
 
 /** Mirrors pi's `CURRENT_SESSION_VERSION`, which is exported from its entry point. */
@@ -54,7 +55,7 @@ const SESSION_FILE_MODES: ReadonlySet<LaunchMode> = new Set<LaunchMode>(["lineag
 
 export interface ChildLaunchSpec {
 	mode: LaunchMode;
-	/** argv prefix identifying how to start pi (see `getPiInvocationParts`). */
+	/** argv prefix identifying how to start pi (see `getPiInvocationParts` below). */
 	invocation: string[];
 	provider: string;
 	model: string;
@@ -69,6 +70,29 @@ export interface ChildLaunchSpec {
 	trusted: boolean;
 	extensionPath: string;
 	promptPath: string;
+}
+
+/**
+ * The argv prefix that starts a new pi process for a child.
+ *
+ * Lives beside `buildChildPiArgs` because both are about launching a child pi,
+ * and two extensions now need them: subagent for its runs and btw for its
+ * forked side panel. It is deliberately not exported from `index.ts`, which is
+ * the vendored file — a re-vendor there would not preserve a local export, and
+ * this module is the one a second launcher should already be reading.
+ */
+export function getPiInvocationParts(): string[] {
+	const currentScript = process.argv[1];
+	if (currentScript && existsSync(currentScript)) {
+		return [process.execPath, currentScript];
+	}
+
+	const execName = path.basename(process.execPath).toLowerCase();
+	if (!/^(node|bun)(\.exe)?$/.test(execName)) {
+		return [process.execPath];
+	}
+
+	return ["pi"];
 }
 
 /**

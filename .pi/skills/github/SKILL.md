@@ -56,7 +56,9 @@ Use the `gh` CLI to interact with GitHub. Always specify `--repo owner/repo` whe
 <!-- LOCAL ADAPTATION B: the workflow is AGENTS.md's, not discretionary.
      Inside this repo: `git push -u origin <branch>`, then
 
-         gh pr create --fill      # --fill uses the commits for title and body
+         gh pr create --base dev --fill   # --base dev is required: this
+                                          # repo's default branch is main, and
+                                          # a bare `gh pr create` targets it
 
      Always say in the body what a reviewer should check and what you
      verified. Then, for a feature branch into dev:

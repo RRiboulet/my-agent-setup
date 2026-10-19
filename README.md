@@ -10,11 +10,12 @@ pi install git:github.com/RRiboulet/my-agent-setup          # for me, every proj
 pi install --local git:github.com/RRiboulet/my-agent-setup  # pin for one project only
 ```
 
-Verified on a clean agent dir and an empty project: both install the ten
-extensions and the six skills the `pi` manifest below lists. That check predates
-`review.ts`, `continue.ts`, `opencode-go-provider/` and `repo-explorer/`; the
-manifest is kept honest by `test/package-manifest.test.ts`, and every entry
-point by the strict-ESM load test under Tests.
+Verified on a clean agent dir and an empty project: both install every
+extension and skill the `pi` manifest below lists. That check predates
+`review.ts`, `continue.ts`, `opencode-go-provider/`, `repo-explorer/`,
+`review-triage/`, `btw/` and `voice/`; the manifest is kept honest by
+`test/package-manifest.test.ts`, and every entry point by the strict-ESM load
+test under Tests.
 
 The one non-obvious part is that this needs the `pi` manifest in
 `package.json`. A git-sourced package is discovered either from that manifest or
@@ -33,10 +34,12 @@ each entry point explicitly:
     ".pi/extensions/native-web-search.ts",
     ".pi/extensions/opencode-go-provider/index.ts",
     ".pi/extensions/repo-explorer/index.ts",
+    ".pi/extensions/review-triage/index.ts",
     ".pi/extensions/review.ts",
     ".pi/extensions/session-breakdown.ts",
     ".pi/extensions/todos.ts",
-    ".pi/extensions/subagent/index.ts"   // the rest of that dir is its internals
+    ".pi/extensions/subagent/index.ts",  // the rest of that dir is its internals
+    ".pi/extensions/voice/index.ts"
   ],
   "skills": [
     ".pi/skills/commit",
@@ -82,6 +85,8 @@ inactive. Installed packages are loaded regardless of project trust.
 | `.pi/extensions/native-web-search.ts` | Native web search tool — **ours**, not upstream: it registers the `web_search` tool. Ships with `.pi/skills/native-web-search/`, which *is* vendored |
 | `.pi/extensions/repo-explorer/` | `/explore`: browse a branch's file tree with a directory-by-directory fuzzy filter and print a file into the transcript, or quick-open `/explore <path> [branch]` / `<branch>:<path>` to skip the menus. Read-only git resolved against the session cwd; the process runner, branch menu, browser, transcript renderer, display sanitizer and argument grammar are separate internals. **Ours** |
 | `.pi/extensions/review-triage/` | `triage_change` tool and `/triage`: measure a finished change from its git diff, ask a calibrated decision model (Jev, via `ctx.modelRegistry.classify()`) whether it needs an adversarial and/or complexity review, how hard each should push and which allowed model should run it, and return a depth-runged, fallback-chained plan for the `subagent` tool. Policy (judge model, candidates, thresholds, chains) lives in `~/.pi/agent/review-triage.json`; the verdict is appended to the session for audit. **Ours** |
+| `.pi/extensions/voice/` | `/voice`: dictation with the phone as microphone — start `termux-microphone-record` over ssh, fetch the m4a, transcribe it through an OpenAI-compatible `/audio/transcriptions` endpoint, and paste the transcript at the cursor (or submit it with `autoSubmit`). `/voice cancel` aborts; `ctrl+shift+r` toggles on Kitty-protocol terminals. **Ours** |
+| `.pi/extensions/btw/` | `/btw`: opens a panel and asks for the question (submit it empty to reopen a running panel), then answers in-process from the exact conversation prefix, so the provider prompt cache is reused; the streaming answer is shown by a Markdown-rendering viewer in its own tmux popup. Neither the question nor the answer enters the transcript. Escape returns to pi while the answer keeps running; a new question replaces the panel. **Ours** |
 | `.pi/extensions/opencode-go-provider/` | An `opencode-go` provider for `/model`: fast GLM, Kimi, MiniMax, Qwen, DeepSeek and Grok models via opencode.ai's Go API, with the correct wire protocol per model (Anthropic, OpenAI Completions, Responses) and a per-account usage-budget widget below the editor. **Vendored** from [monotykamary/pi-opencode-go-provider](https://github.com/monotykamary/pi-opencode-go-provider) (MIT), byte-identical to upstream — see below |
 | `.pi/skills/native-web-search/` | Script + docs for the above. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/native-web-search/`, with local provider patches: OpenRouter support, an `opencode-go` default through the Go API's Anthropic-compatible endpoint, unknown-provider rejection, and a test seam (`__test__` + direct-invocation guard). The two must travel together |
 | `.pi/skills/commit/` | Conventional Commits subjects, and the branch-per-change rule from `AGENTS.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/commit/SKILL.md`, with two local adaptations |
@@ -92,11 +97,29 @@ inactive. Installed packages are loaded regardless of project trust.
 | `REVIEW_GUIDELINES.md` | Project-level review guidelines read by `/review` — branch hygiene, token rules, changelog shape, PR workflow, line endings |
 | `pi-session.sh` | Launch pi under tmux with an OpenRouter model |
 
+`/btw` notes: the command takes no arguments — it always asks for the question
+(submit it empty to reopen a running panel), so spaces and punctuation in it
+cannot be lost. The request reuses the main
+conversation's prompt prefix — no system-prompt or tool-list override — but the
+provider's cache only stays warm for a few minutes of idle time, so the first
+question after a gap pays full price once (and warms the cache for the next
+main turn). Escape closes the
+popup and never reaches the viewer; the answer keeps streaming into its file.
+Copying text out needs nested tmux copy-mode (`C-b C-b`, because the outer
+client keeps the prefix). The viewer renders the answer as Markdown (a bundled
+renderer), so it scrolls natively — copy mode (`C-b [`), and the mouse wheel
+where the tmux config sets `set -g mouse on` (the devcontainer's does) — like the
+subagent attach views; the next `/btw` restarts the viewer on the same answer. On a session with an active `/goal` the
+main request's forced system prompt differs, so the panel may re-bill the
+context and show goal notes; `.pi/extensions/btw/request.ts` documents that
+limitation.
+
 ## Requirements
 
 - `@earendil-works/pi-coding-agent` **1.0.x**
 - **Node 24+** — the tests execute TypeScript directly, with no build step
 - **tmux** — the subagent extension creates one tmux session per run, and the `tmux` skill drives interactive CLIs on a separate private socket
+- **A phone with Termux + Termux:API** for `/voice` — setup is in `.pi/extensions/voice/README.md`
 - An `opencode-go` key for web search — in `~/.pi/agent/auth.json` under `opencode-go`, or via `OPENCODE_API_KEY`. The `web_search` tool and the native-web-search skill both default to this provider. An OpenRouter key is only needed for `pi-session.sh`, which launches a model through OpenRouter.
 
 The `.devcontainer/` provides all of these.
@@ -260,6 +283,21 @@ local changes** — the files above are byte-identical to upstream commit
 `286c467` (main, 2026-10-07, package.json v1.1.18). The extension is
 side-effect-free at load (the strict-ESM guard covers it) and only depends on
 pi's host packages.
+
+## Voice
+
+`/voice` turns a phone into the microphone: it starts
+`termux-microphone-record` over ssh, stops it on the second `/voice`, fetches
+the recording, and POSTs it to an OpenAI-compatible `/audio/transcriptions`
+endpoint. The transcript is pasted at the cursor by default (a long paste
+collapses to pi's `[paste #n]` marker and expands on submit), or submitted as a
+prompt with `autoSubmit` — queued as a follow-up while the agent streams.
+`/voice cancel` aborts any phase; `ctrl+shift+r` toggles on terminals that
+forward Kitty-protocol keys.
+
+Setup, the configuration table, the key routing (the ambient OpenAI key is
+never sent to a custom endpoint), the single `response_format` retry and the
+phone prerequisites are in `.pi/extensions/voice/README.md`.
 
 ## Configuration
 

@@ -166,6 +166,7 @@ import {
 	buildChildPiArgs,
 	countSessionLines,
 	forkLiveBranch,
+	getPiInvocationParts,
 	requireExistingSession,
 	seedLineageSession,
 	usesSessionFile,
@@ -535,20 +536,6 @@ function runDirOwnsLiveTranscript(run: RunRecord, runs: Map<string, RunRecord>):
 		if (isSameOrDescendant(run.runDir, other.sessionFile)) return true;
 	}
 	return false;
-}
-
-function getPiInvocationParts(): string[] {
-	const currentScript = process.argv[1];
-	if (currentScript && existsSync(currentScript)) {
-		return [process.execPath, currentScript];
-	}
-
-	const execName = path.basename(process.execPath).toLowerCase();
-	if (!/^(node|bun)(\.exe)?$/.test(execName)) {
-		return [process.execPath];
-	}
-
-	return ["pi"];
 }
 
 function textFromAssistant(message: Record<string, unknown>): string {
@@ -1448,6 +1435,10 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 
 	const markRunFailed = async (run: RunRecord, message: string): Promise<void> => {
 		clearTimer(run.id);
+		// Capture usage (and discover sessionFile) before flipping to "failed", so a
+		// persisted/observable "failed" run never lacks usage or its transcript
+		// pointer. persist() runs once, inside settleRun, after capture.
+		await captureRunUsage(run);
 		run.status = "failed";
 		run.interruptRequestedAt = undefined;
 		run.error = message;

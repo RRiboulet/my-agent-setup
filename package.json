@@ -10,7 +10,8 @@
   "pi": {
     "extensions": [
       ".pi/extensions/answer.ts",
-      ".pi/extensions/continue.ts",
+      ".pi/extensions/btw/index.ts",
+        ".pi/extensions/continue.ts",
       ".pi/extensions/goal.ts",
       ".pi/extensions/native-web-search.ts",
       ".pi/extensions/opencode-go-provider/index.ts",
@@ -19,7 +20,8 @@
       ".pi/extensions/review.ts",
       ".pi/extensions/session-breakdown.ts",
       ".pi/extensions/todos.ts",
-      ".pi/extensions/subagent/index.ts"
+      ".pi/extensions/subagent/index.ts",
+      ".pi/extensions/voice/index.ts"
     ],
     "skills": [
       ".pi/skills/commit",

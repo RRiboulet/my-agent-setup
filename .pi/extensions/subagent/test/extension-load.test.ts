@@ -23,6 +23,7 @@ import { test } from "node:test";
 
 const EXTENSIONS = [
 	"../../answer.ts",
+	"../../btw/index.ts",
 	"../../continue.ts",
 	"../../goal.ts",
 	"../../native-web-search.ts",
@@ -33,6 +34,7 @@ const EXTENSIONS = [
 	"../../session-breakdown.ts",
 	"../../todos.ts",
 	"../index.ts",
+	"../../voice/index.ts",
 ] as const;
 
 // Extension tree files that are not entry points themselves but get imported
@@ -40,6 +42,32 @@ const EXTENSIONS = [
 // loader. The exports an importer will use are named, so an accidental drop
 // of one fails here instead of at wiring time.
 const MODULES: Record<string, string[]> = {
+	"../../btw/launch.ts": [
+		"buildBtwKillServerArgs",
+		"buildBtwPaths",
+		"buildBtwRemainOnExitArgs",
+		"buildBtwSendKeysArgs",
+		"buildBtwSessionCreateArgs",
+		"buildBtwSubmitArgs",
+		"buildBtwViewerCommand",
+		"btwAnswerPath",
+		"btwOwnerPidPath",
+		"btwRootDir",
+		"btwRunDir",
+		"btwSessionName",
+		"btwSocketPath",
+		"btwTarget",
+		"requireBtwQuestion",
+	],
+	"../../btw/request.ts": [
+		"buildBtwContext",
+		"buildBtwRequestParts",
+		"providerSessionHeaders",
+		"reasoningOption",
+		"runBtwRequest",
+		"runBtwStream",
+		"sanitizeAnswerText",
+	],
 	"../../repo-explorer/git.ts": ["openGit", "RepoGitError"],
 	"../../repo-explorer/runner.ts": ["makeGitRunner"],
 	"../../repo-explorer/branch-menu.ts": ["buildBranchMenu", "resolveBranchChoice", "chooseBranch"],
@@ -47,8 +75,29 @@ const MODULES: Record<string, string[]> = {
 	"../../repo-explorer/file-browser.ts": ["FileBrowser", "listDirectory", "parentPath"],
 	"../../repo-explorer/file-transcript.ts": ["formatFileTranscript", "numberLines", "fileMessageRenderer"],
 	"../../repo-explorer/sanitize.ts": ["sanitizeDisplay", "sanitizeFileContent"],
+	"../handoff.ts": [
+		"buildChildPiArgs",
+		"countSessionLines",
+		"forkLiveBranch",
+		"getPiInvocationParts",
+		"requireExistingSession",
+		"seedLineageSession",
+		"usesSessionFile",
+	],
 	"../panel.ts": ["buildEscapeBindArgs", "buildAttachCommand", "buildPanelLaunch"],
 	"../shell.ts": ["shellQuote"],
+	"../../voice/config.ts": ["agentDir", "configPath", "loadConfig", "parseEnvBool", "readConfigFile"],
+	"../../voice/recorder.ts": [
+		"Recorder",
+		"buildCleanupCommand",
+		"buildFetchCommand",
+		"buildStartCommand",
+		"buildStopCommand",
+		"localRecordingPath",
+		"newRecordingId",
+		"remoteRecordingPath",
+	],
+	"../../voice/transcribe.ts": ["TranscribeError", "assertUploadSize", "resolveApiKey", "transcribeAudio"],
 };
 
 for (const relative of EXTENSIONS) {

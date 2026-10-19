@@ -1,10 +1,11 @@
 # Subagent extension tests
 
-Unit and behaviour tests for `.pi/extensions/` — the `subagent/` tree, plus the
-sibling `todos.ts` tool (`todos-tool.test.ts`), which lives here because this is
-where the test harness and the linked pi packages are. Node runs these `.ts`
-files directly (native type stripping) — there is no build step and no compiler
-in the loop, so type errors are not caught here.
+Unit and behaviour tests for `.pi/extensions/` — the `subagent/` tree, the
+sibling `btw/` extension, plus the sibling `todos.ts` tool (`todos-tool.test.ts`),
+which lives here because this is where the test harness and the linked pi
+packages are. Node runs these `.ts` files directly (native type stripping) —
+there is no build step and no compiler in the loop, so type errors are not
+caught here.
 
 ## Running
 
@@ -41,6 +42,11 @@ test.
 | `panel.test.ts` | the panel builders (`panel.ts`): the Escape bind argv, the nested attach command (both `TMUX` variables unset, quoting), the popup argv, the run-id-derived title, its refusal of a run id carrying a tmux format metacharacter, and the `openSubagentPanel` guards (missing/queued/terminal run, non-tmux, no attached client, dead session, failed bind, non-TUI/shutdown) via a fake exec + popup launcher |
 | `usage.test.ts` | child session usage/cost accounting |
 | `handoff.test.ts` | child launch argv per mode, lineage/fork session seeding, live-branch fork ordering, and the usage baseline |
+| `btw-launch.test.ts` | the sibling `.pi/extensions/btw/launch.ts`: paths (the per-session socket from the full session id, the 0700 run dir, `answer.md`, `owner.pid`), the `exec node <viewer.mjs> <answer>` viewer command, the tmux argv with session targets and `kill-server`, and the question / absolute-path / session-id guards |
+| `btw-markdown.test.ts` | the sibling `.pi/extensions/btw/markdown.mjs`: the Markdown→ANSI renderer — ATX headings at three levels, blockquotes/rules/lists/tasks, fenced code, inline code/links/bold/italic/strike, escapes and HTML tags, the dimmed usage footer, the opt-in gutter, incremental resume, line-independence, and NO_COLOR |
+| `btw.test.ts` | the `/btw` command wiring: reset and viewer start, the popup ladder/argv/title and its fallbacks (vanished pane, no client, failed bind), reattach with and without an answer, restarting a dead viewer, the answer/usage/error footers, the guard ladder, replace ordering, the failed-kill replace that keeps the old answer, the `blockImages` wiring, multi-line question headers, and the factory's prompt/reattach/empty-submission/non-TUI/starting paths |
+| `btw-lifecycle.test.ts` | the owner-pid lifecycle: the start and shutdown reason tables, the live-owner guard on both paths, missing and malformed owner files, kill→delete ordering, the failed-kill retry that keeps the answer and socket, the cross-session sweep, stray files in the root, and idempotency |
+| `btw-request.test.ts` | the sibling `.pi/extensions/btw/request.ts`: the projection→`convertToLlm` prefix with no system/tools override, the deliberate absence of `tool_choice`, the main-session routing header, `reasoning`/`sessionId` (including `off` → dropped), the `blockImages` mirror, the sanitizer, and the stream / tool-call-continuation outcomes; plus the resolved thinking level + thinking budgets, the telemetry attribution headers, the ignored-tool-call accumulation across the continuation, the zero-cache warning threshold, and the drift guard against pi's mirrored internals |
 | `lifecycle.test.ts` | launch, concurrency queueing, finalisation, failure detection, cancel, status, clean, shutdown stops the watcher, turn-level interrupt, the live widget (install/refresh/clear), and the widget→panel wiring (a click binds Escape then launches the popup detached, through a fake launcher) |
 | `interrupt.test.ts` | the `interrupt.json` marker (validation, reading, writing), the child reporter's abort path, and the parent lifecycle of an interrupted run |
 | `session-breakdown.test.ts` | the vendored `/session-breakdown`: aggregation over fixture session trees, its four `LOCAL PATCH` hunks — agent-dir roots, inherited-prefix exclusion, the footer note (including that it reaches both the TUI and the non-interactive path), and the `__test__` surface — the upstream behaviours re-vendored on 2026-10-05 (faux/test-provider sessions skipped, only models that produced a message counted, cost/session + provider grouping), which ship untested upstream, and the four metric tables' exact layout plus both palette choosers (pinned against the pre-2026-10-08-dedup output) |
@@ -52,6 +58,7 @@ test.
 | `repo-explorer-browser.test.ts` | the sibling `.pi/extensions/repo-explorer/file-browser.ts`: the directory model (`listDirectory`'s folder-first ordering, nested-folder synthesis, a directory that is only a prefix of a sibling, `parentPath`) and the real component driven by pi's key sequences — drill-in and file completion with the full repo-relative path, arrow wraparound, the ⌫/←-walks-up-only-while-the-filter-is-empty rule, Esc's clear-then-up-then-cancel order, fuzzy filtering, an empty directory, and width-bounded rendering; plus the display boundary in use (a byte-level assertion that no rendered line carries a raw control byte for a hostile listing, the breadcrumb sanitized, and the byte-faithful path still what a selection resolves to) and degenerate widths down to pi's 2-column floor |
 | `repo-explorer-transcript.test.ts` | the sibling `.pi/extensions/repo-explorer/file-transcript.ts` and `sanitize.ts`: the numbering (right-aligned, terminator-aware, blank lines preserved), `formatFileTranscript` (header, truncation note, empty-file case, hostile path sanitized while `details` keep it raw), `fileMessageRenderer` (the two coloured lines, a hostile body made inert, tabs preserved, CRLF normalized, width-bounded lines, the per-width render cache and its invalidate, non-string content tolerated), and `sanitizeDisplay`/`sanitizeFileContent`'s differing policies |
 | `repo-explorer-quick-open.test.ts` | the sibling `.pi/extensions/repo-explorer/quick-open.ts`: the `/explore <path>` argument grammar (`tokenizeArgs`, `normalizeRepoPath`, `parseExploreArgs` — the single-token-is-a-path rule, `branch:path` vs `<path> <branch>`, quotes, the absolute-path and too-many-tokens errors) and `resolveQuickBranch`'s refname rule (explicit refname / short name / menu label, the unlisted tag-or-sha fallthrough, the ambiguous `origin/main` refusal, and the last-pick and HEAD defaults) |
+| `voice.test.ts` | the sibling `.pi/extensions/voice/`: config defaults/file/env merge and the malformed-file warning; the recorder's command builders and state machine against a fake ssh runner and clock (start/stop/cancel/shutdown, `-q` handling, hex ids, quoting, the cancel-vs-stop races); the transcription POST against a fake fetch (multipart fields, auth and no-fallback key routing, the single `response_format` retry, timeout, caller abort, the 25 MB cap); and the end-to-end wiring start → stop → fetch → transcribe → paste/autoSubmit (status key, cancel mid-fetch and mid-transcribe, kept-audio notices, the no-UI fallback) |
 | `helpers.ts` | env/temp-dir isolation and polling helpers |
 
 `lifecycle.test.ts` drives the real extension factory with a fake

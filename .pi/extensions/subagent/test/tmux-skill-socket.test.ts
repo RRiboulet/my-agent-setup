@@ -20,6 +20,7 @@ const script = readFileSync(path.join(SKILL_DIR, "scripts/find-sessions.sh"), "u
 const waitScript = readFileSync(path.join(SKILL_DIR, "scripts/wait-for-text.sh"), "utf8");
 const skill = readFileSync(path.join(SKILL_DIR, "SKILL.md"), "utf8");
 const extension = readFileSync(path.join(REPO_ROOT, ".pi/extensions/subagent/index.ts"), "utf8");
+const btwLaunch = readFileSync(path.join(REPO_ROOT, ".pi/extensions/btw/launch.ts"), "utf8");
 
 test("the skill's sessions live under PI_TMUX_SOCKET_DIR, not the agent dir", () => {
 	assert.ok(script.includes("PI_TMUX_SOCKET_DIR"), "the skill socket dir must be env-overridable");
@@ -40,4 +41,21 @@ test("SKILL.md fences the subagent socket off", () => {
 		/do\s+\*{0,2}not\*{0,2}\s+create sessions on the subagent socket/i,
 		"the skill must say outright not to create sessions there",
 	);
+});
+
+test("the btw extension keeps one socket per main session", () => {
+	assert.match(btwLaunch, /`tmux-btw-\$\{requireSessionId\(sessionId\)\}\.sock`/);
+	assert.ok(!btwLaunch.includes("tmux-subagents.sock"), "the btw socket must not be the subagent socket");
+	assert.ok(!btwLaunch.includes("pi-tmux-sockets"), "the btw socket must not be the skill socket");
+});
+
+test("SKILL.md fences the btw socket and namespace off", () => {
+	assert.ok(skill.includes("tmux-btw-<session-id>.sock"), "the btw socket pattern must be named");
+	assert.ok(skill.includes("btw-<session-id>"), "the reserved session namespace must be named");
+	assert.match(
+		skill,
+		/do\s+\*{0,2}not\*{0,2}\s+create sessions on a .*tmux-btw/i,
+		"the skill must say outright not to create sessions there",
+	);
+	assert.match(skill, /do\s+\*{0,2}not\*{0,2}\s+`kill-server` or `kill-session` a `btw-\*` session/i);
 });

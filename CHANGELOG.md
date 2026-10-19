@@ -4,6 +4,302 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.7.0 — 2026-10-19
+
+Added:
+
+- **`/btw` — ask a side question without polluting the conversation.** `/btw`
+  opens a panel and asks for the question (an empty submission reopens a running
+  panel); the answer is produced in-process from the active conversation and
+  shown in a Markdown-rendering viewer in its own tmux popup. Neither the question nor
+  the answer is added to the transcript. The command deliberately takes no
+  arguments, so spaces and punctuation in the question cannot be parsed as
+  command input.
+
+  The request reuses the main conversation's exact prompt prefix —
+  `buildSessionContext()` run through pi's own `convertToLlm()`, no
+  system-prompt or tool-list override, the main session's routing header, and no
+  `tool_choice` (setting it invalidates the provider's message cache: the same
+  question cost 808,589 fresh input tokens with it and 813,184 cache-read ones
+  without). On a warm ~800k-token session the side question billed 79 input
+  tokens. The session's thinking level and the `images.blockImages` filter are
+  mirrored, and tool calls are never executed: a tool-calling answer is
+  continued once with a synthetic refusal, and a second one is reported with
+  the usage it billed.
+
+  The panel is a viewer on a per-main-session tmux socket, so Escape closes it
+  and nothing else, and the answer keeps streaming while it is closed.
+  `session_start` reaps only dead owners (a live sibling process keeps its
+  panel), `session_shutdown` kills the server before deleting the answer and
+  the socket, and `reload` keeps it. Known limits: the first question after an
+  idle gap pays full price once, the viewer's Markdown renderer covers ATX
+  headings, fenced code, lists, quotes, links and inline emphasis but not
+  tables, setext headings or nested emphasis, and a session with an active
+  `/goal` diverges from the main request's forced system prompt.
+
+  A pre-merge review hardened parity and ownership. The side request now
+  forwards the resolved thinking level (not the projection's `"off"` default)
+  and the settings' thinking budgets so the provider maps `reasoning` through
+  the same tables, reproduces the telemetry attribution headers the main loop
+  merges, and sums ignored tool-call counts across the continuation. The
+  answer-file appender checks the owner pid and stops instead of
+  interleaving into a panel a sibling pi reset under it, and the zero-cache
+  warning only fires when `input` is large enough that a cache read was
+  expected, so a short cold start no longer trains the user to distrust it.
+
+- **`/voice` — dictate with the phone as the microphone.** `/voice` starts
+  `termux-microphone-record` on a phone reachable over ssh; the second `/voice`
+  stops it, fetches the m4a, and POSTs it to an OpenAI-compatible
+  `/audio/transcriptions` endpoint. The transcript is pasted into the editor at
+  the cursor (a paste over 10 lines or 1000 characters collapses to pi's
+  `[paste #n]` marker and expands again on submit), or submitted as a prompt
+  with `autoSubmit` — plain send when the agent is idle, `deliverAs:
+  "followUp"` while it streams. `/voice cancel` aborts any phase without
+  pasting, and `ctrl+shift+r` toggles the recorder on terminals that forward
+  Kitty-protocol keys.
+
+  The uploader is deliberately narrow. An explicit key wins, and the ambient
+  OpenAI key (environment or model registry) is only sent when `baseUrl` is the
+  OpenAI default — a custom endpoint is called unauthenticated unless it is
+  given a key. The only retry is a single `text`-format re-upload after a 400
+  that names `response_format` (it re-bills, hence exactly one); recordings
+  over the 25 MB cap are refused before the read, the POST has a 60 s timeout,
+  and a failed transcription keeps the recording on disk and says where,
+  rather than losing it.
+
+  Phone prerequisites (Termux + Termux:API, the absolute recorder path and the
+  non-interactive ssh `PATH` caveat), the configuration table and the manual
+  smoke checklist are in `.pi/extensions/voice/README.md`.
+
+Fixed:
+
+- **A failed local unlink can no longer wedge `/voice` outside `idle`, and a
+  failed `ssh` spawn now says why.** Every *remote* cleanup was already bounded
+  and best-effort, but the local `rm` of the fetched recording was awaited bare:
+  a failing unlink (a read-only temp dir, a path that is not a file) rejected
+  `stop()` or `cancel()` before the state reset, so the recorder parked in
+  `transcribing` and a later `/voice cancel` could not recover it. Local deletes
+  now go through a best-effort `#rmSafe`, so the cycle always lands in `idle`; the
+  recording is left behind rather than the machine never finishing, which is how
+  the remote cleanup already behaved.
+
+  `#runSafe` also returned `undefined` on a thrown runner, so a missing `ssh`
+  binary, a DNS failure and a spawn `ENOENT` all surfaced as the same "the ssh
+  command … did not run". It now carries the thrown cause, and the failure text
+  includes it. `firstLine`/`describeError` moved to a shared `voice/util.ts`
+  because the recorder and transcription each had their own copy.
+
+- **A stalled fetch can no longer park `/voice` in `fetching` forever.** Every
+  cleanup call ran under a budget, but the fetch — the one stage that crosses the
+  network with up to 25 MB — had none. A transfer
+  that stalled (network gone) left the cycle in `fetching` with no local timer
+  to end it; only `/voice cancel` could, and a user who walked away saw the
+  status sit there. The fetch now runs under `FETCH_BUDGET_MS` (two minutes,
+  far larger than the cleanup budgets because a real recording has to cross the
+  link): on overrun the ssh is killed and the failure is reported as
+  `fetch-failed` with "timed out after N ms", keeping the remote copy exactly as
+  any other failed fetch does. The budget is a separate controller forwarded
+  from the cycle signal, so a cancel still ends the fetch immediately — the
+  timeout only fires when nothing else has.
+
+- **A subagent that fails at the tmux layer now persists `failed` with its usage.** `markRunFailed` used to write `status: "failed"` before capturing usage, so pollers could observe a `failed` run with no usage (and a crash in that window lost the transcript pointer). Usage and `sessionFile` are now captured before the status flips, and `runs.json` is written once.
+
+- **Two config values can no longer reach the phone, or `ssh`, as shell
+  syntax.** Both `recorderPath` and `sshTarget` come from `voice.json` or a
+  `PI_VOICE_*` variable, and both were interpolated into a command unexamined.
+  `recorderPath` is concatenated before the recorder arguments and before `-q`
+  in the stop command, so a value carrying `;`, backticks, `$(…)` or a space
+  ran arbitrary commands on the phone — the recording id was already pinned by
+  `RECORDING_ID_PATTERN`, but this second variable in the same string was left
+  raw. `sshTarget` is passed to `spawn("ssh", [target, command])` as one argv
+  element with no shell, which makes a leading `-` the whole attack: ssh parses
+  it as an option, and `-oProxyCommand=…` executes locally in the container.
+
+  Both are now validated in `config.ts`, where a bad value warns once and the
+  field keeps its default — the same degrade-not-throw contract every other
+  field follows, so `/voice` stays registered and usable (`recorderPath` must
+  be absolute and shell-safe; `sshTarget` must not start with `-`). The
+  command builders and `makeSshRun` keep their own refusal as unreachable
+  defense-in-depth for a directly-constructed `Recorder`. That placement was
+  the review's correction: validating in the builders alone made a bad value
+  throw *after* `start()` had set phase `starting`, stranding the machine there
+  with `/voice cancel` broken too (`buildStopCommand` threw in the same path),
+  and a leading-dash `sshTarget` threw at extension-load time and removed
+  `/voice` altogether. A builder refusal now lands in the retryable `error`
+  phase, and a best-effort stop that refuses is skipped rather than abandoning
+  the cancel's remaining cleanup.
+
+- **The ssh transport can no longer stream the container out of memory.**
+  `makeSshRun` accumulated every byte of stdout from every `ssh` command without
+  limit, and the 25 MB upload check (`assertUploadSize`) ran only after the whole
+  transfer had been buffered and written to a temp file. A semi-trusted phone —
+  corrupt, compromised, or just `cat`-ing the wrong file — could therefore grow
+  the container's heap and tmpdir without bound before anything objected.
+  Buffering now stops at the upload cap plus a 4 MB slack: the slack is
+  deliberate, so a recording merely over the cap still reaches
+  `assertUploadSize`, whose message names the size and keeps the audio, and only
+  a runaway stream is killed. An overflow drops the partial buffer, kills the
+  child, and surfaces as a `fetch-failed` with "produced more than N bytes of
+  stdout; killed" — the remote copy still survives, as it does for any failed
+  fetch.
+
+  stderr is bounded too, and the adversarial review is why: the phone is the ssh
+  *server*, so it writes to stderr no matter what command was asked for, and a
+  stdout-only cap would have moved the hole rather than closed it. Only the head
+  (64 KB) is retained, and the stream keeps being drained, because a paused pipe
+  would back-pressure the child. Losing the tail of a diagnostic stream is fine;
+  losing the container is not. An overflow still keeps whatever stderr arrived
+  before it, with the overflow notice placed first so the recorder's
+  `firstLine(stderr)` shows the reason rather than a truncated warning.
+
+- **Cancelling a `/voice` that is still starting can no longer orphan the
+  phone recording.** `termux-microphone-record` runs on the phone, and killing
+  the local `ssh` client does not stop the remote command: cancel's `-q` could
+  arrive while the start was still in flight, come back "No recording to stop",
+  and then watch the recorder launch and record until `-l` — up to 900 seconds,
+  device-global, with the phase already back at `idle`. Cancel from `starting`
+  now waits (bounded, `START_SETTLE_BUDGET_MS`) for the start command to settle
+  first, so the recorder exists before the best-effort `-q` is sent; only then
+  does it abort the client. If the start never settles, the wait times out and
+  cancel proceeds with the same best-effort stop and cleanup as before.
+
+  The wait reopens the ordering question the old code answered carelessly: a
+  start that settles precisely as cancel lands must not run its success path and
+  flip the phase back to `recording`. That is handled where every other
+  cancel-versus-command decision is — `#runStage` now treats a set `#cancelling`
+  as the cancel owning the outcome even before it aborts, so a start that
+  settles or throws while the cancel waits yields instead of reporting. And
+  `START_SETTLE_BUDGET_MS` is kept below `SHUTDOWN_BUDGET_MS`, so `session_shutdown`
+  runs the same settle wait and still reaches its best-effort `-q` before its
+  own budget gives up, rather than letting a session exit leave the phone
+  recording.
+- **A cancel during the fetch no longer deletes a local recording the user asked
+  to keep.** Every cancel surface honoured `keepAudio` except the `fetching`
+  branch, which called the local delete unconditionally — so the README's "no
+  cancel path touches the local file when `keepAudio` is set" was false in the
+  one window where the file actually exists: after it is written and before the
+  phase moves on, which includes the bounded remote-cleanup await. The same
+  unguarded delete sat in the post-write abort check, where a cancel landing
+  during the write dropped the just-written copy. The post-write check still
+  respects `keepAudio`; the cancel's own local delete is now a single guarded
+  step after the per-phase switch, because the bug was one branch forgetting a
+  guard that four branches repeated, and one delete cannot be forgotten. The
+  remote original is still removed either way, since `keepAudio` concerns the
+  local m4a only.
+
+  A cancel that keeps the file now also says where it is. `#doCancel` ended by
+  emitting a bare idle status, so the recording survived with no path in any
+  notice — the one keep-the-audio path that stayed silent, while a successful
+  cycle and a delivery failure both name the file. It reports the path when a
+  `stat` confirms the file is there, and stays silent otherwise, because naming
+  a path that does not resolve is worse than the silence it replaced. The idle
+  transition itself is now a single `#goIdle`, shared by a finished cycle, a
+  cancel and a shutdown.
+
+Maintenance:
+
+- **The `/voice` container side now survives container rebuilds.** `/voice`
+  drives ssh from this container to the phone through a Tailscale userspace
+  tunnel (`tailscaled --tun=userspace-networking`, a SOCKS5 proxy, because
+  the container has no `/dev/tun`). Most of that setup already lived on the
+  pi-agent-config volume — the ssh key pair and config template, the
+  tailscale binaries and state, `voice.json` — and the extension itself
+  lives in the repo, so a rebuild used to cost exactly three container-layer
+  things: `~/.ssh/config` (home is container-local), the `netcat-openbsd`
+  package the ssh `ProxyCommand` needs, and the `tailscaled` process, which
+  is not an init service. `.devcontainer/restore-post-rebuild.sh`
+  reinstalls, restores and relaunches exactly those three, idempotently (a
+  plain container restart also only needs the daemon relaunched), then
+  verifies the chain with `ssh phone true`; the devcontainer's
+  `postCreateCommand` now runs it on every container creation. The full
+  container-side setup and the post-rebuild contract are documented in
+  `.devcontainer/voice-container.md`, with a pointer from the voice README.
+
+  Two details the rebuild contract rests on, both found by exercising the
+  script against a simulated teardown rather than by reading it. Liveness is
+  probed by *connecting* to the daemon's socket (`nc -z -U`), not by testing
+  that the socket file exists: a container teardown SIGKILLs `tailscaled`,
+  which leaves the socket file behind, so an existence check reports a dead
+  daemon as running and skips the launch. And every script here is invoked
+  through an interpreter (`bash`/`sh`): this checkout is bind-mounted with
+  `core.fileMode false`, so the exec bit is not in git and `./script.sh`
+  fails with "Permission denied".
+
+- **The pull request workflow now names its base branch.** `AGENTS.md`'s step 3
+  said only `gh pr create --fill`, but this repository's **default branch is
+  `main`**, and `gh pr create` without `--base` opens the pull request against
+  that default — so following the documented command targeted `main`, which
+  takes releases only. Worse, a branch cut from `dev` carries every change
+  merged since the last release, and squashing it into `main` replays all of
+  them there, untagged. (That is exactly what happened once, and `main` had to
+  be restored to the `v1.6.0` tag.) The workflow now spells out `--base dev`
+  with that reasoning, and its steps 4 and 5 stop calling the integration
+  branch `main`: the squash `--delete-branch` rationale is about `dev`'s
+  history, and step 5 brings `dev` up to date. The vendored github skill's
+  local adaptation says the same.
+
+- **The commit identity is pinned to a noreply address on every container
+  creation.** Commit metadata is public as soon as a branch is pushed: the
+  author and committer addresses and every `Co-authored-by:` trailer live in the
+  commit object, so a personal address there can only be removed by rewriting
+  the history of every branch and tag — and even then it survives in forks and
+  in GitHub's cached commit views. The container-local `~/.gitconfig` held a
+  personal address, which is how it reached this repository's earlier history.
+  `.devcontainer/postCreate.sh` now sets `user.name`/`user.email` to the GitHub
+  noreply identity on every container creation, which is what makes it outlast a
+  rebuild (home is otherwise discarded with `/home/vscode`). It is applied in
+  `postCreate` rather than the Dockerfile so a personal identity is not baked
+  into an image others may build, and with `--global` rather than `--system`
+  because it is the user's identity, not the machine's.
+
+- **The voice recorder's per-stage cancel and failure guards are one helper
+  now.** `start()` and `stop()` each repeated the same three lines — return if
+  the signal aborted, turn a thrown runner into a "did not run" failure, then
+  read the result — with the abort check appearing six times in `stop()` alone.
+  The architecture review flagged that as the most likely place a future stage
+  omits the check. `#runStage` now owns the pattern for the three command stages
+  (start, stop, fetch); the abort checks that remain are the ones with distinct
+  work behind them, the write-then-cancel race and the barriers around
+  `deliver`. No behaviour change.
+
+- **The voice recorder's kept-audio path is a parameter, not a field.** The path
+  a failed or `keepAudio` cycle leaves on disk lived in `#keptPath`, set just
+  before one emitted status and cleared just after, so its value was only
+  meaningful between two adjacent statements. It now rides on the status that
+  names it (`#fail(..., localPath)` and `#finishCycle(localPath)`), which removes
+  the set/clear dance and the ordering contract. No behaviour change.
+
+- **The voice config loader is one field table instead of two hand-written
+  passes.** `loadConfig` applied each of its twelve fields twice, once for
+  `voice.json` and once for `PI_VOICE_*`, and the two blocks were free to drift:
+  a field added to one and not the other would silently stop responding to that
+  layer. Each field now declares both readings once — `stringField`,
+  `baseUrlField`, `boolField`, `intField`, `bitrateField` — in a `FIELDS` table
+  the loader loops over, and a `LEAVE` sentinel says when a layer has nothing to
+  say. That is also how a missing value keeps its default while an explicit
+  `bitrateKbps: null` still clears the field. The file grew by about fifty lines,
+  all of it named per-kind coercion and its reasoning; the point is that no field
+  is written twice, not that the file shrank.
+
+- **The voice ssh transport has its own module.** `makeSshRun` — the one place
+  the extension spawns `ssh`, collects Buffer stdout and kills on abort — lived
+  in `index.ts`, whose stated job is registration and presentation, and was
+  exported only so tests could import it. It now lives in
+  `.pi/extensions/voice/transport.ts`, which is where a second backend (a local
+  recorder instead of ssh) would land.
+
+- **Reviews must be asked for, and take their model from the triage config.**
+  `triage_change` is recommendation-only — it never launches a reviewer — but the
+  rule that a human approves every review agent lived only in that tool's
+  description, which is not in context unless the tool is called. Three `/voice`
+  review subagents were therefore started on hand-picked models that were not in
+  `~/.pi/agent/review-triage.json`: the triage catalog and the free-form
+  `subagent` overrides had no link between them. `AGENTS.md` now states the rule
+  where every session reads it — always ask the user before starting a review
+  subagent, and take the reviewer's `provider`/`model`/`thinking` from the
+  config's `candidates` rather than hand-picking one, adding a model to the
+  config first if a lens needs one it lacks.
+
 ## v1.6.0 — 2026-10-15
 
 Added:

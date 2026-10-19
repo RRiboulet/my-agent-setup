@@ -95,14 +95,21 @@ Once authenticated:
 1. Work on a branch (see "Branches"), committing as the `.pi/skills/commit/`
    skill directs where it is present.
 2. `git push -u origin <branch>`
-3. `gh pr create --fill` — `--fill` uses the commits for title and body, which
-   this repo's long commit subjects suit. Always say in the body what a reviewer
-   should check and what you verified.
+3. `gh pr create --base dev --fill` — the explicit `--base dev` is not
+   decoration. This repository's **default branch is `main`**, and `gh pr create`
+   with no `--base` opens the pull request against that default, so the
+   unqualified command silently targets `main` — which takes releases only. A
+   branch cut from `dev` then drags every change merged since the last release
+   into `main` with it, because the squash replays the whole branch. `--fill`
+   uses the commits for title and body, which this repo's long commit subjects
+   suit; check the title it produced, since `--fill` falls back to the branch
+   name when it cannot read a single commit. Always say in the body what a
+   reviewer should check and what you verified.
 4. `gh pr merge --squash --delete-branch`. `--delete-branch` is not optional
-   politeness: a squash merge does not put the branch tip in `main`'s history, so
+   politeness: a squash merge does not put the branch tip in `dev`'s history, so
    a later `git branch -d <branch>` fails with "not fully merged" and needs `-D`.
    Letting gh delete both the local and the remote branch avoids both.
-5. Bring `main` up to date: `git checkout main && git pull --ff-only`.
+5. Bring `dev` up to date: `git checkout dev && git pull --ff-only`.
 
 Tags are cut from `main`, never from a feature branch.
 
@@ -192,6 +199,26 @@ So reach them in two steps:
 There is no blocking wait, so collecting a result means polling
 `subagent_status` — `subagent_status({ compact: true })` is the cheap
 one-line-per-run form, and the single-run path is the one that returns output.
+
+## Review subagents: ask first, and take the model from the triage config
+
+`triage_change` (the tool) and `/triage` are **recommendation-only**. They gather
+evidence, ask the judge, and return a plan; they never launch a review, switch a
+model, or run a test. Nothing in this repo starts a reviewer on its own.
+
+**Always ask the user before launching a review subagent.** A recommendation is
+not an instruction, and a question that merely *sounds* like it invites a review
+is not approval either: starting a reviewer spends real tokens and runs an
+independent process, so it is the user's call every time. Propose the lenses and
+models, then wait for a yes.
+
+When the user does approve one, the reviewer's `provider`, `model` and
+`thinking` come from the `candidates` in `~/.pi/agent/review-triage.json` — for a
+single change, the model `triage_change` names; for a multi-lens review (which
+`triage_change` does not serve, because it resolves one profile), a model picked
+from that `candidates` list per lens. Never hand-pick a model outside the list:
+if a lens needs a model the config lacks, add it to the config first. Which
+model sits in which capability band is a human judgement, not the agent's.
 
 ## Tests
 
