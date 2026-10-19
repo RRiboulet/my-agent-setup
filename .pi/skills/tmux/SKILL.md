@@ -97,7 +97,7 @@ This must ALWAYS be printed right after a session was started and once again at 
 
 ### Relationship to the btw extension
 
-`.pi/extensions/btw/` shows a side answer in a `tail -F` viewer that runs in one tmux session per main pi session, named `btw-<session-id>`, on a socket at **`<pi agent dir>/tmux-btw-<session-id>.sock`** (`getAgentDir()`, usually `~/.pi/agent`). One socket per main session is deliberate: the popup's root-table Escape binding is global to its server, and a teardown must not reach another session's panel. So:
+`.pi/extensions/btw/` shows a side answer in a Markdown-rendering viewer that runs in one tmux session per main pi session, named `btw-<session-id>`, on a socket at **`<pi agent dir>/tmux-btw-<session-id>.sock`** (`getAgentDir()`, usually `~/.pi/agent`). One socket per main session is deliberate: the popup's root-table Escape binding is global to its server, and a teardown must not reach another session's panel. So:
 
 - Do **not** create sessions on a `tmux-btw-*.sock` socket, and do **not** `kill-server` or `kill-session` a `btw-*` session — the extension owns its lifetime and reaps it by the owner pid it recorded.
 - `btw-` is reserved, like `pi-agent-`; this skill's own names stay `pi-<slug>`.

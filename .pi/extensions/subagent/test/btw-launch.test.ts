@@ -4,11 +4,14 @@
 // tmux or the filesystem — the per-session socket, the run dir, the viewer
 // command and the tmux argv. The panel itself needs a terminal and a tmux
 // server, so the deterministic parts are pinned here: the exact argv, the
-// base-index-free session targets, the `exec tail -F` command, and the path and
-// question guards.
+// base-index-free session targets, the `exec node viewer.mjs` command, and the
+// path and question guards.
 
 import assert from "node:assert/strict";
+import * as path from "node:path";
 import { test } from "node:test";
+
+import { shellQuote } from "../shell.ts";
 
 import {
 	buildBtwKillServerArgs,
@@ -145,11 +148,12 @@ test("send-keys is literal and option-safe; Enter is a separate call", () => {
 	]);
 });
 
-test("the viewer follows the answer file with tail -F and execs", () => {
-	assert.equal(buildBtwViewerCommand("/tmp/answer.md"), "exec tail -F -- '/tmp/answer.md'");
+test("the viewer renders the answer file with the bundled script and execs", () => {
+	const viewer = path.join(import.meta.dirname, "..", "..", "btw", "viewer.mjs");
+	assert.equal(buildBtwViewerCommand("/tmp/answer.md"), `exec node ${shellQuote(viewer)} '/tmp/answer.md'`);
 	assert.equal(
 		buildBtwViewerCommand("/tmp/my dir/it's.md"),
-		`exec tail -F -- '/tmp/my dir/it'"'"'s.md'`,
+		`exec node ${shellQuote(viewer)} '/tmp/my dir/it'"'"'s.md'`,
 		"the path stays one shell word",
 	);
 });
