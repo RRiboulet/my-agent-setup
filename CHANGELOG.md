@@ -4,6 +4,47 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Added:
+
+- **`/voice` is now controllable from the keyboard on the phone.** The toggle
+  shortcut was `ctrl+shift+r`, which is only distinct from `ctrl+r` under the
+  Kitty keyboard protocol: on a legacy terminal — Termux on the phone included
+  — the two collapse to the same byte, so the keypress was silently ignored and
+  the only way to stop a recording was to type `/voice` again. The shortcut is
+  now configurable (`shortcut`, a pi key id or a list, also
+  `PI_VOICE_SHORTCUT`) and defaults to `["ctrl+shift+r", "alt+r"]`. `alt+r` is
+  the legacy-expressible form (ESC + r), needs no protocol negotiation, and
+  needs only Termux's `ALT` extra key plus a letter, so a recording can be
+  finished without retyping the command. Neither default key is reserved, so
+  neither shadows a built-in editor action; `ctrl+r` remains a valid override for
+  terminals that send it, though it then warns about `app.session.rename` and
+  shadows rename in the main editor (rename still works in the session
+  selector).
+
+  The setting takes a single id, a comma-separated string, or an array, and is
+  validated against pi's own key grammar at the config boundary — the base-key
+  set is derived from pi's exported `Key`, with tests that round-trip ids
+  `parseKey` produces and cross-check `matchesKey` in both directions, so a key
+  added to pi is not silently refused here. Validation does not stop at the
+  grammar: `ctrl+f5` and `alt+escape` parse but can never fire, because pi
+  refuses a modifier on `escape` and on `f1`–`f12`, so those are rejected too
+  rather than registered as dead keys. A comma-based or `+`-based key (`ctrl+,`,
+  `ctrl++`) is read as one id rather than a broken list. `[]` or `""` disables
+  the shortcut, from the file or the environment. **One invalid entry rejects the
+  whole value** and keeps the previous setting — the same all-or-nothing rule as
+  every other voice field — so a typo cannot take the toggle away, including by
+  half-applying a list.
+
+  A rejected value is now reported where it can be seen. It used to go through
+  `console.warn` at extension load, and pi's interactive mode never captures
+  `console.*`, so a mistyped override silently left the defaults bound and looked
+  like a shortcut that simply did not work. Warnings are collected while the
+  config loads and shown once, as a notification, at `session_start`; a headless
+  session still gets them on stderr. `alt+r` itself is two bytes on a legacy
+  transport, so a link that delivers ESC and `r` more than ~10 ms apart reads ESC
+  as an interrupt instead — `PI_TUI_ESC_TIMEOUT` is the lever, and the README
+  says so.
+
 ## v1.7.0 — 2026-10-19
 
 Added:

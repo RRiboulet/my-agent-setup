@@ -85,7 +85,7 @@ inactive. Installed packages are loaded regardless of project trust.
 | `.pi/extensions/native-web-search.ts` | Native web search tool — **ours**, not upstream: it registers the `web_search` tool. Ships with `.pi/skills/native-web-search/`, which *is* vendored |
 | `.pi/extensions/repo-explorer/` | `/explore`: browse a branch's file tree with a directory-by-directory fuzzy filter and print a file into the transcript, or quick-open `/explore <path> [branch]` / `<branch>:<path>` to skip the menus. Read-only git resolved against the session cwd; the process runner, branch menu, browser, transcript renderer, display sanitizer and argument grammar are separate internals. **Ours** |
 | `.pi/extensions/review-triage/` | `triage_change` tool and `/triage`: measure a finished change from its git diff, ask a calibrated decision model (Jev, via `ctx.modelRegistry.classify()`) whether it needs an adversarial and/or complexity review, how hard each should push and which allowed model should run it, and return a depth-runged, fallback-chained plan for the `subagent` tool. Policy (judge model, candidates, thresholds, chains) lives in `~/.pi/agent/review-triage.json`; the verdict is appended to the session for audit. **Ours** |
-| `.pi/extensions/voice/` | `/voice`: dictation with the phone as microphone — start `termux-microphone-record` over ssh, fetch the m4a, transcribe it through an OpenAI-compatible `/audio/transcriptions` endpoint, and paste the transcript at the cursor (or submit it with `autoSubmit`). `/voice cancel` aborts; `ctrl+shift+r` toggles on Kitty-protocol terminals. **Ours** |
+| `.pi/extensions/voice/` | `/voice`: dictation with the phone as microphone — start `termux-microphone-record` over ssh, fetch the m4a, transcribe it through an OpenAI-compatible `/audio/transcriptions` endpoint, and paste the transcript at the cursor (or submit it with `autoSubmit`). `/voice cancel` aborts; `alt+r` (and `ctrl+shift+r` on a Kitty terminal) toggle the same cycle. **Ours** |
 | `.pi/extensions/btw/` | `/btw`: opens a panel and asks for the question (submit it empty to reopen a running panel), then answers in-process from the exact conversation prefix, so the provider prompt cache is reused; the streaming answer is shown by a Markdown-rendering viewer in its own tmux popup. Neither the question nor the answer enters the transcript. Escape returns to pi while the answer keeps running; a new question replaces the panel. **Ours** |
 | `.pi/extensions/opencode-go-provider/` | An `opencode-go` provider for `/model`: fast GLM, Kimi, MiniMax, Qwen, DeepSeek and Grok models via opencode.ai's Go API, with the correct wire protocol per model (Anthropic, OpenAI Completions, Responses) and a per-account usage-budget widget below the editor. **Vendored** from [monotykamary/pi-opencode-go-provider](https://github.com/monotykamary/pi-opencode-go-provider) (MIT), byte-identical to upstream — see below |
 | `.pi/skills/native-web-search/` | Script + docs for the above. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/native-web-search/`, with local provider patches: OpenRouter support, an `opencode-go` default through the Go API's Anthropic-compatible endpoint, unknown-provider rejection, and a test seam (`__test__` + direct-invocation guard). The two must travel together |
@@ -292,8 +292,9 @@ the recording, and POSTs it to an OpenAI-compatible `/audio/transcriptions`
 endpoint. The transcript is pasted at the cursor by default (a long paste
 collapses to pi's `[paste #n]` marker and expands on submit), or submitted as a
 prompt with `autoSubmit` — queued as a follow-up while the agent streams.
-`/voice cancel` aborts any phase; `ctrl+shift+r` toggles on terminals that
-forward Kitty-protocol keys.
+`/voice cancel` aborts any phase; `alt+r` toggles the same cycle on every
+terminal, `ctrl+shift+r` on a Kitty one, so the recording can be finished
+without retyping the command.
 
 Setup, the configuration table, the key routing (the ambient OpenAI key is
 never sent to a custom endpoint), the single `response_format` retry and the

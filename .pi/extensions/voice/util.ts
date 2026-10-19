@@ -7,6 +7,10 @@
  * second place to fix the same bug.
  */
 
+/** A warning sink: config loading and shortcut parsing both report through
+ * one shape, so a warning cannot be reformatted (or dropped) in between. */
+export type Warn = (message: string) => void;
+
 /** The first non-blank line of a possibly multi-line message. */
 export function firstLine(text: string): string {
 	return text.split(/\r?\n/).find((line) => line.trim() !== "") ?? "";
