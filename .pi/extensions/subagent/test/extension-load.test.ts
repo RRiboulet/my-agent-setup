@@ -87,6 +87,7 @@ const MODULES: Record<string, string[]> = {
 	"../panel.ts": ["buildEscapeBindArgs", "buildAttachCommand", "buildPanelLaunch"],
 	"../shell.ts": ["shellQuote"],
 	"../../voice/config.ts": ["agentDir", "configPath", "loadConfig", "parseEnvBool", "readConfigFile"],
+	"../../voice/shortcut.ts": ["normalizeKeyId", "parseShortcutIds"],
 	"../../voice/recorder.ts": [
 		"Recorder",
 		"buildCleanupCommand",
