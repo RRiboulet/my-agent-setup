@@ -9,7 +9,7 @@ Added:
 - **`/btw` — ask a side question without polluting the conversation.** `/btw`
   opens a panel and asks for the question (an empty submission reopens a running
   panel); the answer is produced in-process from the active conversation and
-  shown in a `less +F` viewer in its own tmux popup. Neither the question nor
+  shown in a `tail -F` viewer in its own tmux popup. Neither the question nor
   the answer is added to the transcript. The command deliberately takes no
   arguments, so spaces and punctuation in the question cannot be parsed as
   command input.
