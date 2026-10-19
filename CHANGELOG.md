@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.7.0 — 2026-10-19
+
 Added:
 
 - **`/btw` — ask a side question without polluting the conversation.** `/btw`
