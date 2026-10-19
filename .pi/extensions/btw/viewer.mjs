@@ -23,8 +23,9 @@ async function runViewer(answerPath) {
 		let text;
 		try {
 			text = await readFile(answerPath, "utf8");
-		} catch {
-			return; // not created yet; the watch below fires when it appears
+		} catch (error) {
+			if (error?.code === "ENOENT") return; // file replaced under us; watch will fire again
+			throw error;
 		}
 		const all = text.split("\n");
 		if (all.length < rendered) {
@@ -42,11 +43,15 @@ async function runViewer(answerPath) {
 	const schedule = () => {
 		clearTimeout(timer);
 		timer = setTimeout(() => {
-			paint().catch(() => undefined);
+			paint().catch((error) => {
+				console.error(`btw viewer paint failed: ${error?.message ?? error}`);
+			});
 		}, DEBOUNCE_MS);
 	};
 	watch(answerPath, schedule);
 	await paint();
 }
 
-runViewer(process.argv[2]);
+runViewer(process.argv[2]).catch((error) => {
+	console.error(`btw viewer failed: ${error?.message ?? error}`);
+});
