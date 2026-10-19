@@ -7,10 +7,11 @@
  * mechanics — start, stop, fetch, cleanup, the device-global recorder's
  * quirks — live in recorder.ts; transcription lives in transcribe.ts.
  *
- * Trigger surfaces: `/voice` toggles, `/voice cancel` aborts. The
- * `ctrl+shift+r` shortcut is for Kitty-capable desktop terminals (it is
- * silently ignored on legacy protocols, including the phone's keyboard), so
- * the command is the reliable path everywhere.
+ * Trigger surfaces: `/voice` toggles, `/voice cancel` aborts. The configured
+ * shortcut(s) toggle the same cycle; the defaults are `ctrl+shift+r` (distinct
+ * only under the Kitty keyboard protocol) and `alt+r` (the legacy-expressible
+ * form, so it fires on the phone's soft keyboard and on terminals without
+ * Kitty). `/voice` remains the reliable path everywhere.
  *
  * The factory only wires things up: config is read once here (edit
  * voice.json, then `/reload`), and nothing long-running starts until a
@@ -22,7 +23,7 @@ import { readFile, stat } from "node:fs/promises";
 import { basename } from "node:path";
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { Key } from "@earendil-works/pi-tui";
+import type { KeyId } from "@earendil-works/pi-tui";
 
 import { loadConfig, type VoiceConfig } from "./config.ts";
 import { Recorder, type RecorderStatus, type Run } from "./recorder.ts";
@@ -179,12 +180,17 @@ export function createVoiceExtension(pi: ExtensionAPI, seams: VoiceSeams = {}): 
 		},
 	});
 
-	pi.registerShortcut(Key.ctrlShift("r"), {
-		description: "Dictate (toggle the phone recorder)",
-		handler: async (ctx) => {
-			await toggle(ctx);
-		},
-	});
+	// The ids are config strings, so the cast is the runtime validator's
+	// (`shortcutField`) word, not the compiler's — an unparseable id never
+	// reaches here. An empty list disables the shortcut entirely.
+	for (const id of config.shortcut) {
+		pi.registerShortcut(id as KeyId, {
+			description: "Dictate (toggle the phone recorder)",
+			handler: async (ctx) => {
+				await toggle(ctx);
+			},
+		});
+	}
 
 	pi.on("session_shutdown", async () => {
 		await recorder.shutdown();

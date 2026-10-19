@@ -22,6 +22,8 @@ import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { parseShortcutIds } from "./shortcut.ts";
+
 export const CONFIG_BASENAME = "voice.json";
 
 /** The recorder inside Termux, pinned as verified 2026-10-15. */
@@ -43,6 +45,16 @@ export const MAX_SECONDS_DEFAULT = 120;
 export const TIMEOUT_MIN_MS = 5_000;
 export const TIMEOUT_MAX_MS = 300_000;
 export const TIMEOUT_DEFAULT_MS = 60_000;
+
+/**
+ * The default shortcut(s), as pi key ids. `ctrl+shift+r` is only distinct from
+ * `ctrl+r` under the Kitty keyboard protocol, so it never fires on a legacy
+ * terminal — including the phone's. `alt+r` is the legacy-expressible fallback
+ * (Termux sends ESC + r) and needs no Kitty negotiation, so it is what makes
+ * the toggle reachable from the phone's soft keyboard. Both are bound on every
+ * terminal; neither is reserved, so neither shadows a built-in editor action.
+ */
+export const DEFAULT_SHORTCUTS: readonly string[] = ["ctrl+shift+r", "alt+r"];
 
 export interface VoiceConfig {
 	/** ssh host alias for the phone (user@host or an entry in ~/.ssh/config). */
@@ -69,6 +81,8 @@ export interface VoiceConfig {
 	prompt?: string;
 	/** Upload timeout in milliseconds. Clamped [5000, 300000]. */
 	timeoutMs: number;
+	/** Pi key ids that toggle the recorder; empty disables the shortcut. */
+	shortcut: string[];
 }
 
 export const DEFAULT_CONFIG: VoiceConfig = {
@@ -80,6 +94,10 @@ export const DEFAULT_CONFIG: VoiceConfig = {
 	baseUrl: "https://api.openai.com/v1",
 	model: "gpt-4o-transcribe",
 	timeoutMs: TIMEOUT_DEFAULT_MS,
+	// A fresh array, not the shared `DEFAULT_SHORTCUTS`: `loadConfig` shallow-
+	// copies `DEFAULT_CONFIG`, so a shared reference would be one mutation away
+	// from changing every later run.
+	shortcut: [...DEFAULT_SHORTCUTS],
 };
 
 /** Environment overrides, one per field. Values win over the file. */
@@ -96,6 +114,7 @@ export const VOICE_ENV = {
 	language: "PI_VOICE_LANGUAGE",
 	prompt: "PI_VOICE_PROMPT",
 	timeoutMs: "PI_VOICE_TIMEOUT_MS",
+	shortcut: "PI_VOICE_SHORTCUT",
 } as const;
 
 export function agentDir(env: NodeJS.ProcessEnv = process.env): string {
@@ -260,6 +279,38 @@ function intField(key: keyof VoiceConfig, env: string, min: number, max: number)
 	};
 }
 
+/** One or more pi key ids. A string (comma-separated) or an array of strings;
+ * each is normalised and validated, and an entry that is not a key id warns and
+ * is dropped. A value with no usable entry leaves the field alone, so a typo
+ * cannot remove the shortcut. `[]` and `""` are accepted and disable it. */
+function shortcutField(key: keyof VoiceConfig, env: string): FieldSpec {
+	const read = (value: unknown, label: string, warn: Warn): unknown => {
+		if (value === undefined || value === null) return LEAVE;
+		// An explicitly empty setting disables the shortcut rather than warning:
+		// the owner wrote it on purpose.
+		if (typeof value === "string" && value.trim() === "") return [];
+		if (Array.isArray(value) && value.length === 0) return [];
+		// Any other type is a config mistake, not an empty setting: warn so it
+		// cannot vanish silently.
+		if (typeof value !== "string" && !Array.isArray(value)) {
+			warn(`voice: ignoring ${label}: expected a pi key like "ctrl+shift+r"`);
+			return LEAVE;
+		}
+		const ids = parseShortcutIds(value, label, warn);
+		return ids.length > 0 ? ids : LEAVE;
+	};
+	return {
+		key,
+		env,
+		fromFile: (value, warn) =>
+			read(value, `shortcut ${JSON.stringify(value)}`, warn),
+		fromEnv: (value, warn) => {
+			if (value === undefined || value.trim() === "") return LEAVE;
+			return read(value, `${env}=${JSON.stringify(value)}`, warn);
+		},
+	};
+}
+
 /** An optional positive integer. A file `null` clears it; a value that is not a
  * positive integer warns and is ignored. Each layer names the source the reader
  * saw — the JSON key, or the `PI_VOICE_*` variable. */
@@ -301,6 +352,7 @@ const FIELDS: readonly FieldSpec[] = [
 	stringField("language", VOICE_ENV.language),
 	stringField("prompt", VOICE_ENV.prompt),
 	intField("timeoutMs", VOICE_ENV.timeoutMs, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS),
+	shortcutField("shortcut", VOICE_ENV.shortcut),
 ];
 
 export function loadConfig(options: LoadConfigOptions = {}): VoiceConfig {
@@ -320,6 +372,11 @@ export function loadConfig(options: LoadConfigOptions = {}): VoiceConfig {
 		const fromEnv = field.fromEnv(env[field.env], warn);
 		if (fromEnv !== LEAVE) (config as Record<string, unknown>)[field.key] = fromEnv;
 	}
+
+	// `shortcut` is the one array field, and the shallow copy above would leave
+	// it shared with `DEFAULT_CONFIG`: copy it so a caller's mutation cannot
+	// reach the default and, through it, every later run.
+	config.shortcut = [...config.shortcut];
 
 	return config;
 }

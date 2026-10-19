@@ -4,6 +4,24 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Added:
+
+- **`/voice` is now controllable from the keyboard on the phone.** The toggle
+  shortcut was `ctrl+shift+r`, which is only distinct from `ctrl+r` under the
+  Kitty keyboard protocol: on a legacy terminal — Termux on the phone included
+  — the two collapse to the same byte, so the keypress was silently ignored and
+  the only way to stop a recording was to type `/voice` again. The shortcut is
+  now configurable (`shortcut`, a pi key id or a list, also
+  `PI_VOICE_SHORTCUT`) and defaults to `["ctrl+shift+r", "alt+r"]`. `alt+r` is
+  the legacy-expressible form (ESC + r), needs no protocol negotiation, and
+  needs only Termux's `ALT` extra key plus a letter, so a recording can be
+  finished without retyping the command. Neither default key is reserved, so
+  neither shadows a built-in editor action; `ctrl+r` remains a valid override for
+  terminals that send it, though it then warns about `app.session.rename` and
+  shadows rename in the main editor (rename still works in the session
+  selector). An empty list disables the shortcut, and an unparseable value warns
+  and keeps the previous setting so a typo cannot take the toggle away.
+
 ## v1.7.0 — 2026-10-19
 
 Added:

@@ -7,8 +7,9 @@ stops it, fetches the m4a, POSTs it to an OpenAI-compatible
 submits it as a prompt. The container never touches a microphone; everything
 device-side happens on the phone over ssh.
 
-**Ours, not vendored.** `ctrl+shift+r` toggles the same cycle for terminals
-that forward Kitty-protocol keys; `/voice cancel` aborts any phase.
+**Ours, not vendored.** The configured shortcut(s) toggle the same cycle;
+`/voice cancel` aborts any phase. The defaults are `ctrl+shift+r` and
+`alt+r` (see below).
 
 ## Usage
 
@@ -20,9 +21,23 @@ that forward Kitty-protocol keys; `/voice cancel` aborts any phase.
 The status line moves `starting…` → `● rec m:ss` → `stopping…` → `fetching…` →
 `transcribing…` and clears when the cycle ends; the footer key is `voice`.
 
-`ctrl+shift+r` needs the Kitty protocol (or modifyOtherKeys): on a legacy
-terminal the keypress is silently ignored, which is why `/voice` is the
-reliable trigger — especially on the phone's soft keyboard.
+The default shortcuts are two, because one key cannot serve both worlds:
+
+- **`ctrl+shift+r`** is the desktop key. It is only distinct from `ctrl+r`
+  under the Kitty keyboard protocol (or modifyOtherKeys), so on a legacy
+  terminal it never fires — the terminal sends the same byte as `ctrl+r`, and
+  pi cannot tell the two apart.
+- **`alt+r`** is the phone key. A legacy terminal (including Termux on the
+  phone) sends ESC + r for it, which needs no protocol negotiation, so it
+  works on the soft keyboard and on every terminal that does not speak Kitty.
+  Termux's extra-keys row has an `ALT` key for it.
+
+Both are bound everywhere and neither shadows a built-in editor action, so the
+shortcut keeps working whether or not the terminal negotiates Kitty. Rebind
+either with `shortcut` (see Configuration) if a key suits your terminal
+better; `ctrl+r` is the other natural choice, though it also triggers a
+built-in-conflict warning and shadows `app.session.rename` in the main
+editor (rename still works in the session selector).
 
 Where the transcript goes:
 
@@ -122,6 +137,7 @@ registered even when the config cannot be read.
 | `language` | unset | `PI_VOICE_LANGUAGE` | optional hint (`gpt-4o-mini-transcribe` rejects it) |
 | `prompt` | unset | `PI_VOICE_PROMPT` | optional vocabulary/style hint (same caveat) |
 | `timeoutMs` | `60000` | `PI_VOICE_TIMEOUT_MS` | upload timeout, clamped 5000–300000 |
+| `shortcut` | `["ctrl+shift+r", "alt+r"]` | `PI_VOICE_SHORTCUT` | pi key id(s) that toggle the recorder; a string, a comma-separated string, or an array. `[]`/`""` disables it |
 
 Booleans accept `1/true/yes/on` and `0/false/no/off`; an unrecognised value is
 ignored rather than guessed.
@@ -183,27 +199,31 @@ What the unit suite cannot prove — it needs the real phone and an STT key:
 
 1. First `/voice`: grant Android's RECORD_AUDIO permission to Termux:API, speak,
    `/voice` again — the transcript lands at the cursor.
-2. `/voice cancel` in each phase (starting / recording / fetching /
+2. The shortcut: `alt+r` starts a recording and `alt+r` again stops it, with no
+   `/voice` typed, and `ctrl+shift+r` does the same on a Kitty terminal. A
+   `shortcut` override in `voice.json` is picked up after `/reload`.
+3. `/voice cancel` in each phase (starting / recording / fetching /
    transcribing): no paste, `$HOME/.pi-voice/` on the phone and the local temp
    dir both empty.
-3. `maxSeconds` expiry with a short cap: the phone stops itself; the later `-q`
+4. `maxSeconds` expiry with a short cap: the phone stops itself; the later `-q`
    may answer `No recording to stop`, which the stop path tolerates on that
    output alone — the fetch step is what still has to prove audio arrived (exit
    0, non-empty stdout).
-4. A second pi session running `/voice` while the phone records: the
+5. A second pi session running `/voice` while the phone records: the
    already-in-progress hint, and nothing on the phone is killed.
-5. Quit pi while recording: shutdown stays bounded and the phone stops.
-6. `bitrateKbps`: `-b` acceptance on your device.
-7. A transcript over 10 lines: the `[paste #n]` marker in the editor and
+6. Quit pi while recording: shutdown stays bounded and the phone stops.
+7. `bitrateKbps`: `-b` acceptance on your device.
+8. A transcript over 10 lines: the `[paste #n]` marker in the editor and
    expansion on submit.
-8. Key resolution with no `PI_VOICE_*` vars set, and the airplane-mode failure
+9. Key resolution with no `PI_VOICE_*` vars set, and the airplane-mode failure
    path.
 
 ## Files
 
 | File | Role |
 |---|---|
-| `index.ts` | registration, `/voice`, `ctrl+shift+r`, status rendering, deliver (read → transcribe → present) |
+| `index.ts` | registration, `/voice`, the configured shortcuts, status rendering, deliver (read → transcribe → present) |
+| `shortcut.ts` | pi key-id grammar: normalise and validate a configured shortcut |
 | `config.ts` | defaults, `voice.json` + `PI_VOICE_*` merge, malformed-file warning |
 | `recorder.ts` | command builders and the recorder state machine (start / stop / cancel / shutdown) |
 | `transcribe.ts` | multipart POST, key routing, typed failures, the single `response_format` retry |

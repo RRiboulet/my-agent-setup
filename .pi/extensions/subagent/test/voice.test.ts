@@ -18,6 +18,7 @@ import {
 	CONFIG_BASENAME,
 	DEFAULT_CONFIG,
 	DEFAULT_RECORDER_PATH,
+	DEFAULT_SHORTCUTS,
 	MAX_SECONDS_DEFAULT,
 	VOICE_ENV,
 	loadConfig,
@@ -50,6 +51,7 @@ import {
 	type TranscribeRequest,
 } from "../../voice/transcribe.ts";
 import { createVoiceExtension, formatElapsed, statusText } from "../../voice/index.ts";
+import { normalizeKeyId, parseShortcutIds } from "../../voice/shortcut.ts";
 import { MAX_SSH_STDERR_BYTES, MAX_SSH_STDOUT_BYTES, makeSshRun } from "../../voice/transport.ts";
 import { waitFor, withEnv, withTempAgentDir } from "./helpers.ts";
 
@@ -542,6 +544,133 @@ test("invalid env values are ignored rather than guessed", async () => {
 				assert.match(warns[0], /PI_VOICE_BITRATE_KBPS/);
 			},
 		);
+	});
+});
+
+// ---------------------------------------------------------------------------
+// Shortcut parsing
+// ---------------------------------------------------------------------------
+
+test("normalizeKeyId accepts pi's grammar and rejects anything else", () => {
+	assert.equal(normalizeKeyId("ctrl+shift+r"), "ctrl+shift+r");
+	assert.equal(normalizeKeyId("CTRL+SHIFT+R"), "ctrl+shift+r");
+	assert.equal(normalizeKeyId("  alt+r  "), "alt+r");
+	assert.equal(normalizeKeyId("shift+ctrl+p"), "shift+ctrl+p");
+	assert.equal(normalizeKeyId("ctrl+alt+]"), "ctrl+alt+]");
+	assert.equal(normalizeKeyId("PageUp"), "pageup");
+	assert.equal(normalizeKeyId("f12"), "f12");
+	assert.equal(normalizeKeyId("+"), "+");
+	assert.equal(normalizeKeyId("ctrl+space"), "ctrl+space");
+	assert.equal(normalizeKeyId("ctrl+super+k"), "ctrl+super+k");
+
+	assert.equal(normalizeKeyId("ctrl+ctrl+r"), undefined, "a modifier twice is not a key");
+	assert.equal(normalizeKeyId("ctrl+"), undefined);
+	assert.equal(normalizeKeyId("ctrl+shift"), undefined, "a bare modifier is not a key");
+	assert.equal(normalizeKeyId("bogus"), undefined);
+	assert.equal(normalizeKeyId(""), undefined);
+	assert.equal(normalizeKeyId("ctrl+bogus"), undefined);
+	assert.equal(normalizeKeyId("ctrl+shift+r+r"), undefined);
+});
+
+test("parseShortcutIds reads a string, a comma-separated string and an array, deduping", () => {
+	const warns: string[] = [];
+	const warn = (message: string) => warns.push(message);
+	assert.deepEqual(parseShortcutIds("alt+r", "file", warn), ["alt+r"]);
+	assert.deepEqual(parseShortcutIds("ctrl+shift+r, ALT+R", "file", warn), ["ctrl+shift+r", "alt+r"]);
+	assert.deepEqual(parseShortcutIds(["alt+r", "alt+r", "f12"], "file", warn), ["alt+r", "f12"]);
+	assert.deepEqual(parseShortcutIds("ctrl+shift+r, nope, bogus", "file", warn), ["ctrl+shift+r"]);
+	assert.equal(warns.length, 2, "each bad entry warns once");
+	assert.deepEqual(parseShortcutIds("", "file", warn), []);
+	assert.deepEqual(parseShortcutIds([], "file", warn), []);
+	assert.deepEqual(parseShortcutIds(42, "file", warn), []);
+});
+
+test("shortcut: defaults, file, env, invalid and disabled", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withEnv(clearVoiceEnv(), async () => {
+			// No file: the two defaults, in order.
+			assert.deepEqual(loadConfig({ warn: () => {} }).shortcut, [...DEFAULT_SHORTCUTS]);
+			assert.deepEqual(DEFAULT_SHORTCUTS, ["ctrl+shift+r", "alt+r"]);
+
+			// A single string and a comma-separated string both work.
+			await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ shortcut: "f12" }));
+			assert.deepEqual(loadConfig({ warn: () => {} }).shortcut, ["f12"]);
+			await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ shortcut: "f12, alt+r" }));
+			assert.deepEqual(loadConfig({ warn: () => {} }).shortcut, ["f12", "alt+r"]);
+
+			// An array, with a duplicate removed.
+			await writeFile(
+				path.join(agentDir, CONFIG_BASENAME),
+				JSON.stringify({ shortcut: ["ctrl+r", "alt+r", "ctrl+r"] }),
+			);
+			assert.deepEqual(loadConfig({ warn: () => {} }).shortcut, ["ctrl+r", "alt+r"]);
+
+			// An invalid entry warns and is dropped; a value with nothing usable
+			// keeps the default rather than silently disabling the shortcut.
+			await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ shortcut: ["ctrl+r", "nope"] }));
+			const warns: string[] = [];
+			assert.deepEqual(
+				loadConfig({ warn: (message) => warns.push(message) }).shortcut,
+				["ctrl+r"],
+			);
+			assert.equal(warns.length, 1);
+			assert.match(warns[0], /nope/);
+			await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ shortcut: "nope" }));
+			const allBad: string[] = [];
+			assert.deepEqual(
+				loadConfig({ warn: (message) => allBad.push(message) }).shortcut,
+				[...DEFAULT_SHORTCUTS],
+			);
+			assert.equal(allBad.length, 1);
+
+			// A value of the wrong type warns and keeps the default.
+			await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ shortcut: 42 }));
+			const wrongType: string[] = [];
+			assert.deepEqual(
+				loadConfig({ warn: (message) => wrongType.push(message) }).shortcut,
+				[...DEFAULT_SHORTCUTS],
+			);
+			assert.equal(wrongType.length, 1);
+			assert.match(wrongType[0], /expected a pi key/);
+
+			// Explicitly empty disables the shortcut.
+			await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ shortcut: [] }));
+			assert.deepEqual(loadConfig({ warn: () => {} }).shortcut, []);
+			await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ shortcut: "" }));
+			assert.deepEqual(loadConfig({ warn: () => {} }).shortcut, []);
+		});
+
+		// The env wins over the file, and a comma-separated env value works.
+		await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ shortcut: ["f12"] }));
+		await withEnv({ ...clearVoiceEnv(), [VOICE_ENV.shortcut]: "ctrl+r, alt+r" }, async () => {
+			assert.deepEqual(loadConfig({ warn: () => {} }).shortcut, ["ctrl+r", "alt+r"]);
+		});
+		await withEnv({ ...clearVoiceEnv(), [VOICE_ENV.shortcut]: "nope" }, async () => {
+			const warns: string[] = [];
+			assert.deepEqual(
+				loadConfig({ warn: (message) => warns.push(message) }).shortcut,
+				["f12"],
+				"an invalid env value falls back to the file, not the default",
+			);
+			assert.equal(warns.length, 1);
+		});
+	});
+});
+
+test("the factory registers exactly the configured shortcuts", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withEnv(clearVoiceEnv(), async () => {
+			await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ shortcut: ["ctrl+r", "f12"] }));
+			const capture = captureFactory(await loadFactory());
+			assert.deepEqual(
+				capture.shortcuts.map((shortcut) => shortcut.id),
+				["ctrl+r", "f12"],
+			);
+
+			await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ shortcut: [] }));
+			const disabled = captureFactory(await loadFactory());
+			assert.deepEqual(disabled.shortcuts, [], "an empty shortcut list registers no key");
+		});
 	});
 });
 
@@ -1676,7 +1805,7 @@ interface CapturedShortcut {
 
 interface Capture {
 	command?: CapturedCommand;
-	shortcut?: CapturedShortcut;
+	shortcuts: CapturedShortcut[];
 	shutdown: boolean;
 	sent: Array<{ content: unknown; options: unknown }>;
 }
@@ -1689,13 +1818,13 @@ async function loadFactory(): Promise<(pi: unknown) => void> {
 }
 
 function captureFactory(factory: (pi: unknown) => void): Capture {
-	const capture: Capture = { shutdown: false, sent: [] };
+	const capture: Capture = { shortcuts: [], shutdown: false, sent: [] };
 	factory({
 		registerCommand: (name: string, options: Omit<CapturedCommand, "name">) => {
 			capture.command = { name, ...options };
 		},
 		registerShortcut: (id: string, options: Omit<CapturedShortcut, "id">) => {
-			capture.shortcut = { id, ...options };
+			capture.shortcuts.push({ id, ...options });
 		},
 		on: (event: string) => {
 			if (event === "session_shutdown") capture.shutdown = true;
@@ -1707,12 +1836,16 @@ function captureFactory(factory: (pi: unknown) => void): Capture {
 	return capture;
 }
 
-test("the factory registers /voice, ctrl+shift+r and a shutdown handler", async () => {
+test("the factory registers /voice, the default shortcuts and a shutdown handler", async () => {
 	await withTempAgentDir(async () => {
 		const capture = captureFactory(await loadFactory());
 		assert.equal(capture.command?.name, "voice");
 		assert.match(capture.command?.description ?? "", /\/voice cancel/);
-		assert.equal(capture.shortcut?.id, "ctrl+shift+r");
+		assert.deepEqual(
+			capture.shortcuts.map((shortcut) => shortcut.id),
+			["ctrl+shift+r", "alt+r"],
+		);
+		assert.ok(capture.shortcuts.every((shortcut) => /dictate/i.test(shortcut.description ?? "")));
 		assert.equal(capture.shutdown, true);
 
 		// /voice cancel while idle and an unknown argument must not touch ssh.
