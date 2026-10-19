@@ -6,6 +6,44 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
+- **`/btw` — ask a side question without polluting the conversation.** `/btw`
+  opens a panel and asks for the question (an empty submission reopens a running
+  panel); the answer is produced in-process from the active conversation and
+  shown in a `tail -F` viewer in its own tmux popup. Neither the question nor
+  the answer is added to the transcript. The command deliberately takes no
+  arguments, so spaces and punctuation in the question cannot be parsed as
+  command input.
+
+  The request reuses the main conversation's exact prompt prefix —
+  `buildSessionContext()` run through pi's own `convertToLlm()`, no
+  system-prompt or tool-list override, the main session's routing header, and no
+  `tool_choice` (setting it invalidates the provider's message cache: the same
+  question cost 808,589 fresh input tokens with it and 813,184 cache-read ones
+  without). On a warm ~800k-token session the side question billed 79 input
+  tokens. The session's thinking level and the `images.blockImages` filter are
+  mirrored, and tool calls are never executed: a tool-calling answer is
+  continued once with a synthetic refusal, and a second one is reported with
+  the usage it billed.
+
+  The panel is a viewer on a per-main-session tmux socket, so Escape closes it
+  and nothing else, and the answer keeps streaming while it is closed.
+  `session_start` reaps only dead owners (a live sibling process keeps its
+  panel), `session_shutdown` kills the server before deleting the answer and
+  the socket, and `reload` keeps it. Known limits: the first question after an
+  idle gap pays full price once, the viewer renders raw Markdown, and a
+  session with an active `/goal` diverges from the main request's forced system
+  prompt.
+
+  A pre-merge review hardened parity and ownership. The side request now
+  forwards the resolved thinking level (not the projection's `"off"` default)
+  and the settings' thinking budgets so the provider maps `reasoning` through
+  the same tables, reproduces the telemetry attribution headers the main loop
+  merges, and sums ignored tool-call counts across the continuation. The
+  answer-file appender checks the owner pid and stops instead of
+  interleaving into a panel a sibling pi reset under it, and the zero-cache
+  warning only fires when `input` is large enough that a cache read was
+  expected, so a short cold start no longer trains the user to distrust it.
+
 - **`/voice` — dictate with the phone as the microphone.** `/voice` starts
   `termux-microphone-record` on a phone reachable over ssh; the second `/voice`
   stops it, fetches the m4a, and POSTs it to an OpenAI-compatible

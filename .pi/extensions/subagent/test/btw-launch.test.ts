@@ -1,62 +1,43 @@
 // Unit tests for the btw launch core.
 //
-// Risk covered: `launch.ts` decides everything the side panel does before it
-// touches tmux or the filesystem — the per-session socket, the scratch paths,
-// the child pi argv, the tmux argv and the shell command string. The panel
-// itself needs a terminal and a live tmux server, so the deterministic parts
-// are pinned here: the exact argv, the `-e` that keeps an extension-registered
-// provider resolvable under `--no-extensions`, the `@question.md` form that
-// keeps the question out of argv parsing, `exec` so `#{pane_dead}` works, and
-// the read-only tool allowlist.
+// Risk covered: `launch.ts` decides everything the panel does before it touches
+// tmux or the filesystem — the per-session socket, the run dir, the viewer
+// command and the tmux argv. The panel itself needs a terminal and a tmux
+// server, so the deterministic parts are pinned here: the exact argv, the
+// base-index-free session targets, the `exec tail -F` command, and the path and
+// question guards.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-	BTW_SIDE_PROMPT,
-	BTW_TOOLS,
-	buildBtwChildCommand,
-	buildBtwChildPiArgs,
-	buildBtwKillSessionArgs,
+	buildBtwKillServerArgs,
 	buildBtwPaths,
 	buildBtwRemainOnExitArgs,
 	buildBtwSendKeysArgs,
 	buildBtwSessionCreateArgs,
 	buildBtwSubmitArgs,
-	btwForkPath,
-	btwQuestionPath,
+	buildBtwViewerCommand,
+	btwAnswerPath,
+	btwOwnerPidPath,
+	btwRootDir,
 	btwRunDir,
 	btwSessionName,
-	btwSidePromptPath,
 	btwSocketPath,
 	btwTarget,
-	providerExtensionPath,
 	requireBtwQuestion,
 } from "../../btw/launch.ts";
 
 const AGENT_DIR = "/home/x/.pi/agent";
-const BTW_DIR = "/repo/.pi/extensions/btw";
-const SID = "1a2b3c4d-0000-4000-8000-000000000000";
+const SID = "01a14e96-1111-7000-8000-000000000001";
 const SOCKET = `${AGENT_DIR}/tmux-btw-${SID}.sock`;
 const SESSION = `btw-${SID}`;
+const RUN_DIR = `${AGENT_DIR}/btw/${SID}`;
 
-test("the socket, session and target derive from the session id", () => {
+test("the socket, session and target derive from the full session id", () => {
 	assert.equal(btwSocketPath(AGENT_DIR, SID), SOCKET);
 	assert.equal(btwSessionName(SID), SESSION);
 	assert.equal(btwTarget(SID), SESSION, "a session target avoids the base-index assumption");
-});
-
-test("buildBtwPaths returns every path from one agent dir and session id", () => {
-	const runDir = `${AGENT_DIR}/btw/${SID}`;
-	assert.deepEqual(buildBtwPaths(AGENT_DIR, SID), {
-		socket: SOCKET,
-		session: SESSION,
-		target: SESSION,
-		runDir,
-		fork: `${runDir}/fork.jsonl`,
-		question: `${runDir}/question.md`,
-		sidePrompt: `${runDir}/side-prompt.md`,
-	});
 });
 
 test("two UUIDv7 ids sharing a timestamp prefix do not collide", () => {
@@ -70,25 +51,33 @@ test("two UUIDv7 ids sharing a timestamp prefix do not collide", () => {
 	assert.notEqual(btwSessionName(first), btwSessionName(second));
 });
 
-test("scratch paths are under the full session id, not the short one", () => {
-	const runDir = `${AGENT_DIR}/btw/${SID}`;
-	assert.equal(btwRunDir(AGENT_DIR, SID), runDir);
-	assert.equal(btwForkPath(AGENT_DIR, SID), `${runDir}/fork.jsonl`);
-	assert.equal(btwQuestionPath(AGENT_DIR, SID), `${runDir}/question.md`);
-	assert.equal(btwSidePromptPath(AGENT_DIR, SID), `${runDir}/side-prompt.md`);
+test("buildBtwPaths returns every path from one agent dir and session id", () => {
+	assert.deepEqual(buildBtwPaths(AGENT_DIR, SID), {
+		socket: SOCKET,
+		session: SESSION,
+		target: SESSION,
+		runDir: RUN_DIR,
+		answer: `${RUN_DIR}/answer.md`,
+		ownerPid: `${RUN_DIR}/owner.pid`,
+	});
+	assert.equal(btwAnswerPath(AGENT_DIR, SID), `${RUN_DIR}/answer.md`);
+	assert.equal(btwOwnerPidPath(AGENT_DIR, SID), `${RUN_DIR}/owner.pid`);
+	assert.equal(btwRunDir(AGENT_DIR, SID), RUN_DIR);
 });
 
-test("a relative agent dir is refused instead of silently producing tilde paths", () => {
+test("the panel root is the btw directory under the agent dir", () => {
+	assert.equal(btwRootDir(AGENT_DIR), `${AGENT_DIR}/btw`);
+	assert.throws(() => btwRootDir("relative/agent"), /absolute agent directory/);
+});
+
+test("a relative agent dir or a multi-component session id is refused", () => {
 	for (const builder of [
 		() => btwSocketPath("~/.pi/agent", SID),
 		() => btwRunDir("relative/agent", SID),
-		() => btwForkPath("~/.pi/agent", SID),
+		() => btwAnswerPath("~/.pi/agent", SID),
 	]) {
 		assert.throws(builder, /absolute agent directory/);
 	}
-});
-
-test("a session id that is not one path component is refused", () => {
 	for (const sessionId of ["", ".", "..", "../evil", "a/b", "/abs"]) {
 		assert.throws(() => btwSocketPath(AGENT_DIR, sessionId), /one path component/);
 		assert.throws(() => btwSessionName(sessionId), /one path component/);
@@ -104,74 +93,8 @@ test("an empty or whitespace question is refused", () => {
 	assert.throws(() => requireBtwQuestion("why?\u0000more"), /NUL/);
 });
 
-test("the allowlist is pi's read-only tool set", () => {
-	assert.deepEqual([...BTW_TOOLS], ["read", "grep", "find", "ls"]);
-});
-
-test("the side prompt marks the replayed loadout as inapplicable", () => {
-	assert.match(BTW_SIDE_PROMPT, /do not apply/i);
-	assert.match(BTW_SIDE_PROMPT, /Escape/);
-	assert.match(BTW_SIDE_PROMPT, /no bash, edit or write/i);
-});
-
-const CHILD_SPEC = {
-	invocation: ["/usr/bin/node", "/usr/lib/pi/cli.js"],
-	provider: "opencode-go",
-	model: "glm-5.3-flash",
-	thinking: "max" as string | undefined,
-	sessionFile: `${AGENT_DIR}/btw/${SID}/fork.jsonl`,
-	questionPath: `${AGENT_DIR}/btw/${SID}/question.md`,
-	sidePromptPath: `${AGENT_DIR}/btw/${SID}/side-prompt.md`,
-	btwDir: BTW_DIR,
-	name: SESSION,
-};
-
-test("the child argv pins the side-panel contract and loads the provider extension", () => {
-	assert.deepEqual(buildBtwChildPiArgs(CHILD_SPEC), [
-		"/usr/bin/node",
-		"/usr/lib/pi/cli.js",
-		"-e",
-		"/repo/.pi/extensions/opencode-go-provider/index.ts",
-		"--provider",
-		"opencode-go",
-		"--model",
-		"glm-5.3-flash",
-		"--thinking",
-		"max",
-		"--session",
-		`${AGENT_DIR}/btw/${SID}/fork.jsonl`,
-		"--name",
-		SESSION,
-		"--no-approve",
-		"--no-extensions",
-		"--no-skills",
-		"--no-prompt-templates",
-		"--no-context-files",
-		"--no-mcp",
-		"--tools",
-		"read,grep,find,ls",
-		"--append-system-prompt",
-		`${AGENT_DIR}/btw/${SID}/side-prompt.md`,
-		`@${AGENT_DIR}/btw/${SID}/question.md`,
-	]);
-});
-
-test("a core provider gets no -e and an absent thinking level drops the flag", () => {
-	const args = buildBtwChildPiArgs({ ...CHILD_SPEC, provider: "anthropic", thinking: undefined });
-	assert.ok(!args.includes("-e"), "no extension is loaded for a core provider");
-	assert.ok(!args.includes("--thinking"), "an unset thinking level is the model default, not a flag");
-	assert.equal(args[args.indexOf("--provider") + 1], "anthropic");
-});
-
-test("the question travels as @file so its text never re-enters argv parsing", () => {
-	const args = buildBtwChildPiArgs(CHILD_SPEC);
-	assert.equal(args[args.length - 1], `@${AGENT_DIR}/btw/${SID}/question.md`);
-});
-
-test("the provider extension path resolves only for an extension-registered provider", () => {
-	assert.equal(providerExtensionPath("opencode-go", BTW_DIR), "/repo/.pi/extensions/opencode-go-provider/index.ts");
-	assert.equal(providerExtensionPath("anthropic", BTW_DIR), undefined);
-	assert.throws(() => providerExtensionPath("opencode-go", "relative/btw"), /absolute extension directory/);
+test("killing the panel tears down the whole per-session server", () => {
+	assert.deepEqual(buildBtwKillServerArgs({ socket: SOCKET }), ["-S", SOCKET, "kill-server"]);
 });
 
 test("tmux session creation is detached, named and anchored to the main cwd", () => {
@@ -189,17 +112,7 @@ test("tmux session creation is detached, named and anchored to the main cwd", ()
 	]);
 });
 
-test("killing the panel session targets the session on its socket", () => {
-	assert.deepEqual(buildBtwKillSessionArgs({ socket: SOCKET, session: SESSION }), [
-		"-S",
-		SOCKET,
-		"kill-session",
-		"-t",
-		SESSION,
-	]);
-});
-
-test("remain-on-exit keeps a crashed child visible", () => {
+test("remain-on-exit targets the session, not window 0", () => {
 	assert.deepEqual(buildBtwRemainOnExitArgs({ socket: SOCKET, session: SESSION }), [
 		"-S",
 		SOCKET,
@@ -232,15 +145,11 @@ test("send-keys is literal and option-safe; Enter is a separate call", () => {
 	]);
 });
 
-test("the child command execs and shell-quotes the real argv", () => {
-	const command = buildBtwChildCommand(buildBtwChildPiArgs(CHILD_SPEC));
-	assert.ok(command.startsWith("exec "), "exec so pane_dead flips with the child");
-	assert.ok(
-		command.includes(`'@${AGENT_DIR}/btw/${SID}/question.md'`),
-		"the @file argument survives as one quoted word",
-	);
+test("the viewer follows the answer file with tail -F and execs", () => {
+	assert.equal(buildBtwViewerCommand("/tmp/answer.md"), "exec tail -F -- '/tmp/answer.md'");
 	assert.equal(
-		buildBtwChildCommand(["/usr/bin/node", "/path with space/cli.js", "it's"]),
-		`exec '/usr/bin/node' '/path with space/cli.js' 'it'"'"'s'`,
+		buildBtwViewerCommand("/tmp/my dir/it's.md"),
+		`exec tail -F -- '/tmp/my dir/it'"'"'s.md'`,
+		"the path stays one shell word",
 	);
 });
