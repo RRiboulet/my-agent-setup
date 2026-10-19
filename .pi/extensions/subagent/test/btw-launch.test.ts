@@ -4,7 +4,7 @@
 // tmux or the filesystem — the per-session socket, the run dir, the viewer
 // command and the tmux argv. The panel itself needs a terminal and a tmux
 // server, so the deterministic parts are pinned here: the exact argv, the
-// base-index-free session targets, the `exec less +F` command, and the path and
+// base-index-free session targets, the `exec tail -F` command, and the path and
 // question guards.
 
 import assert from "node:assert/strict";
@@ -145,11 +145,11 @@ test("send-keys is literal and option-safe; Enter is a separate call", () => {
 	]);
 });
 
-test("the viewer follows the answer file with less +F and execs", () => {
-	assert.equal(buildBtwViewerCommand("/tmp/answer.md"), "exec less +F -- '/tmp/answer.md'");
+test("the viewer follows the answer file with tail -F and execs", () => {
+	assert.equal(buildBtwViewerCommand("/tmp/answer.md"), "exec tail -F -- '/tmp/answer.md'");
 	assert.equal(
 		buildBtwViewerCommand("/tmp/my dir/it's.md"),
-		`exec less +F -- '/tmp/my dir/it'"'"'s.md'`,
+		`exec tail -F -- '/tmp/my dir/it'"'"'s.md'`,
 		"the path stays one shell word",
 	);
 });

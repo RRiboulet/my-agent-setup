@@ -90,4 +90,4 @@ These assertions fail if:
 - `x-opencode-session` header is missing or points to the wrong session,
 - the context prefix diverges from `convertToLlm(buildSessionContext(...))`.
 
-Runtime smoke check: the answer footer prints `cache read N`. A warning is logged if `N === 0` on a warm session (implementation in `appendFooter` / `runBtwRequest`).
+Runtime smoke check: the answer footer prints `cache read N`. When an answer reports `cache read 0`, a warning is also notified (implementation in `appendFooter`): the first question after an idle gap legitimately misses (see above), but on a warm session a zero means an invariant is broken and the session is being re-billed in full.

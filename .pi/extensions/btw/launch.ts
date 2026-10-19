@@ -190,10 +190,13 @@ export function buildBtwSubmitArgs(input: { socket: string; target: string }): s
 
 /**
  * The command the viewer pane runs: follow the answer file as the parent
- * appends to it. `Ctrl+C` stops following for normal paging; `q` exits. `--`
- * keeps a path starting with `-` from becoming an option, and `exec` replaces
- * the shell so `#{pane_dead}` flips when the pager exits.
+ * appends to it. No pager on purpose — plain output into the pty keeps tmux
+ * owning the keys, so the pane scrolls natively (copy mode, mouse wheel) the
+ * same way the subagent attach views do; a pager like `less +F` swallows the
+ * tmux prefix and pins the viewport, which is the scroll bug. `--` keeps a
+ * path starting with `-` from becoming an option, and `exec` replaces the
+ * shell so `#{pane_dead}` flips if the follower itself dies.
  */
 export function buildBtwViewerCommand(answerPath: string): string {
-	return `exec less +F -- ${shellQuote(answerPath)}`;
+	return `exec tail -F -- ${shellQuote(answerPath)}`;
 }

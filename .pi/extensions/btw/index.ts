@@ -482,6 +482,13 @@ async function appendFooter(deps: BtwDeps, paths: BtwPaths, outcome: BtwOutcome)
 				: withToolNote(`error: ${outcome.message}${outcome.usage ? ` · ${formatBtwUsage(outcome.usage)}` : ""}`);
 	await appendFile(paths.answer, `${FOOTER}${sanitizeAnswerText(summary)}\n`, "utf8").catch(() => undefined);
 	if (outcome.status === "error") deps.notify(`BTW: ${outcome.message}`, "error");
+	// A zero cache read is the one failure the footer cannot show (it omits
+	// the `cache read` segment when the value is 0), so it is notified too: the
+	// first question after an idle gap legitimately misses, any other means an
+	// invariant above is broken and the session is being re-billed in full.
+	if (outcome.status === "ok" && outcome.usage !== undefined && outcome.usage.cacheRead === 0) {
+		deps.notify("BTW: the answer reported 0 cached tokens read — the cache invariants in CACHE.md are broken", "warning");
+	}
 }
 
 /**

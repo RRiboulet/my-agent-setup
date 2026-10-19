@@ -1,6 +1,6 @@
 // Behaviour tests for the /btw panel.
 //
-// Risk covered: `/btw` resets the panel, starts the `less +F` viewer, and runs
+// Risk covered: `/btw` resets the panel, starts the `tail -F` viewer, and runs
 // the in-process request into `answer.md`. These tests pin the tmux call order
 // (kill-server -> new-session -> remain-on-exit -> type viewer -> Enter), the
 // popup ladder and argv, reattach without a new request, the answer file and
@@ -480,6 +480,29 @@ test("a multi-line question is quoted line by line in the header", async () => {
 			await launch.completion;
 			const answer = readFileSync(buildBtwPaths(agentDir, SID).answer, "utf8");
 			assert.match(answer, /^# \/btw\n\n> line one\n> line two\n\n/);
+		});
+	});
+});
+
+test("an answer that reads no cache warns instead of failing quietly", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withNoTmux(async () => {
+			const { notifications, deps } = fakeDeps(agentDir);
+			const registry = streamingRegistry("Hello", {
+				...ZERO_USAGE,
+				input: 812_345,
+				cacheRead: 0,
+				output: 3,
+				totalTokens: 812_348,
+			});
+			const launch = await launchBtwPanel(deps, fakeContext(registry.modelRegistry), "why?");
+			assert.ok(launch);
+			await launch.completion;
+			assert.match(
+				notifications.at(-1)?.message ?? "",
+				/0 cached tokens read/,
+				"a zero cache read is loud in the TUI, not just absent from the footer",
+			);
 		});
 	});
 });
