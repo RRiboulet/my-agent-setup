@@ -9,7 +9,7 @@ Added:
 - **`/btw` — ask a side question without polluting the conversation.** `/btw`
   opens a panel and asks for the question (an empty submission reopens a running
   panel); the answer is produced in-process from the active conversation and
-  shown in a `tail -F` viewer in its own tmux popup. Neither the question nor
+  shown in a Markdown-rendering viewer in its own tmux popup. Neither the question nor
   the answer is added to the transcript. The command deliberately takes no
   arguments, so spaces and punctuation in the question cannot be parsed as
   command input.
@@ -30,9 +30,10 @@ Added:
   `session_start` reaps only dead owners (a live sibling process keeps its
   panel), `session_shutdown` kills the server before deleting the answer and
   the socket, and `reload` keeps it. Known limits: the first question after an
-  idle gap pays full price once, the viewer renders raw Markdown, and a
-  session with an active `/goal` diverges from the main request's forced system
-  prompt.
+  idle gap pays full price once, the viewer's Markdown renderer covers ATX
+  headings, fenced code, lists, quotes, links and inline emphasis but not
+  tables, setext headings or nested emphasis, and a session with an active
+  `/goal` diverges from the main request's forced system prompt.
 
   A pre-merge review hardened parity and ownership. The side request now
   forwards the resolved thinking level (not the projection's `"off"` default)

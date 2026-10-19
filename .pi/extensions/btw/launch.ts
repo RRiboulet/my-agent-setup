@@ -15,7 +15,11 @@
 // Escape-to-close.
 
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { shellQuote } from "../subagent/shell.ts";
+
+/** The bundled viewer script, next to this module. */
+const VIEWER_SCRIPT = fileURLToPath(new URL("./viewer.mjs", import.meta.url));
 
 /**
  * Refuse a relative path, with the reason in the message.
@@ -189,14 +193,13 @@ export function buildBtwSubmitArgs(input: { socket: string; target: string }): s
 }
 
 /**
- * The command the viewer pane runs: follow the answer file as the parent
- * appends to it. No pager on purpose — plain output into the pty keeps tmux
- * owning the keys, so the pane scrolls natively (copy mode, mouse wheel) the
- * same way the subagent attach views do; a pager like `less +F` swallows the
- * tmux prefix and pins the viewport, which is the scroll bug. `--` keeps a
- * path starting with `-` from becoming an option, and `exec` replaces the
- * shell so `#{pane_dead}` flips if the follower itself dies.
+ * The command the viewer pane runs: render the answer file as Markdown and
+ * keep up as the parent appends to it. No pager on purpose — plain output into
+ * the pty keeps tmux owning the keys, so the pane scrolls natively (copy mode,
+ * mouse wheel) the same way the subagent attach views do; a pager like `less +F`
+ * swallows the tmux prefix and pins the viewport, which is the scroll bug. `exec`
+ * replaces the shell so `#{pane_dead}` flips if the renderer itself dies.
  */
 export function buildBtwViewerCommand(answerPath: string): string {
-	return `exec tail -F -- ${shellQuote(answerPath)}`;
+	return `exec node ${shellQuote(VIEWER_SCRIPT)} ${shellQuote(answerPath)}`;
 }
