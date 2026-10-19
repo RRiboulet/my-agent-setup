@@ -94,9 +94,9 @@ export const DEFAULT_CONFIG: VoiceConfig = {
 	baseUrl: "https://api.openai.com/v1",
 	model: "gpt-4o-transcribe",
 	timeoutMs: TIMEOUT_DEFAULT_MS,
-	// A fresh array, not the shared `DEFAULT_SHORTCUTS`: `loadConfig` shallow-
-	// copies `DEFAULT_CONFIG`, so a shared reference would be one mutation away
-	// from changing every later run.
+	// A copy of `DEFAULT_SHORTCUTS` so the constant and the template never
+	// alias. `loadConfig` copies it again before returning; that second copy is
+	// the guard that keeps a caller's mutation out of every later run.
 	shortcut: [...DEFAULT_SHORTCUTS],
 };
 
@@ -290,12 +290,9 @@ function shortcutField(key: keyof VoiceConfig, env: string): FieldSpec {
 		// the owner wrote it on purpose.
 		if (typeof value === "string" && value.trim() === "") return [];
 		if (Array.isArray(value) && value.length === 0) return [];
-		// Any other type is a config mistake, not an empty setting: warn so it
-		// cannot vanish silently.
-		if (typeof value !== "string" && !Array.isArray(value)) {
-			warn(`voice: ignoring ${label}: expected a pi key like "ctrl+shift+r"`);
-			return LEAVE;
-		}
+		// A wrong type is a config mistake, not an empty setting: parseShortcutIds
+		// warns and returns [], which makes this LEAVE, so the mistake cannot
+		// silently remove the shortcut.
 		const ids = parseShortcutIds(value, label, warn);
 		return ids.length > 0 ? ids : LEAVE;
 	};

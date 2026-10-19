@@ -19,8 +19,20 @@ Added:
   neither shadows a built-in editor action; `ctrl+r` remains a valid override for
   terminals that send it, though it then warns about `app.session.rename` and
   shadows rename in the main editor (rename still works in the session
-  selector). An empty list disables the shortcut, and an unparseable value warns
-  and keeps the previous setting so a typo cannot take the toggle away.
+  selector).
+
+  The setting takes a single id, a comma-separated string, or an array, and is
+  validated against pi's own key grammar at the config boundary — the base-key
+  set is derived from pi's exported `Key`, with a test that round-trips every id
+  `parseKey` can produce, so a key added to pi is not silently refused here. A
+  comma-based or `+`-based key (`ctrl+,`, `ctrl++`) is read as one id rather than
+  a broken list. An empty list disables the shortcut, and an unparseable value
+  warns and keeps the previous setting so a typo cannot take the toggle away;
+  the warning names the bad entry, because the fallback (defaults still bound)
+  would otherwise make a rejected rebind look like a working one. `alt+r` is two
+  bytes on a legacy transport, so a link that delivers ESC and `r` more than
+  ~10 ms apart reads ESC as an interrupt instead — `PI_TUI_ESC_TIMEOUT` is the
+  lever, and the README says so.
 
 ## v1.7.0 — 2026-10-19
 

@@ -137,7 +137,7 @@ registered even when the config cannot be read.
 | `language` | unset | `PI_VOICE_LANGUAGE` | optional hint (`gpt-4o-mini-transcribe` rejects it) |
 | `prompt` | unset | `PI_VOICE_PROMPT` | optional vocabulary/style hint (same caveat) |
 | `timeoutMs` | `60000` | `PI_VOICE_TIMEOUT_MS` | upload timeout, clamped 5000–300000 |
-| `shortcut` | `["ctrl+shift+r", "alt+r"]` | `PI_VOICE_SHORTCUT` | pi key id(s) that toggle the recorder; a string, a comma-separated string, or an array. `[]`/`""` disables it |
+| `shortcut` | `["ctrl+shift+r", "alt+r"]` | `PI_VOICE_SHORTCUT` | pi key id(s) that toggle the recorder; an array, a single id, or a comma-separated list. `[]` or `""` in `voice.json` disables it (the env var has no disable form). A comma-based key (`ctrl+,`) is read as one id, so it cannot share the string form with another — use the array form |
 
 Booleans accept `1/true/yes/on` and `0/false/no/off`; an unrecognised value is
 ignored rather than guessed.
@@ -192,6 +192,14 @@ The transcript becomes part of the session log like any other input.
   begins with `/` (a registered command) or `!` executes as that command or
   shell line. Reword it first if the dictation happens to start that way.
   `autoSubmit` does not have this caveat — it never expands prompt templates.
+- **Bind a modifier combination, not a bare key.** `shortcut: "r"` is a valid
+  key id and would register, so every `r` typed would toggle the recorder.
+  Use a modifier combination (`alt+r`, `ctrl+shift+r`, …).
+- **`alt+r` is two bytes on a legacy terminal.** Termux sends ESC + r, and pi
+  reassembles them with a short timeout. On a phone link that delivers the two
+  bytes in separate reads more than ~10 ms apart, pi reads ESC as an interrupt
+  instead. If that happens, raise `PI_TUI_ESC_TIMEOUT`, or use `ctrl+shift+r` on
+  a Kitty terminal.
 
 ## Manual checklist
 

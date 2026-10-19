@@ -52,6 +52,7 @@ import {
 } from "../../voice/transcribe.ts";
 import { createVoiceExtension, formatElapsed, statusText } from "../../voice/index.ts";
 import { normalizeKeyId, parseShortcutIds } from "../../voice/shortcut.ts";
+import { parseKey } from "@earendil-works/pi-tui";
 import { MAX_SSH_STDERR_BYTES, MAX_SSH_STDOUT_BYTES, makeSshRun } from "../../voice/transport.ts";
 import { waitFor, withEnv, withTempAgentDir } from "./helpers.ts";
 
@@ -562,6 +563,9 @@ test("normalizeKeyId accepts pi's grammar and rejects anything else", () => {
 	assert.equal(normalizeKeyId("+"), "+");
 	assert.equal(normalizeKeyId("ctrl+space"), "ctrl+space");
 	assert.equal(normalizeKeyId("ctrl+super+k"), "ctrl+super+k");
+	assert.equal(normalizeKeyId("ctrl++"), "ctrl++", "a trailing + is the + base key");
+	assert.equal(normalizeKeyId("shift+ctrl++"), "shift+ctrl++");
+	assert.equal(normalizeKeyId("ctrl+shift+alt+super+r"), "ctrl+shift+alt+super+r");
 
 	assert.equal(normalizeKeyId("ctrl+ctrl+r"), undefined, "a modifier twice is not a key");
 	assert.equal(normalizeKeyId("ctrl+"), undefined);
@@ -570,6 +574,34 @@ test("normalizeKeyId accepts pi's grammar and rejects anything else", () => {
 	assert.equal(normalizeKeyId(""), undefined);
 	assert.equal(normalizeKeyId("ctrl+bogus"), undefined);
 	assert.equal(normalizeKeyId("ctrl+shift+r+r"), undefined);
+	assert.equal(normalizeKeyId("ctrl+++"), undefined);
+	assert.equal(normalizeKeyId("ctrl+shift+alt+super+ctrl+r"), undefined);
+});
+
+/**
+ * The drift guard the reviews asked for: the accepted ids are tied to pi's own
+ * parser instead of to a hand-copied list. `parseKey` is the function `matchesKey`
+ * uses, so every id it can produce must be one `normalizeKeyId` accepts — if pi
+ * gains a key, this fails rather than silently refusing it.
+ */
+test("normalizeKeyId accepts every id pi's own parser can produce", () => {
+	const sequences = [
+		"\x1br", // alt+r, the legacy form
+		"\x12", // ctrl+r
+		"\x1b[114;6u", // shift+ctrl+r, Kitty
+		"\x1b[27;5;43~", // ctrl++, modifyOtherKeys
+		"\x1b[43;5u", // ctrl++, Kitty
+		"\x1b[27;5;44~", // ctrl+,
+		"\x1b[Z", // shift+tab
+		"\x1b\r", // alt+enter
+		"\x1b[5~", // pageUp
+		"\x00", // ctrl+space
+	];
+	for (const sequence of sequences) {
+		const parsed = parseKey(sequence);
+		assert.ok(parsed, `${JSON.stringify(sequence)} should parse to a key id`);
+		assert.notEqual(normalizeKeyId(parsed), undefined, `normalizeKeyId must accept pi's own ${parsed}`);
+	}
 });
 
 test("parseShortcutIds reads a string, a comma-separated string and an array, deduping", () => {
@@ -583,6 +615,13 @@ test("parseShortcutIds reads a string, a comma-separated string and an array, de
 	assert.deepEqual(parseShortcutIds("", "file", warn), []);
 	assert.deepEqual(parseShortcutIds([], "file", warn), []);
 	assert.deepEqual(parseShortcutIds(42, "file", warn), []);
+	assert.equal(warns.length, 3, "each bad entry and the wrong type warn once");
+	assert.match(warns[2], /expected a pi key/);
+
+	// A key whose own id contains the separator is read whole, not as a list.
+	assert.deepEqual(parseShortcutIds("ctrl+,", "file", warn), ["ctrl+,"]);
+	assert.deepEqual(parseShortcutIds("ctrl++", "file", warn), ["ctrl++"]);
+	assert.deepEqual(parseShortcutIds(["ctrl+,", "alt+r"], "file", warn), ["ctrl+,", "alt+r"]);
 });
 
 test("shortcut: defaults, file, env, invalid and disabled", async () => {
