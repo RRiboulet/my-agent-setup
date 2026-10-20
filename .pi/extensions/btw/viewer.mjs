@@ -66,10 +66,18 @@ function panelTerminal() {
  * The parent resolves pi's packages where pi's own mapping applies; in a
  * spawned process a bare specifier only resolves when the package's own
  * `node_modules` has them, which an installed pi package does not. So the
- * path is used when there is one, and the name is the fallback.
+ * path is used when there is one - and when the path does not work, the name
+ * is tried, because a path that has gone stale (pi upgraded between the spec
+ * being written and the viewer starting) should not take the panel down.
  */
 async function importPi(specifier, entryPoint) {
-	if (entryPoint) return await import(pathToFileURL(entryPoint).href);
+	if (entryPoint) {
+		try {
+			return await import(pathToFileURL(entryPoint).href);
+		} catch (error) {
+			console.error(`btw viewer could not load ${entryPoint}: ${error?.message ?? error}`);
+		}
+	}
 	return await import(specifier);
 }
 
@@ -95,7 +103,11 @@ async function loadPanelSetup(panelPath) {
 	let theme;
 	try {
 		theme = spec ? installThemeSpec(spec.theme, piThemeModule) : undefined;
-	} catch {
+	} catch (error) {
+		// The panel would otherwise draw in the terminal's palette with
+		// nothing said about it, which is the one failure a reader cannot
+		// see for themselves.
+		console.error(`btw viewer could not use your theme: ${error?.message ?? error}`);
 		theme = undefined;
 	}
 	if (theme === undefined) {
@@ -125,7 +137,6 @@ async function runViewer(answerPath, panelPath) {
 	const view = createMarkdownView(pitui.Markdown, theme);
 	const tui = new pitui.TuiMainScreen(panelTerminal());
 	tui.addChild(view);
-
 	// The pane's shell echoed the command that started this viewer, and the
 	// answer belongs at the top of the panel rather than under it. Clearing
 	// the scrollback too keeps the panel's history the answer's history.
@@ -158,9 +169,9 @@ async function runViewer(answerPath, panelPath) {
 		clearTimeout(timer);
 		timer = setTimeout(() => {
 			paint().catch((error) => {
-				// A failed paint leaves the panel on its last good frame.
-				// Retrying on every tick would only repeat the failure, so
-				// the panel says so once and stops drawing.
+				// The panel keeps its last good frame, and says what went
+				// wrong. The answer keeps growing, so the next change tries
+				// again - the failure is in the panel, not in the answer.
 				console.error(`btw viewer paint failed: ${error?.message ?? error}`);
 			});
 		}, DEBOUNCE_MS);

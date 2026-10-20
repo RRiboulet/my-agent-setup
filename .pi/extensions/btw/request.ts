@@ -282,9 +282,14 @@ export function openCodeFence(text: string): string | undefined {
 	// Only a code block can leave a fence open, and only at the top level: a
 	// fence inside a list item is closed by the end of the item.
 	if (last?.type !== "code") return undefined;
-	const lines = last.raw.split("\n");
+	// The block's source, without the newline the document may end with. A
+	// closing fence is a line of its own, and it is not the line that opened
+	// the fence - so a fence with nothing after it is still open, and a
+	// closing fence followed by a newline is still closed.
+	const lines = last.raw.replace(/\n+$/, "").split("\n");
 	const marker = /^ {0,3}(`{3,}|~{3,})/.exec(lines[0])?.[1];
 	if (marker === undefined) return undefined;
+	if (lines.length < 2) return marker;
 	const closing = lines[lines.length - 1].trim();
 	const closed = closing.length >= marker.length && [...closing].every((char) => char === marker[0]);
 	return closed ? undefined : marker;

@@ -12,17 +12,6 @@
 // renders through the same `getMarkdownTheme()` the TUI uses. The panel is
 // then the transcript's own colors, not an approximation of them.
 
-/**
- * pi's theme module keeps the live theme on `globalThis` under this symbol, so
- * that every copy of the module (node's ESM loader and jiti) shares one
- * instance. The viewer installs its rebuilt theme under the same symbol, which
- * is what makes `getMarkdownTheme()` - and the syntax highlighting behind it -
- * use the parent's colors.
- */
-const THEME_KEY = Symbol.for("@earendil-works/pi-coding-agent:theme");
-/** The symbol pi used before the rename; pi's own `setGlobalTheme` sets both. */
-const THEME_KEY_OLD = Symbol.for("@mariozechner/pi-coding-agent:theme");
-
 /** The escape a palette index is drawn with. */
 const INDEXED_ESCAPE = /^\x1b\[(?:38|48);5;(\d+)m$/;
 /** The escape a truecolor value is drawn with. */
@@ -53,7 +42,10 @@ function colorValueFromAnsi(ansi, defaultEscape) {
 	const truecolor = TRUECOLOR_ESCAPE.exec(ansi);
 	if (truecolor) {
 		const [, r, g, b] = truecolor;
-		return `#${[r, g, b].map((channel) => channel.padStart(2, "0")).join("")}`;
+		// The channels in the escape are decimal, and a hex colour is two
+		// hex digits per channel - padding the decimal would give nine
+		// digits where six belong, and pi's own parser would refuse it.
+		return `#${[r, g, b].map((channel) => Number(channel).toString(16).padStart(2, "0")).join("")}`;
 	}
 	return undefined;
 }
@@ -132,16 +124,19 @@ export function buildThemeSpec(theme, options = {}) {
 export function installThemeSpec(spec, piThemeModule) {
 	const { Theme, getMarkdownTheme } = piThemeModule;
 	const theme = new Theme(spec.colors, {}, spec.mode, { dim: spec.dim, name: spec.name });
-	globalThis[THEME_KEY] = theme;
-	globalThis[THEME_KEY_OLD] = theme;
-	const markdownTheme = getMarkdownTheme();
-	// pi's theme module reads the live theme through a proxy keyed by a symbol
-	// it owns. If that symbol ever moves, the install above is a no-op and the
-	// panel would quietly draw in whatever theme pi happens to have; the probe
-	// turns that into a fallback instead.
-	if (markdownTheme.heading("x") !== theme.fg("mdHeading", "x")) {
-		throw new Error("the panel's theme did not take effect");
+	if (typeof piThemeModule.setThemeInstance === "function") {
+		// pi's own API for handing the process a theme instance. It is what
+		// the theme module exports for exactly this, and using it means the
+		// panel does not have to know how pi keeps the live theme.
+		piThemeModule.setThemeInstance(theme);
+	} else {
+		// The package's public entry point does not re-export it. Loading
+		// the theme by name is the best that can be done there, and it is
+		// exact for a named theme - the generated `system` theme is the one
+		// that needs the colors the terminal reported.
+		piThemeModule.initTheme(spec.name);
 	}
+	const markdownTheme = getMarkdownTheme();
 	if (spec.codeBlockIndent !== undefined) markdownTheme.codeBlockIndent = spec.codeBlockIndent;
 	return markdownTheme;
 }

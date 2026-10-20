@@ -97,6 +97,22 @@ function messageOf(error: unknown): string {
 }
 
 /**
+ * The theme pi is rendering with, or undefined when there is none.
+ *
+ * pi's theme is a proxy that throws when it has not been initialised, which
+ * is a session handler's problem and not the panel's: a panel without a
+ * theme opens in the terminal's palette, and a session handler that throws
+ * takes the session down with it.
+ */
+function liveTheme(ctx: ExtensionContext): ExtensionContext["ui"]["theme"] | undefined {
+	try {
+		return ctx.ui.theme;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
  * Whether a pid belongs to a live process. EPERM means the process exists but
  * is not ours, which still counts as alive.
  */
@@ -410,17 +426,32 @@ async function openBtwPopup(deps: BtwDeps, paths: BtwPaths, sessionId: string): 
  * trusts.
  */
 async function writePanelSpec(deps: BtwDeps, paths: BtwPaths): Promise<void> {
-	const theme = deps.theme;
-	if (!theme) return;
+	// The entry points come first and on their own: they are what lets the
+	// panel start at all, and a theme that cannot be read must not cost it
+	// that.
+	let entryPoints: { tui?: string; theme?: string } = {};
 	try {
-		const spec = {
-			theme: buildThemeSpec(theme, { codeBlockIndent: deps.codeBlockIndent }),
-			entryPoints: resolvePiEntryPoints(getPackageDir()),
-		};
-		await writeFile(paths.panel, JSON.stringify(spec), { encoding: "utf8", mode: 0o600 });
+		entryPoints = resolvePiEntryPoints(getPackageDir());
+	} catch (error) {
+		deps.notify(`The BTW panel could not find pi's packages: ${messageOf(error)}`, "warning");
+	}
+	const theme = deps.theme;
+	if (!theme) {
+		await writePanelSpecFile(paths, { entryPoints });
+		return;
+	}
+	try {
+		const spec = buildThemeSpec(theme, { codeBlockIndent: deps.codeBlockIndent });
+		await writePanelSpecFile(paths, { theme: spec, entryPoints });
 	} catch (error) {
 		deps.notify(`The BTW panel could not use your theme: ${messageOf(error)}`, "warning");
+		await writePanelSpecFile(paths, { entryPoints });
 	}
+}
+
+/** Write the panel's setup down for the viewer. */
+async function writePanelSpecFile(paths: BtwPaths, spec: unknown): Promise<void> {
+	await writeFile(paths.panel, JSON.stringify(spec), { encoding: "utf8", mode: 0o600 }).catch(() => undefined);
 }
 
 /** Start (or restart) the view-only tmux session for an existing answer file. */
@@ -526,10 +557,25 @@ async function appendFooter(deps: BtwDeps, paths: BtwPaths, outcome: BtwOutcome)
 	// code block, so the fence is closed before the footer is appended. The
 	// answer is read back because the outcome does not carry the text of a
 	// cancelled or failed request.
-	const answer = await readFile(paths.answer, "utf8").catch(() => "");
+	let answer = "";
+	try {
+		answer = await readFile(paths.answer, "utf8");
+	} catch (error) {
+		deps.notify(`The BTW panel could not read the answer: ${messageOf(error)}`, "warning");
+	}
 	const closer = fenceCloser(answer);
-	if (closer) await appendFile(paths.answer, closer, "utf8").catch(() => undefined);
-	await appendFile(paths.answer, `${FOOTER}${sanitizeAnswerText(summary)}\n`, "utf8").catch(() => undefined);
+	if (closer) {
+		try {
+			await appendFile(paths.answer, closer, "utf8");
+		} catch (error) {
+			deps.notify(`The BTW panel could not close an open code fence: ${messageOf(error)}`, "warning");
+		}
+	}
+	try {
+		await appendFile(paths.answer, `${FOOTER}${sanitizeAnswerText(summary)}\n`, "utf8");
+	} catch (error) {
+		deps.notify(`The BTW panel could not write its footer: ${messageOf(error)}`, "warning");
+	}
 	if (outcome.status === "error") deps.notify(`BTW: ${outcome.message}`, "error");
 	// A zero cache read is the one failure the footer cannot show (it omits
 	// the `cache read` segment when the value is 0), so it is notified too — but
@@ -642,8 +688,10 @@ export default function btwExtension(pi: ExtensionAPI): void {
 			isPidAlive: defaultIsPidAlive,
 			blockImages: settings.images?.blockImages === true,
 			// The theme pi renders with right now; the panel is handed its
-			// resolved colors (see `theme.mjs`).
-			theme: ctx.ui.theme,
+			// resolved colors (see `theme.mjs`). pi's theme is a proxy that
+			// throws when it has not been initialised, and a session handler
+			// that throws takes the session down with it.
+			theme: liveTheme(ctx),
 			// The indent the transcript gives a code block, when the session
 			// moved it away from pi-tui's default.
 			codeBlockIndent: settings.markdown?.codeBlockIndent,

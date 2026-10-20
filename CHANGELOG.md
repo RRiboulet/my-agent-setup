@@ -68,6 +68,16 @@ Fixed:
   implicit close would append a fence of its own — and that fence would open
   a new block, which is worse than the problem it was meant to solve.
 
+  The panel's colours survive a truecolor terminal, which is where the
+  hand-off first broke: the channels in a truecolor escape are decimal, and
+  a hex colour is two hex digits per channel. Reading one as the other
+  produced a nine-digit colour that pi's own parser refused, so the panel
+  quietly fell back to the terminal's palette — on every terminal that
+  reports truecolor, which is most of them. The colour that travels is read
+  out of the escape the theme opens the token with, so a palette index stays
+  an index, a token the theme leaves to the terminal stays the terminal's
+  default, and a faint token is faded once rather than twice.
+
 ## v1.8.0 — 2026-10-19
 
 Added:

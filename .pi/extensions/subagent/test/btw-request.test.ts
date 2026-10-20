@@ -264,6 +264,25 @@ test("a fence inside a list item is not an open fence", () => {
 	assert.equal(fenceCloser(answer), "", "so no closer is appended");
 });
 
+test("a closed fence at the end of the answer is closed", () => {
+	// The block's source ends with a newline, and the closing fence is the
+	// line before it. Reading the *last* line as the fence reported a closed
+	// fence as open, and the closer that was then appended opened a block of
+	// its own - with the footer inside it.
+	const answer = "Here is the code:\n\n```ts\nconst x = 1;\n```\n";
+	assert.equal(openCodeFence(answer), undefined, "the fence is closed");
+	assert.equal(fenceCloser(answer), "", "so no closer is appended");
+});
+
+test("a bare fence marker at the end of the answer is still open", () => {
+	// A truncated answer, or one whose stream was cut: the model opened a
+	// block and never closed it. The marker is the line that opened it, so
+	// it cannot also be the line that closed it.
+	const answer = "Here is the code:\n\n```\n";
+	assert.equal(openCodeFence(answer), "```", "the fence is open");
+	assert.equal(fenceCloser(answer), "\n```", "so it is closed before the footer");
+});
+
 test("text deltas stream through and the final usage is returned", async () => {
 	const stream = createAssistantMessageEventStream();
 	const chunks: string[] = [];
