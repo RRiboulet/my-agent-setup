@@ -254,6 +254,16 @@ test("a code fence the answer left open is found, so the footer can close it", (
 	assert.equal(fenceCloser("done"), "", "a closed answer needs no closer");
 });
 
+test("a fence inside a list item is not an open fence", () => {
+	// The parser closes it at the end of the list item, so the footer that
+	// follows the list is outside the code block. A scanner that missed the
+	// implicit close would append a fence of its own - and that fence would
+	// open a new block, which is worse than the problem it solved.
+	const answer = "- Step one:\n  ```bash\n  npm install\n";
+	assert.equal(openCodeFence(answer), undefined, "the item ends the fence");
+	assert.equal(fenceCloser(answer), "", "so no closer is appended");
+});
+
 test("text deltas stream through and the final usage is returned", async () => {
 	const stream = createAssistantMessageEventStream();
 	const chunks: string[] = [];

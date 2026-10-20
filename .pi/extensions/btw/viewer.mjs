@@ -14,14 +14,12 @@
 // every half-written line was dropped and never redrawn - the panel showed the
 // answer up to its last newline and lost the rest.
 //
-// The viewer reads the answer file and the theme spec the parent wrote; it
+// The viewer reads the answer file and the panel spec the parent wrote; it
 // writes to the pane and nothing else.
 
 import { watch } from "node:fs";
 import { readFile } from "node:fs/promises";
-
-import { TuiMainScreen } from "@earendil-works/pi-tui";
-import { getMarkdownTheme, initTheme } from "@earendil-works/pi-coding-agent";
+import { pathToFileURL } from "node:url";
 
 import { createMarkdownView } from "./markdown.mjs";
 import { installThemeSpec } from "./theme.mjs";
@@ -63,28 +61,69 @@ function panelTerminal() {
 }
 
 /**
- * The theme the panel renders with.
+ * Import a module by the path the parent resolved, or by its name.
  *
- * The spec the parent wrote is pi's own resolved theme. A panel left over
- * from an older version has no spec, and a spec that cannot be read is no
- * better than none: the viewer's own default is used in both cases, which is
- * the terminal's palette rather than the transcript's colors. The panel still
- * opens and still reads; only its colors differ.
+ * The parent resolves pi's packages where pi's own mapping applies; in a
+ * spawned process a bare specifier only resolves when the package's own
+ * `node_modules` has them, which an installed pi package does not. So the
+ * path is used when there is one, and the name is the fallback.
  */
-async function loadMarkdownTheme(themePath) {
-	try {
-		const spec = JSON.parse(await readFile(themePath, "utf8"));
-		return installThemeSpec(spec);
-	} catch {
-		initTheme();
-		return getMarkdownTheme();
-	}
+async function importPi(specifier, entryPoint) {
+	if (entryPoint) return await import(pathToFileURL(entryPoint).href);
+	return await import(specifier);
 }
 
-async function runViewer(answerPath, themePath) {
-	const theme = await loadMarkdownTheme(themePath);
-	const view = createMarkdownView(theme);
-	const tui = new TuiMainScreen(panelTerminal());
+/**
+ * The panel's setup: the theme it draws with, and where to find pi.
+ *
+ * A panel left over from an older version has no spec, and a spec that cannot
+ * be read is no better than none: the panel falls back to the terminal's own
+ * palette and to the bare specifiers, which is what works in a checkout whose
+ * own `node_modules` has them. The panel still opens and still reads; only its
+ * colors differ.
+ */
+async function loadPanelSetup(panelPath) {
+	let spec;
+	try {
+		spec = JSON.parse(await readFile(panelPath, "utf8"));
+	} catch {
+		spec = undefined;
+	}
+	const entryPoints = spec?.entryPoints ?? {};
+	const pitui = await importPi("@earendil-works/pi-tui", entryPoints.tui);
+	const piThemeModule = await importPi("@earendil-works/pi-coding-agent", entryPoints.theme);
+	let theme;
+	try {
+		theme = spec ? installThemeSpec(spec.theme, piThemeModule) : undefined;
+	} catch {
+		theme = undefined;
+	}
+	if (theme === undefined) {
+		piThemeModule.initTheme();
+		theme = piThemeModule.getMarkdownTheme();
+	}
+	return { pitui, theme };
+}
+
+/**
+ * The panel hides the cursor while it draws; give it back when it stops.
+ *
+ * The pane is `remain-on-exit`, so a viewer that stops - a killed server, a
+ * closed panel - would otherwise leave the panel with an invisible cursor.
+ */
+const restoreCursor = () => process.stdout.write("\x1b[?25h");
+process.on("exit", restoreCursor);
+for (const signal of ["SIGTERM", "SIGHUP", "SIGINT"]) {
+	process.on(signal, () => {
+		restoreCursor();
+		process.exit(0);
+	});
+}
+
+async function runViewer(answerPath, panelPath) {
+	const { pitui, theme } = await loadPanelSetup(panelPath);
+	const view = createMarkdownView(pitui.Markdown, theme);
+	const tui = new pitui.TuiMainScreen(panelTerminal());
 	tui.addChild(view);
 
 	// The pane's shell echoed the command that started this viewer, and the
@@ -106,13 +145,22 @@ async function runViewer(answerPath, themePath) {
 
 	// A resize changes the layout, and with it the width every table and code
 	// block is laid out at; pi-tui redraws the whole screen when it notices.
-	process.stdout.on("resize", () => tui.renderNow());
+	process.stdout.on("resize", () => {
+		try {
+			tui.renderNow();
+		} catch (error) {
+			console.error(`btw viewer render failed: ${error?.message ?? error}`);
+		}
+	});
 
 	let timer;
 	const schedule = () => {
 		clearTimeout(timer);
 		timer = setTimeout(() => {
 			paint().catch((error) => {
+				// A failed paint leaves the panel on its last good frame.
+				// Retrying on every tick would only repeat the failure, so
+				// the panel says so once and stops drawing.
 				console.error(`btw viewer paint failed: ${error?.message ?? error}`);
 			});
 		}, DEBOUNCE_MS);

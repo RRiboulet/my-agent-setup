@@ -15,8 +15,10 @@
 //    differentially: only the lines that changed are rewritten, which is what
 //    lets a streaming answer correct the tail of a half-written line instead
 //    of dropping it.
-
-import { Markdown } from "@earendil-works/pi-tui";
+//
+// pi-tui's `Markdown` class is passed in rather than imported: the panel runs
+// in its own process, where a bare specifier does not resolve (see
+// `entry-points.mjs`).
 
 /** The padding pi gives an assistant message's Markdown. */
 const PADDING_X = 1;
@@ -25,16 +27,11 @@ const PADDING_Y = 0;
 /**
  * A Markdown view over one document: `setText` replaces the document and
  * `render` lays it out at a width.
+ *
+ * The component is long-lived on purpose - pi-tui caches the parsed document
+ * and the layout, so replacing the text is cheap where building a new
+ * component for every paint would not be.
  */
-export function createMarkdownView(theme) {
+export function createMarkdownView(Markdown, theme) {
 	return new Markdown("", PADDING_X, PADDING_Y, theme);
-}
-
-/**
- * The whole document, rendered at one width. The form the tests pin; the
- * viewer renders through `createMarkdownView` instead, so it can replace the
- * document without rebuilding the component.
- */
-export function renderMarkdown(text, width, theme) {
-	return new Markdown(text, PADDING_X, PADDING_Y, theme).render(width);
 }

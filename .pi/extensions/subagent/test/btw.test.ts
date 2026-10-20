@@ -278,7 +278,7 @@ test("a question resets the panel, starts the viewer and streams the answer", as
 					`-S ${paths.socket} kill-server`,
 					`-S ${paths.socket} new-session -d -s ${paths.session} -n btw -c /work/project`,
 					`-S ${paths.socket} set-window-option -t ${paths.session} remain-on-exit on`,
-					`-S ${paths.socket} send-keys -t ${paths.target} -l -- ${buildBtwViewerCommand(paths.answer, paths.theme)}`,
+					`-S ${paths.socket} send-keys -t ${paths.target} -l -- ${buildBtwViewerCommand(paths.answer, paths.panel)}`,
 					`-S ${paths.socket} send-keys -t ${paths.target} Enter`,
 				],
 			);
@@ -328,9 +328,11 @@ test("the panel writes the theme it renders with, so the panel's colors are the 
 				name: "kokomi",
 				colors: { mdHeading: rgbColor(0x7e, 0xc8, 0xc8), text: rgbColor(0xe8, 0xec, 0xf5) },
 				getColorMode: () => "256color",
+				// The escapes the theme opens its tokens with: the panel reads
+				// the colour back out of them, so a palette index stays an
+				// index and a token left to the terminal stays there.
 				getFgAnsi: (token: string) => (token === "mdHeading" ? "\x1b[38;5;116m" : "\x1b[39m"),
 				getBgAnsi: () => "\x1b[49m",
-				fg: (_token: string, text: string) => `${text}\x1b[39m`,
 			} as never;
 			const registry = streamingRegistry("Hello");
 			const launch = await launchBtwPanel(deps, fakeContext(registry.modelRegistry), "why?");
@@ -338,11 +340,17 @@ test("the panel writes the theme it renders with, so the panel's colors are the 
 			await launch.completion;
 
 			const paths = buildBtwPaths(agentDir, SID);
-			const spec = JSON.parse(readFileSync(paths.theme, "utf8"));
-			assert.equal(spec.name, "kokomi");
-			assert.equal(spec.mode, "256color");
-			assert.equal(spec.colors.mdHeading, "#7ec8c8", "the transcript's color travels to the panel");
-			assert.equal(spec.colors.text, "", "a token the theme leaves at the terminal's default stays there");
+			const spec = JSON.parse(readFileSync(paths.panel, "utf8"));
+			assert.equal(spec.theme.name, "kokomi");
+			assert.equal(spec.theme.mode, "256color");
+			assert.equal(
+				spec.theme.colors.mdHeading,
+				116,
+				"the transcript's color travels to the panel, as the index it is drawn with",
+			);
+			assert.equal(spec.theme.colors.text, "", "a token the theme leaves at the terminal's default stays there");
+			assert.ok(spec.entryPoints.tui, "the panel is told where pi-tui is, since it cannot resolve it itself");
+			assert.ok(spec.entryPoints.theme, "the panel is told where pi's theme module is");
 		});
 	});
 });

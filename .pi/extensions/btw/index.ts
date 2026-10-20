@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, getPackageDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
 
 import { buildAttachCommand, buildEscapeBindArgs, buildPanelLaunch } from "../subagent/panel.ts";
@@ -20,6 +20,7 @@ import {
 	type BtwPaths,
 } from "./launch.ts";
 import { fenceCloser, runBtwRequest, sanitizeAnswerText, type BtwOutcome } from "./request.ts";
+import { resolvePiEntryPoints } from "./entry-points.mjs";
 import { buildThemeSpec } from "./theme.mjs";
 
 const DESCRIPTION = "Open a side-question panel that asks for the question and answers without adding anything to the transcript.";
@@ -71,6 +72,13 @@ export interface BtwDeps {
 	 * its own.
 	 */
 	theme?: ExtensionContext["ui"]["theme"];
+	/**
+	 * The indent the transcript gives a code block.
+	 *
+	 * pi-tui's own default is two spaces, which is also pi's default, so this
+	 * is only set when the session moved it.
+	 */
+	codeBlockIndent?: string;
 }
 
 /** The slice of pi's command context the launch core reads. */
@@ -386,31 +394,38 @@ async function openBtwPopup(deps: BtwDeps, paths: BtwPaths, sessionId: string): 
 }
 
 /**
- * Write the theme the panel renders with.
+ * Write the panel's setup: the theme it draws with, and where to find pi.
  *
- * The viewer is a separate process, so pi's theme instance does not reach it.
- * The parent resolves the theme it is using right now into a small spec and
- * the viewer rebuilds a theme from it, which is what makes the panel's
- * Markdown - and the syntax highlighting inside it - come out in the
- * transcript's colors.
+ * The viewer is a separate process, so two things do not reach it: pi's theme
+ * instance, and pi's packages. The parent resolves both - the theme into a
+ * small spec the viewer rebuilds a theme from, and the packages into paths
+ * the viewer can import - and writes them down for it.
  *
- * A missing theme is not fatal: the viewer falls back to the terminal's own
- * palette, so a panel still opens on a session where pi's theme cannot be
- * read.
+ * This runs on every start of the viewer, not only on the first: the panel
+ * outlives a reload, and a theme changed in between should reach it.
+ *
+ * A missing theme is not fatal - the viewer falls back to the terminal's own
+ * palette, so a panel still opens - but it is said out loud, because a panel
+ * in the wrong colors is a panel nobody can read the difference between and
+ * trusts.
  */
-async function writeThemeSpec(deps: BtwDeps, paths: BtwPaths): Promise<void> {
+async function writePanelSpec(deps: BtwDeps, paths: BtwPaths): Promise<void> {
 	const theme = deps.theme;
 	if (!theme) return;
 	try {
-		await writeFile(paths.theme, JSON.stringify(buildThemeSpec(theme)), { encoding: "utf8", mode: 0o600 });
-	} catch {
-		// The viewer copes without a spec; a panel that cannot show the
-		// transcript's colors is better than no panel.
+		const spec = {
+			theme: buildThemeSpec(theme, { codeBlockIndent: deps.codeBlockIndent }),
+			entryPoints: resolvePiEntryPoints(getPackageDir()),
+		};
+		await writeFile(paths.panel, JSON.stringify(spec), { encoding: "utf8", mode: 0o600 });
+	} catch (error) {
+		deps.notify(`The BTW panel could not use your theme: ${messageOf(error)}`, "warning");
 	}
 }
 
 /** Start (or restart) the view-only tmux session for an existing answer file. */
 async function startViewer(deps: BtwDeps, paths: BtwPaths, cwd: string): Promise<void> {
+	await writePanelSpec(deps, paths);
 	await runTmux(
 		deps,
 		buildBtwSessionCreateArgs({ socket: paths.socket, session: paths.session, cwd }),
@@ -423,7 +438,7 @@ async function startViewer(deps: BtwDeps, paths: BtwPaths, cwd: string): Promise
 	);
 	await runTmux(
 		deps,
-		buildBtwSendKeysArgs({ socket: paths.socket, target: paths.target, command: buildBtwViewerCommand(paths.answer, paths.theme) }),
+		buildBtwSendKeysArgs({ socket: paths.socket, target: paths.target, command: buildBtwViewerCommand(paths.answer, paths.panel) }),
 		"Could not start the BTW viewer",
 	);
 	await runTmux(
@@ -570,9 +585,6 @@ export async function launchBtwPanel(deps: BtwDeps, ctx: BtwContext, rawQuestion
 
 	try {
 		await resetPanel(deps, paths);
-		// The theme the panel renders with, resolved here because pi's theme
-		// lives in this process and the viewer does not.
-		await writeThemeSpec(deps, paths);
 		const quoted = sanitizeAnswerText(question).split("\n").join("\n> ");
 		await writeFile(paths.answer, `# /btw\n\n> ${quoted}\n\n`, { encoding: "utf8", mode: 0o600 });
 		await startViewer(deps, paths, ctx.cwd);
@@ -632,6 +644,9 @@ export default function btwExtension(pi: ExtensionAPI): void {
 			// The theme pi renders with right now; the panel is handed its
 			// resolved colors (see `theme.mjs`).
 			theme: ctx.ui.theme,
+			// The indent the transcript gives a code block, when the session
+			// moved it away from pi-tui's default.
+			codeBlockIndent: settings.markdown?.codeBlockIndent,
 			// The main loop forwards these so the provider maps thinking and
 			// attributes the request identically; see request.ts.
 			thinkingBudgets: settings.thinkingBudgets,

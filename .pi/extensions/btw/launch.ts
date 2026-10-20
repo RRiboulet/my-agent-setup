@@ -107,11 +107,13 @@ export function btwAnswerPath(agentDir: string, sessionId: string): string {
 }
 
 /**
- * The theme the viewer renders with: pi's own resolved theme, written by the
- * parent so the panel's colors are the transcript's colors.
+ * The panel's setup: the theme it draws with, and where to find pi.
+ *
+ * The viewer runs in its own process, where a bare specifier does not resolve
+ * (see `entry-points.mjs`), so the parent hands over paths it can import.
  */
-export function btwThemePath(agentDir: string, sessionId: string): string {
-	return path.join(btwRunDir(agentDir, sessionId), "theme.json");
+export function btwPanelPath(agentDir: string, sessionId: string): string {
+	return path.join(btwRunDir(agentDir, sessionId), "panel.json");
 }
 
 /** The main pi process that owns the panel; a dead pid makes the panel reapable. */
@@ -126,7 +128,7 @@ export interface BtwPaths {
 	target: string;
 	runDir: string;
 	answer: string;
-	theme: string;
+	panel: string;
 	ownerPid: string;
 }
 
@@ -138,7 +140,7 @@ export function buildBtwPaths(agentDir: string, sessionId: string): BtwPaths {
 		target: btwTarget(sessionId),
 		runDir: btwRunDir(agentDir, sessionId),
 		answer: btwAnswerPath(agentDir, sessionId),
-		theme: btwThemePath(agentDir, sessionId),
+		panel: btwPanelPath(agentDir, sessionId),
 		ownerPid: btwOwnerPidPath(agentDir, sessionId),
 	};
 }
@@ -210,10 +212,10 @@ export function buildBtwSubmitArgs(input: { socket: string; target: string }): s
  * swallows the tmux prefix and pins the viewport, which is the scroll bug. `exec`
  * replaces the shell so `#{pane_dead}` flips if the renderer itself dies.
  *
- * The theme spec travels with the answer path because the viewer runs in its
- * own process: pi's theme lives in pi's process, so the parent resolves it and
- * hands it over (see `theme.mjs`).
+ * The panel's setup travels with the answer path because the viewer runs in
+ * its own process: pi's theme lives in pi's process, so the parent resolves
+ * it and hands it over (see `theme.mjs`).
  */
-export function buildBtwViewerCommand(answerPath: string, themePath: string): string {
-	return `exec node ${shellQuote(VIEWER_SCRIPT)} ${shellQuote(answerPath)} ${shellQuote(themePath)}`;
+export function buildBtwViewerCommand(answerPath: string, panelPath: string): string {
+	return `exec node ${shellQuote(VIEWER_SCRIPT)} ${shellQuote(answerPath)} ${shellQuote(panelPath)}`;
 }

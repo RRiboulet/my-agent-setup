@@ -35,11 +35,38 @@ Fixed:
   renders through the same `getMarkdownTheme()` the TUI uses. Loading the
   theme by name inside the viewer would have been enough for a named theme,
   but not for the generated `system` theme, which is built from the colors the
-  terminal reported — and only pi asked the terminal.
+  terminal reported — and only pi asked the terminal. What travels is the
+  theme's own color *values* rather than the colors they resolve to: a
+  palette index stays an index, so a terminal with a palette of its own draws
+  the panel's accents in its own magenta, and a token the theme leaves to the
+  terminal stays the terminal's default. A faint token is the case that
+  decides it — the theme's resolved color map mixes a faint token toward the
+  background, so a color taken from there would be faded twice.
+
+  The parent also hands the viewer *where pi is*. The viewer is a separate
+  process, and a bare `@earendil-works/pi-tui` does not resolve there: pi
+  maps that name onto its own installation for the extensions it loads, but a
+  spawned `node` gets no such mapping, and an installed package has no
+  `node_modules` of its own — pi installs the host-provided packages for the
+  extension, not for a process the extension spawns. A viewer that imported
+  them by name would have died on every panel in an installed package, which
+  is how the package is meant to be used. So the parent resolves the entry
+  points where the mapping applies
+  (`.pi/extensions/btw/entry-points.mjs`) and the viewer imports them by
+  path, falling back to the bare name where there is no path to find.
+
+  Two things the transcript does are not done in the panel: its Markdown
+  transforms, so a mermaid diagram is shown as its source, and its scrollback
+  behaviour, so a resize redraws the panel and clears it. The panel's history
+  is the answer's history otherwise.
 
   A code fence the answer leaves open is also closed before the usage footer
   is appended. An unclosed fence runs to the end of the document, so the
-  footer used to be drawn inside the code block.
+  footer used to be drawn inside the code block. The fence state comes from
+  the parser that draws the answer, not from a line scanner: a fence inside a
+  list item is closed by the end of that item, and a scanner that missed the
+  implicit close would append a fence of its own — and that fence would open
+  a new block, which is worse than the problem it was meant to solve.
 
 ## v1.8.0 — 2026-10-19
 

@@ -46,7 +46,7 @@ import {
 	type ModelRegistry,
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences } from "@earendil-works/pi-tui";
+import { Marked, stripTerminalSequences } from "@earendil-works/pi-tui";
 
 /**
  * `off` means "no reasoning" to every provider; pi's agent loop drops it before
@@ -264,26 +264,30 @@ export function buildBtwContext(
 }
 
 /**
- * The fence marker the text leaves open, if any.
+ * The fence the text leaves open, if any.
  *
  * A code fence that is never closed runs to the end of the document, so
  * anything appended after the answer - the usage footer - would be drawn
- * inside the code block instead of after it. The marker is the run of
- * backticks or tildes that opened the fence, so the caller can close it with
- * the same character.
+ * inside the code block instead of after it.
+ *
+ * The state comes from the parser that draws the answer, not from a line
+ * scanner: a fence inside a list item is closed by the end of that item, and
+ * a scanner that missed that would close a fence that is not open - and the
+ * fence it appended would itself open a new block, which is worse than the
+ * problem it was meant to solve.
  */
 export function openCodeFence(text: string): string | undefined {
-	let open: string | undefined;
-	for (const line of text.split("\n")) {
-		if (open === undefined) {
-			const start = /^ {0,3}(`{3,}|~{3,})/.exec(line);
-			if (start) open = start[1];
-			continue;
-		}
-		const end = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(line);
-		if (end && end[1][0] === open[0] && end[1].length >= open.length) open = undefined;
-	}
-	return open;
+	const tokens = new Marked().lexer(text);
+	const last = tokens[tokens.length - 1];
+	// Only a code block can leave a fence open, and only at the top level: a
+	// fence inside a list item is closed by the end of the item.
+	if (last?.type !== "code") return undefined;
+	const lines = last.raw.split("\n");
+	const marker = /^ {0,3}(`{3,}|~{3,})/.exec(lines[0])?.[1];
+	if (marker === undefined) return undefined;
+	const closing = lines[lines.length - 1].trim();
+	const closed = closing.length >= marker.length && [...closing].every((char) => char === marker[0]);
+	return closed ? undefined : marker;
 }
 
 /**
