@@ -4,6 +4,80 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Fixed:
+
+- **The `/btw` panel renders Markdown the way the transcript does, and no
+  longer loses the end of a line the model was still writing.** The panel drew
+  the answer with its own line-oriented renderer — a second and much worse
+  Markdown implementation than the one pi already ships: no tables, no nested
+  lists, no syntax-highlighted code, and its own idea of what a heading or a
+  quote looks like. It was also append-only, and an append-only renderer
+  cannot redraw the line it is still writing, so the tail of every streamed
+  line was dropped: the panel showed the answer as far as its last newline and
+  never showed the rest, which made a streaming answer look truncated at every
+  line break.
+
+  The panel now draws through pi-tui's own `Markdown` component — the one the
+  TUI renders an assistant message with — inside pi-tui's `TuiMainScreen`.
+  That buys the whole Markdown surface the transcript has (tables with borders
+  and aligned cells, nested lists, fenced code with syntax highlighting,
+  quotes, links) and it makes the panel a peer of the transcript instead of a
+  second renderer that drifts from it. The screen is redrawn differentially,
+  so a line the model is still writing is corrected in place rather than
+  dropped, and a table that grows a wider column re-lays itself out where it
+  stands. The panel still only draws and never takes the keyboard, so tmux
+  keeps the keys and the pane scrolls natively, as before.
+
+  The panel's colors are the transcript's too. pi's theme lives in pi's
+  process and the panel draws in its own, so the parent resolves the theme it
+  is using right now and hands the viewer its colors
+  (`.pi/extensions/btw/theme.mjs`); the viewer rebuilds a theme from them and
+  renders through the same `getMarkdownTheme()` the TUI uses. Loading the
+  theme by name inside the viewer would have been enough for a named theme,
+  but not for the generated `system` theme, which is built from the colors the
+  terminal reported — and only pi asked the terminal. What travels is the
+  theme's own color *values* rather than the colors they resolve to: a
+  palette index stays an index, so a terminal with a palette of its own draws
+  the panel's accents in its own magenta, and a token the theme leaves to the
+  terminal stays the terminal's default. A faint token is the case that
+  decides it — the theme's resolved color map mixes a faint token toward the
+  background, so a color taken from there would be faded twice.
+
+  The parent also hands the viewer *where pi is*. The viewer is a separate
+  process, and a bare `@earendil-works/pi-tui` does not resolve there: pi
+  maps that name onto its own installation for the extensions it loads, but a
+  spawned `node` gets no such mapping, and an installed package has no
+  `node_modules` of its own — pi installs the host-provided packages for the
+  extension, not for a process the extension spawns. A viewer that imported
+  them by name would have died on every panel in an installed package, which
+  is how the package is meant to be used. So the parent resolves the entry
+  points where the mapping applies
+  (`.pi/extensions/btw/entry-points.mjs`) and the viewer imports them by
+  path, falling back to the bare name where there is no path to find.
+
+  Two things the transcript does are not done in the panel: its Markdown
+  transforms, so a mermaid diagram is shown as its source, and its scrollback
+  behaviour, so a resize redraws the panel and clears it. The panel's history
+  is the answer's history otherwise.
+
+  A code fence the answer leaves open is also closed before the usage footer
+  is appended. An unclosed fence runs to the end of the document, so the
+  footer used to be drawn inside the code block. The fence state comes from
+  the parser that draws the answer, not from a line scanner: a fence inside a
+  list item is closed by the end of that item, and a scanner that missed the
+  implicit close would append a fence of its own — and that fence would open
+  a new block, which is worse than the problem it was meant to solve.
+
+  The panel's colours survive a truecolor terminal, which is where the
+  hand-off first broke: the channels in a truecolor escape are decimal, and
+  a hex colour is two hex digits per channel. Reading one as the other
+  produced a nine-digit colour that pi's own parser refused, so the panel
+  quietly fell back to the terminal's palette — on every terminal that
+  reports truecolor, which is most of them. The colour that travels is read
+  out of the escape the theme opens the token with, so a palette index stays
+  an index, a token the theme leaves to the terminal stays the terminal's
+  default, and a faint token is faded once rather than twice.
+
 ## v1.8.0 — 2026-10-19
 
 Added:

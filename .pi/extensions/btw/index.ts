@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 
-import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, getPackageDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
 
 import { buildAttachCommand, buildEscapeBindArgs, buildPanelLaunch } from "../subagent/panel.ts";
@@ -19,7 +19,9 @@ import {
 	requireBtwQuestion,
 	type BtwPaths,
 } from "./launch.ts";
-import { runBtwRequest, sanitizeAnswerText, type BtwOutcome } from "./request.ts";
+import { fenceCloser, runBtwRequest, sanitizeAnswerText, type BtwOutcome } from "./request.ts";
+import { resolvePiEntryPoints } from "./entry-points.mjs";
+import { buildThemeSpec } from "./theme.mjs";
 
 const DESCRIPTION = "Open a side-question panel that asks for the question and answers without adding anything to the transcript.";
 /** Every tmux call is bounded: a wedged server must not hang the command handler. */
@@ -61,6 +63,22 @@ export interface BtwDeps {
 	isPidAlive: (pid: number) => boolean;
 	/** Mirror the main loop's image-blocking wrapper when the setting is on. */
 	blockImages: boolean;
+	/**
+	 * The theme pi is rendering with right now.
+	 *
+	 * The panel renders in its own process, and pi's theme lives in pi's
+	 * process: the panel is handed the resolved colors (see `theme.mjs`), so
+	 * it draws the answer in the transcript's colors rather than in a theme of
+	 * its own.
+	 */
+	theme?: ExtensionContext["ui"]["theme"];
+	/**
+	 * The indent the transcript gives a code block.
+	 *
+	 * pi-tui's own default is two spaces, which is also pi's default, so this
+	 * is only set when the session moved it.
+	 */
+	codeBlockIndent?: string;
 }
 
 /** The slice of pi's command context the launch core reads. */
@@ -76,6 +94,22 @@ export interface BtwLaunch {
 
 function messageOf(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The theme pi is rendering with, or undefined when there is none.
+ *
+ * pi's theme is a proxy that throws when it has not been initialised, which
+ * is a session handler's problem and not the panel's: a panel without a
+ * theme opens in the terminal's palette, and a session handler that throws
+ * takes the session down with it.
+ */
+function liveTheme(ctx: ExtensionContext): ExtensionContext["ui"]["theme"] | undefined {
+	try {
+		return ctx.ui.theme;
+	} catch {
+		return undefined;
+	}
 }
 
 /**
@@ -375,8 +409,54 @@ async function openBtwPopup(deps: BtwDeps, paths: BtwPaths, sessionId: string): 
 	}
 }
 
+/**
+ * Write the panel's setup: the theme it draws with, and where to find pi.
+ *
+ * The viewer is a separate process, so two things do not reach it: pi's theme
+ * instance, and pi's packages. The parent resolves both - the theme into a
+ * small spec the viewer rebuilds a theme from, and the packages into paths
+ * the viewer can import - and writes them down for it.
+ *
+ * This runs on every start of the viewer, not only on the first: the panel
+ * outlives a reload, and a theme changed in between should reach it.
+ *
+ * A missing theme is not fatal - the viewer falls back to the terminal's own
+ * palette, so a panel still opens - but it is said out loud, because a panel
+ * in the wrong colors is a panel nobody can read the difference between and
+ * trusts.
+ */
+async function writePanelSpec(deps: BtwDeps, paths: BtwPaths): Promise<void> {
+	// The entry points come first and on their own: they are what lets the
+	// panel start at all, and a theme that cannot be read must not cost it
+	// that.
+	let entryPoints: { tui?: string; theme?: string } = {};
+	try {
+		entryPoints = resolvePiEntryPoints(getPackageDir());
+	} catch (error) {
+		deps.notify(`The BTW panel could not find pi's packages: ${messageOf(error)}`, "warning");
+	}
+	const theme = deps.theme;
+	if (!theme) {
+		await writePanelSpecFile(paths, { entryPoints });
+		return;
+	}
+	try {
+		const spec = buildThemeSpec(theme, { codeBlockIndent: deps.codeBlockIndent });
+		await writePanelSpecFile(paths, { theme: spec, entryPoints });
+	} catch (error) {
+		deps.notify(`The BTW panel could not use your theme: ${messageOf(error)}`, "warning");
+		await writePanelSpecFile(paths, { entryPoints });
+	}
+}
+
+/** Write the panel's setup down for the viewer. */
+async function writePanelSpecFile(paths: BtwPaths, spec: unknown): Promise<void> {
+	await writeFile(paths.panel, JSON.stringify(spec), { encoding: "utf8", mode: 0o600 }).catch(() => undefined);
+}
+
 /** Start (or restart) the view-only tmux session for an existing answer file. */
 async function startViewer(deps: BtwDeps, paths: BtwPaths, cwd: string): Promise<void> {
+	await writePanelSpec(deps, paths);
 	await runTmux(
 		deps,
 		buildBtwSessionCreateArgs({ socket: paths.socket, session: paths.session, cwd }),
@@ -389,7 +469,7 @@ async function startViewer(deps: BtwDeps, paths: BtwPaths, cwd: string): Promise
 	);
 	await runTmux(
 		deps,
-		buildBtwSendKeysArgs({ socket: paths.socket, target: paths.target, command: buildBtwViewerCommand(paths.answer) }),
+		buildBtwSendKeysArgs({ socket: paths.socket, target: paths.target, command: buildBtwViewerCommand(paths.answer, paths.panel) }),
 		"Could not start the BTW viewer",
 	);
 	await runTmux(
@@ -473,7 +553,29 @@ async function appendFooter(deps: BtwDeps, paths: BtwPaths, outcome: BtwOutcome)
 			: outcome.status === "cancelled"
 				? withToolNote(`cancelled${outcome.usage ? ` · ${formatBtwUsage(outcome.usage)}` : ""}`)
 				: withToolNote(`error: ${outcome.message}${outcome.usage ? ` · ${formatBtwUsage(outcome.usage)}` : ""}`);
-	await appendFile(paths.answer, `${FOOTER}${sanitizeAnswerText(summary)}\n`, "utf8").catch(() => undefined);
+	// A code fence the answer left open would swallow the footer into the
+	// code block, so the fence is closed before the footer is appended. The
+	// answer is read back because the outcome does not carry the text of a
+	// cancelled or failed request.
+	let answer = "";
+	try {
+		answer = await readFile(paths.answer, "utf8");
+	} catch (error) {
+		deps.notify(`The BTW panel could not read the answer: ${messageOf(error)}`, "warning");
+	}
+	const closer = fenceCloser(answer);
+	if (closer) {
+		try {
+			await appendFile(paths.answer, closer, "utf8");
+		} catch (error) {
+			deps.notify(`The BTW panel could not close an open code fence: ${messageOf(error)}`, "warning");
+		}
+	}
+	try {
+		await appendFile(paths.answer, `${FOOTER}${sanitizeAnswerText(summary)}\n`, "utf8");
+	} catch (error) {
+		deps.notify(`The BTW panel could not write its footer: ${messageOf(error)}`, "warning");
+	}
 	if (outcome.status === "error") deps.notify(`BTW: ${outcome.message}`, "error");
 	// A zero cache read is the one failure the footer cannot show (it omits
 	// the `cache read` segment when the value is 0), so it is notified too — but
@@ -585,6 +687,14 @@ export default function btwExtension(pi: ExtensionAPI): void {
 			agentDir: getAgentDir(),
 			isPidAlive: defaultIsPidAlive,
 			blockImages: settings.images?.blockImages === true,
+			// The theme pi renders with right now; the panel is handed its
+			// resolved colors (see `theme.mjs`). pi's theme is a proxy that
+			// throws when it has not been initialised, and a session handler
+			// that throws takes the session down with it.
+			theme: liveTheme(ctx),
+			// The indent the transcript gives a code block, when the session
+			// moved it away from pi-tui's default.
+			codeBlockIndent: settings.markdown?.codeBlockIndent,
 			// The main loop forwards these so the provider maps thinking and
 			// attributes the request identically; see request.ts.
 			thinkingBudgets: settings.thinkingBudgets,

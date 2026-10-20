@@ -25,6 +25,8 @@ import {
 	BTW_INSTRUCTION,
 	buildBtwContext,
 	buildBtwRequestParts,
+	fenceCloser,
+	openCodeFence,
 	providerSessionHeaders,
 	reasoningOption,
 	runBtwRequest,
@@ -239,6 +241,46 @@ test("terminal sequences, C0/C1 controls and bidi overrides are stripped", () =>
 	assert.equal(sanitizeAnswerText("\u202Eevil\u202C"), "evil", "bidi overrides are not display text");
 	assert.equal(sanitizeAnswerText("line\nnext\tend"), "line\nnext\tend");
 	assert.equal(sanitizeAnswerText("x\x1b[3"), "x[3", "a split sequence loses its ESC and becomes inert text");
+});
+
+test("a code fence the answer left open is found, so the footer can close it", () => {
+	assert.equal(openCodeFence("```ts\nconst x = 1;\n```"), undefined, "a closed fence leaves nothing open");
+	assert.equal(openCodeFence("```ts\nconst x = 1;"), "```", "an unclosed backtick fence is reported");
+	assert.equal(openCodeFence("~~~ts\nconst x = 1;"), "~~~", "an unclosed tilde fence is reported");
+	assert.equal(openCodeFence("```ts\nconst x = 1;\n```\ntext"), undefined, "a fence closed earlier does not count");
+	assert.equal(openCodeFence("````\n```\nstill open"), "````", "a shorter fence does not close a longer one");
+	assert.equal(openCodeFence("`inline` and ```fence```"), undefined, "an inline span is not a fence");
+	assert.equal(fenceCloser("```ts\nconst x = 1;"), "\n```", "the closer repeats the opening marker");
+	assert.equal(fenceCloser("done"), "", "a closed answer needs no closer");
+});
+
+test("a fence inside a list item is not an open fence", () => {
+	// The parser closes it at the end of the list item, so the footer that
+	// follows the list is outside the code block. A scanner that missed the
+	// implicit close would append a fence of its own - and that fence would
+	// open a new block, which is worse than the problem it solved.
+	const answer = "- Step one:\n  ```bash\n  npm install\n";
+	assert.equal(openCodeFence(answer), undefined, "the item ends the fence");
+	assert.equal(fenceCloser(answer), "", "so no closer is appended");
+});
+
+test("a closed fence at the end of the answer is closed", () => {
+	// The block's source ends with a newline, and the closing fence is the
+	// line before it. Reading the *last* line as the fence reported a closed
+	// fence as open, and the closer that was then appended opened a block of
+	// its own - with the footer inside it.
+	const answer = "Here is the code:\n\n```ts\nconst x = 1;\n```\n";
+	assert.equal(openCodeFence(answer), undefined, "the fence is closed");
+	assert.equal(fenceCloser(answer), "", "so no closer is appended");
+});
+
+test("a bare fence marker at the end of the answer is still open", () => {
+	// A truncated answer, or one whose stream was cut: the model opened a
+	// block and never closed it. The marker is the line that opened it, so
+	// it cannot also be the line that closed it.
+	const answer = "Here is the code:\n\n```\n";
+	assert.equal(openCodeFence(answer), "```", "the fence is open");
+	assert.equal(fenceCloser(answer), "\n```", "so it is closed before the footer");
 });
 
 test("text deltas stream through and the final usage is returned", async () => {

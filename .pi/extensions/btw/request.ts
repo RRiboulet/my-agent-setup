@@ -46,7 +46,7 @@ import {
 	type ModelRegistry,
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences } from "@earendil-works/pi-tui";
+import { Marked, stripTerminalSequences } from "@earendil-works/pi-tui";
 
 /**
  * `off` means "no reasoning" to every provider; pi's agent loop drops it before
@@ -261,6 +261,47 @@ export function buildBtwContext(
 	options: { blockImages?: boolean } = {},
 ): Context {
 	return buildBtwRequestParts(entries, leafId, question, now, options).context;
+}
+
+/**
+ * The fence the text leaves open, if any.
+ *
+ * A code fence that is never closed runs to the end of the document, so
+ * anything appended after the answer - the usage footer - would be drawn
+ * inside the code block instead of after it.
+ *
+ * The state comes from the parser that draws the answer, not from a line
+ * scanner: a fence inside a list item is closed by the end of that item, and
+ * a scanner that missed that would close a fence that is not open - and the
+ * fence it appended would itself open a new block, which is worse than the
+ * problem it was meant to solve.
+ */
+export function openCodeFence(text: string): string | undefined {
+	const tokens = new Marked().lexer(text);
+	const last = tokens[tokens.length - 1];
+	// Only a code block can leave a fence open, and only at the top level: a
+	// fence inside a list item is closed by the end of the item.
+	if (last?.type !== "code") return undefined;
+	// The block's source, without the newline the document may end with. A
+	// closing fence is a line of its own, and it is not the line that opened
+	// the fence - so a fence with nothing after it is still open, and a
+	// closing fence followed by a newline is still closed.
+	const lines = last.raw.replace(/\n+$/, "").split("\n");
+	const marker = /^ {0,3}(`{3,}|~{3,})/.exec(lines[0])?.[1];
+	if (marker === undefined) return undefined;
+	if (lines.length < 2) return marker;
+	const closing = lines[lines.length - 1].trim();
+	const closed = closing.length >= marker.length && [...closing].every((char) => char === marker[0]);
+	return closed ? undefined : marker;
+}
+
+/**
+ * The text that closes a fence the answer left open, or the empty string when
+ * the answer closed its fences.
+ */
+export function fenceCloser(text: string): string {
+	const open = openCodeFence(text);
+	return open === undefined ? "" : `\n${open}`;
 }
 
 /**
