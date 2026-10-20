@@ -23,7 +23,7 @@ the self-building loop in §4 practical.
 - [0. Sources checked](#0-sources-checked)
   - [0.1 Version and API drift](#01-version-and-api-drift)
 - [1. Kernel architecture on Android](#1-kernel-architecture-on-android)
-  - [1.1 Three premises to correct first](#11-three-premises-to-correct-first)
+  - [1.1 Four premises to correct first](#11-four-premises-to-correct-first)
   - [1.2 The constraint that decides the architecture](#12-the-constraint-that-decides-the-architecture)
   - [1.3 Option A — bundled Linux/Node runtime](#13-option-a--bundled-linuxnode-runtime)
   - [1.4 Option B — Hermes/JS engine, no shell](#14-option-b--hermesjs-engine-no-shell)
@@ -45,12 +45,12 @@ the self-building loop in §4 practical.
 - [3. UI/UX plan (web client in a native host)](#3-uiux-plan-web-client-in-a-native-host)
   - [3.1 The invariant](#31-the-invariant)
   - [3.2 Minimum viable screen set](#32-minimum-viable-screen-set)
-  - [WebView/browser specifics](#webviewbrowser-specifics)
-  - [3.3 Paged loading](#33-paged-loading)
-  - [3.4 Task status indicators](#34-task-status-indicators)
-  - [3.5 Subagent visualization](#35-subagent-visualization)
-  - [3.6 The Resume affordance](#36-the-resume-affordance)
-  - [3.7 UI state rules](#37-ui-state-rules)
+  - [3.3 WebView/browser specifics](#33-webviewbrowser-specifics)
+  - [3.4 Paged loading](#34-paged-loading)
+  - [3.5 Task status indicators](#35-task-status-indicators)
+  - [3.6 Subagent visualization](#36-subagent-visualization)
+  - [3.7 The Resume affordance](#37-the-resume-affordance)
+  - [3.8 UI state rules](#38-ui-state-rules)
 - [4. The self-building loop](#4-the-self-building-loop)
   - [4.1 What "self-building" means here](#41-what-self-building-means-here)
   - [4.2 Three reload paths, three different mechanisms](#42-three-reload-paths-three-different-mechanisms)
@@ -69,11 +69,11 @@ the self-building loop in §4 practical.
 | Source | What was read | Why it matters |
 |---|---|---|
 | `earendil-works/pi` monorepo, `packages/durable` @ `fdce48e` (main, 2026-10-20) | `README.md` (869 lines), `docs/spec.md` (5618 lines), and the source of `src/index.ts`, `src/types.ts`, `src/tasks.ts`, `src/env/index.ts`, `src/harness/{harness,tool,types,define,registry,view,live,task-graph,events,agent,scheduler,telemetry}.ts`, `src/storage/{sqlite,node,jsonl,memory}/*`, `src/tools/*`, `src/testing/*` | Primary reference. Line citations below are `packages/durable/…` at commit `fdce48e`, not at the `v1.3.0` tag. |
-| `earendil-works/pi` monorepo, `packages/chord` @ `fdce48e` | `src/sqlite/database.ts` (`SqliteDatabase`, `SqliteExecutor`), `src/sqlite/node.ts`, `src/delta/index.ts` (`Op`, `WireOp`) | The portable seams: an async SQLite facade and a tuple-based delta format. The `./sqlite` subpaths are post-1.3.0; at the tag the facade lives in `packages/durable/src/storage/sqlite/database.ts`. |
+| `earendil-works/pi` monorepo, `packages/chord` @ `fdce48e` | `src/sqlite/database.ts` (`SqliteDatabase`, `SqliteExecutor`), `src/sqlite/node.ts`, `src/delta/index.ts` (`Op`, `WireOp`), `src/node.ts` + `src/manager.ts` (`processLock`), `package.json` `exports` | The portable seams: an async SQLite facade and a tuple-based delta format. The `./sqlite` subpaths are post-1.3.0; at the tag the facade lives in `packages/durable/src/storage/sqlite/database.ts`. |
 | npm `@earendil-works/pi-durable@1.3.0` | `package.json` `exports` map, `dependencies` | The last *released* version. It does **not** contain the main-only APIs this plan uses; see §0.1. |
 | `sugarforever/pi-durable-expo-env` @ `0.1.0` | `README.md`, `src/core.ts` (the whole `ExecutionEnv` implementation), `src/index.ts` (the Expo backend), `package.json` | The only existing mobile `ExecutionEnv`. It answers "can Pi Durable run without Node?" — yes, with no shell. It does **not** solve storage. |
 | `earendil-works/pi` monorepo, `packages/env` | `README.md` | `RemoteExecutionEnv` / `LocalExecutionEnv` over a Rust daemon — the supported remote-execution option, and it lists Android (Termux) as a supported *remote* system. |
-| `RRiboulet/my-agent-setup` (this repo) | The 13 extensions and 6 skills, plus `AGENTS.md` | The migration surface; §2.4 says which of them survive the port. |
+| `RRiboulet/my-agent-setup` (this repo) | The 13 extensions and 6 skills (5 of the 6 skills survive the port, §2.7), plus `AGENTS.md` | The migration surface; §2.4 says which of them survive the port. |
 | `MaliNamNam/pi-phone`, `petrroll/pocket-pi`, `heikeyangle-code/pi-android`, `TannerMidd/pi-pocket` | READMEs | Precedents for the runtime question. `pi-phone` is the one most often mis-cited as a runtime; see §1.1. |
 | Web search: "Pi Durable Android foreground service SQLite storage" | — | Suggests **no** public project currently runs a Pi Durable harness inside an Android foreground service. A search cannot prove a negative; treat the service layer as unproven territory, which §5 does. |
 
@@ -104,7 +104,7 @@ that commit, not the version string.
 Consequences:
 
 - **If you pin `v1.3.0`,** you must remove or defer §1.10's wake/sleep/AlarmManager
-  design, §3.4/§3.6's `sleeping`/`blocked`/`restart_limit`/`task_parked`/
+  design, §3.5/§3.7's `sleeping`/`blocked`/`restart_limit`/`task_parked`/
   `retryTask` states, §4.3's restart counter, §5 R3, §6 Phase 6's restart policy,
   and the main-only names in Appendix A. The storage facade is
   `packages/durable/src/storage/sqlite/database.ts`, not `packages/chord/…`.
@@ -126,7 +126,7 @@ They are not citations; verify them against the target SDK in Phase 0.
 
 ## 1. Kernel architecture on Android
 
-### 1.1 Three premises to correct first
+### 1.1 Four premises to correct first
 
 **`pi-phone` is not a runtime you can bundle.** `MaliNamNam/pi-phone` describes
 itself as "a phone-first remote UI for Pi that lets you drive a real Pi
@@ -148,8 +148,8 @@ actually contributes:
 
 **Pi Durable has no "skills" concept.** It has *sections*
 (`section(key, render)`), *hooks*, *tools*, *tasks*, *wraps* and *documents*.
-Your six skills therefore have to become sections (plus tools for their
-scripts) — §2.7.
+Your six skills — five of which survive the port (§2.7) — therefore have to
+become sections (plus tools for their scripts).
 
 **The UI is a web client, not Compose.** The passive client is a browser-based
 app served over loopback and hosted in a WebView or the device browser.
@@ -197,15 +197,27 @@ ExecutionEnv**.
 
 ### 1.3 Option A — bundled Linux/Node runtime
 
-**Shape.** The APK targets **API 35** and ships `libproot.so` as a native
-executable in `jniLibs/arm64-v8a`, extracted to
-`ApplicationInfo.nativeLibraryDir`. Android 10+ blocks `execve()` of files in
-the app home for apps targeting API 29+, so a Termux prefix copied into
-`files/` is not runnable; a native library is. The service runs `proot` against
-a rootfs extracted under `files/`, and the rootfs carries Node, git, gh and the
-build tools. **The Node process inside the rootfs is the kernel.** A custom
-bionic Node (shipped as `libnode.so` and exec'd from `nativeLibraryDir`) is the
-later optimization, not the v1 target.
+**Shape.** The APK targets **API 35** and ships `libproot.so` under
+`jniLibs/arm64-v8a` with **`useLegacyPackaging="true"`** (or
+`android:extractNativeLibs="true"`), so the package manager extracts a real
+executable file into `ApplicationInfo.nativeLibraryDir` and the service can
+`execve` it. That setting is not optional: on `targetSdk 35`,
+`android:extractNativeLibs` defaults to `false`, native libraries are then
+loaded straight out of the APK, and `nativeLibraryDir` may hold only symlinks
+— nothing executable. Android 10+ blocks `execve()` of files in the app home
+for apps targeting API 29+, so a Termux prefix copied into `files/` is not
+runnable; a native library is.
+
+**The mechanism, because it is what S0.1 has to prove.** The process that is
+executed is **proot's own binary in `nativeLibraryDir`**; proot then runs the
+rootfs binaries out of `files/` through its path translation. The API-29 exec
+ban does not bite, because the ban is on executing files *in the app home* —
+the exec'd file is the native library, and the rootfs binaries are reached
+through proot, not exec'd directly. The service runs `proot` against a rootfs
+extracted under `files/`, and the rootfs carries Node, git, gh and the build
+tools. **The Node process inside the rootfs is the kernel.** A custom bionic
+Node (shipped as `libnode.so` and exec'd from `nativeLibraryDir`) is the later
+optimization, not the v1 target.
 
 **What you get, from the source:**
 
@@ -428,7 +440,9 @@ other transactions until the transaction finishes".
 **Spike S0.2 implements exactly this facade over `android.database.sqlite` and
 runs it against `registerStorageConformance` from
 `@earendil-works/pi-durable/testing`.** That is a cheap, decisive test, and
-it also de-risks Option B for free.
+it also de-risks Option B for free. **S0.2 runs only if Option B is still
+live** (§5 R2, §6 Phase 0): on the Option A target this facade is not on the
+path, so do not plan a spike for it.
 
 **One more storage rule you must internalize:** "One process owns a storage at a
 time; there is no cross-process locking." Only the kernel process opens the Pi
@@ -495,7 +509,7 @@ Rules, in order of how much they matter:
 6. **The WebView is disposable and untrusted.** It holds no durable state and
    never opens the SQLite file. It may be killed by the WebView renderer
    process death, rotation, or low memory; reconnect always starts from a
-   fresh snapshot (§3.7).
+   fresh snapshot (§3.8).
 
 ### 1.9 The kernel↔UI contract
 
@@ -515,7 +529,7 @@ so no commit is missed; buffer publications. Then run
 `harness.commit(async (tx) => { ... })` with no writes. A no-write commit
 returns without publishing (`writes.length === 0`), so the snapshot's watermark
 is the **last buffered publication's `seq`**, not the barrier's. Read on that
-line through `tx`: the conversation record, the active entry range
+line through `tx`: the scoped conversation's record, its active entry range
 (`latestHeadMarker` + `scanEntries`), the task records (`scanTasks`), the
 conversation edges (`scanConversations`), and the known singleton docs
 (`AgentDoc`, `LiveDoc`, `InboxDoc`, `UsageDoc`, `ProviderDoc`, `app.*`). The
@@ -524,6 +538,38 @@ included in the snapshot; it is the same committed state, one read later. Drop
 buffered publications with `seq <= snapshotSeq`; replay the rest. Commits are
 serialized and the listener runs in `#publish`, so every commit up to the last
 buffered seq is included.
+
+**Snapshot scope: one conversation per subscription, plus a child index.**
+A snapshot is scoped to a conversation, and the scope is decided at attach:
+the default scope is the root conversation, and a client that opens a child
+view (§3.6) attaches a **second subscription** to the same kernel —
+`WS /v1/events?conversation=<id>`. The kernel holds **one**
+`harness.subscribeCommits` listener and fans the folded events out to every
+connection; each connection keeps only what its scope covers — entries by
+`EntryRecord.conversationId`, conversation-scoped docs by their
+`conversationId`, and every global document. What a scoped snapshot carries:
+
+- the scoped conversation's record and its **active entry range**;
+- a **child index** — for every conversation it owns, the id, the creator edge
+  (`ConversationRecord.owner`) and the fork edge (`ConversationRecord.parent`),
+  **metadata only, no transcripts**;
+- the live task graph (global: every node carries its `conversationId`);
+- the singleton docs — the ones scoped to this conversation (`AgentDoc`,
+  `LiveDoc`, `InboxDoc`, and the `app.*` docs that carry a conversation scope)
+  plus the global ones (`UsageDoc`, `ProviderDoc`) — plus usage and the
+  submissions.
+
+**No snapshot ever carries more than one conversation's transcript.** The
+alternative — every conversation's active transcript in one payload — is
+unbounded, and the memory argument in §1.7 applies to transcripts just as it
+does to JSONL. And the child transcript is **not** paged in from
+`GET /v1/entries` either: paging goes *behind* the active window (§3.4), so a
+paged seed would not be the active transcript, and §3.1's invariant — "the
+projection is fully reconstructible from a snapshot" — would not hold for the
+child view. The child view therefore gets its own scoped snapshot, and paging
+then works for it exactly as it does for the root: behind that scope's own
+active window. `btw` panels (§2.5) are the same shape — their own
+conversation, their own scoped subscription, their own snapshot.
 
 **Singleton app docs, not doc families.** `Tx` has no `scanDocuments`, so a
 family cannot be enumerated in the snapshot barrier. The app-state docs are
@@ -537,12 +583,12 @@ doc becomes too large, and then add an index doc updated in the same commit.
 
 | Event | Payload | Derived from |
 |---|---|---|
-| `snapshot` | conversation + active entries + docs + live task graph + usage + submissions, with `seq` | the no-write barrier + the known singleton docs + `taskGraph()` |
-| `entry` | `EntryRecord` (append only) | `entry` changes |
-| `doc` | `{ kind, key?, value, ops? }` | `document.create` / `change` / `retire` |
-| `taskgraph` | the live `TaskGraph` (small) | fetched after a task change; sent as its own message with the last publication `seq`; may lag the transcript by one commit |
+| `snapshot` | the scope's conversation + active entries + child index + docs + live task graph + usage + submissions, with `seq` | the no-write barrier + the known singleton docs + `taskGraph()` |
+| `entry` | `EntryRecord` (append only; carries its `conversationId`) | `entry` changes |
+| `doc` | `{ kind, key?, value, ops?, conversationId? }` | `document.create` / `change` / `retire`. `conversationId` is present for conversation-scoped docs (`pi.live`, `pi.inbox`, `app.*`), so a scoped subscription can route it; a document with no scope is global and goes to every subscription. |
+| `taskgraph` | the live `TaskGraph` (small) | a full-state message sent after a publication that touched tasks; it carries the last publication `seq` for correlation but is **applied unconditionally**, never dropped on an older seq. It reflects committed state at fetch time and is never used to infer progress |
 | `submission` | `SubmissionRecord` | submission changes |
-| `snapshot` on overflow | the full projection again | when the kernel's bounded queue overflows |
+| `snapshot` on overflow | the scope's full projection again | when the kernel's bounded queue overflows |
 
 No separate `run`/`usage` events: `pi.live` and `pi.usage` arrive as `doc`
 changes. Streaming is the `pi.live` doc: it commits `generation.message`,
@@ -554,14 +600,19 @@ which would give the client two sources for one projection.
 **Head writes.** `pi.reset`, handoff and a compaction summary append an entry
 carrying `head`, which shrinks the active transcript; no append-only event can
 express that. Emit a full `snapshot` on any publication containing an entry with
-`head`. Reset and compaction are rare; optimize to `entries_replaced` later if
-the snapshot is too large.
+`head` — **for the scope that conversation belongs to** (a head write in a child
+conversation does not disturb the root's snapshot, and the root's snapshot does
+not contain the child's transcript anyway). Reset and compaction are rare;
+optimize to `entries_replaced` later if the snapshot is too large.
 
 **One snapshot path.** The WS `snapshot` at attach is the only client path.
 `GET /v1/snapshot` remains a `curl`/debug endpoint; the client never uses it.
+The scope travels in the attach URL (`?conversation=<id>`), not in a second
+endpoint, so a child view is the same path with a different scope.
 
-**Paging.** The snapshot is the active transcript. `GET /v1/entries?before=<id>&limit=N`
-uses `conversation.entries({ maxEntryId, order: "descending" }, limit, cursor)`;
+**Paging.** The snapshot is the active transcript **of the scope**.
+`GET /v1/entries?conversation=<id>&before=<id>&limit=N` uses
+`conversation.entries({ maxEntryId, order: "descending" }, limit, cursor)`;
 "load older" pages behind the oldest snapshot entry, and past-head entries
 render only below the head marker.
 
@@ -569,6 +620,9 @@ render only below the head marker.
 fresh `snapshot`; never `await` the socket in the commit listener. The client
 keeps the last applied `seq` and ignores older envelopes; a `doc` event carries
 its publication `seq`, so a stale doc does not overwrite a newer snapshot value.
+`taskgraph` is the one exception: it is full-state, not seq-ordered, so it is
+applied unconditionally (see the event table) and never dropped on an older
+`seq`.
 
 **Available, but not the WS stream:**
 
@@ -599,10 +653,13 @@ ticket, never in a query string. Use a `NetworkSecurityConfig` with a
 cannot be scoped to loopback. Even loopback needs the `INTERNET` permission.
 
 ```
-WS  /v1/events          →  { t:"snapshot", seq, … }  then  { t:"batch", seq, events:[…] }
+WS  /v1/events?conversation=<id>
+                     →  { t:"snapshot", seq, … }  then  { t:"batch", seq, events:[…] }
+                        (omit ?conversation for the root scope)
 POST /v1/commands/…     →  submit | abort | compact | resume | retryTask
                             | abortTask | fork
-GET  /v1/entries        →  paged history (before, limit)
+GET  /v1/entries?conversation=<id>&before=<id>&limit=N
+                     →  paged history for that scope
 GET  /v1/usage          →  session-wide totals (not atomic; documented)
 ```
 
@@ -856,11 +913,13 @@ decides — which is the right trade.
 
 **Do not port the tmux-based `subagent` extension.** Its tmux sessions, its
 `runs.json` state, its polling watcher and its five management tools are all
-re-implementations of what Pi Durable already provides. **There is no shipped
-subagent task to switch to:** `BUILTIN_TASKS` is `[GenerationTask, ToolTask,
-CompactionTask]`. Pi Durable documents an *owned-child-conversation pattern*;
-the app writes the tool and, for persistent subagents, the anchor task. The
-examples exist at both `v1.3.0` and `main`: `test/examples/22-subagent-foreground.ts`
+re-implementations of the **ownership primitives** Pi Durable provides — child
+conversations, `ownership: { kind: "task" }`, `scanConversations`, and
+`requestId`. **There is no shipped subagent task to switch to:**
+`BUILTIN_TASKS` is `[GenerationTask, ToolTask, CompactionTask]`. Pi Durable
+documents an *owned-child-conversation pattern*; the app writes the tool and,
+for persistent subagents, the anchor task. The examples exist at both
+`v1.3.0` and `main`: `test/examples/22-subagent-foreground.ts`
 is byte-identical, and `23-subagent-background.ts` differs only by the
 now-required `checkpointWhen` predicate. Example 23's combined spawn/send/stop
 tool is `replay: "unsafe"`; only the foreground tool (22) is safe.
@@ -904,7 +963,7 @@ parent is idle only once the child is, and an owning task created with
 
 What the UI needs from it is the child's conversation id, which the tool
 reports through `api.details({ conversationId: child })`. That is how the
-subagent view (§3.5) opens a second view over the same commit stream, filtered
+subagent view (§3.6) opens a second view over the same commit stream, filtered
 to the child — no tmux
 target, no attach command, no pane scraping.
 
@@ -915,7 +974,7 @@ want them.
 
 | Hook | Task | Purpose |
 |---|---|---|
-| `beforeTool` guard | `ToolTask` | Block or rewrite dangerous commands on a phone: `rm -rf`, `git push --force`, anything touching paths outside the workspace. `{ block: "…" }` produces a `blocked` error result the model sees. **This is the single most valuable hook for the mobile port**, because the phone is where a stray `rm` is unrecoverable. |
+| `beforeTool` guard | `ToolTask` | Block or rewrite dangerous commands on a phone: `rm -rf`, `git push --force`, anything touching paths outside the workspace. `{ block: "…" }` produces a `blocked` error result the model sees. **This is the single most valuable hook for the mobile port**, because the phone is where a stray `rm` is unrecoverable — as a guardrail, not a boundary (§2.8). |
 | `beforeTool` rewriter | `ToolTask` | Rewrite `cwd`-relative paths into the app workspace. This is convenience, not containment: absolute paths, `sh -c`, and interpreters still bypass it (see the sandbox note below). |
 | `afterTool` redactor | `ToolTask` | Strip API keys / tokens from tool output before they enter the transcript. **Caveat from the README:** "An `afterTool` hook that redacts a schema tool's `output` must redact its `structuredOutput` too." |
 | `afterTools` | `GenerationTask` | Emit a durable "turn complete" marker into a doc; the web status bar can then show "idle, last turn N". |
@@ -970,9 +1029,14 @@ boundary. Do not claim the agent "cannot break the kernel." The guard is an
 
 **Secrets never live in the kernel environment.** The host decrypts the model
 key from the Keystore and passes it once over a pipe/fd; the kernel holds it in
-memory. `NodeExecutionEnv` is built with `inheritEnv: false` and a scrubbed
-environment. `git`/`gh` get credentials per command (`env: { GH_TOKEN }` on
-that one spawn), never in `process.env` and never in `.git/config`.
+memory. Every `exec` runs with `inheritEnv: false`, and that is a **per-call**
+option on `ShellExecOptions` (`src/env/index.ts:303`), **not** a constructor
+flag: `NodeExecutionEnv`'s constructor takes a base `shellEnv` and no
+`inheritEnv`, and `getShellEnv` merges `process.env` unless the call says
+otherwise (`src/env/node.ts:270-281`). So the scrub is enforced by wrapping the
+env once and passing `inheritEnv: false` on every call. `git`/`gh` get
+credentials per command (`env: { GH_TOKEN }` on that one spawn), never in
+`process.env` and never in `.git/config`.
 
 **Agent-written extensions are user-confirmed installs.** The agent writes
 `workspace/extensions/foo.ts`; the kernel shows the file, hash and diff; the
@@ -1017,6 +1081,9 @@ recoverable store.
 
 The mechanical statement: **every pixel the web client shows is a projection of
 committed state, and the projection is fully reconstructible from a snapshot.**
+Each open view — the root transcript or a child conversation (§3.6) — is
+scoped to one conversation, and each is reconstructible from *that scope's*
+snapshot (§1.9).
 
 Consequences, each of which is testable:
 
@@ -1025,9 +1092,9 @@ Consequences, each of which is testable:
    tool slot's `status` and `output`. Not "did my send succeed?" — that comes
    from the `SubmissionRecord` (`submission` events / `harness.submission`).
 2. **The Activity can be destroyed at any instant** and be rebuilt with zero
-   loss, because a fresh Activity attaches to `WS /v1/events` and receives a
-   fresh `snapshot`. Rotation, process death by the OS, "don't keep
-   activities", a configuration change — all non-events.
+   loss, because a fresh Activity attaches to `WS /v1/events` — with the scope
+   it is showing — and receives a fresh `snapshot`. Rotation, process death by
+   the OS, "don't keep activities", a configuration change — all non-events.
 3. **A button never implies an outcome.** "Stop" does not set a local
    "stopping" flag; it sends `POST /v1/commands/abort` and the UI changes when
    the abort's effects are committed. The button's enabled/disabled state comes
@@ -1121,12 +1188,17 @@ the UI should say so rather than showing an error.
 Opened by tapping a subagent tool call. It opens a **second view** over the
 same commit stream, filtered to the child's conversation id (from the call's
 `details.conversationId`), and shows the child's own transcript, plus the
-parent→child edge. Because the child is a real conversation, it has its own
-history, its own compaction, and its own fork — all of which a tmux-backed
-child never had.
+parent→child edge. Mechanically: the client attaches a **second subscription**
+scoped to the child (`WS /v1/events?conversation=<childId>`) and the kernel
+sends that scope its own snapshot — the child's active transcript, its child
+index, the task graph and the docs (§1.9). The parent's snapshot is not
+enlarged to carry the child's transcript, and the child's transcript is not
+paged in as a substitute. Because the child is a real conversation, it has
+its own history, its own compaction, and its own fork — all of which a
+tmux-backed child never had.
 
 **S6 — Recovery sheet.**
-Shown when the app reopens and finds work in flight. See §3.6.
+Shown when the app reopens and finds work in flight. See §3.7.
 
 **S7 — Usage sheet.**
 `harness.usage(context)` / `docs["pi.usage"]`: per model and per tool, tokens
@@ -1142,7 +1214,7 @@ non-mutating commands (`show`, `ls-tree`, `cat-file`). `git status` can refresh
 and write `.git/index`, and `bash git …` is unsafe. The tool-vs-`bash` choice
 is still open (Appendix B #9).
 
-### WebView/browser specifics.
+### 3.3 WebView/browser specifics
 
 The web client must treat reconnect, back-button navigation, and WebView
 renderer death as normal events. It must not use local storage for durable
@@ -1151,7 +1223,7 @@ draft text); draft text should be submitted as a durable input when the user
 sends. The WebView must not receive the SQLite file path or unrestricted shell
 access.
 
-### 3.3 Paged loading
+### 3.4 Paged loading
 
 `Conversation.entries(query, limit, cursor, context)` returns
 `Page<EntryRecord, Cursor>` — "Fork-aware history of this conversation, newest
@@ -1164,15 +1236,15 @@ that matter on a phone:
 - **The initial load must not be the whole history.** A virtualized web list
   over a `Page` with a "load older" trigger at the top, backed by
   `entries(query, limit, cursor, context)`.
-- **The snapshot is the active transcript.** v1 serves it whole; do not also
-  promise a windowed snapshot. If it grows too large, add a v2 windowed
-  snapshot later.
+- **The snapshot is the active transcript of its scope.** v1 serves it whole;
+  do not also promise a windowed snapshot. If it grows too large, add a v2
+  windowed snapshot later.
 - **Paging goes behind the snapshot.** "Load older" uses
   `entries({ maxEntryId: oldestLoaded, order: "descending" }, limit, cursor)`;
   past-head entries render only below the head marker. The snapshot already
   contains the active window, so the first page must not re-append it.
 
-### 3.4 Task status indicators
+### 3.5 Task status indicators
 
 One rule: **the indicator reads committed status; it never infers.**
 
@@ -1183,9 +1255,16 @@ One rule: **the indicator reads committed status; it never infers.**
 | running tool call | `pi.live.tools[].status` (`pending`/`running`/`done`) | |
 | retry backoff | `pi.live.generation.retry` (`{at, error}`) | Show the countdown from `at` — a *committed* deadline, not a local timer. |
 | compaction | `pi.live.compactions[]`, `pi.live.compactionFailure` | |
-| queued input | `pi.inbox` | `InboxDoc` / `InboxItem`. |
+| queued input | `pi.inbox` | `InboxDoc` / `InboxItem`. The **queue**: what is waiting for a boundary. The inbox item's `id` is the `SubmissionId`. |
+| submission outcome | `SubmissionRecord` (`submission` events / `harness.submission`) | The **receipt**: what happened to the thing you sent. Not an alternative to the inbox row — a queued input has both. |
 | abort requested | `TaskGraphNode.abortRequested` | Show "Stopping…" until the task terminalizes. |
 | parked | `onReport` `{type:"task_parked"}` → durable, shown in the task panel | See §5 R3. |
+
+**Two different things, not two answers to one question.** `pi.inbox` is the
+**queue** — the input is waiting for a boundary — and the `SubmissionRecord` is
+the **receipt** — the input was admitted, and what became of it. §3.1's "did
+my send succeed?" is answered by the receipt; the queue is what the composer
+shows as "queued".
 
 The `sleeping` status and `TaskGraphNode.blocked` are post-1.3.0 (`main` @
 `fdce48e`); at the `v1.3.0` tag the graph has no `sleeping` status and no
@@ -1198,7 +1277,7 @@ suspended / waiting" trichotomy maps to **running / sleeping / waiting**, plus
 in `TaskGraphNode.blocked` and `TaskInspection`. Design the UI for four
 states, not three.
 
-### 3.5 Subagent visualization
+### 3.6 Subagent visualization
 
 The tree is `TaskGraphNode.owner` plus
 `TaskGraphNode.conversations` ("Conversations this task owns, in ID order").
@@ -1219,9 +1298,11 @@ conversation X". `scanConversations` supports both filters:
 answers "children of this task". The kernel should expose a
 `GET /v1/conversations?owner=<id>` endpoint backed by `ownerConversationId`.
 A fork's parent is `ConversationRecord.parent`, a separate edge; this endpoint
-does not cover it.
+does not cover it. The same edges are in the snapshot's **child index**
+(§1.9), so the tree is reconstructible from the snapshot alone; the endpoint
+is for on-demand queries, not for the first paint.
 
-### 3.6 The Resume affordance
+### 3.7 The Resume affordance
 
 This is where the durability story becomes visible, so it deserves care.
 
@@ -1279,14 +1360,16 @@ Retry posts to `/v1/commands/retryTask`, and Discard posts to
 `/v1/commands/abortTask`. The web client never sets a local "stopping" flag;
 it waits for the committed effects.
 
-### 3.7 UI state rules
+### 3.8 UI state rules
 
-- **Reconnect = resnapshot.** On WebSocket reconnect, the client attaches to
-  `WS /v1/events` and receives a fresh `snapshot`; it replaces its projection.
-  No local diffing, no reconciliation logic.
+- **Reconnect = resnapshot.** On WebSocket reconnect, the client re-attaches to
+  `WS /v1/events` **with the same scope** and receives a fresh `snapshot` for
+  that scope; it replaces its projection. No local diffing, no reconciliation
+  logic.
 - **`snapshot` event = drop everything.** The kernel sends it on attach, on
   bounded-queue overflow, and on any publication containing an entry with
-  `head` (reset, handoff, compaction). There is no separate `reset` event.
+  `head` (reset, handoff, compaction) — each for the scope that conversation
+  belongs to. There is no separate `reset` event.
 - **One snapshot path.** The WS `snapshot` is the client's only path;
   `GET /v1/snapshot` is debug-only.
 - **Optimistic UI is forbidden for durable state.** The "Send" button does not
@@ -1474,7 +1557,7 @@ milestone — it proves durability before anything else is built):
 | # | Criterion | How it is checked |
 |---|---|---|
 | M0.1 | With `pi.agent.model` configured from the `models` catalog, a submitted input produces a committed `pi.user` entry and a committed `pi.assistant` entry, visible in the snapshot | `curl` the snapshot; check the entries |
-| M0.2 | The kernel is killed explicitly with `SIGKILL` after a tool call commits its `execute` checkpoint, and a service restart **resumes the pending work**; every pre-kill entry is present and unchanged, and new entries are appended. `am kill` is not used: it may not kill a foreground-service process. | record the kernel pid at startup; `run-as <pkg> kill -9 <pid>` (debug build) or a debug-only IPC command; assert `pidof` shows the pid absent and a monotonic `boots` counter incremented; compare the snapshot prefix |
+| M0.2 | The kernel is killed explicitly with `SIGKILL` after a tool call commits its `execute` checkpoint, and a service restart **resumes the pending work**; every pre-kill entry is present and unchanged, and new entries are appended. `am kill` is not used: it may not kill a foreground-service process. | record the kernel pid at startup; `run-as <pkg> kill -9 <pid>` (debug build — `run-as` needs a debuggable build) or, in a release build, the debug-only IPC kill command, which is the release-mode equivalent; assert `pidof` shows the pid absent and a monotonic `boots` counter incremented; compare the snapshot prefix |
 | M0.3 | The `sleep-then-throw` fixture (`replay: "unsafe"`), interrupted after its `execute` checkpoint is committed, produces an `interrupted` result, **not** a rerun | read the committed `ToolTaskCheckpoint` with `phase: "execute"` in SQLite; then SIGKILL the kernel; assert the interrupted diagnostic |
 | M0.4 | The `sleep` fixture (`replay: "safe"`), interrupted at the same point, **does** rerun after the kill | same build as M0.3 — no declaration flip or rebuild between runs |
 | M0.5 | The SQLite file survives `adb shell am force-stop` and a reboot; `sqlite3` on the pulled file shows the entries | pull `session.sqlite`, `-wal` and `-shm` together (or run `PRAGMA wal_checkpoint(TRUNCATE)` first), then inspect |
@@ -1516,10 +1599,17 @@ Sub-questions, each with its own answer:
 **Spike S0.1 (3–4 days).** Build the smallest app: `targetSdk 35`,
 `libproot.so` + a rootfs under `files/`, a `ForegroundService` that launches
 it, opens `node:sqlite`, inserts and reads 1,000 rows, and prints over
-loopback. Measure: APK size, cold start, file I/O under proot, `node:sqlite`,
-exec before and after an APK update, `processLock` behavior, explicit kernel
-SIGKILL, and Doze (`adb shell dumpsys deviceidle force-idle`). If `processLock`
-does not behave, record the fallback (child-owned `FileLock` + pid/start time).
+loopback. **Ship `libproot.so` with `useLegacyPackaging="true"` (or
+`android:extractNativeLibs="true"`)**, so `nativeLibraryDir` contains a real
+executable and not just symlinks. The spike must prove the *mechanism*, not
+just that a process starts: the exec'd file is proot's own binary in
+`nativeLibraryDir`, and the rootfs binaries run out of `files/` through proot's
+path translation — which is why the API-29 exec ban does not apply. Measure:
+APK size, cold start, file I/O under proot, `node:sqlite`, exec before and
+after an APK update, rootfs relocation, `processLock` behavior, explicit
+kernel SIGKILL, and Doze (`adb shell dumpsys deviceidle force-idle`). If
+`processLock` does not behave, record the fallback (child-owned `FileLock` +
+pid/start time).
 
 **Fallback.** A custom bionic Node built for the app's prefix is the first
 optimization if proot is too slow. If the runtime cannot work at all, fall back
@@ -1617,7 +1707,7 @@ it stopped is `pending` again, so the next open counts no restart for it."
    `harness.inspect(context)` for tasks with
    `state.kind === "blocked"` and `reason === "restart_limit"` and call
    `harness.retryTask(id)` for each. This makes "parked" a visible, recoverable
-   state instead of a silent stall — and it gives you the §3.6 Retry button.
+   state instead of a silent stall — and it gives you the §3.7 Retry button.
 4. **Persist progress often.** The restart counter resets when the task
    commits a *different* state. Durable's `api.output()` already commits
    running output at most every 100 ms (`settings.progress`), so a long tool
@@ -1730,12 +1820,13 @@ the OAuth risk is for other providers.
 **Mitigation.** The model key, the workspace's git credential and `GH_CONFIG_DIR`
 are three separate secrets. The Android Keystore can hold them, but the Node
 kernel cannot read the Keystore: the host decrypts and passes each secret once
-over a pipe/fd; the kernel holds it in memory. `NodeExecutionEnv` is built with
-`inheritEnv: false` and a scrubbed environment, so `bash -c env` cannot print
-the key. `git`/`gh` get credentials per command (`env: { GH_TOKEN }` on that one
-spawn), never in `process.env` and never in `.git/config`. A backup/export must
-not include the secrets. Do not keep the kernel short-lived to dodge this: the
-kernel is the process that must live for days.
+over a pipe/fd; the kernel holds it in memory. Every `exec` through
+`NodeExecutionEnv` passes `inheritEnv: false` (a per-call option, default
+`true`), so `bash -c env` cannot print the key. `git`/`gh` get credentials per
+command (`env: { GH_TOKEN }` on that one spawn), never in `process.env` and
+never in `.git/config`. A backup/export must not include the secrets. The
+kernel is the process that must live for days, so the mitigation is the
+per-call environment, not a shorter lifetime.
 
 ### R9 — The IPC boundary is a real failure surface
 
@@ -1848,10 +1939,17 @@ and S0.5 run in parallel with it; S0.3, S0.6 and S0.7 need S0.1's runtime; S0.2
 is conditional on Option B and must run before that fallback is chosen; S0.8 is
 last. S0.9 can run in parallel from day one.
 
+**This is two weeks of spikes, not a weekend.** S0.1 (3–4 d) + S0.7 (3–4 d) +
+S0.6 (2 d) + S0.3 (1 d) alone are ~9–11 working days, and they are partly
+serial (S0.3, S0.6 and S0.7 all need S0.1's runtime). Add S0.4, S0.5, S0.8 and
+S0.9 and Phase 1 starts two to three weeks in, not in parallel with the
+spikes. Budget for that before promising Phase 1 dates.
+
 **Deliverables**
 
 - S0.1 Proot-on-Android spike (§5 R1) → a report: `targetSdk`, APK size,
-  cold start, `node:sqlite`, exec from `nativeLibraryDir` before/after an APK
+  cold start, `node:sqlite`, legacy packaging (a real executable in
+  `nativeLibraryDir`), exec from `nativeLibraryDir` before/after an APK
   update, rootfs relocation, `processLock`, kill/Doze behaviour.
 - S0.2 Android `SqliteDatabase` facade + `registerStorageConformance` pass
   (§5 R2) — **only if the plan falls back to Option B**; run it before choosing
@@ -1867,15 +1965,20 @@ last. S0.9 can run in parallel from day one.
 - S0.8 A **written decision record**: runtime, storage, env, IPC transport,
   security boundary.
 - S0.9 A **commit-fold protocol prototype** in Node against `MemoryStorage`:
-  subscribe, no-write barrier, head-write snapshot, overflow, singleton docs.
+  subscribe, no-write barrier, head-write snapshot, overflow, singleton docs,
+  and a second scope (a child conversation) with its own snapshot.
 
 **Acceptance**
 
 - [ ] S0.1 runs on a physical device, not only an emulator; records the
-      `targetSdk`; proves exec from `nativeLibraryDir` before and after an APK
-      update; proves `processLock` (abstract socket, released on death) or
-      records the child-owned `FileLock` fallback; and survives an explicit
-      kernel SIGKILL with the SQLite file intact.
+      `targetSdk`; ships `libproot.so` with `useLegacyPackaging="true"` (or
+      `android:extractNativeLibs="true"`) and proves `nativeLibraryDir` holds
+      a real executable; proves that the exec'd process is proot's own binary
+      and that the rootfs binaries run out of `files/` through it; proves exec
+      from `nativeLibraryDir` before and after an APK update; proves
+      `processLock` (abstract socket, released on death) or records the
+      child-owned `FileLock` fallback; and survives an explicit kernel SIGKILL
+      with the SQLite file intact.
 - [ ] S0.2's facade passes `registerStorageConformance` with zero failures,
       or the failure list is understood and accepted — *only if Option B is
       still live*.
@@ -1890,7 +1993,10 @@ last. S0.9 can run in parallel from day one.
 - [ ] S0.8 names the runtime, the env, the IPC transport and the security
       boundary, and §1.6's `env` factory seam is fixed.
 - [ ] S0.9 passes: a snapshot taken during a commit burst, a head write, a
-      queue overflow, and a stale-doc event all converge on the same state.
+      queue overflow, and a stale-doc event all converge on the same state; and
+      a second scope (a child conversation) receives its own snapshot and its
+      own events, while the root's snapshot stays free of the child's
+      transcript.
 
 ### Phase 1 — Durable kernel, no UI
 
@@ -1906,8 +2012,8 @@ last. S0.9 can run in parallel from day one.
   `onReport`'s `info` argument are post-1.3.0.
 - `processLock("pi-durable:<pkg>")` owned by the child, with the S0.1 fallback
   if the abstract socket does not behave.
-- Secrets via a one-time fd/pipe; `NodeExecutionEnv` built with
-  `inheritEnv: false` and a scrubbed environment; no secret in `process.env`.
+- Secrets via a one-time fd/pipe; every `exec` through `NodeExecutionEnv` with
+  `inheritEnv: false`; no secret in the kernel's `process.env`.
 - A redacted SAF export skeleton, written on stop and at a turn boundary.
 - Loopback HTTP+WS server with the bearer token; `POST /v1/commands/*`.
 - Three fixtures: `echo` (`replay: "safe"`), `sleep` (`replay: "safe"`), and
@@ -1933,12 +2039,13 @@ belongs to Phase 2, where the web client exists.
 - Web client screens S1 (transcript), S2 (composer with steer/follow-up),
   S3 (status strip), plus static asset serving from the kernel (`GET /`).
 - `WS /v1/events` folded from `harness.subscribeCommits`: `snapshot` on attach,
-  one `batch` per publication, `snapshot` on a head write or queue overflow.
+  one `batch` per publication, `snapshot` on a head write or queue overflow —
+  each scoped to the conversation the subscription is for (§1.9).
   `GET /v1/snapshot` is debug-only; the client never uses it.
 - Streaming from the `pi.live` doc (partial answer and tool output); the final
   `entry` on completion.
 - `abortRequested` in the status strip; `taskgraph` events for the live tree.
-- Paged `entries` loading behind the snapshot (§3.3).
+- Paged `entries` loading behind the snapshot (§3.4).
 
 **Acceptance**
 
@@ -1956,6 +2063,9 @@ belongs to Phase 2, where the web client exists.
       drops the old projection.
 - [ ] The client has exactly one snapshot path (the WS `snapshot`); an
       unauthenticated `GET /v1/snapshot` is refused.
+- [ ] A snapshot carries **one** conversation's transcript: the root snapshot
+      has no child transcript in it, and the child's transcript is not paged in
+      as a substitute.
 - [ ] The UI can be force-stopped and relaunched mid-turn; the transcript
       continues from the same point.
 - [ ] Editing the web UI source in dev mode hot-reloads the WebView without
@@ -1974,7 +2084,9 @@ belongs to Phase 2, where the web client exists.
   `scanConversations`, `requestId` and `api.details`; the persistent combined
   tool (example 23) is `replay: "unsafe"` unless `stop`/`send` are split out.
 - The child's conversation id, surfaced through `api.details({ conversationId
-  })`, so the UI can open a second view over the same commit stream for it.
+  })`, so the UI can open a second view over the same commit stream for it —
+  a second scoped subscription, `WS /v1/events?conversation=<childId>`, which
+  gets the child its own scoped snapshot (§1.9).
 - `GET /v1/conversations?owner=<id>` for the creator-edge tree, backed by
   `scanConversations({ ownerConversationId })`; fork parents are
   `ConversationRecord.parent`, a separate edge.
@@ -1985,7 +2097,9 @@ belongs to Phase 2, where the web client exists.
       child's turn, relaunch, and the child continues from its checkpoint.
 - [ ] Aborting the parent aborts the child (ownership cascade); aborting with
       `{background:true}` reaches a background child.
-- [ ] The UI can open a child conversation and shows its own transcript.
+- [ ] The UI can open a child conversation and shows its own transcript,
+      from that scope's own snapshot — not from the root snapshot and not from
+      a paged substitute.
 - [ ] Aborting a child's run keeps its conversation and its entries; a
       follow-up input continues the same conversation.
 
@@ -2127,6 +2241,31 @@ still `1.3.0`). The `v1.3.0` tag differs: see §0.1. Names marked
 released tarball does not have them. The exports map also includes `./images`,
 `./images/node` and `./images/cloudflare`, omitted here.
 
+### Package entry points (`packages/chord/package.json` `exports`)
+
+```
+"."                          src/index.ts
+"./context"                  src/context/index.ts
+"./output"                   src/output.ts
+"./delta"                    src/delta/index.ts
+"./node"                     src/node.ts          <- processLock
+"./telemetry-sqlite"         src/telemetry-sqlite/index.ts
+"./sqlite"                   src/sqlite/index.ts
+"./sqlite/node"              src/sqlite/node.ts   <- openNodeSqliteDatabase
+"./sqlite/cloudflare"        src/sqlite/cloudflare.ts
+"./package.json"
+```
+
+`processLock` is re-exported by `src/node.ts:15` and defined at
+`src/manager.ts:82` as
+`processLock(name: string): Promise<() => Promise<void>>` — the returned
+function releases it. The source comment states the platform behavior this plan
+relies on: "an abstract socket (Linux, Android) or a named pipe (Windows)
+vanishes with its process, so there is no stale state to take over and no race
+between two would-be owners". The Android path is the abstract socket
+(`\0chord2-<hash>`). S0.1 still verifies it on the target device, because the
+claim is about the *device*, not the source.
+
 ### Types that matter for this plan
 
 ```ts
@@ -2145,10 +2284,10 @@ export interface ExecutionEnv extends FileSystem, Shell {}
 
 | Call | Where | Note |
 |---|---|---|
-| `harness.subscribeCommits(listener)` | `src/types.ts:1083` | the WS stream's only source; `{seq, changes}` |
+| `harness.subscribeCommits(listener)` | `src/types.ts:1083` | the WS stream's only source; `{seq, changes}`. **Declared on `Session`**, which `Harness` extends (`export interface Harness extends Session`, `src/harness/types.ts:775`), so `harness.subscribeCommits(...)` is the same call. The listener runs on the Session line and must not block or call Session APIs. |
 | `harness.commit(fn, ctx)` | | no-write read barrier for the snapshot; a no-write commit does not publish |
 | `Tx.conversation/scanEntries/scanTasks/scanConversations/doc` | | snapshot reads on the commit line |
-| `processLock(name)` | `@earendil-works/chord/node` | abstract socket on Android; child-owned; S0.1 verifies the behavior |
+| `processLock(name)` | `@earendil-works/chord/node` → `packages/chord/src/node.ts:15` → `src/manager.ts:82` | abstract socket on Android; child-owned; returns a release function; S0.1 verifies the behavior on the device |
 | `Harness.open(storage, options, context)` | `src/harness/harness.ts:525` | Requires a registry containing the built-in tasks; `env` is a factory, not an `ExecutionEnv`. |
 | `harness.resume()` | `src/harness/types.ts` | "Enable task scheduling. Idempotent." |
 | `harness.wake(): Wake` | | `{ active, at? }` |
@@ -2169,6 +2308,8 @@ export interface ExecutionEnv extends FileSystem, Shell {}
 | `api.createTask(task, input, options, ctx)` | | `options.ownership` required |
 | `api.commit(fn, ctx)` / `api.memo(name, candidate, ctx)` | | durable side effects |
 | `api.details(value, ctx)` | | how the UI finds a child conversation |
+| `env.exec(command, options, ctx)` | `src/env/index.ts:365` | `Shell.exec`; a string runs through the env's shell, an array runs `command[0]` directly |
+| `options.env` / `options.inheritEnv` on an exec | `src/env/index.ts:302-303` | `ShellExecOptions.env` is the **per-call** environment (`env: { GH_TOKEN }` for one spawn); `inheritEnv` defaults to `true` (merge `process.env`), `false` gives only the per-call vars. `getShellEnv` implements it (`src/env/node.ts:270-281`); `NodeExecutionEnv`'s constructor has a base `shellEnv` and **no** `inheritEnv` flag, so the scrub is per call. |
 | `runtime.commit(fn, ctx)` | | returns `void`; the callback returns `{status:"waiting", checkpoint, on, policy}` to wait |
 | `runtime.sleepUntil(until, {phase}, ctx)` | | durable sleep |
 | `runtime.outcomes(ids, ctx)` | | join results |
@@ -2235,7 +2376,11 @@ migrates to version 2 and cannot be opened by 1.3.0 or earlier. If you pin the
   Phase 5 experiment with a host fallback.
 - **Events:** `subscribeCommits` fold, no-write commit barrier, singleton app
   docs (the long-term phone-scale answer, not a v1 shortcut), `pi.live`
-  streaming, snapshot on head writes, one WS snapshot path, entries paging.
+  streaming, snapshot on head writes, one WS snapshot path, entries paging,
+  and **scoped snapshots**: a snapshot carries one conversation's transcript
+  plus a child index (ids and owner edges, no transcripts); a child view is a
+  second scoped subscription on the same commit stream, not a bigger snapshot
+  and not a paged substitute (§1.9).
 - **Spikes:** S0.1 verifies `processLock` on the target device (fallback:
   child-owned `FileLock`); S0.7 names and proves a no-USB install path.
 
