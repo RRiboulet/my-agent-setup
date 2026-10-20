@@ -96,9 +96,9 @@ that commit, not the version string.
 | `@earendil-works/chord/sqlite` | absent | present |
 | `DURABLE_TELEMETRY_SCHEMA`, `DEFAULT_RESTART_LIMIT` exports | absent | present |
 | `defineDoc` / `defineDocFamily` `checkpointWhen` | optional | required |
-| `Harness.open` | `src/harness/harness.ts` is 470 lines | line 523 |
-| `openNodeSqliteStorage` | `src/storage/sqlite/node.ts:209` | `:16` |
-| `test/examples/22`, `23` | absent | present |
+| `Harness.open` | `src/harness/harness.ts` is 470 lines | line 525 |
+| `openNodeSqliteStorage` | `src/storage/sqlite/node.ts:209` | `:15` |
+| `test/examples/22`, `23` | present (22 byte-identical; 23 lacks the required `checkpointWhen`) | present |
 
 Consequences:
 
@@ -330,6 +330,11 @@ export function envFor(cwd: string): ExecutionEnv {
 }
 ```
 
+`HarnessOptions.env` is a factory, not an `ExecutionEnv`: pass
+`env: (target, context) => envFor(target.cwd ?? defaultWorkspace)`. `envFor` must
+set `ExecutionEnv.cwd` (required by `FileSystem`), which `NodeExecutionEnv` does
+from its constructor.
+
 **Escalation order, and why:** Option A is chosen because the review, commit,
 github, librarian and update-changelog workflows and the git viewer need `git`,
 and because the shell and the durability layer must work with no network at
@@ -461,13 +466,14 @@ Rules, in order of how much they matter:
    process**, taking the service and its Node child with it; that is a kernel
    restart, not an Activity event, and SQLite + `resume()` handle it. If you
    want app-process isolation, put the service in a separate
-   `android:process=":kernel"`; `am kill <pkg>` still kills every process of
-   the package.
+   `android:process=":kernel"`; `am force-stop <pkg>` kills every process of
+   the package (and suppresses restart), while `am kill` only kills processes
+   the system deems safe.
 4. **Graceful stop is best-effort.** `onDestroy` sends `SIGTERM` and the kernel
    traps it and calls `harness.close(context)`, but Android does not guarantee
    `onDestroy` on a system kill. Use an explicit stop action and
    `stopService`/`stopSelf` for the graceful path, and treat `SIGKILL` (OEM
-   killer, `am kill`, low memory) as the normal crash path — see §5 R3.
+   killer, an explicit `kill -9`, low memory) as the normal crash path — see §5 R3.
 5. **The service supervises.** If the kernel exits, the service restarts it and
    the kernel calls `Harness.open(...)` + `harness.resume()`, which picks up
    whatever the last process left unfinished ("Work interrupted by a crash or
@@ -647,10 +653,10 @@ And the mapping from pi-coding-agent concepts:
 | `pi.registerTool({name, parameters, execute})` | `defineTool({name, parameters, execute, replay})` |
 | `pi.registerCommand(name, handler)` | a tool the model may call **plus** a UI affordance that submits a canned input |
 | `pi.registerShortcut(key, handler)` | gone — replace it with an explicit UI affordance (e.g. `continue` gets a **Continue** button in S2) |
-| `pi.registerMessageRenderer(kind, fn)` + `pi.sendMessage({customType})` | `defineEntry({kind})` + `conversation.submit({type:"write", entry:{kind,data}})` |
+| `pi.registerMessageRenderer(kind, fn)` + `pi.sendMessage({customType})` | `defineEntry(kind)` + `conversation.submit({type:"write", entry:{kind,data}})` |
 | `renderCall` / `renderResult` | the `details` field of a tool result + the app's own renderer |
 | `pi.getThinkingLevel()` | `conversation.configure({thinkingLevel})` |
-| `ctx.cwd` | `agent.cwd`; some adapters expose `env.cwd` (the Expo adapter does), but `ExecutionEnv` itself does not require it |
+| `ctx.cwd` | `agent.cwd`; `ExecutionEnv.cwd: string` is required by `FileSystem`, so the `env` factory must supply it (from `EnvTarget.cwd` or a default workspace) |
 | `pi.registerFlag` / provider registration | `HarnessOptions.models` — a `Models` from `@earendil-works/pi-ai/models` |
 
 Two structural wins fall out of this:
@@ -789,6 +795,10 @@ export const SafeRead = defineExtension({
 });
 ```
 
+`createReadTool()` has no image processor. If the app uses
+`createCodingTools({ images })`, a re-declared `createReadTool()` drops image
+processing; pass the same options or keep the image path unsafe.
+
 `write`, `edit` and `bash` stay unsafe. `edit` is *nearly* idempotent (it
 matches `oldText`), but a partially-applied edit that then died leaves the file
 in a state where `oldText` no longer matches, so a rerun fails confusingly.
@@ -803,16 +813,21 @@ re-implementations of what Pi Durable already provides. **There is no shipped
 subagent task to switch to:** `BUILTIN_TASKS` is `[GenerationTask, ToolTask,
 CompactionTask]`. Pi Durable documents an *owned-child-conversation pattern*;
 the app writes the tool and, for persistent subagents, the anchor task. The
-`main` checkout has it as `test/examples/22-subagent-foreground.ts` and
-`23-subagent-background.ts`; at `v1.3.0` those examples do not exist.
+examples exist at both `v1.3.0` and `main`: `test/examples/22-subagent-foreground.ts`
+is byte-identical, and `23-subagent-background.ts` differs only by the
+now-required `checkpointWhen` predicate. Example 23's combined spawn/send/stop
+tool is `replay: "unsafe"`; only the foreground tool (22) is safe.
 
-The pattern, in one sentence: a `replay: "safe"` subagent tool creates its child
-conversation inside `api.commit()` with `ownership: { kind: "task", taskId:
-api.taskId }`, reuses an existing child by `scanConversations({ ownerTaskId })`,
-then drives it through `api.conversation(id)` with a request id derived from
-`api.taskId`. The replay/idempotency half is not optional: without it, a process
-death after the child is created either spawns a second child or abandons the
-first.
+The pattern, in one sentence: the foreground subagent tool (example 22) is
+`replay: "safe"`; it creates its child conversation inside `api.commit()` with
+`ownership: { kind: "task", taskId: api.taskId }`, reuses an existing child by
+`scanConversations({ ownerTaskId })`, then drives it through
+`api.conversation(id)` with a request id derived from `api.taskId`. The
+replay/idempotency half is not optional: without it, a process death after the
+child is created either spawns a second child or abandons the first. The
+persistent combined tool (example 23) is `replay: "unsafe"` because a rerun of
+`stop` could stop newer work; split `stop`/`send` out of the safe spawn tool if
+you port it.
 
 The ownership types, from `src/types.ts`:
 
@@ -836,8 +851,9 @@ The durable recipe, from the README:
   (`test/examples/23-subagent-background.ts` on `main`).
 
 What ownership buys, in one line: aborting the call aborts the child, the
-parent is idle only once the child is, and a child created with
-`{ background: true }` survives the parent's abort.
+parent is idle only once the child is, and an owning task created with
+`{ background: true }` survives the parent's abort. The flag is on
+`TaskOptions` (the owning task), not on the conversation record.
 
 What the UI needs from it is the child's conversation id, which the tool
 reports through `api.details({ conversationId: child })`. That is how the
@@ -1097,11 +1113,13 @@ tool call has finished is no longer a live task, but its conversation still
 exists and still belongs to the parent. Render it from the conversation record,
 and mark it "ended".
 
-Concretely, the UI needs one query: "which conversations are children of
+Concretely, the UI needs one query: "which conversations were created by
 conversation X". `scanConversations` supports both filters:
 `ownerConversationId` answers exactly that question, while `ownerTaskId`
 answers "children of this task". The kernel should expose a
-`GET /v1/conversations?parent=<id>` endpoint backed by `ownerConversationId`.
+`GET /v1/conversations?owner=<id>` endpoint backed by `ownerConversationId`.
+A fork's parent is `ConversationRecord.parent`, a separate edge; this endpoint
+does not cover it.
 
 ### 3.6 The Resume affordance
 
@@ -1142,7 +1160,7 @@ again".** Per the spec:
 | Button | Command | When it appears |
 |---|---|---|
 | **Resume** | `harness.resume()` | When there is pending work that is not parked. |
-| **Retry** | `harness.retryTask(id)` | Per task, when `blocked.reason === "restart_limit"`. |
+| **Retry** | `harness.retryTask(id)` | Per task, when `TaskGraphNode.blocked === "restart_limit"` (or `TaskInspection.state.kind === "blocked"` with `reason`) |
 | **Discard** | `harness.abortTask(id, context)` | Per task, for work the user no longer wants. |
 
 **And a fourth state the UI must show honestly: "interrupted".** A tool call
@@ -1251,8 +1269,12 @@ incident.** Concretely, in the kernel:
 
 ```ts
 // On start: pick up where the last process stopped.
-const harness = await Harness.open(await openNodeSqliteStorage(dbPath), { models, registry, settings, env, onWake }, ctx);
-const root = await harness.root(ctx);          // the same root as last time
+const harness = await Harness.open(await openNodeSqliteStorage(dbPath), {
+  models, registry, settings,
+  env: (target) => envFor(target.cwd ?? defaultWorkspace),
+  onWake,
+}, ctx);
+const root = await harness.root(ctx, { agent: { model } }); // models is the catalog; pi.agent.model selects
 harness.resume();                              // continue any run the last process left unfinished
 ```
 
@@ -1270,8 +1292,8 @@ The README is explicit that a close is *not* a crash:
 
 So: a graceful stop (SIGTERM → `close()`) leaves the restart counter alone; an
 abrupt kill increments it. On Android, the difference between the two is only
-partly under your control: `onDestroy` is best-effort and `am kill`/OEM kills
-are `SIGKILL` (§5 R3). The counter and parking are post-1.3.0 (`main` @
+partly under your control: `onDestroy` is best-effort and an explicit or OEM
+SIGKILL is the normal path (§5 R3). The counter and parking are post-1.3.0 (`main` @
 `fdce48e`); at the `v1.3.0` tag there is no `restartLimit`.
 
 The second half of "normal event" is that the *user* never sees an error. The
@@ -1331,9 +1353,11 @@ Concretely, and this is deliberately *not* a UI milestone:
    notification, and a `BroadcastReceiver` for `BOOT_COMPLETED` (optional).
 2. The service starts the kernel (Node, per §1.3) with the HTTP+WS server from
    §1.9 on loopback, with the bearer token.
-3. The kernel opens `openNodeSqliteStorage("/data/data/<pkg>/pi/session.sqlite")`,
-   calls `Harness.open(...)`, `harness.root(ctx)`, and registers **one** tool:
-   `echo` (`replay: "safe"`).
+3. The kernel opens `openNodeSqliteStorage(join(filesDir, "pi/session.sqlite"))`,
+   calls `Harness.open(...)`, `harness.root(ctx, { agent: { model } })`, and
+   registers three fixtures: `echo` (`replay: "safe"`), `sleep`
+   (`replay: "safe"`), and `sleep-then-throw` (`replay: "unsafe"`). `filesDir`
+   is `Context.filesDir`; do not hardcode `/data/data/<pkg>`.
 4. The kernel exposes `POST /v1/commands/submit` and `GET /v1/snapshot`.
 5. **No web UI yet** — `curl` from `adb shell` is enough.
 
@@ -1342,17 +1366,19 @@ milestone — it proves durability before anything else is built):
 
 | # | Criterion | How it is checked |
 |---|---|---|
-| M0.1 | A submitted input produces a committed `pi.user` entry and a committed `pi.assistant` entry, visible in the snapshot | `curl` the snapshot; check the entries |
-| M0.2 | `adb shell am kill <pkg>` (process death, no graceful close) followed by a service restart **resumes the pending work**; every pre-kill entry is present and unchanged, and new entries are appended | kill mid-tool-call; restart; compare the snapshot prefix, not "byte-identical" |
-| M0.3 | A tool that was interrupted mid-flight and is declared `replay: "unsafe"` produces an `interrupted` result, **not** a rerun | register a `sleep`-then-throw tool; kill during it |
-| M0.4 | The same tool declared `replay: "safe"` **does** rerun after the kill | flip the declaration |
-| M0.5 | The SQLite file survives `adb shell am force-stop` and a reboot; `sqlite3` on the pulled file shows the entries | pull and inspect |
-| M0.6 | Exactly one kernel process exists at a time; a second launch attempt is refused | assert on the lock |
-| M0.7 | `harness.inspect()` after the kill reports the previously-running task as `pending`, and `harness.resume()` runs it | via the snapshot |
+| M0.1 | With `pi.agent.model` configured from the `models` catalog, a submitted input produces a committed `pi.user` entry and a committed `pi.assistant` entry, visible in the snapshot | `curl` the snapshot; check the entries |
+| M0.2 | The kernel is killed explicitly with `SIGKILL` after a tool call commits its `execute` checkpoint, and a service restart **resumes the pending work**; every pre-kill entry is present and unchanged, and new entries are appended. `am kill` is not used: it may not kill a foreground-service process. | record the kernel pid at startup; `run-as <pkg> kill -9 <pid>` (debug build) or a debug-only IPC command; assert `pidof` shows the pid absent and a monotonic `boots` counter incremented; compare the snapshot prefix |
+| M0.3 | The `sleep-then-throw` fixture (`replay: "unsafe"`), interrupted after its `execute` checkpoint is committed, produces an `interrupted` result, **not** a rerun | read the committed `ToolTaskCheckpoint` with `phase: "execute"` in SQLite; then SIGKILL the kernel; assert the interrupted diagnostic |
+| M0.4 | The `sleep` fixture (`replay: "safe"`), interrupted at the same point, **does** rerun after the kill | same build as M0.3 — no declaration flip or rebuild between runs |
+| M0.5 | The SQLite file survives `adb shell am force-stop` and a reboot; `sqlite3` on the pulled file shows the entries | pull `session.sqlite`, `-wal` and `-shm` together (or run `PRAGMA wal_checkpoint(TRUNCATE)` first), then inspect |
+| M0.6 | The service starts exactly one kernel child; a second kernel that cannot take `pi/kernel.lock` refuses to start | assert the second launch exits nonzero and the first pid is unchanged |
+| M0.7 | `harness.inspect()` after the kill reports the previously-running task with `TaskInspection.record.state.status === "pending"` (the derived `state.kind` is `"ready"`), and `harness.resume()` runs it | via the snapshot; assert the record field, not `state.kind` |
 | M0.8 | The kernel serves a trivial `GET /` page and the WebView loads it over loopback with the bearer token | Load the WebView; check the page renders |
 
 M0.2/M0.3/M0.4 are the three that actually prove the kernel is durable, and
-they are cheap. Everything else in this plan is downstream of them.
+they are cheap. They must kill the *kernel* explicitly: a test that only kills
+the Activity can pass without exercising recovery. Everything else in this plan
+is downstream of them.
 
 ---
 
@@ -1383,7 +1409,7 @@ Sub-questions, each with its own answer:
 that launches a bundled Node, which opens a `node:sqlite` database, creates a
 table, inserts 1 000 rows in a transaction, reads them back, and prints a
 report over a loopback socket. Measure: APK size, cold-start time, `node:sqlite`
-availability, behaviour across `am kill`, behaviour across Doze (`adb shell
+availability, behaviour across an explicit kernel SIGKILL, behaviour across Doze (`adb shell
 dumpsys deviceidle force-idle`).
 
 **Fallback.** Option B (Hermes + `android.database.sqlite` facade + no shell)
@@ -1458,7 +1484,7 @@ The mechanism, from `src/harness/scheduler.ts`:
 
 Now count the ways a phone kills a background service: Samsung's and Xiaomi's
 battery managers, "app hibernation" on Android 12+, memory pressure, the user
-swiping the app from recents, `adb shell am kill`, and a Doze-adjacent
+swiping the app from recents, an explicit `run-as` SIGKILL, and a Doze-adjacent
 background restriction. Five of those in a row, before the task manages to
 commit a *different* state, and your task is parked and silent.
 
@@ -1475,7 +1501,7 @@ it stopped is `pending` again, so the next open counts no restart for it."
 2. **Graceful shutdown wherever you can.** An explicit stop action →
    `stopService`/`stopSelf` → `SIGTERM` → the kernel traps it →
    `harness.close(ctx)`. Do not rely on `onDestroy`: Android does not guarantee
-   it on a system kill, and `am kill`/an OEM kill are `SIGKILL`.
+   it on a system kill, and an explicit/OEM SIGKILL is the normal path.
 3. **Host-driven recovery.** On every service start, scan
    `harness.inspect(context)` for tasks with
    `state.kind === "blocked"` and `reason === "restart_limit"` and call
@@ -1486,7 +1512,7 @@ it stopped is `pending` again, so the next open counts no restart for it."
    running output at most every 100 ms (`settings.progress`), so a long tool
    call does make progress — but a task in a *phase* with no output does not.
 
-**Spike S0.3 (1 day).** A loop that does `am kill` on the app 10 times during
+**Spike S0.3 (1 day).** A loop that SIGKILLs the kernel pid 10 times during
 a long tool call, then asserts (a) the task is still live and (b) it completes
 on the next resume. Run it on the three OEM skins you actually own.
 
@@ -1710,7 +1736,7 @@ criteria. The criteria are the point: they are what "done" means.
 **Acceptance**
 
 - [ ] S0.1 runs on a physical device, not only an emulator, and survives
-      `am kill` with the SQLite file intact.
+      an explicit kernel SIGKILL with the SQLite file intact.
 - [ ] S0.2's facade passes `registerStorageConformance` with zero failures,
       or the failure list is understood and accepted — *only if Option B is
       still live*.
@@ -1721,7 +1747,7 @@ criteria. The criteria are the point: they are what "done" means.
 - [ ] S0.7 builds and installs a trivial APK on the device, or the fallback
       build-host decision is recorded.
 - [ ] S0.8 names the runtime, the env, the IPC transport and the security
-      boundary, and §1.6's seam (`envFor(cwd)`) is fixed.
+      boundary, and §1.6's `env` factory seam is fixed.
 
 ### Phase 1 — Durable kernel, no UI
 
@@ -1730,18 +1756,25 @@ criteria. The criteria are the point: they are what "done" means.
 **Deliverables**
 
 - The Android app skeleton: `ForegroundService` + notification + supervisor.
-- The kernel process: `Harness.open(openNodeSqliteStorage(db), {models, registry:
-  createRegistry(), settings, env, onWake, onReport}, ctx)`, `harness.root(ctx)`,
-  `harness.resume()`. `onWake` and `onReport`'s `info` argument are post-1.3.0.
+- The kernel process: `Harness.open(await openNodeSqliteStorage(db), {models,
+  registry: createRegistry(), settings, env: (target) => envFor(target.cwd ??
+  defaultWorkspace), onWake, onReport}, ctx)`,
+  `harness.root(ctx, { agent: { model } })`, `harness.resume()`. `onWake` and
+  `onReport`'s `info` argument are post-1.3.0.
 - Loopback HTTP+WS server with the bearer token; `POST /v1/commands/*`.
-- One tool: `echo`, `replay: "safe"`.
-- `onReport` → the kernel's log *and* a durable record the UI can read (so
-  `task_parked`, `task_faulted` and `session_failed` are not lost; `task_parked`
-  is post-1.3.0).
+- Three fixtures: `echo` (`replay: "safe"`), `sleep` (`replay: "safe"`), and
+  `sleep-then-throw` (`replay: "unsafe"`), all in one build.
+- A test provider (`fauxProvider` from `@earendil-works/pi-ai/providers/faux`)
+  so M0.1 does not depend on network or credentials; real provider transport is
+  R8's separate gate.
+- `onReport` → `task_parked` and `task_faulted` to a durable doc the UI can read
+  (`task_parked` is post-1.3.0); `session_failed` to the kernel log/file, because
+  a storage-failure report cannot be committed to the storage that just failed.
 - `onWake` → `AlarmManager` + wake lock (§1.10).
 
-**Acceptance** = Milestone 0's M0.1–M0.7 (§4.5), all seven. M0.8 (the WebView
-loads `GET /`) belongs to Phase 2, where the web client exists.
+**Acceptance** = Milestone 0's M0.1–M0.7 (§4.5), all seven, with the model
+configured and the three fixtures in one build. M0.8 (the WebView loads `GET /`)
+belongs to Phase 2, where the web client exists.
 
 ### Phase 2 — Reactive web UI v0
 
@@ -1757,9 +1790,9 @@ loads `GET /`) belongs to Phase 2, where the web client exists.
 
 **Acceptance**
 
-- [ ] Rotating the device, killing the WebView renderer, or `adb shell am kill`ing
-      the Activity leaves the transcript, the run and the pending tools exactly
-      as they were.
+- [ ] Rotating the device, killing the WebView renderer, or force-stopping and
+      relaunching the app leaves the transcript, the run and the pending tools
+      exactly as they were.
 - [ ] A model turn streams into the transcript with no local "thinking"
       animation that is not backed by a committed field.
 - [ ] A steer submitted during a run is visibly applied to the running turn
@@ -1778,12 +1811,14 @@ loads `GET /`) belongs to Phase 2, where the web client exists.
 
 - Screen S4 (task tree) and S5 (subagent view).
 - The owned-child subagent tool (no shipped subagent task exists) wired to the
-  UI per §2.5 — `replay: "safe"`, `scanConversations`, `requestId`,
-  `api.details` — and no port of the tmux extension.
+  UI per §2.5 — the foreground tool is `replay: "safe"` with
+  `scanConversations`, `requestId` and `api.details`; the persistent combined
+  tool (example 23) is `replay: "unsafe"` unless `stop`/`send` are split out.
 - The child's conversation id, surfaced through `api.details({ conversationId
   })`, so the UI can attach a second event stream to it.
-- `GET /v1/conversations?parent=<id>` for the parent→child tree, backed by
-  `scanConversations({ ownerConversationId })`.
+- `GET /v1/conversations?owner=<id>` for the creator-edge tree, backed by
+  `scanConversations({ ownerConversationId })`; fork parents are
+  `ConversationRecord.parent`, a separate edge.
 
 **Acceptance**
 
@@ -1815,7 +1850,8 @@ sections.
 - [ ] Todos and goals live in documents, not files; a process kill preserves
       them.
 - [ ] `triage_change`'s decision is in a durable doc and is visible in the
-      task panel.
+      transcript or a docs read, not the task panel (the task panel renders the
+      task graph, and a doc is not a task).
 - [ ] Every skill's body is reachable as a section and its scripts as tools.
 
 ### Phase 5 — Self-building loop
@@ -1864,8 +1900,8 @@ sections.
 
 - [ ] The 10× kill loop (§5 R3) leaves no task parked, or parks it visibly
       with a working Retry.
-- [ ] A second kernel launch attempt is refused, and the store is uncorrupted
-      after the attempt.
+- [ ] After a refused second launch, the store is uncorrupted and the first
+      kernel still serves.
 - [ ] The app survives a reboot with the transcript and any in-flight task
       intact.
 
@@ -1929,7 +1965,7 @@ export interface ExecutionEnv extends FileSystem, Shell {}
 
 | Call | Where | Note |
 |---|---|---|
-| `Harness.open(storage, options, context)` | `src/harness/harness.ts:523` | Requires a registry containing the built-in tasks. |
+| `Harness.open(storage, options, context)` | `src/harness/harness.ts:525` | Requires a registry containing the built-in tasks; `env` is a factory, not an `ExecutionEnv`. |
 | `harness.resume()` | `src/harness/types.ts` | "Enable task scheduling. Idempotent." |
 | `harness.wake(): Wake` | | `{ active, at? }` |
 | `harness.close(context)` / `harness.closed` | | "Seal admission, settle admitted commits, then close storage." |
@@ -1949,7 +1985,7 @@ export interface ExecutionEnv extends FileSystem, Shell {}
 | `api.createTask(task, input, options, ctx)` | | `options.ownership` required |
 | `api.commit(fn, ctx)` / `api.memo(name, candidate, ctx)` | | durable side effects |
 | `api.details(value, ctx)` | | how the UI finds a child conversation |
-| `runtime.commit(fn, ctx)` | | returns `{status:"waiting", checkpoint, on, policy}` to wait |
+| `runtime.commit(fn, ctx)` | | returns `void`; the callback returns `{status:"waiting", checkpoint, on, policy}` to wait |
 | `runtime.sleepUntil(until, {phase}, ctx)` | | durable sleep |
 | `runtime.outcomes(ids, ctx)` | | join results |
 
@@ -1986,7 +2022,8 @@ post-1.3.0; the tag has none of them.
     README, Watching a Conversation.
 
 Line numbers are for `fdce48e`. At `v1.3.0`, quotes 2 and 3 are at
-`docs/spec.md:3376` and `:2927`, and quote 7 is at a different scheduler line.
+`docs/spec.md:3376` and `:2927`; quote 7 is main-only (the tag's restart
+handling is `abandonOnRestart`, not the close/crash counter).
 
 ---
 
