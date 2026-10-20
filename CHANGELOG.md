@@ -4,30 +4,6 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
-Added:
-
-- **The `opencode-go` provider now declares image input for `minimax-m3.1-flash-free`.**
-  The extension syncs its model list from the live `/v1/models` feed, which
-  returns only `{id, object, created, owned_by}` — no `modalities` — so every
-  model that is not in the curated `models.json` is registered with the default
-  `input: ["text"]`. `minimax-m3.1-flash-free` is live-only, so it arrived
-  text-only even though the upstream catalog lists it as multimodal, and pi
-  dropped images on the way in: `read` on a PNG answered "Current model does
-  not support images" and the image never reached the endpoint.
-
-  `patch.json` now declares `input: ["text", "image"]` for it, the same
-  mechanism the extension already uses to correct live-only models such as
-  `ox-alpha-free` and `deepseek-flash`. With the patch in place pi attaches
-  the image block and the model reads it: asked which colour fills each half
-  of a split red/blue image, it answers "left=red, right=blue" — the same
-  answer the catalog's image-capable models give. Before the patch it
-  hallucinated a colour instead, having been handed no image at all.
-
-  Video is not part of this: pi's `Model.input` is `("text" | "image")[]` and
-  the chat path has no video content block, so there is nothing to declare.
-  Getting frames in front of a model means extracting them and sending them
-  as images.
-
 ## v1.8.0 — 2026-10-19
 
 Added:

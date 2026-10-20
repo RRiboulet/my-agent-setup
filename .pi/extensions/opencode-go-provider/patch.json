@@ -220,11 +220,5 @@
       "thinkingFormat": "qwen",
       "maxTokensField": "max_tokens"
     }
-  },
-  "minimax-m3.1-flash-free": {
-    "input": [
-      "text",
-      "image"
-    ]
   }
 }
