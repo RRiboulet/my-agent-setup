@@ -19,10 +19,11 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, test } from "node:test";
 
-import { initTheme } from "@earendil-works/pi-coding-agent";
+import { initTheme, Theme } from "@earendil-works/pi-coding-agent";
+import { indexedColor, oklchColor, rgbColor } from "@earendil-works/pi-tui";
 
 import { renderMarkdown } from "../../btw/markdown.mjs";
-import { buildThemeSpec, installThemeSpec } from "../../btw/theme.mjs";
+import { buildThemeSpec, colorValue, installThemeSpec } from "../../btw/theme.mjs";
 
 const VIEWER = path.join(import.meta.dirname, "..", "..", "btw", "viewer.mjs");
 
@@ -68,6 +69,30 @@ test("headings, lists, quotes, links and code blocks render", () => {
 	const code = plain(renderMarkdown("```ts\nconst x = 1;\n```", 40, theme).join("\n"));
 	assert.match(code, /const x = 1;/, "the code is drawn");
 	assert.match(code, /```/, "the fence is drawn as a fence");
+});
+
+test("a color keeps the form the terminal needs", () => {
+	assert.equal(colorValue(indexedColor(5)), 5, "a palette index stays an index, so the terminal's own palette draws it");
+	assert.equal(colorValue(rgbColor(1, 2, 3)), "#010203");
+	assert.equal(colorValue(oklchColor(0.5, 0.1, 120)), "oklch(50.000000% 0.100000 120.000000)");
+});
+
+test("a palette index reaches the panel as an index, not as a hex", () => {
+	initTheme("dark");
+	const live = globalThis[Symbol.for("@earendil-works/pi-coding-agent:theme")];
+	const values: Record<string, string | number> = {};
+	for (const [token, color] of Object.entries(live.colors)) values[token] = colorValue(color);
+	values.mdHeading = 5;
+	const indexed = new Theme(values, {}, live.getColorMode());
+
+	const spec = buildThemeSpec(indexed);
+	assert.equal(spec.colors.mdHeading, 5, "the index survives the hand-off");
+	const panel = installThemeSpec(spec);
+	assert.equal(
+		panel.heading("Title"),
+		indexed.fg("mdHeading", "Title"),
+		"the panel draws the index the way the transcript draws it",
+	);
 });
 
 test("the theme spec round-trips: the panel renders in the transcript's colors", () => {

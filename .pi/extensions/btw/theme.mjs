@@ -27,22 +27,58 @@ const THEME_KEY = Symbol.for("@earendil-works/pi-coding-agent:theme");
 const THEME_KEY_OLD = Symbol.for("@mariozechner/pi-coding-agent:theme");
 
 /**
+ * A color as pi's theme spells it.
+ *
+ * pi's `Theme` takes color *values* - a hex string, an `oklch(...)` string or
+ * a palette index - and turns them into the escape sequence the terminal
+ * draws. The panel is handed the values rather than the colors they resolve
+ * to, because a palette index has to stay an index: a terminal with a palette
+ * of its own draws index 5 in its own magenta, and a hex would pin the
+ * standard one.
+ */
+export function colorValue(color) {
+	if (color.kind === "indexed") return color.index;
+	if (color.kind === "oklch") {
+		return `oklch(${(color.l * 100).toFixed(6)}% ${color.c.toFixed(6)} ${color.h.toFixed(6)})`;
+	}
+	return colorToHex(color);
+}
+
+/**
  * The theme the panel renders with, in the form the viewer can rebuild.
  *
- * Every token's resolved color travels, not just the markdown ones: the
- * syntax highlighting inside a code block reads the syntax tokens, and a
- * theme that renders the panel's headings in the transcript's colors but its
- * code in another theme's would not be the transcript's colors.
+ * Every token travels, not just the markdown ones: the syntax highlighting
+ * inside a code block reads the syntax tokens, and a theme that renders the
+ * panel's headings in the transcript's colors but its code in another theme's
+ * would not be the transcript's colors.
  *
  * `colors` holds every token, foreground and background alike; pi's `Theme`
  * constructor splits them by slot itself, so the split is not repeated here.
  */
 export function buildThemeSpec(theme) {
 	const colors = {};
+	const dim = [];
 	for (const [token, color] of Object.entries(theme.colors)) {
-		colors[token] = colorToHex(color);
+		let foreground = true;
+		try {
+			theme.getFgAnsi(token);
+		} catch {
+			foreground = false;
+		}
+		// A token the theme leaves at the terminal's default is handed on as
+		// the default, not as the color the terminal reported: the transcript
+		// draws it in the terminal's own default, and so must the panel. The
+		// generated `system` theme is full of such tokens, and they are what
+		// the body text is drawn in.
+		const ansi = foreground ? theme.getFgAnsi(token) : theme.getBgAnsi(token);
+		const isDefault = ansi.startsWith(foreground ? "\x1b[39m" : "\x1b[49m");
+		// A faint token is drawn with SGR 2 on top of its color. The theme
+		// says so in the escape sequence it opens with, which is where the
+		// flag is read from: `fg` closes a faint token differently.
+		if (foreground && theme.fg(token, "").endsWith("\x1b[22;39m")) dim.push(token);
+		colors[token] = isDefault ? "" : colorValue(color);
 	}
-	return { name: theme.name ?? "system", mode: theme.getColorMode(), colors };
+	return { name: theme.name ?? "system", mode: theme.getColorMode(), colors, dim };
 }
 
 /**
@@ -55,7 +91,7 @@ export function buildThemeSpec(theme) {
  * parent's colors.
  */
 export function installThemeSpec(spec) {
-	const theme = new Theme(spec.colors, {}, spec.mode, { name: spec.name });
+	const theme = new Theme(spec.colors, {}, spec.mode, { dim: spec.dim, name: spec.name });
 	globalThis[THEME_KEY] = theme;
 	globalThis[THEME_KEY_OLD] = theme;
 	return getMarkdownTheme();

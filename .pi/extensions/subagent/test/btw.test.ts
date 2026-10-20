@@ -328,6 +328,9 @@ test("the panel writes the theme it renders with, so the panel's colors are the 
 				name: "kokomi",
 				colors: { mdHeading: rgbColor(0x7e, 0xc8, 0xc8), text: rgbColor(0xe8, 0xec, 0xf5) },
 				getColorMode: () => "256color",
+				getFgAnsi: (token: string) => (token === "mdHeading" ? "\x1b[38;5;116m" : "\x1b[39m"),
+				getBgAnsi: () => "\x1b[49m",
+				fg: (_token: string, text: string) => `${text}\x1b[39m`,
 			} as never;
 			const registry = streamingRegistry("Hello");
 			const launch = await launchBtwPanel(deps, fakeContext(registry.modelRegistry), "why?");
@@ -339,6 +342,7 @@ test("the panel writes the theme it renders with, so the panel's colors are the 
 			assert.equal(spec.name, "kokomi");
 			assert.equal(spec.mode, "256color");
 			assert.equal(spec.colors.mdHeading, "#7ec8c8", "the transcript's color travels to the panel");
+			assert.equal(spec.colors.text, "", "a token the theme leaves at the terminal's default stays there");
 		});
 	});
 });
