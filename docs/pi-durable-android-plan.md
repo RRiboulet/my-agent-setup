@@ -3,8 +3,10 @@
 **Pi Durable as the kernel, a web client as the passive UI, a foreground service owning SQLite.**
 
 Status: plan, not implementation. Everything below was checked against the
-actual sources listed in [§0](#0-sources-checked); anything I could not verify
-is marked as an assumption or as a spike.
+sources listed in [§0](#0-sources-checked) at **`main` commit `fdce48e`
+(2026-10-20)**, which is post-`v1.3.0`; anything I could not verify is marked as
+an assumption or as a spike. §0.1 records what is main-only and what changes if
+you pin the `v1.3.0` tag instead — do not mix the two.
 
 The native Android layer is a Kotlin host shell only: foreground service,
 WebView/browser container, notifications, wake locks, credential access, and
@@ -19,6 +21,7 @@ the self-building loop in §4 practical.
 ## Table of contents
 
 - [0. Sources checked](#0-sources-checked)
+  - [0.1 Version and API drift](#01-version-and-api-drift)
 - [1. Kernel architecture on Android](#1-kernel-architecture-on-android)
   - [1.1 Three premises to correct first](#11-three-premises-to-correct-first)
   - [1.2 The constraint that decides the architecture](#12-the-constraint-that-decides-the-architecture)
@@ -35,7 +38,7 @@ the self-building loop in §4 practical.
   - [2.2 The replay policy rule](#22-the-replay-policy-rule)
   - [2.3 Decision rule for `replay`](#23-decision-rule-for-replay)
   - [2.4 Per-extension plan](#24-per-extension-plan)
-  - [2.5 Subagent: use the built-in task](#25-subagent-use-the-built-in-task)
+  - [2.5 Subagent: implement the owned-child pattern](#25-subagent-implement-the-owned-child-pattern)
   - [2.6 Hooks worth adding on a phone](#26-hooks-worth-adding-on-a-phone)
   - [2.7 Skills become sections](#27-skills-become-sections)
 - [3. UI/UX plan (web client in a native host)](#3-uiux-plan-web-client-in-a-native-host)
@@ -64,14 +67,59 @@ the self-building loop in §4 practical.
 
 | Source | What was read | Why it matters |
 |---|---|---|
-| `earendil-works/pi` monorepo, `packages/durable` @ `1.3.0` | `README.md` (869 lines), `docs/spec.md` (5618 lines), and the source of `src/index.ts`, `src/types.ts`, `src/tasks.ts`, `src/env/index.ts`, `src/harness/{harness,tool,types,define,registry,view,live,task-graph,events,agent,scheduler}.ts`, `src/storage/{sqlite,node,jsonl,memory}/*`, `src/tools/*`, `src/testing/*` | Primary reference. Line citations below are `packages/durable/…` in that repo at tag `v1.3.0`. |
-| `earendil-works/pi` monorepo, `packages/chord` @ `1.3.0` | `src/sqlite/database.ts` (`SqliteDatabase`, `SqliteExecutor`), `src/sqlite/node.ts`, `src/delta/index.ts` (`Op`, `WireOp`) | The portable seams: an async SQLite facade and a tuple-based delta format. |
-| npm `@earendil-works/pi-durable@1.3.0` | `package.json` `exports` map, `dependencies` | The exact subpath imports a client may use. |
+| `earendil-works/pi` monorepo, `packages/durable` @ `fdce48e` (main, 2026-10-20) | `README.md` (869 lines), `docs/spec.md` (5618 lines), and the source of `src/index.ts`, `src/types.ts`, `src/tasks.ts`, `src/env/index.ts`, `src/harness/{harness,tool,types,define,registry,view,live,task-graph,events,agent,scheduler,telemetry}.ts`, `src/storage/{sqlite,node,jsonl,memory}/*`, `src/tools/*`, `src/testing/*` | Primary reference. Line citations below are `packages/durable/…` at commit `fdce48e`, not at the `v1.3.0` tag. |
+| `earendil-works/pi` monorepo, `packages/chord` @ `fdce48e` | `src/sqlite/database.ts` (`SqliteDatabase`, `SqliteExecutor`), `src/sqlite/node.ts`, `src/delta/index.ts` (`Op`, `WireOp`) | The portable seams: an async SQLite facade and a tuple-based delta format. The `./sqlite` subpaths are post-1.3.0; at the tag the facade lives in `packages/durable/src/storage/sqlite/database.ts`. |
+| npm `@earendil-works/pi-durable@1.3.0` | `package.json` `exports` map, `dependencies` | The last *released* version. It does **not** contain the main-only APIs this plan uses; see §0.1. |
 | `sugarforever/pi-durable-expo-env` @ `0.1.0` | `README.md`, `src/core.ts` (the whole `ExecutionEnv` implementation), `src/index.ts` (the Expo backend), `package.json` | The only existing mobile `ExecutionEnv`. It answers "can Pi Durable run without Node?" — yes, with no shell. It does **not** solve storage. |
 | `earendil-works/pi` monorepo, `packages/env` | `README.md` | `RemoteExecutionEnv` / `LocalExecutionEnv` over a Rust daemon — the supported remote-execution option, and it lists Android (Termux) as a supported *remote* system. |
 | `RRiboulet/my-agent-setup` (this repo) | The 13 extensions and 6 skills, plus `AGENTS.md` | The migration surface; §2.4 says which of them survive the port. |
-| `MaliNamNam/pi-phone`, `petrroll/pocket-pi`, `heikeyangle-code/pi-android`, `TannerMidd/pi-pocket` | READMEs | Precedents for the runtime question. Two of the four are commonly mis-cited; see §1.1. |
-| Web search: "Pi Durable Android foreground service SQLite storage" | — | Confirms **no** public project currently runs a Pi Durable harness inside an Android foreground service. The service layer is unproven territory; §5 treats it as the top risk. |
+| `MaliNamNam/pi-phone`, `petrroll/pocket-pi`, `heikeyangle-code/pi-android`, `TannerMidd/pi-pocket` | READMEs | Precedents for the runtime question. `pi-phone` is the one most often mis-cited as a runtime; see §1.1. |
+| Web search: "Pi Durable Android foreground service SQLite storage" | — | Suggests **no** public project currently runs a Pi Durable harness inside an Android foreground service. A search cannot prove a negative; treat the service layer as unproven territory, which §5 does. |
+
+### 0.1 Version and API drift
+
+The plan was first written against `main` but labelled `v1.3.0`. That is a real
+difference, not a citation nit: `main` at `fdce48e` is five days past the
+`v1.3.0` tag (2026-10-15), its changelog is still `[Unreleased]`, and the
+package version is still `1.3.0`. **The target is `main` at `fdce48e`.** Pin
+that commit, not the version string.
+
+| What this plan uses | At the `v1.3.0` tag | At `fdce48e` (target) |
+|---|---|---|
+| `README.md` / `docs/spec.md` | 768 / 5352 lines | 869 / 5618 lines |
+| Replay rule | `docs/spec.md:3376` | `docs/spec.md:3601` |
+| "Omitted `replay` is `unsafe`" | `docs/spec.md:2927` | `docs/spec.md:3152` |
+| `HarnessOptions.onWake`, `Harness.wake()`, `Wake` | absent | present |
+| `settings.restartLimit` (default 5, `Infinity`), `harness.retryTask()` | absent | present |
+| `TaskGraphState.sleeping`, `TaskGraphNode.blocked` | absent | present |
+| `TaskRuntime.sleepUntil()`, `ToolExecutionApi.now()` | absent | present |
+| `@earendil-works/chord/sqlite` | absent | present |
+| `DURABLE_TELEMETRY_SCHEMA`, `DEFAULT_RESTART_LIMIT` exports | absent | present |
+| `defineDoc` / `defineDocFamily` `checkpointWhen` | optional | required |
+| `Harness.open` | `src/harness/harness.ts` is 470 lines | line 523 |
+| `openNodeSqliteStorage` | `src/storage/sqlite/node.ts:209` | `:16` |
+| `test/examples/22`, `23` | absent | present |
+
+Consequences:
+
+- **If you pin `v1.3.0`,** you must remove or defer §1.10's wake/sleep/AlarmManager
+  design, §3.4/§3.6's `sleeping`/`blocked`/`restart_limit`/`task_parked`/
+  `retryTask` states, §4.3's restart counter, §5 R3, §6 Phase 6's restart policy,
+  and the main-only names in Appendix A. The storage facade is
+  `packages/durable/src/storage/sqlite/database.ts`, not `packages/chord/…`.
+- **If you pin `fdce48e`,** you are on an unreleased commit whose API may change
+  without notice. Pin every package (`pi-durable`, `chord`, `pi-ai`,
+  `pi-codemode`, `pi-env`, `typebox`) and record the commit in the lockfile.
+  The SQLite schema migrates to version 2, and **a migrated database cannot be
+  opened by 1.3.0 or earlier** — a one-way upgrade for the app's data.
+- `main` is the only source of the sleep/wake and restart-parking behaviour this
+  plan relies on. Do not present the plan as implementable on the released
+  tarball.
+
+Platform statements in this plan (backup defaults, exact alarms, package
+replacement, loopback sharing, WAL behaviour, `FileLock`) come from Android
+documentation and the platform's semantics, not from the Pi Durable sources.
+They are not citations; verify them against the target SDK in Phase 0.
 
 ---
 
@@ -121,9 +169,10 @@ Two facts from the source, together, decide almost everything:
 
 **(b) The UI must not own the runtime that holds the durable state.** Your
 requirement is "a native Android host with a web UI that only renders
-committed state". React Native's JS context is bound to the Activity: there is
-no supported way to keep a live JS runtime with open WebSockets and streaming
-model responses inside an Android `Service` process. So the RN shape
+committed state". React Native *can* run headless JS in a `Service`, but it is
+built for short tasks and is not a supported long-lived host for open
+WebSockets and streaming model responses; a durable agent needs a runtime that
+outlives the Activity and can be restarted underneath it. So the RN shape
 ("one JS runtime, React UI") fights the foreground-service requirement
 directly. The Compose shape ("Kotlin UI in the Activity, kernel in a service")
 gets the process separation right but the wrong UI technology: Compose cannot
@@ -151,18 +200,22 @@ ExecutionEnv**.
 bionic-linked build). The foreground service starts it; the Node process is the
 kernel.
 
-**What you get, verbatim from the source:**
+**What you get, from the source:**
 
 - `openNodeSqliteStorage(path)` from `@earendil-works/pi-durable/storage/sqlite/node`
-  (`src/storage/sqlite/node.ts:15`) — which is `openNodeSqliteDatabase(path)`
-  from `@earendil-works/chord/sqlite/node`, which is `DatabaseSync` from
-  `node:sqlite`. WAL mode, `synchronous = NORMAL`.
+  (`src/storage/sqlite/node.ts`) — which is `openNodeSqliteDatabase(path)` from
+  `@earendil-works/chord/sqlite/node` at `fdce48e`, which is `DatabaseSync`
+  from `node:sqlite`. WAL mode, `synchronous = NORMAL`.
 - `NodeExecutionEnv` from `@earendil-works/pi-durable/env/node` — a **complete
-  shell and filesystem**: `bash` works, `git` works, and so do the
-  git-dependent workflows — `review`, `review-triage`, the commit, github and
-  librarian skills, and the git viewer.
-- Your extensions are plain TS running on Node, so most of the surviving ones
-  port to a Durable extension without a rewrite of their logic.
+  shell and filesystem** *interface*. It provides `exec`; `bash`, `git`, `gh`
+  and `gradle` are external binaries that must be provisioned in the bundled
+  prefix. With them present, the git-dependent workflows — `review`,
+  `review-triage`, the commit, github and librarian skills, and the git viewer
+  — work.
+- Your extensions run on the same Node runtime, but they target a different
+  API. Most keep their logic and change their registration, state shape and
+  result rendering; §2.4 is the per-extension ledger. "No rewrite" is too
+  strong.
 
 **What it costs.**
 
@@ -172,6 +225,10 @@ kernel.
 - `node:sqlite` must exist in the build. It landed in Node 22.5 as
   experimental; a Termux Node 24/25 build should have it, but **this must be
   verified, not assumed** (spike S0.1).
+- A Termux prefix is path-bound: its binaries, scripts and `$PREFIX` assume a
+  fixed install root. Running it from another app's data directory is not just
+  "copy the files". S0.1 must verify the relocation (prefix, linker,
+  `LD_LIBRARY_PATH`, `TMPDIR`), not only `node:sqlite`.
 - arm64 only, in practice.
 - Play Protect warnings on sideload; sideloading is fine for a personal tool.
 - If you use proot rather than a native bionic build, syscall translation
@@ -207,8 +264,8 @@ collection runs `git diff`), the commit, github and librarian skills, and the
 git viewer — all become non-functional. A coding agent that cannot run the
 tests is a chat bot.
 
-**Verdict: not the target.** It buys a 15 MB APK and no sideload, at the cost
-of the agent's core competence. It stays in the document because a
+**Verdict: not the target.** It buys a smaller APK and Play eligibility, at the
+cost of the agent's core competence. It stays in the document because a
 reimplementation path exists — build the git viewer on `isomorphic-git` and
 rebuild review-triage on top of it — but that path costs you review, commit,
 github and librarian, which defeats the point of a self-building dev
@@ -240,11 +297,13 @@ bundled-runtime spike (§5 R1), and that fallback is weaker than it looks: it
 trades the offline requirement for a Tailscale dependency on a machine that
 may be asleep.
 
-Note the combination that keeps C1 cheap to keep alive: the IPC layer, the
-storage layer, the UI, and the durability model are all identical between A
-and C1. Only the `ExecutionEnv` implementation changes. So C1 is not a
-throwaway: build the app so that swapping the env is one line, and the
-fallback stays one line away.
+Note what stays cheap: the IPC layer, the storage layer, the UI and the
+durability model are identical between A and C1; only the `ExecutionEnv`
+implementation changes. That keeps the *factory* swap to one line. It does not
+keep the product identical: under C1 the shell, the workspace and the on-device
+build loop live on the box, so the self-building loop in §4 is no longer
+on-device. C1 is a fallback for durability, not for the phone-native build
+story.
 
 ### 1.6 Decision
 
@@ -254,9 +313,10 @@ and hosted in a WebView, `NodeExecutionEnv` (decorated with an Android bridge
 for phone capabilities), SQLite owned by the kernel process.
 
 **Ship C1 if the Phase 0 spike on Node-on-Android fails**, and accept what that
-costs: the offline requirement goes with it. The app, the IPC, the storage, the
-UI and every ported extension are identical; only the `ExecutionEnv` factory
-differs:
+costs: the offline requirement goes with it, the shell and the workspace move to
+the box, and the on-device build loop in §4 becomes a remote build. The IPC,
+storage, UI and durability model are unchanged; the `ExecutionEnv` factory is
+the one-line seam:
 
 ```ts
 // kernel/env.ts — the single seam
@@ -270,15 +330,16 @@ export function envFor(cwd: string): ExecutionEnv {
 }
 ```
 
-**Escalation order, and why:** Option A is chosen because the review, commit
-and github workflows and the git viewer need `git`, and because the shell and
-the durability layer must work with no network at all. Option C1 is out as a
-target: its shell lives on another machine, so it cannot satisfy the offline
-requirement. Option B is out for the same reason the shell matters — a
-git-less environment would cost review, commit, github and librarian, which
-*is* the self-building dev environment. Reimplementing the git viewer on
-`isomorphic-git` and rebuilding review-triage on top of it would technically
-get you there, and would not be worth it for a learning project. Stay on A.
+**Escalation order, and why:** Option A is chosen because the review, commit,
+github, librarian and update-changelog workflows and the git viewer need `git`,
+and because the shell and the durability layer must work with no network at
+all. Option C1 is out as a target: its shell lives on another machine, so it
+cannot satisfy the offline requirement. Option B is out for the same reason the
+shell matters — a git-less environment would cost review, commit, github,
+librarian and update-changelog, which *is* the self-building dev environment.
+Reimplementing the git viewer on `isomorphic-git` and rebuilding review-triage
+on top of it would technically get you there, and would not be worth it for a
+learning project. Stay on A.
 
 ### 1.7 Storage: SQLite vs JSONL
 
@@ -324,10 +385,12 @@ portable core is exported and takes a facade:
 ```ts
 // src/storage/sqlite/index.ts
 export { SqliteStorage, type SqliteStorageOptions } from "./storage.ts";
-// src/storage/sqlite/storage.ts imports only from @earendil-works/chord — no Node APIs.
+// src/storage/sqlite/storage.ts imports no Node APIs; its non-local imports are from @earendil-works/chord.
 ```
 
-and the facade contract is small (`packages/chord/src/sqlite/database.ts`):
+and the facade contract is small (`packages/chord/src/sqlite/database.ts` at
+`fdce48e`; at the 1.3.0 tag the same interface is
+`packages/durable/src/storage/sqlite/database.ts`):
 
 ```ts
 export interface SqliteDatabase extends SqliteExecutor {
@@ -353,7 +416,7 @@ it also de-risks Option B for free.
 
 **One more storage rule you must internalize:** "One process owns a storage at a
 time; there is no cross-process locking." Only the kernel process opens the Pi
-database. The Compose UI never touches the `.sqlite` file — it reads through
+database. The web client never touches the `.sqlite` file — it reads through
 the kernel's IPC. This is not a style preference; two writers is a corruption
 risk, and the `prefix` option exists only for *sharing a database with host
 tables in the same process*, not for sharing across processes.
@@ -384,17 +447,27 @@ tables in the same process*, not for sharing across processes.
 
 Rules, in order of how much they matter:
 
-1. **Exactly one kernel process at a time.** The service holds a `FileLock`
-   on `pi/kernel.lock` and passes the fd to the child; a second kernel refuses
-   to start. This is the enforcement of "one process owns a storage at a time".
+1. **Exactly one kernel process at a time.** The service starts exactly one
+   child, and the kernel itself takes an exclusive lock on `pi/kernel.lock` at
+   startup; a second kernel that cannot take the lock refuses to start. A Java
+   `FileLock` in the service cannot be handed to the child — `fcntl` locks are
+   per-process and are not inherited across `exec` — so the child owns the lock
+   that matters. This is the enforcement of "one process owns a storage at a
+   time".
 2. **The kernel owns the database.** The Activity never opens it.
-3. **The Activity is disposable.** Rotation, config change, low memory,
-   "don't keep activities" — the Activity dies and is recreated; the kernel,
-   the storage and the run are untouched. This is the single most important
-   property of the design and the reason the kernel is not in the Activity.
-4. **Graceful stop is the default, not the exception.** `onDestroy` sends
-   `SIGTERM`; the kernel traps it and calls `harness.close(context)`. This
-   matters more on Android than anywhere else — see §5 R3.
+3. **The Activity is disposable; the app process is not.** Rotation, config
+   change, "don't keep activities" and WebView renderer death destroy the
+   Activity without touching the kernel. **Low memory can kill the whole app
+   process**, taking the service and its Node child with it; that is a kernel
+   restart, not an Activity event, and SQLite + `resume()` handle it. If you
+   want app-process isolation, put the service in a separate
+   `android:process=":kernel"`; `am kill <pkg>` still kills every process of
+   the package.
+4. **Graceful stop is best-effort.** `onDestroy` sends `SIGTERM` and the kernel
+   traps it and calls `harness.close(context)`, but Android does not guarantee
+   `onDestroy` on a system kill. Use an explicit stop action and
+   `stopService`/`stopSelf` for the graceful path, and treat `SIGKILL` (OEM
+   killer, `am kill`, low memory) as the normal crash path — see §5 R3.
 5. **The service supervises.** If the kernel exits, the service restarts it and
    the kernel calls `Harness.open(...)` + `harness.resume()`, which picks up
    whatever the last process left unfinished ("Work interrupted by a crash or
@@ -435,16 +508,21 @@ export type Op =
 
 — and the reference implementation (`apply-immutable-trusted.ts`) is portable.
 You *could* port it to Kotlin and forward raw ops. I recommend against it for v1:
-the Kotlin side would then re-implement Chord's semantics, and every divergence
+the web client would then re-implement Chord's semantics, and every divergence
 is a rendering bug that looks like a durability bug. Instead the **kernel
 translates** the committed state into a small, purpose-built, versioned event
 schema, where the translation lives in JS next to the semantics it comes from.
 
 ```
-WS  /v1/events          →  { t:"snapshot", … }  then  { t:"batch", … }
-POST /v1/commands/…     →  submit | abort | compact | reset | resume
-                            | retryTask | abortTask | fork | entries | steer
+WS  /v1/events          →  { t:"snapshot", seq, … }  then  { t:"batch", seq, … }
+POST /v1/commands/…     →  submit | abort | compact | resume | retryTask
+                            | abortTask | fork
+GET  /v1/entries        →  paged history (query, limit, cursor)
 ```
+
+`steer` is not a separate command: it is `submit` with `whenBusy: "steer"`.
+The browser's WebSocket token travels in a subprotocol or a ticket, not a query
+string (§1.9).
 
 In development, the kernel runs the web build's dev server **on the phone** —
 Vite inside the same Node runtime, bound to loopback — so the WebView gets
@@ -456,35 +534,45 @@ The event vocabulary (v1):
 
 | Event | Payload | Derived from |
 |---|---|---|
-| `snapshot` | full `ConversationView` + task graph + agent + usage + inbox | `viewState()`, `taskGraph()` |
+| `snapshot` | full `ConversationView` + task graph + agent + usage + inbox, read on the Session line, with `seq` | `viewState()`, `taskGraph()`, `inspect()` |
 | `entry` | the `EntryRecord` | `watchEvents` |
 | `doc` | a document patch (`pi.live`, `pi.inbox`, `pi.agent`, `pi.usage`, extension docs) | `watchDoc` |
 | `task` | a task-graph node | `watchTaskGraph` |
 | `run` | `{ busy, generation?, tools[], compactions[] }` | `docs["pi.live"]` |
 | `usage` | token/cost totals | `docs["pi.usage"]` |
-| `reset` | "resync from a fresh snapshot" | emitted by the kernel on desync |
 
 **Why a semantic layer and not raw ops:** the UI's needs are "append an entry",
 "this tool call's output grew", "this task is now waiting on X". Those are
 domain facts. Chord ops are a *storage* delta format. Translating in the kernel
-means the Kotlin client has ~20 message types instead of a JSON-patch engine
+means the web client has ~20 message types instead of a JSON-patch engine
 plus Pi's document model, and the translation is unit-testable in JS against
 the conformance suite.
 
+**One commit, one batch.** The semantic layer must preserve the kernel's commit
+order. `watchEvents`, `watchDoc` and `watchTaskGraph` are separate watches; if
+the kernel forwards them as separate streams, a client can apply an entry
+before the document or task change from the same commit. Subscribe on the
+Session line and emit one `{seq, commit, events[]}` envelope per commit, or
+derive every event from the same commit publication. The snapshot must be read
+on that same line, with its `seq`, so a reconnect cannot observe a torn state.
+
 **Snapshot + delta, always.** Every reconnect starts from a snapshot. The UI
 can therefore be destroyed and rebuilt at any moment with zero loss, which is
-the mechanical guarantee behind "the UI never owns progress" (§3.1). A `reset`
-event tells the client to drop everything and take a new snapshot — the kernel
-emits it whenever it detects the client fell more than 100 batches behind
-(the same threshold `watchEvents` uses). The web client must treat a `reset`
-event as "drop all local projection and refetch `/v1/snapshot`." It must never
-reconcile local state against the kernel.
+the mechanical guarantee behind "the UI never owns progress" (§3.1). A
+`snapshot` event tells the client to drop everything and replace its
+projection; `watchEvents` already emits one when a consumer falls more than 100
+batches behind, and the kernel forwards it. There is no separate `reset` event
+to invent, and the client never reconciles local state against the kernel.
 
 **Transport.** Loopback HTTP + WebSocket on `127.0.0.1`, with a per-launch
 bearer token, exactly as `pocket-pi` does with its `127.0.0.1:9998` bridge.
-Binding to `127.0.0.1` (not `0.0.0.0`) plus the token keeps other apps on the
-device out; add `android:usesCleartextTraffic` scoped to loopback or use a
-`NetworkSecurityConfig` that permits cleartext only for `127.0.0.1`.
+Binding to `127.0.0.1` (not `0.0.0.0`) keeps the server off the network, but
+**it does not keep other apps out**: loopback is shared across apps on the
+device. The bearer token is the access control. A browser WebSocket cannot set
+an `Authorization` header, so carry the token in a subprotocol or a one-time
+ticket, never in a query string. Use a `NetworkSecurityConfig` with a
+`domain-config` for `127.0.0.1`; `android:usesCleartextTraffic` is app-wide and
+cannot be scoped to loopback.
 
 ### 1.10 Foreground service specifics
 
@@ -496,6 +584,10 @@ device out; add `android:usesCleartextTraffic` scoped to loopback or use a
 - **Notification.** A persistent, low-importance notification showing the run
   state ("Working…", "Waiting for you", "Idle"). It is also the only honest
   way to tell the user the agent is alive.
+- **Version note.** The wake/sleep API below is post-1.3.0 (`main` @ `fdce48e`);
+  `Harness.wake()`, `Wake`, `onWake` and durable sleeps do not exist at the
+  `v1.3.0` tag. On 1.3.0 this section must be replaced by `TaskRuntime.sleep()`
+  and host timers.
 - **Wake lock.** A partial `WakeLock` only while the harness reports
   `wake().active`. The kernel already computes this: `Wake = { active: boolean;
   at?: number }`.
@@ -514,14 +606,21 @@ device out; add `android:usesCleartextTraffic` scoped to loopback or use a
   `wake.active` to the wake lock. This is the same pattern the README shows
   for a Cloudflare Durable Object, and Android's foreground service is exactly
   the kind of evictable host it describes ("A host whose process can be
-  evicted, such as a Cloudflare Durable Object, wakes it itself").
+  evicted, such as a Cloudflare Durable Object, wakes it itself"). Check
+  `canScheduleExactAlarms()` first: on Android 14+ `SCHEDULE_EXACT_ALARM` is
+  denied by default for most apps, so fall back to `setAndAllowWhileIdle()`.
+  The `specialUse` type also needs the
+  `android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE` manifest property.
 - **Storage location.** App-private internal storage
-  (`/data/data/<pkg>/files/…`) — no permissions needed, excluded from backup
-  by default, and gone on uninstall. The transcript does **not** survive an
-  uninstall by default; the app gains an explicit export/import instead, whose
-  format is an open question (Appendix B). Do not turn on `android:allowBackup`
-  for `pi/session.sqlite`: a restored WAL against a restored main database is
-  not a consistent pair.
+  (`/data/data/<pkg>/files/…`) — no permissions needed, and gone on uninstall.
+  It is **not** excluded from backup by default: `android:allowBackup`
+  defaults to `true`, and Auto Backup includes internal files and databases.
+  Set `android:allowBackup="false"` (or a `dataExtractionRules` exclusion for
+  `pi/`) explicitly; otherwise a restore can resurrect an old session, and the
+  transcript does not survive an uninstall anyway. The app gains an explicit
+  export/import instead, whose format is still open (Appendix B). Do not rely
+  on a WAL/main pair restored from different backups; the reason to exclude
+  the database is restore semantics and size, not the WAL format itself.
 
 ---
 
@@ -539,7 +638,7 @@ Pi Durable's extension model has exactly five slots
 | `hooks` | `hook(GenerationTask, {…})`, `hook(ToolTask, {…})`, `hook(CompactionTask, {…})` | Cross-cutting policy on the built-in tasks. |
 | `wraps` | `wrapTool(tool, fn)`, `wrapSection(key, fn)` | Decorating a tool that another extension won. |
 | `tasks` | `defineTask({name, version, initial, phases, abort})` | Multi-step work that must survive process death. |
-| (state) | `defineDoc` / `defineDocFamily` | Your durable state: todos, goals, subagent registry, triage decisions. |
+| (state tokens) | `defineDoc` / `defineDocFamily` | Your durable state: todos, goals, subagent registry, triage decisions. These are conversation/session/task tokens, not an `Extension` slot. |
 
 And the mapping from pi-coding-agent concepts:
 
@@ -547,11 +646,11 @@ And the mapping from pi-coding-agent concepts:
 |---|---|
 | `pi.registerTool({name, parameters, execute})` | `defineTool({name, parameters, execute, replay})` |
 | `pi.registerCommand(name, handler)` | a tool the model may call **plus** a UI affordance that submits a canned input |
-| `pi.registerShortcut(key, handler)` | gone — the Compose app has its own input surface |
+| `pi.registerShortcut(key, handler)` | gone — replace it with an explicit UI affordance (e.g. `continue` gets a **Continue** button in S2) |
 | `pi.registerMessageRenderer(kind, fn)` + `pi.sendMessage({customType})` | `defineEntry({kind})` + `conversation.submit({type:"write", entry:{kind,data}})` |
 | `renderCall` / `renderResult` | the `details` field of a tool result + the app's own renderer |
 | `pi.getThinkingLevel()` | `conversation.configure({thinkingLevel})` |
-| `ctx.cwd` | `agent.cwd` / `env.cwd` |
+| `ctx.cwd` | `agent.cwd`; some adapters expose `env.cwd` (the Expo adapter does), but `ExecutionEnv` itself does not require it |
 | `pi.registerFlag` / provider registration | `HarnessOptions.models` — a `Models` from `@earendil-works/pi-ai/models` |
 
 Two structural wins fall out of this:
@@ -600,10 +699,13 @@ execution:
 Three consequences that drive the whole porting plan:
 
 1. **`replay` is opt-in and the default is `unsafe`.** "Omitted `replay` is
-   `unsafe`." And — verified against the source — **none of Pi Durable's own
-   built-in tools declare it**: `read`, `write`, `edit`, `bash` and `powershell`
-   in `src/tools/*.ts` contain no `replay` field. So *every* built-in tool is
-   unsafe by default.
+   `unsafe`." The four coding tools in `src/tools/*.ts` — `read`, `write`,
+   `edit`, `bash` (and `powershell`) — declare no `replay`, so they are unsafe
+   by default. **They are not the only built-in tools:** the shipped `codemode`
+   (`src/codemode/codemode.ts:245`) and `tool-search`
+   (`src/tool-search/tool-search.ts:62`) extensions do declare
+   `replay: "safe"`. "Every built-in tool is unsafe" is false; the safe/unsafe
+   split is per tool.
 2. **An unsafe tool that was interrupted yields an `interrupted` error result
    to the model, carrying the durable partial output** — not a rerun, not a
    silent success. That is the correct behaviour for `bash` and `edit`, and it
@@ -634,30 +736,48 @@ checkpoint, or task input." So a tool that needs a timestamp or a random id
 becomes safe by capturing that value in a `runtime.memo(...)` or a task input
 first — `ToolExecutionApi.memo(name, candidate, context)`.
 
+**The hard case is `read`.** A file is mutable external state: the arguments do
+not determine the bytes, and a rerun after a crash can read a different file.
+That is fine if you accept "read the file as it is now" as the tool's semantics,
+but it is not the spec's "pure transformation". `read` is also only pure when
+the app does not configure an `ImageProcessor`: `createReadTool({ images })`
+can make a paid image-model call. The `SafeRead` declaration below uses
+`createReadTool()` with no image processor; do not reuse it on an image path.
+If you need the exact bytes the first attempt saw, capture them in a memo or
+mark the call unsafe.
+
 ### 2.4 Per-extension plan
 
-The table covers the extensions and skills that survive the port, plus the one
-new feature the app gains.
+The table covers the extensions and skills that survive the port, the new git
+viewer, and the one shortcut that becomes a UI affordance.
 
 | # | Extension | Durable form | Replay | Notes |
 |---|---|---|---|---|
 | 1 | **review-triage** (`triage_change`) | `triage_change` **tool** + `app.triage.decisions` **doc** | **unsafe** | It runs `git` and pays for a classifier call. The *decision* is written to a doc in the same commit, so the audit trail is durable rather than a transcript artefact. |
 | 2 | **goal** (`get_goal`, `create_goal`, `update_goal`) | three **tools** + `app.goal` **doc** (scope: conversation, `history: "rewindable"`) | `get_goal` **safe**; `create_goal`/`update_goal` **safe if** a stable `goalId` is in the arguments, else **unsafe** | Today's implementation reconstructs state from the active branch on reload. A `defineDoc` with `history: "rewindable"` gives that for free, plus `snapshotAsOf()`. |
-| 3 | **todos** (`todo` with 9 verbs) | one **tool** + `app.todos` **doc family** (one doc per todo, keyed by id) | **safe** for all verbs | `create`/`append`/`update`/`claim` are upserts keyed by a caller-supplied id; `delete` is idempotent; `claim` is a compare-and-set inside one commit (claim-if-unclaimed), so a rerun returns "already claimed" rather than stealing. |
+| 3 | **todos** (`todo` with 9 verbs) | one **tool** + `app.todos` **doc family** (one doc per todo, keyed by id) | **safe only with an idempotency key** — `create` and `append` are **unsafe** as they stand | Today's `create` ignores the optional `id` argument and generates `crypto.randomBytes(4)` + `created_at`; a rerun would create a second todo. `append` appends text, so a rerun appends it twice. The port must take a caller id / idempotency key and memoize `created_at`, and give `append` a per-call key, or leave both unsafe. `update`/`delete` are idempotent by id (same values); `claim` must return success on a same-call rerun, not "already claimed". |
 | 4 | **voice** (`/voice`) | **not an extension** — becomes an input path in the web client (MediaRecorder or a native bridge) | n/a | The phone *is* the microphone now. The app records, transcribes, and calls `conversation.submit({type:"input", content})`. The current implementation reaches the phone over ssh from a desktop; that inversion is the entire point of this project. |
 | 5 | **answer** (`/answer`) | `answer_questions` **tool** (model call → structured JSON) + a web screen that collects the answers and submits them | **unsafe** | Paid model call. The interactive TUI becomes a web sheet. The compiled answers become one follow-up input. |
 | 6 | **session-breakdown** | `session_stats` **tool** + a web stats screen | **safe** | It reads `~/.pi/agent/sessions/*.jsonl` today. In Durable the transcript *is* the database: read `harness.usage(context)` and scan entries. Strictly better. |
-| 7 | **btw** (side-question panel) | `btw` **tool** + a **background anchor task** + a child conversation | **safe** | The panel becomes its own conversation, so it adds nothing to the parent transcript — and the anchor task is durable, so the answer survives a process death. Same owned-child pattern as §2.5. |
+| 7 | **btw** (side-question panel) | `btw` **tool** + a **background anchor task** + a child conversation | **safe only with the §2.5 idempotency pattern**, otherwise **unsafe** | The panel becomes its own conversation, so it adds nothing to the parent transcript — and the anchor task is durable, so the answer survives process death. A rerun must find the existing child and submission (`scanConversations({ ownerTaskId })`, `requestId`), not create a second panel. Same pattern as §2.5. |
 | 8 | **review** (`/review`) | `review_start` **tool** that creates an `app.review` **task** with phases `collect → plan → run` | **unsafe** (spawns git + child conversations) | The *review children* are owned conversations, so they survive process death. |
-| 9 | **native-web-search** (`web_search`) | `web_search` **tool** | **unsafe** | It spends money on a search provider. Prefer an in-process `fetch` implementation over spawning the Node script — then it needs no shell. |
+| 9 | **native-web-search** (`web_search`) | `web_search` **tool** | **unsafe** | It spends money on a search provider. Prefer an in-process call over spawning the Node script where the provider SDK allows it; it still needs network and the provider's native-search request shape, so this is a port, not a `fetch` one-liner. |
 | 10 | **opencode-go-provider** | **kernel configuration**, not an extension | n/a | Durable gets models from `HarnessOptions.models`. Build the `Models` with the opencode-go provider registered at kernel start; no durable artifact. |
-| 11 | **git viewer** (new; supersedes `repo-explorer`) | a **web screen** over `git` through the `ExecutionEnv`: list branches, browse a tree, read a file | **safe** | Read-only git, no side effects → rerunning is harmless. It replaces the `repo-explorer` extension rather than porting it: the browser *is* the UI, so only the queries are new. **Needs git** — under Option B it cannot be built at all (§5 R4). |
-| 12 | **skills** (commit, github, librarian, native-web-search, update-changelog) | **sections** + the tools their scripts need | n/a | §2.7. The `tmux` skill is dropped: once the durable kernel owns the work there are no tmux sessions left to drive. |
+| 11 | **git viewer** (new; supersedes `repo-explorer`) | a **web screen** + dedicated read-only `git_*` **tools** over the `ExecutionEnv`: list branches, browse a tree, read a file | **safe only for non-mutating commands** (`show`, `ls-tree`, `cat-file`); **unsafe** if it goes through `bash` | The screen itself has no replay policy; the tools do. `git status` can refresh and write `.git/index`, so keep it out of the safe set. The tool-vs-`bash` choice is still open (Appendix B #9). It replaces `repo-explorer` rather than porting it. **Needs git** — under Option B it cannot be built at all (§5 R4). |
+| 12 | **skills** (commit, github, librarian, native-web-search, update-changelog) | **sections** + the tools their scripts need | n/a for sections; the `git_*`/`gh_*` tools are **unsafe** | §2.7. `update-changelog` needs `git describe`/`git log`; `native-web-search` is a Node script over pi-ai, not a git workflow. The `tmux` skill is dropped as a product decision (no interactive Python/gdb/psql targets on the phone), not because durable ownership removes tmux sessions. |
+| 13 | **continue** (shortcut) | **not an extension** — a **Continue** button in S2 that submits a literal "continue" input only when the conversation is idle | n/a | The shortcut's only behavior is `sendUserMessage("continue")` when `isIdle()`. No durable artifact, no tool. |
+
+On `main` @ `fdce48e`, every `defineDoc` / `defineDocFamily` also requires a
+`checkpointWhen` predicate (the tag made it optional). Use `() => false` for
+ordinary delta-only documents, or a periodic base policy for long-lived state.
 
 **The built-in tools.** `read`, `write`, `edit`, `bash` ship unsafe. `read` is
-the one worth upgrading: it is pure, and on a phone a process death mid-`read`
-is common. Upgrade it by re-declaring it in a later extension (a same-named
-tool replaces an earlier one where both are selected):
+the one worth upgrading *when no image processor is configured*: with plain
+text it only reads, and on a phone a process death mid-`read` is common.
+Upgrade it by re-declaring it in a later extension (a same-named tool replaces
+an earlier one where both are selected; install `safe-read` after
+`coding-tools`). `codemode` and `tool-search` are already `safe`; they are not
+part of this override.
 
 ```ts
 // kernel/extensions/safe-read.ts
@@ -675,17 +795,24 @@ in a state where `oldText` no longer matches, so a rerun fails confusingly.
 Keeping it unsafe means the model gets the `interrupted` diagnostic and
 decides — which is the right trade.
 
-### 2.5 Subagent: use the built-in task
+### 2.5 Subagent: implement the owned-child pattern
 
 **Do not port the tmux-based `subagent` extension.** Its tmux sessions, its
 `runs.json` state, its polling watcher and its five management tools are all
-re-implementations of what Pi Durable already provides. Use Pi Durable's own
-subagent support — the owned-child-conversation pattern the README
-documents — and tune it later.
+re-implementations of what Pi Durable already provides. **There is no shipped
+subagent task to switch to:** `BUILTIN_TASKS` is `[GenerationTask, ToolTask,
+CompactionTask]`. Pi Durable documents an *owned-child-conversation pattern*;
+the app writes the tool and, for persistent subagents, the anchor task. The
+`main` checkout has it as `test/examples/22-subagent-foreground.ts` and
+`23-subagent-background.ts`; at `v1.3.0` those examples do not exist.
 
-The pattern, in one sentence: a subagent tool creates its child conversation
-inside `api.commit()` with `ownership: { kind: "task", taskId: api.taskId }`,
-then drives it through `api.conversation(id)`.
+The pattern, in one sentence: a `replay: "safe"` subagent tool creates its child
+conversation inside `api.commit()` with `ownership: { kind: "task", taskId:
+api.taskId }`, reuses an existing child by `scanConversations({ ownerTaskId })`,
+then drives it through `api.conversation(id)` with a request id derived from
+`api.taskId`. The replay/idempotency half is not optional: without it, a process
+death after the child is created either spawns a second child or abandons the
+first.
 
 The ownership types, from `src/types.ts`:
 
@@ -695,6 +822,18 @@ export type TaskOwnership = { readonly kind: "conversation" } | { readonly kind:
 // src/types.ts:394
 export type ConversationOwnership = { readonly kind: "ownerless" } | { readonly kind: "task"; readonly taskId: TaskId };
 ```
+
+The durable recipe, from the README:
+
+- `replay: "safe"` on the tool.
+- In the creating commit, `scanConversations({ ownerTaskId: api.taskId }, 1)`
+  first; only create if it returns nothing.
+- `api.details({ conversationId })` from the running call, so the UI can attach.
+- Submit with `requestId` set to `subagent:${api.taskId}`; a rerun keeps it and
+  does not send twice.
+- For persistent subagents, an anchor task per child and a background reporter
+  task per message, so the parent's abort and idle wait do not reach them
+  (`test/examples/23-subagent-background.ts` on `main`).
 
 What ownership buys, in one line: aborting the call aborts the child, the
 parent is idle only once the child is, and a child created with
@@ -713,12 +852,23 @@ want them.
 | Hook | Task | Purpose |
 |---|---|---|
 | `beforeTool` guard | `ToolTask` | Block or rewrite dangerous commands on a phone: `rm -rf`, `git push --force`, anything touching paths outside the workspace. `{ block: "…" }` produces a `blocked` error result the model sees. **This is the single most valuable hook for the mobile port**, because the phone is where a stray `rm` is unrecoverable. |
-| `beforeTool` rewriter | `ToolTask` | Rewrite `cwd`-relative paths into the app workspace, so the model cannot address the whole device. |
+| `beforeTool` rewriter | `ToolTask` | Rewrite `cwd`-relative paths into the app workspace. This is convenience, not containment: absolute paths, `sh -c`, and interpreters still bypass it (see the sandbox note below). |
 | `afterTool` redactor | `ToolTask` | Strip API keys / tokens from tool output before they enter the transcript. **Caveat from the README:** "An `afterTool` hook that redacts a schema tool's `output` must redact its `structuredOutput` too." |
 | `afterTools` | `GenerationTask` | Emit a durable "turn complete" marker into a doc; the web status bar can then show "idle, last turn N". |
 | `beforeCompact` | `CompactionTask` | Inject a phone-specific compaction instruction ("keep file paths and command names verbatim"). |
-| `beforeRequest` | `GenerationTask` | Inject a device-state section (battery, network, foreground/background) — but note the README's warning: "A section that returns something different every time, such as the current time, defeats that [prompt caching]." Use a `section`, not a per-request hook, and keep it stable. |
-| Phone-capability bridge | ToolTask | The web client cannot directly call every Android API. Expose a narrow native bridge for microphone, file picker, notifications and share intents only, and keep it outside the durable state path. The bridge is not a tool; it is an app-to-app IPC surface for the WebView. |
+| `beforeRequest` | `GenerationTask` | **Not for volatile device state.** The README warns: "A section that returns something different every time, such as the current time, defeats that [prompt caching]." Put battery/network/foreground state in a stable `section` (updated only on a meaningful change), not a per-request hook. |
+| Phone-capability bridge | — (not a hook) | The web client cannot directly call every Android API. Expose a narrow native bridge for microphone, file picker, notifications and share intents only, and keep it outside the durable state path. The bridge is not a tool; it is an app-to-app IPC surface for the WebView. |
+
+**The guard is not a sandbox.** `beforeTool` can rewrite arguments and block a
+call, but it sees the command string, not the syscalls. A same-uid `bash` can
+reach `pi/session.sqlite` and the credentials through `node -e`, `python -c`,
+`find -delete`, absolute paths or a symlink, whatever the deny-list says. Treat
+the hook as one layer, not the boundary: either expose a curated `exec` tool
+with an argv allow-list and path validation (no arbitrary `bash`), or run the
+shell in a separate uid/container with a bind mount that excludes `pi/` and the
+Keystore. A `pre-commit` hook cannot stop `git reset --hard`, `git clean -fdx`
+or `git push --force`; use `pre-push` for force-push, and accept that hooks are
+bypassable. §4.4 and §5 R10 depend on this distinction.
 
 ### 2.7 Skills become sections
 
@@ -738,10 +888,13 @@ Pi Durable has no skill loader. A skill becomes:
 The `commit` skill becomes a section + `git_status`/`git_diff`/`git_commit`
 tools with **`replay: "unsafe"`** (a commit is a non-idempotent side effect).
 The `github` skill becomes a section + `gh_*` tools, also unsafe (a PR is
-created). The `tmux` skill is **not** ported: once the durable kernel owns
-the work there are no tmux sessions left to drive, and the skills that survive
-— commit, github, librarian, native-web-search, update-changelog — are the
-ones that need `git` or `gh` and nothing else.
+created). `update-changelog` needs `git describe`/`git log`; `librarian` needs
+`git clone` and the network; `native-web-search` is a Node script over pi-ai,
+not a git workflow. The `tmux` skill is **not** ported as a product decision:
+the phone has no interactive Python/gdb/psql targets, and the subagent
+extension's tmux use is separately replaced by task ownership. Do not justify
+the drop with "no tmux sessions left" — the skill is for interactive CLIs, not
+for subagent sessions.
 
 ---
 
@@ -751,7 +904,7 @@ ones that need `git` or `gh` and nothing else.
 
 > **The UI never owns progress.**
 
-The mechanical statement: **every pixel the Compose UI shows is a projection of
+The mechanical statement: **every pixel the web client shows is a projection of
 committed state, and the projection is fully reconstructible from a snapshot.**
 
 Consequences, each of which is testable:
@@ -802,6 +955,10 @@ has three and they are not equivalent:
 A phone UI that cannot express "steer" is much less useful than one that can.
 This is a Durable-native concept pi-coding-agent does not have.
 
+The **Continue** affordance from the `continue` extension is a button that
+submits `"continue"` only when the committed run state is idle; it must not
+steer or queue a mid-run turn.
+
 **S3 — Status strip.**
 Derived from `docs["pi.live"]`:
 
@@ -835,6 +992,10 @@ export type TaskGraphNode = {
 };
 ```
 
+`TaskGraphNode.blocked` and the `sleeping` state are post-1.3.0 (`main` @
+`fdce48e`); at the `v1.3.0` tag the graph has no `sleeping` status and no
+`blocked` field. See §0.1.
+
 The panel is a tree (owner edges), each node showing status, phase, and — for
 blocked nodes — a **Retry** button calling `harness.retryTask(id, context)`.
 "After a restart, tasks that were `running` show as `pending` until they run
@@ -859,8 +1020,11 @@ matters.
 **S8 — Git viewer.**
 Browse the workspace clone from the phone: pick a branch, walk the tree, read
 a file. It replaces the `repo-explorer` extension (§2.4) and is the reason the
-app needs `git` (§5 R4). Read-only, so it is a `replay: "safe"` tool behind a
-web screen.
+app needs `git` (§5 R4). The screen is a web view over dedicated `git_*`
+tools, not a tool itself; the tools are `replay: "safe"` only for
+non-mutating commands (`show`, `ls-tree`, `cat-file`). `git status` can refresh
+and write `.git/index`, and `bash git …` is unsafe. The tool-vs-`bash` choice
+is still open (Appendix B #9).
 
 ### WebView/browser specifics.
 
@@ -885,10 +1049,13 @@ that matter on a phone:
   over a `Page` with a "load older" trigger at the top, backed by
   `entries(query, limit, cursor, context)`.
 - **`viewState()` returns the whole active transcript.** That is fine for a
-  transcript of tens of entries and wrong for thousands. The kernel should
-  serve a *windowed* snapshot for the UI and let the event stream carry the
-  tail. Design the snapshot endpoint with a `since`/`limit` parameter from day
-  one, even if v1 always sends everything.
+  transcript of tens of entries and wrong for thousands. **v1 serves that full
+  active transcript as the snapshot**; do not also promise a windowed snapshot.
+  If the transcript grows too large, add a v2 snapshot with `since`/`limit` and
+  define that the client's window is a projection of the full snapshot plus
+  `entries` pages. Design the endpoint with `since`/`limit` from day one, but
+  keep the v1 contract explicit: full active transcript, with a `seq`, then
+  deltas.
 
 ### 3.4 Task status indicators
 
@@ -903,6 +1070,10 @@ One rule: **the indicator reads committed status; it never infers.**
 | compaction | `pi.live.compactions[]`, `pi.live.compactionFailure` | |
 | queued input | `pi.inbox` | `InboxDoc` / `InboxItem`. |
 | parked | `onReport` `{type:"task_parked"}` → durable, shown in the task panel | See §5 R3. |
+
+The `sleeping` status and `TaskGraphNode.blocked` are post-1.3.0 (`main` @
+`fdce48e`); at the `v1.3.0` tag the graph has no `sleeping` status and no
+`blocked` field, and `restart_limit` does not exist. See §0.1.
 
 Note `TaskGraphState` has no "suspended" status — the closest is `sleeping`
 (with `until`) and `waiting` (with `on` and `policy`). Your "running /
@@ -926,10 +1097,11 @@ tool call has finished is no longer a live task, but its conversation still
 exists and still belongs to the parent. Render it from the conversation record,
 and mark it "ended".
 
-Concretely, the UI needs one query it does not have a primitive for:
-"which conversations are children of conversation X". `scanConversations({
-ownerTaskId })` exists on the transaction; the kernel should expose a
-`GET /v1/conversations?parent=<id>` endpoint backed by it.
+Concretely, the UI needs one query: "which conversations are children of
+conversation X". `scanConversations` supports both filters:
+`ownerConversationId` answers exactly that question, while `ownerTaskId`
+answers "children of this task". The kernel should expose a
+`GET /v1/conversations?parent=<id>` endpoint backed by `ownerConversationId`.
 
 ### 3.6 The Resume affordance
 
@@ -962,15 +1134,16 @@ again".** Per the spec:
   render that honestly, not as a retry.
 - A task cut off `restartLimit` times is **parked** and will *not* resume; it
   needs `harness.retryTask(id)`. This is the "parked tasks" list, with a
-  per-task Retry.
+  per-task Retry. (`restartLimit` and parking are post-1.3.0, `main` @
+  `fdce48e`; at the tag there is no parking, only the interrupted-task path.)
 
 **Therefore the Recovery sheet has three buttons, not one:**
 
 | Button | Command | When it appears |
 |---|---|---|
-| **Resume** | `harness.resume()` | Always, when there is pending work. |
+| **Resume** | `harness.resume()` | When there is pending work that is not parked. |
 | **Retry** | `harness.retryTask(id)` | Per task, when `blocked.reason === "restart_limit"`. |
-| **Discard** | `harness.abortTask(id)` | Per task, for work the user no longer wants. |
+| **Discard** | `harness.abortTask(id, context)` | Per task, for work the user no longer wants. |
 
 **And a fourth state the UI must show honestly: "interrupted".** A tool call
 whose stored policy is unsafe and which was cut off produces a `pi.tool-result`
@@ -988,15 +1161,17 @@ it waits for the committed effects.
 - **Reconnect = resnapshot.** On WebSocket reconnect, the client requests a
   fresh snapshot and replaces its projection. No local diffing, no
   reconciliation logic.
-- **`reset` event = drop everything.** The kernel emits it when the client has
-  fallen too far behind.
+- **`snapshot` event = drop everything.** The kernel forwards the
+  `watchEvents` snapshot when a consumer has fallen too far behind; there is no
+  separate `reset` event.
 - **Optimistic UI is forbidden for durable state.** The "Send" button does not
   insert a bubble; the bubble appears when the `pi.user` entry is committed.
   (A submission is durably admitted before it is placed, so the delay is
   short — but it exists, and hiding it would be a lie.)
 - **Errors are states, not toasts.** A failed submission settles as
   `unanswered` with a reason (`run_failed`, `stale`, `aborted`); the UI shows
-  it in the transcript, not as a transient snackbar.
+  it in the transcript, not as a transient snackbar. `run_failed` is a
+  post-1.3.0 `afterFailedRun` reason; do not hard-code it as the only value.
 - **WebView renderer death = reconnect.** If the WebView renderer process is
   killed, the web client reconnects and resnapshots exactly as if the Activity
   had rotated. This is a normal event, not an error state.
@@ -1020,8 +1195,9 @@ Two things must be separated, and this is the crux:
 
 The agent edits layer 2's *source*. The running session in layer 1 is
 unaffected by that edit until the new code is actually loaded — at which point
-the *next* phase or request uses it, and the running one finishes under the
-code it started with.
+the *next* phase or request uses it. Under an extension reload (R1) the running
+call finishes under the code it started with; a kernel restart (R3) cuts the
+phase off and reruns it from the top under the new code.
 
 ### 4.2 Three reload paths, three different mechanisms
 
@@ -1044,17 +1220,20 @@ So there are three distinct reload paths, and they are *not* the same event:
 |---|---|---|
 | **R1 — extension reload** | `registry.install(newExtension)` under the same name, in the running kernel | The next phase/request/call uses the new code. **No process restart. No session interruption.** This is the hot path. |
 | **R2 — web UI hot reload / rebuild** | Vite HMR, with the dev server running **on the phone** inside the kernel, or rebuild static assets and reload the WebView in production | UI changes without an APK reinstall. The session is untouched. |
-| **R3 — kernel restart / APK rebuild** | `harness.close(ctx)` → process exit → `Harness.open(...)` → `harness.resume()`, or `gradlew installDebug` for native host shell changes | The session survives via SQLite; pending tasks resume. |
+| **R3 — kernel restart / APK rebuild** | `harness.close(ctx)` → process exit → `Harness.open(...)` → `harness.resume()`, or `gradlew assembleDebug` plus an explicit install (adb/wireless debugging, or PackageInstaller with the user's tap) for native host shell changes | The session survives via SQLite; pending tasks resume when the app is relaunched. A package replacement force-stops the app, so nothing resumes until the user opens it again. |
 
-**R1 is the interesting one and it is fully native to Pi Durable.** If the
-kernel can load an extension from a file at runtime — pi-coding-agent does
-this with `jiti` — then the agent can write `workspace/extensions/foo.ts`,
-call a `registry.install()` for it, and the change is live on the *next*
-request, with zero downtime and zero risk to the running turn. R2 is what the
-web client buys you. Because the UI is served as static assets, the agent can
-edit web/src/..., trigger a Vite HMR update (or a rebuild + WebView reload),
-and see the change without reinstalling the APK. This is the UI analogue of R1
-and is the reason the UI is not Compose. So the loop is:
+**R1 is the interesting one and it is fully native to Pi Durable.** Durable
+does not ship a file loader; pi-coding-agent uses `jiti`. The app must add one
+(`jiti` or `esbuild`) and resolve `@earendil-works/pi-durable`, TypeBox and the
+extension's other imports from the kernel's `node_modules`. With that in place,
+the agent can write `workspace/extensions/foo.ts`, call `registry.install()` for
+it, and the change is live on the *next* request, with zero downtime and zero
+risk to the running turn. R2 is what the web client buys you. Because the UI is
+served as static assets, the agent can edit web/src/..., trigger a Vite HMR
+update (or a rebuild + WebView reload), and see the change without reinstalling
+the APK. This is the UI analogue of R1 and is the reason the UI is not Compose.
+The loader is a dependency and a memory cost, not a free property. So the loop
+is:
 
 ```
 agent edits web/src/Screen.tsx
@@ -1062,7 +1241,7 @@ agent edits web/src/Screen.tsx
 agent edits workspace/extensions/foo.ts
    → kernel: registry.install(loadExtension("foo.ts")) ← R1: instant
 agent edits app/src/main/java/.../Service.kt
-   → ./gradlew installDebug                           ← R3: APK rebuild; session survives via SQLite
+   → assembleDebug, then install (adb or user tap) ← R3: APK rebuild; session survives via SQLite
 ```
 
 ### 4.3 Restarting the worker is a normal event
@@ -1090,9 +1269,10 @@ The README is explicit that a close is *not* a crash:
 > over.
 
 So: a graceful stop (SIGTERM → `close()`) leaves the restart counter alone; an
-abrupt kill increments it. On Android, the difference between the two is under
-your control (§5 R3), and it decides whether a task survives five app launches
-or gets parked.
+abrupt kill increments it. On Android, the difference between the two is only
+partly under your control: `onDestroy` is best-effort and `am kill`/OEM kills
+are `SIGKILL` (§5 R3). The counter and parking are post-1.3.0 (`main` @
+`fdce48e`); at the `v1.3.0` tag there is no `restartLimit`.
 
 The second half of "normal event" is that the *user* never sees an error. The
 app shows "Restored your session" and the task panel shows the pending tasks.
@@ -1104,33 +1284,42 @@ A parked task shows a Retry button, not a crash dialog.
 2. The agent is told: *"Read the app's README, then add a screen that shows
    the task graph as a tree."*
 3. The agent reads files with `read`, edits with `edit`, and runs
-   `./gradlew :app:assembleDebug` with `bash`.
+   `./gradlew :app:assembleDebug` with `bash`. The JDK and Android SDK are
+   pre-provisioned in the bundled prefix; they are not part of the Node runtime
+   and add their own APK/storage cost (spike S0.7).
 4. The build fails → the agent reads the compiler output from the tool result
    and fixes it. (This is why Option B, with no shell, is not a coding agent.)
 5. The agent commits the change (`git_commit` tool, unsafe) and pushes
-   (`gh` tool, unsafe).
+   (`gh` tool, unsafe). The workspace's git credential and `GH_CONFIG_DIR` are
+   app credentials, separate from the model key (R8).
 6. The agent edits the web UI source (`web/src/…`) and the WebView
    hot-reloads (R2); no APK rebuild is needed for UI changes.
 7. The agent writes a new extension into `workspace/extensions/` and installs
-   it (R1) to change *its own* behaviour mid-session.
+   it through the runtime loader (R1) to change *its own* behaviour mid-session.
 
 **The self-referential part:** the agent can edit the app that hosts it — the
 web UI via R2, the extensions via R1, and the native host shell via R3 — and
 then the app it is running in is replaced underneath it. The session survives
-because it lives in SQLite, not in the process. The agent comes back after the
-reinstall, mid-task, with its context intact.
+because it lives in SQLite, not in the process. When the user relaunches the
+app after the reinstall, the agent comes back mid-task with its context intact;
+a package replacement force-stops it, so it does not resume by itself.
 
 **The hard constraint:** the agent must not be able to break the kernel in a
 way that loses the transcript. The workspace is a **git clone**, so the agent
 can commit and push from the phone — which is exactly why the guardrails have
-to be strict rather than advisory. Three guards:
+to be strict rather than advisory. Two guards and one limit:
 - The Pi database is in app-private storage, not in the workspace, so
   `git clean -fdx` in the workspace cannot touch it.
 - The workspace is a separate directory from the Pi state directory, and the
   `beforeTool` guard (§2.6) blocks paths outside it.
-- That guard is **strict**: a deny-list of paths and destructive commands
-  (`rm -rf`, `git push --force`, `git reset --hard`), not a warning the
-  agent may talk its way past.
+- That guard is **not a sandbox**, and a deny-list is not "strict": the shell
+  runs as the same uid as the database, so `node -e`, `python -c`, `find
+  -delete`, absolute paths and symlinks bypass a command-string deny-list. The
+  real boundary is either a curated `exec` tool with an argv allow-list and
+  path validation (no arbitrary `bash`), or a separate uid/container with a
+  bind mount that excludes `pi/` and the Keystore. See §2.6 and R10. A
+  `pre-commit` hook cannot stop `git reset --hard`/`clean -fdx`; use `pre-push`
+  for force-push and treat hooks as advisory.
 
 ### 4.5 Smallest possible first milestone
 
@@ -1140,12 +1329,12 @@ Concretely, and this is deliberately *not* a UI milestone:
 
 1. An Android app with a `ForegroundService` (type `specialUse`), a
    notification, and a `BroadcastReceiver` for `BOOT_COMPLETED` (optional).
-2. The service starts the kernel (Node, per §1.3) with a JSON-RPC over a
-   loopback socket.
+2. The service starts the kernel (Node, per §1.3) with the HTTP+WS server from
+   §1.9 on loopback, with the bearer token.
 3. The kernel opens `openNodeSqliteStorage("/data/data/<pkg>/pi/session.sqlite")`,
    calls `Harness.open(...)`, `harness.root(ctx)`, and registers **one** tool:
    `echo` (`replay: "safe"`).
-4. The kernel exposes `POST /submit` and `GET /snapshot`.
+4. The kernel exposes `POST /v1/commands/submit` and `GET /v1/snapshot`.
 5. **No web UI yet** — `curl` from `adb shell` is enough.
 
 **Acceptance criteria for Milestone 0** (this is the whole point of the
@@ -1154,7 +1343,7 @@ milestone — it proves durability before anything else is built):
 | # | Criterion | How it is checked |
 |---|---|---|
 | M0.1 | A submitted input produces a committed `pi.user` entry and a committed `pi.assistant` entry, visible in the snapshot | `curl` the snapshot; check the entries |
-| M0.2 | `adb shell am kill <pkg>` (process death, no graceful close) followed by a service restart **resumes the pending work** and the transcript is byte-identical apart from the new entries | kill mid-tool-call; restart; diff the snapshot |
+| M0.2 | `adb shell am kill <pkg>` (process death, no graceful close) followed by a service restart **resumes the pending work**; every pre-kill entry is present and unchanged, and new entries are appended | kill mid-tool-call; restart; compare the snapshot prefix, not "byte-identical" |
 | M0.3 | A tool that was interrupted mid-flight and is declared `replay: "unsafe"` produces an `interrupted` result, **not** a rerun | register a `sleep`-then-throw tool; kill during it |
 | M0.4 | The same tool declared `replay: "safe"` **does** rerun after the kill | flip the declaration |
 | M0.5 | The SQLite file survives `adb shell am force-stop` and a reboot; `sqlite3` on the pulled file shows the entries | pull and inspect |
@@ -1182,11 +1371,13 @@ Sub-questions, each with its own answer:
 - Is a native bionic-linked Node enough, or is proot required? (proot is
   *slow*; a durable agent that spends its life in syscall translation will
   feel it.)
+- Is the Termux prefix relocatable into this app's data directory, or does its
+  fixed `$PREFIX`/linker make a custom bootstrap or proot necessary?
 - How large is the resulting APK, and does the 15 MB Play Store limit matter?
   (Sideloading makes it irrelevant; Play does not.)
-- Does the process survive Doze and OEM battery killers? (Does not matter for
-  the *kernel's* correctness — that is what SQLite is for — but it matters for
-  latency.)
+- Does the process survive Doze and OEM battery killers? (Committed state
+  survives — that is what SQLite is for — but progress does not: a kill can
+  interrupt a task and, on main, count toward `restartLimit`; see R3.)
 
 **Spike S0.1 (2–3 days).** Build the smallest possible app: a `ForegroundService`
 that launches a bundled Node, which opens a `node:sqlite` database, creates a
@@ -1196,9 +1387,11 @@ availability, behaviour across `am kill`, behaviour across Doze (`adb shell
 dumpsys deviceidle force-idle`).
 
 **Fallback.** Option B (Hermes + `android.database.sqlite` facade + no shell)
-or Option C1 (remote execution). Both are one-line changes to the env factory
-(§1.6) if the kernel, storage, IPC and UI are built as separable layers — which
-is why the plan insists on that seam from day one.
+or Option C1 (remote execution). The *factory* swap is one line (§1.6) if the
+kernel, storage, IPC and UI are built as separable layers; the product
+consequences are not. B loses the shell and the git-dependent workflows; C1
+moves the shell, workspace and build loop to the box. Neither keeps the
+on-device self-building loop intact.
 
 ### R2 — The SQLite facade (Option B) and SQLite under a foreground service
 
@@ -1206,14 +1399,16 @@ is why the plan insists on that seam from day one.
 is the target and it uses `openNodeSqliteStorage` — Node's own SQLite — so the
 facade question only bites if the plan falls back to Option B, which the
 offline-shell requirement rules out (§1.6). Spike S0.2 is therefore scheduled
-conditionally (§6, Phase 0). The storage-pressure question stays live either
-way: the database lives in app-private storage that Android may delete, and
-`SQLiteDatabase.deleteDatabase` can be called on it.
+conditionally (§6, Phase 0). If S0.1 fails and Option B becomes the fallback,
+S0.2 must run before the fallback is chosen; skipping it and then falling back
+leaves the fallback unmeasured. The storage-pressure question stays live either
+way: the user can clear app storage, an uninstall deletes it, and the disk can
+fill. Android does not garbage-collect `files/` the way it clears `cache/`;
+`SQLiteDatabase.deleteDatabase` is an app call, not an OS cleanup.
 
 **Unknown.** Does a hand-written `SqliteDatabase` facade over
 `android.database.sqlite` pass `registerStorageConformance`? And does SQLite
-behave under Android's storage pressure (the OS will delete app caches, and
-`SQLiteDatabase.deleteDatabase` can be called)?
+behave when the disk fills or the user clears app data?
 
 Sub-questions:
 - The framework SQLite API is not shaped like the facade: `exec` takes one
@@ -1245,7 +1440,10 @@ from `@earendil-works/pi-durable/env`, but keeps the whole history in memory
 ### R3 — OEM process killers will park your tasks
 
 **This is the most likely thing to actually bite you, and it is specific to
-Android.**
+Android.** It is also a post-1.3.0 behaviour: `settings.restartLimit`, the
+`restarts` counter and parking exist at `main` @ `fdce48e`, not at the `v1.3.0`
+tag. On 1.3.0 a kill still interrupts the task, but there is no parking and no
+`retryTask`.
 
 The mechanism, from `src/harness/scheduler.ts`:
 
@@ -1253,7 +1451,7 @@ The mechanism, from `src/harness/scheduler.ts`:
   `restarts = (restarts ?? 0) + 1`.
 - "a new state the task commits starts the count over" — progress resets it.
 - `settings.restartLimit` defaults to `DEFAULT_RESTART_LIMIT = 5`. At the limit,
-  the task is **parked**: "the task graph show it as blocked with reason
+  the task is **parked**: "the task graph shows it as blocked with reason
   `restart_limit`, `wake()` does not count it as active, and `onReport` gets it
   once as `task_parked`". A parked task **does not run** until
   `harness.retryTask(id)` is called.
@@ -1274,10 +1472,10 @@ it stopped is `pending` again, so the next open counts no restart for it."
    crash their host (OOM, CPU spin) — an Android foreground service killed by
    the OEM is not that. You trade a runaway-task guard for OEM-killer
    tolerance.
-2. **Graceful shutdown wherever you can.** `onDestroy` → `SIGTERM` → the
-   kernel traps it → `harness.close(ctx)`. Android gives you a few seconds in
-   `onDestroy` for a service; use them. But be honest: `am kill` and an OEM
-   kill are `SIGKILL` and you get nothing.
+2. **Graceful shutdown wherever you can.** An explicit stop action →
+   `stopService`/`stopSelf` → `SIGTERM` → the kernel traps it →
+   `harness.close(ctx)`. Do not rely on `onDestroy`: Android does not guarantee
+   it on a system kill, and `am kill`/an OEM kill are `SIGKILL`.
 3. **Host-driven recovery.** On every service start, scan
    `harness.inspect(context)` for tasks with
    `state.kind === "blocked"` and `reason === "restart_limit"` and call
@@ -1300,29 +1498,34 @@ That is not a degraded coding agent; it is a different product.
 
 **Spike S0.4 (half a day, and it is just counting).** Take the surviving
 extensions and skills (§2.4) and mark each as *needs-exec* or *not*. The
-count that matters is smaller than it looks, and it is now closed: `review`
-(git), `review-triage` (git diff), the commit, github and librarian skills
-(git, gh, clone) and the git viewer (git) — the git-dependent workflows and
-the git viewer. `btw` no longer counts (its tmux panel becomes a durable
-conversation), and the dropped extensions do not count at all.
+extension/skill table is not the whole count: `review` (git), `review-triage`
+(git diff), the commit, github, librarian and update-changelog skills (git,
+gh, clone, `git describe`/`git log`), the git viewer (git), and the app's own
+build loop (`gradlew`, JDK, Android SDK) all need exec. `btw` no longer counts
+(its tmux panel becomes a durable conversation), and the dropped extensions do
+not count at all. "The count is closed" was true only for the extension table,
+not for the product.
 
 **Fallback / mitigation.** Option B is not the target: it would cost review,
 commit, github and librarian, which *is* the self-building dev environment.
 The reimplementation path exists — build the git viewer on `isomorphic-git`
-and rebuild review-triage on top of it — and `web_search` should be
-reimplemented in-process over `fetch` regardless, because it drops a
-subprocess for no loss. Even with both done, the loss is the review, commit
-and github workflows. For a learning project, stay on A.
+and rebuild review-triage on top of it — and `web_search` can move in-process
+from the Node script where the provider SDK allows it, though it still needs
+the provider's native-search request shape. Even with both done, the loss is
+the review, commit and github workflows. For a learning project, stay on A.
 
 ### R5 — Single-writer violations corrupt the store
 
 **Unknown.** "One process owns a storage at a time; there is no cross-process
 locking." Two kernels on one `.sqlite` file will not error politely.
 
-**Mitigation.** A `FileLock` on `pi/kernel.lock`, held by the service, with the
-pid recorded inside it. The kernel refuses to start if the lock is held by a
-live pid. The service also refuses to start a second kernel. Belt and braces,
-because the failure mode is silent corruption.
+**Mitigation.** The kernel takes an exclusive lock on `pi/kernel.lock` at
+startup and refuses to start if it cannot; the service starts exactly one
+child and refuses a second. Record the pid for diagnostics, but do not rely on
+the pid for exclusion (pids are reused). The child owns the lock — a Java
+`FileLock` in the service is not inherited across `exec` — and the SQLite
+open is the backstop. Belt and braces, because the failure mode is silent
+corruption.
 
 **Spike.** Part of Milestone 0 (M0.6).
 
@@ -1341,7 +1544,13 @@ exists.
 
 **Spike S0.5.** Install on API 30, 33, 34 and 35 emulators; start the service
 from each allowed entry point; verify the notification, the type, and that
-`AlarmManager.setExactAndAllowWhileIdle` fires while the screen is off.
+`AlarmManager.setExactAndAllowWhileIdle` fires while the screen is off. Check
+`canScheduleExactAlarms()` at runtime and fall back to
+`setAndAllowWhileIdle()`; `SCHEDULE_EXACT_ALARM` is denied by default on
+Android 14+ for most apps. Add the
+`android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE` manifest property, and test
+whether `BOOT_COMPLETED` may start the service on API 31+ rather than assuming
+it can.
 
 **Mitigation.** The app is for your phone only, so this is a sideload and not a
 listing: `specialUse` + `USE_EXACT_ALARM` is the answer, and the Play
@@ -1355,26 +1564,36 @@ is the alternative.
 **Known and permanent.** The package's own README opens with: "**Experimental.**
 The API changes without notice between releases."
 
-**Mitigation.** Pin `@earendil-works/pi-durable` and `@earendil-works/chord`
-to an exact version (1.3.0). Keep every Durable-specific import behind one
-adapter module (`kernel/durable-api.ts`) so a version bump is one file. Run
-the package's own conformance suites (`registerStorageConformance`,
-`registerEnvConformance`) against your Android implementations on every bump —
-they exist precisely for this.
+**Mitigation.** Pin the `main` commit `fdce48e`, not the string `1.3.0`, and
+pin every package the kernel imports (`@earendil-works/pi-durable`, `chord`,
+`pi-ai`, `pi-codemode`, `pi-env`, `typebox`) in the lockfile. Keep every
+Durable-specific import behind one adapter module (`kernel/durable-api.ts`) so
+a version bump is one file. Run the package's own conformance suites
+(`registerStorageConformance`, `registerEnvConformance`) against your Android
+implementations on every bump — they exist precisely for this. Note that the
+main schema migrates to version 2 and **cannot be opened by 1.3.0 or earlier**;
+keep the lockfile with the data so a downgrade is not attempted.
 
 ### R8 — Model transport, credentials, and cost on a phone
 
 **Unknown.** Providers live in `@earendil-works/pi-ai`. The `opencode-go`
-provider you use may need custom headers, a specific base URL, or an OAuth
-flow that a phone browser can complete but a background service cannot.
+provider you use may need custom headers or a specific base URL; other providers
+may need an OAuth flow that a phone browser can complete but a background
+service cannot.
 
 **Spike.** Point the kernel at each provider you care about from the service
 context (not the Activity) and check: streaming works, custom headers survive,
-key storage (`EncryptedSharedPreferences` or a Keystore-backed file the kernel
-reads at start) works, and a 401 refreshes the credential without a restart.
+key passing works, and a 401 refreshes the credential without a restart. The
+opencode-go extension uses an API key and a fixed base URL, not an OAuth flow;
+the OAuth risk is for other providers.
 
-**Mitigation.** Credentials live in the Android Keystore; the kernel reads them
-at start and on a 401. The app never holds the key in plain text on disk.
+**Mitigation.** The model key, the workspace's git credential and `GH_CONFIG_DIR`
+are three separate secrets. The Android Keystore can hold them, but the Node
+kernel cannot read the Keystore: the host decrypts and passes each secret to
+the child (env, fd or local socket), so it is plaintext in the child's memory
+and in `/proc/<pid>/environ` for the same uid. Keep the child short-lived
+enough that this is acceptable, do not log the environment, and rotate on a 401.
+A backup/export must not include the secrets.
 
 ### R9 — The IPC boundary is a real failure surface
 
@@ -1387,16 +1606,21 @@ from a snapshot", which is the same invariant §3.1 already demands. WebView
 renderer death is also an IPC boundary event: the web client reconnects and
 resnapshots exactly as a rotated Activity would.
 
-### R10 — The self-build loop can destroy the workspace
+### R10 — The self-build loop can destroy the workspace and the store
 
 **Unknown.** The agent has `bash`. It can `git clean -fdx` the app source, or
-worse.
+worse: it can reach `pi/session.sqlite` and the credentials, because the kernel
+and the shell share a uid.
 
-**Mitigation.** The `beforeTool` guard (§2.6) blocks paths outside the
-workspace and denies destructive commands — strictly, not as a warning,
-because the workspace is a git clone the agent is allowed to push (§4.4). The
-Pi state directory is outside the workspace. A `pre-commit` hook in the
-workspace's git repo refuses destructive ref operations.
+**Mitigation.** A `beforeTool` guard (§2.6) is necessary but not sufficient.
+The real boundary is one of: a curated `exec` tool with an argv allow-list and
+path validation (no arbitrary `bash`), a separate uid/container with a bind
+mount that excludes `pi/` and the Keystore, or an explicit accept-the-risk
+decision plus automatic export. The Pi state directory is outside the
+workspace, which protects it from `git clean -fdx` in the workspace but not
+from an arbitrary shell. A `pre-commit` hook cannot stop `git reset --hard`,
+`git clean -fdx` or force-push; use `pre-push` for the last one and treat hooks
+as advisory.
 
 ### R11 — Loopback web server and WebView security
 
@@ -1405,12 +1629,15 @@ workspace's git repo refuses destructive ref operations.
 if the WebView is given access to the SQLite file path or unrestricted shell
 access, the durability story is undermined.
 
-**Mitigation.** Bind only to `127.0.0.1`; issue a per-launch bearer token; use
-a `NetworkSecurityConfig` that permits cleartext only for `127.0.0.1`; keep
-the dev server inside the kernel and on loopback — there is no `adb reverse`
-to expose, because the Vite server runs on the phone (§5 R12); treat the
-WebView as untrusted and give it only the event protocol and narrow bridge
-calls. Do not pass the SQLite path or shell access to the web client.
+**Mitigation.** Bind only to `127.0.0.1`; issue a per-launch bearer token and
+require it on every request (HTTP header and a WS subprotocol/ticket — browsers
+cannot set an `Authorization` header on a WebSocket); use a
+`NetworkSecurityConfig` `domain-config` for `127.0.0.1`; keep the dev server
+inside the kernel and on loopback — there is no `adb reverse` to expose,
+because the Vite server runs on the phone (§5 R12); treat the WebView as
+untrusted and give it only the event protocol and narrow bridge calls. Do not
+pass the SQLite path or shell access to the web client. Loopback is shared
+across apps, so the token is the boundary, not the bind address.
 
 ### R12 — A dev server on the phone
 
@@ -1419,7 +1646,8 @@ Node runtime, on the phone, watching the web sources and pushing updates over
 a loopback WebSocket. Nothing in this plan has run a bundler on a phone: the
 watcher has to see the workspace files, `esbuild` has to run under the same
 Node build that carries the kernel, and the dev server has to coexist with
-the kernel's own event loop and its memory ceiling.
+the kernel's own event loop and its memory ceiling. The runtime extension
+loader (`jiti`/`esbuild`) is the same class of cost.
 
 **Spike S0.6 (2 days).** Run Vite in the kernel's Node runtime against a
 scratch web project, edit a file, and confirm the WebView hot-reloads without
@@ -1430,6 +1658,26 @@ at once.
 **Fallback.** Build the static assets on the device with a one-shot
 `tsc`/esbuild step and reload the WebView instead of hot-reloading. Slower to
 iterate, still no APK reinstall and no host machine.
+
+### R13 — The on-device build and install toolchain
+
+**Unknown.** The self-building loop in §4 needs more than Node: `gradlew`
+needs a JDK and an Android SDK/build-tools, and installing the result needs
+either adb over wireless debugging or a `PackageInstaller` session with the
+user's confirmation. A normal app cannot silently replace itself; a package
+replacement force-stops it, and nothing resumes until the user relaunches.
+Option A's APK budget currently counts only Node/Termux.
+
+**Spike S0.7 (2–3 days).** On the target phone, install a JDK + Android SDK +
+Gradle in the bundled prefix, build a trivial APK, and measure size, cold-build
+time, memory and battery. Then install it through the chosen path: adb over
+wireless debugging, or `PackageInstaller` + user tap. Record what happens to
+the running service and how the app is relaunched.
+
+**Fallback.** Use a separate build host (a laptop or a small server) for native
+changes and keep only the web UI / extension loop on-device. That keeps the
+durable session on the phone but gives up the fully on-device self-build; say
+so in §4.4 rather than implying `installDebug` works from inside the app.
 
 ---
 
@@ -1445,14 +1693,19 @@ criteria. The criteria are the point: they are what "done" means.
 **Deliverables**
 
 - S0.1 Node-on-Android spike (§5 R1) → a report: APK size, startup time,
-  `node:sqlite` availability, kill/Doze behaviour.
+  `node:sqlite` availability, prefix relocation, kill/Doze behaviour.
 - S0.2 Android `SqliteDatabase` facade + `registerStorageConformance` pass
   (§5 R2) — **only if the plan falls back to Option B**; skipped otherwise.
-- S0.3 Env compatibility count (§5 R4) → the exec-needs table.
-- S0.4 FGS/alarm behaviour on API 30/33/34/35 (§5 R6).
-- S0.5 A **written decision record**: runtime, storage, env, IPC transport.
+- S0.3 The 10× OEM-kill loop (§5 R3) → task survives, or parks visibly with a
+  working retry.
+- S0.4 Env compatibility count (§5 R4) → the exec-needs table.
+- S0.5 FGS/alarm behaviour on API 30/33/34/35 (§5 R6).
 - S0.6 A dev server on the phone (§5 R12) → does Vite run inside the kernel's
   Node runtime, and what does it cost the agent's memory?
+- S0.7 The on-device build/install toolchain (§5 R13) → JDK, SDK, Gradle,
+  install path, relaunch behaviour.
+- S0.8 A **written decision record**: runtime, storage, env, IPC transport,
+  security boundary.
 
 **Acceptance**
 
@@ -1461,10 +1714,14 @@ criteria. The criteria are the point: they are what "done" means.
 - [ ] S0.2's facade passes `registerStorageConformance` with zero failures,
       or the failure list is understood and accepted — *only if Option B is
       still live*.
+- [ ] S0.3's 10× kill loop leaves the task live or visibly parked with a
+      working Retry; no silent stall.
 - [ ] S0.6 shows a WebView hot-reloading a changed component with no
       reinstall, and a measured memory cost the agent can afford.
-- [ ] The decision record names the runtime and the env, and §1.6's seam
-      (`envFor(cwd)`) is fixed.
+- [ ] S0.7 builds and installs a trivial APK on the device, or the fallback
+      build-host decision is recorded.
+- [ ] S0.8 names the runtime, the env, the IPC transport and the security
+      boundary, and §1.6's seam (`envFor(cwd)`) is fixed.
 
 ### Phase 1 — Durable kernel, no UI
 
@@ -1473,16 +1730,18 @@ criteria. The criteria are the point: they are what "done" means.
 **Deliverables**
 
 - The Android app skeleton: `ForegroundService` + notification + supervisor.
-- The kernel process: `Harness.open(openNodeSqliteStorage(db), {models, registry,
-  settings, env, onWake, onReport}, ctx)`, `harness.root(ctx)`,
-  `harness.resume()`.
+- The kernel process: `Harness.open(openNodeSqliteStorage(db), {models, registry:
+  createRegistry(), settings, env, onWake, onReport}, ctx)`, `harness.root(ctx)`,
+  `harness.resume()`. `onWake` and `onReport`'s `info` argument are post-1.3.0.
 - Loopback HTTP+WS server with the bearer token; `POST /v1/commands/*`.
 - One tool: `echo`, `replay: "safe"`.
 - `onReport` → the kernel's log *and* a durable record the UI can read (so
-  `task_parked`, `task_faulted` and `session_failed` are not lost).
+  `task_parked`, `task_faulted` and `session_failed` are not lost; `task_parked`
+  is post-1.3.0).
 - `onWake` → `AlarmManager` + wake lock (§1.10).
 
-**Acceptance** = Milestone 0's M0.1–M0.7 (§4.5), all seven.
+**Acceptance** = Milestone 0's M0.1–M0.7 (§4.5), all seven. M0.8 (the WebView
+loads `GET /`) belongs to Phase 2, where the web client exists.
 
 ### Phase 2 — Reactive web UI v0
 
@@ -1492,7 +1751,8 @@ criteria. The criteria are the point: they are what "done" means.
 
 - Web client screens S1 (transcript), S2 (composer with steer/follow-up),
   S3 (status strip), plus static asset serving from the kernel (`GET /`).
-- `GET /v1/snapshot` + `WS /v1/events` with the §1.9 vocabulary.
+- `GET /v1/snapshot` (full active transcript, with `seq`) + `WS /v1/events`
+  with the §1.9 vocabulary and one commit envelope per batch.
 - Paged `entries` loading (§3.3).
 
 **Acceptance**
@@ -1507,7 +1767,8 @@ criteria. The criteria are the point: they are what "done" means.
 - [ ] The UI can be force-stopped and relaunched mid-turn; the transcript
       continues from the same point.
 - [ ] Editing the web UI source in dev mode hot-reloads the WebView without
-      reinstalling the APK.
+      reinstalling the APK — or the S0.6 fallback (rebuild + WebView reload)
+      is in place and the acceptance is worded for it.
 
 ### Phase 3 — Task panel and subagent view
 
@@ -1516,11 +1777,13 @@ criteria. The criteria are the point: they are what "done" means.
 **Deliverables**
 
 - Screen S4 (task tree) and S5 (subagent view).
-- The built-in subagent task wired to the UI per §2.5 — no port of the tmux
-  extension.
+- The owned-child subagent tool (no shipped subagent task exists) wired to the
+  UI per §2.5 — `replay: "safe"`, `scanConversations`, `requestId`,
+  `api.details` — and no port of the tmux extension.
 - The child's conversation id, surfaced through `api.details({ conversationId
   })`, so the UI can attach a second event stream to it.
-- `GET /v1/conversations?parent=<id>` for the parent→child tree.
+- `GET /v1/conversations?parent=<id>` for the parent→child tree, backed by
+  `scanConversations({ ownerConversationId })`.
 
 **Acceptance**
 
@@ -1536,11 +1799,11 @@ criteria. The criteria are the point: they are what "done" means.
 
 **Depends on:** Phase 3.
 
-**Deliverables** — the surviving 10 extensions and 5 skills, per §2.4 and
-§2.7: review-triage, goal, todos, voice (as an input path), answer,
-session-breakdown, btw, review, native-web-search, opencode-go-provider (as
-kernel config), the skills as sections — plus the git viewer, which is new
-rather than ported.
+**Deliverables** — the surviving extensions and inputs in §2.4, plus the 5
+skills per §2.7: review-triage, goal, todos, voice (input path), answer,
+session-breakdown, btw, review, native-web-search, opencode-go-provider (kernel
+config), continue (UI button), the git viewer (new), and the skills as
+sections.
 
 **Acceptance**
 
@@ -1563,16 +1826,19 @@ rather than ported.
 
 - The workspace layout: `pi/workspace/app` (the app's git clone),
   `pi/workspace/extensions` (agent-writable extensions).
-- `registry.install()` from a file at runtime (R1).
-- The `gradlew` build tool.
-- The guard hooks from §2.6.
+- A runtime extension loader (`jiti`/`esbuild`) plus `registry.install()` from
+  a file (R1), with the kernel's `node_modules` on the resolution path.
+- The JDK + Android SDK + Gradle toolchain and the chosen install path (S0.7).
+- The guard hooks from §2.6, with the §4.4 sandbox decision.
 
 **Acceptance**
 
 - [ ] The agent, running inside the app, edits the web UI source and the WebView
-      hot-reloads (R2); no APK rebuild is needed for UI changes.
-- [ ] The agent edits the native host shell and `gradlew installDebug` replaces
-      the APK; the session survives via SQLite and `resume()` (R3).
+      hot-reloads (R2) or rebuilds + reloads without an APK reinstall; no APK
+      rebuild is needed for UI changes.
+- [ ] The agent edits the native host shell, `assembleDebug` + the S0.7 install
+      path replaces the APK, and a relaunch resumes the session from SQLite
+      (R3).
 - [ ] The agent writes a new extension file, installs it, and the next request
       uses the new code **without a kernel restart**.
 - [ ] A running tool call completes under the code it started with, even
@@ -1584,11 +1850,15 @@ rather than ported.
 
 **Deliverables**
 
-- `settings.restartLimit` policy (§5 R3) + the host-driven `retryTask` sweep.
+- `settings.restartLimit` policy (post-1.3.0, §5 R3) + the host-driven
+  `retryTask` sweep.
 - Single-writer enforcement (§5 R5).
-- Credential storage in the Keystore (§5 R8).
-- The export/import path for the transcript (§1.10); app size; battery
-  behaviour; the OEM-kill soak test.
+- Credential passing from the Keystore to the child, plus git/gh credentials
+  (§5 R8).
+- The security-boundary decision from §4.4/R10, enforced and tested.
+- `android:allowBackup="false"` / `dataExtractionRules` for `pi/`; the
+  export/import path for the transcript (§1.10); app size; battery behaviour;
+  the OEM-kill soak test.
 
 **Acceptance**
 
@@ -1603,8 +1873,10 @@ rather than ported.
 
 ## Appendix A — Verified API surface
 
-Everything below was read in the sources listed in §0 at
-`@earendil-works/pi-durable@1.3.0` / `@earendil-works/chord@1.3.0`.
+Everything below was read at `main` commit `fdce48e`
+(`@earendil-works/pi-durable` and `@earendil-works/chord`, package version
+still `1.3.0`). The `v1.3.0` tag differs: see §0.1. Names marked
+"post-1.3.0" below do not exist at the tag.
 
 ### Package entry points (`packages/durable/package.json` `exports`)
 
@@ -1634,6 +1906,10 @@ Everything below was read in the sources listed in §0 at
 "./testing"                 registerStorageConformance, registerEnvConformance,
                                      createExpectAssertions, storage benchmarks
 ```
+
+`DEFAULT_RESTART_LIMIT` and `DURABLE_TELEMETRY_SCHEMA` are post-1.3.0; the
+released tarball does not have them. The exports map also includes `./images`,
+`./images/node` and `./images/cloudflare`, omitted here.
 
 ### Types that matter for this plan
 
@@ -1677,6 +1953,9 @@ export interface ExecutionEnv extends FileSystem, Shell {}
 | `runtime.sleepUntil(until, {phase}, ctx)` | | durable sleep |
 | `runtime.outcomes(ids, ctx)` | | join results |
 
+The `harness.wake()`, `harness.retryTask()` and `runtime.sleepUntil()` rows are
+post-1.3.0; the tag has none of them.
+
 ### The exact quotes this plan leans on
 
 1. *"If the process dies mid-call, the tool reruns on reopen only when it is
@@ -1706,6 +1985,9 @@ export interface ExecutionEnv extends FileSystem, Shell {}
 10. *"await send(ops); // for example to a remote client that applies them"* —
     README, Watching a Conversation.
 
+Line numbers are for `fdce48e`. At `v1.3.0`, quotes 2 and 3 are at
+`docs/spec.md:3376` and `:2927`, and quote 7 is at a different scheduler line.
+
 ---
 
 ## Appendix B — Decisions taken, and what is still open
@@ -1714,9 +1996,15 @@ The seven questions that used to block Phase 1 are answered. They are recorded
 here because each one closes a branch of the plan, and the reasoning is worth
 keeping next to the decision.
 
+**Target version (added after review).** The plan targets `main` at `fdce48e`
+(post-1.3.0, unreleased), because the sleep/wake and restart-parking design
+needs it. Pin the commit and every package, not the string `1.3.0`; the schema
+migrates to version 2 and cannot be opened by 1.3.0 or earlier. If you pin the
+`v1.3.0` tag instead, the deferred list in §0.1 applies.
+
 1. **The workspace is a git clone, not a synced copy.** The agent can commit
    and push from the phone; a copy could not. The price is credentials on the
-   device (§5 R8) and a strict `beforeTool` guard (§2.6, §4.4), because a
+   device (§5 R8) and a guard that is not a sandbox (§2.6, §4.4), because a
    clone is exactly what `git clean -fdx` and `git reset --hard` operate on.
    The Pi state directory stays outside the workspace.
 2. **The network is required for model inference; the shell and the durability
@@ -1727,14 +2015,19 @@ keeping next to the decision.
    and a large APK are all acceptable costs, and the Play Store's constraints
    do not bind (§1.3, §5 R6).
 4. **Option A is the target.** The justification is narrower than "most of the
-   setup needs a shell": it is that the review, commit and github workflows and
-   the git viewer need `git`. A reimplementation path exists — the git viewer
-   on `isomorphic-git`, review-triage rebuilt on top of it — but it would cost
-   review, commit, github and librarian, which defeats the point of a
-   self-building dev environment. For a learning project, stay on A (§5 R4).
-5. **The transcript does not survive an uninstall by default.** The app gains
-   an explicit export/import instead of a backup rule, because a restored WAL
-   against a restored main database is not a consistent pair (§1.10).
+   setup needs a shell": it is that the review, commit, github, librarian and
+   update-changelog workflows and the git viewer need `git`, and the
+   self-building loop also needs `gradlew`/JDK/SDK. A reimplementation path
+   exists — the git viewer on `isomorphic-git`, review-triage rebuilt on top of
+   it — but it would cost review, commit, github, librarian and
+   update-changelog, which defeats the point of a self-building dev
+   environment. For a learning project, stay on A (§5 R4, R13).
+5. **The transcript does not survive an uninstall by default.** Set
+   `android:allowBackup="false"` (or a `dataExtractionRules` exclusion for
+   `pi/`), because the default is `true` and Auto Backup includes internal
+   databases. The app gains an explicit export/import instead of a backup rule;
+   the reason is restore semantics and size, not a WAL-pair impossibility
+   (§1.10).
 6. **The native bridge is microphone, file picker, share intents and
    notifications — nothing else.** It stays outside the durable state path:
    an app-to-app IPC surface for the WebView, not a tool (§2.6).
@@ -1753,7 +2046,9 @@ Still open:
 9. **Does the git viewer read git through the `bash` tool, or through a
    dedicated read-only tool?** A dedicated `git_*` tool with a narrow schema is
    easier to guard and easier to give a replay policy; `bash` is one call away
-   from anything. The guard question decides it (§2.6).
+   from anything. The guard question decides it (§2.6). Until it is decided,
+   §2.4 and §3.2 treat only the non-mutating `git_*` commands as `safe` and
+   `bash git …` as unsafe.
 10. **How much memory does the in-kernel dev server cost, and does it starve
     the agent?** A phone running a bundler, a model stream and a tool call at
     once is the tightest case in the plan; §5 R12's spike measures it, and its
