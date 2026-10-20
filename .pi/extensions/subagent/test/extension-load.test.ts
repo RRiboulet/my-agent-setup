@@ -57,8 +57,11 @@ const MODULES: Record<string, string[]> = {
 		"btwSessionName",
 		"btwSocketPath",
 		"btwTarget",
+		"btwThemePath",
 		"requireBtwQuestion",
 	],
+	"../../btw/markdown.mjs": ["createMarkdownView", "renderMarkdown"],
+	"../../btw/theme.mjs": ["buildThemeSpec", "installThemeSpec"],
 	"../../btw/request.ts": [
 		"buildBtwContext",
 		"buildBtwRequestParts",

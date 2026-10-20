@@ -28,6 +28,7 @@ import {
 	btwSessionName,
 	btwSocketPath,
 	btwTarget,
+	btwThemePath,
 	requireBtwQuestion,
 } from "../../btw/launch.ts";
 
@@ -61,9 +62,11 @@ test("buildBtwPaths returns every path from one agent dir and session id", () =>
 		target: SESSION,
 		runDir: RUN_DIR,
 		answer: `${RUN_DIR}/answer.md`,
+		theme: `${RUN_DIR}/theme.json`,
 		ownerPid: `${RUN_DIR}/owner.pid`,
 	});
 	assert.equal(btwAnswerPath(AGENT_DIR, SID), `${RUN_DIR}/answer.md`);
+	assert.equal(btwThemePath(AGENT_DIR, SID), `${RUN_DIR}/theme.json`);
 	assert.equal(btwOwnerPidPath(AGENT_DIR, SID), `${RUN_DIR}/owner.pid`);
 	assert.equal(btwRunDir(AGENT_DIR, SID), RUN_DIR);
 });
@@ -150,10 +153,13 @@ test("send-keys is literal and option-safe; Enter is a separate call", () => {
 
 test("the viewer renders the answer file with the bundled script and execs", () => {
 	const viewer = path.join(import.meta.dirname, "..", "..", "btw", "viewer.mjs");
-	assert.equal(buildBtwViewerCommand("/tmp/answer.md"), `exec node ${shellQuote(viewer)} '/tmp/answer.md'`);
 	assert.equal(
-		buildBtwViewerCommand("/tmp/my dir/it's.md"),
-		`exec node ${shellQuote(viewer)} '/tmp/my dir/it'"'"'s.md'`,
+		buildBtwViewerCommand("/tmp/answer.md", "/tmp/theme.json"),
+		`exec node ${shellQuote(viewer)} '/tmp/answer.md' '/tmp/theme.json'`,
+	);
+	assert.equal(
+		buildBtwViewerCommand("/tmp/my dir/it's.md", "/tmp/my dir/theme.json"),
+		`exec node ${shellQuote(viewer)} '/tmp/my dir/it'"'"'s.md' '/tmp/my dir/theme.json'`,
 		"the path stays one shell word",
 	);
 });

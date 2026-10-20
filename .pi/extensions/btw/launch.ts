@@ -106,6 +106,14 @@ export function btwAnswerPath(agentDir: string, sessionId: string): string {
 	return path.join(btwRunDir(agentDir, sessionId), "answer.md");
 }
 
+/**
+ * The theme the viewer renders with: pi's own resolved theme, written by the
+ * parent so the panel's colors are the transcript's colors.
+ */
+export function btwThemePath(agentDir: string, sessionId: string): string {
+	return path.join(btwRunDir(agentDir, sessionId), "theme.json");
+}
+
 /** The main pi process that owns the panel; a dead pid makes the panel reapable. */
 export function btwOwnerPidPath(agentDir: string, sessionId: string): string {
 	return path.join(btwRunDir(agentDir, sessionId), "owner.pid");
@@ -118,6 +126,7 @@ export interface BtwPaths {
 	target: string;
 	runDir: string;
 	answer: string;
+	theme: string;
 	ownerPid: string;
 }
 
@@ -129,6 +138,7 @@ export function buildBtwPaths(agentDir: string, sessionId: string): BtwPaths {
 		target: btwTarget(sessionId),
 		runDir: btwRunDir(agentDir, sessionId),
 		answer: btwAnswerPath(agentDir, sessionId),
+		theme: btwThemePath(agentDir, sessionId),
 		ownerPid: btwOwnerPidPath(agentDir, sessionId),
 	};
 }
@@ -199,7 +209,11 @@ export function buildBtwSubmitArgs(input: { socket: string; target: string }): s
  * mouse wheel) the same way the subagent attach views do; a pager like `less +F`
  * swallows the tmux prefix and pins the viewport, which is the scroll bug. `exec`
  * replaces the shell so `#{pane_dead}` flips if the renderer itself dies.
+ *
+ * The theme spec travels with the answer path because the viewer runs in its
+ * own process: pi's theme lives in pi's process, so the parent resolves it and
+ * hands it over (see `theme.mjs`).
  */
-export function buildBtwViewerCommand(answerPath: string): string {
-	return `exec node ${shellQuote(VIEWER_SCRIPT)} ${shellQuote(answerPath)}`;
+export function buildBtwViewerCommand(answerPath: string, themePath: string): string {
+	return `exec node ${shellQuote(VIEWER_SCRIPT)} ${shellQuote(answerPath)} ${shellQuote(themePath)}`;
 }

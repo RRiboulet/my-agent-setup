@@ -25,6 +25,8 @@ import {
 	BTW_INSTRUCTION,
 	buildBtwContext,
 	buildBtwRequestParts,
+	fenceCloser,
+	openCodeFence,
 	providerSessionHeaders,
 	reasoningOption,
 	runBtwRequest,
@@ -239,6 +241,17 @@ test("terminal sequences, C0/C1 controls and bidi overrides are stripped", () =>
 	assert.equal(sanitizeAnswerText("\u202Eevil\u202C"), "evil", "bidi overrides are not display text");
 	assert.equal(sanitizeAnswerText("line\nnext\tend"), "line\nnext\tend");
 	assert.equal(sanitizeAnswerText("x\x1b[3"), "x[3", "a split sequence loses its ESC and becomes inert text");
+});
+
+test("a code fence the answer left open is found, so the footer can close it", () => {
+	assert.equal(openCodeFence("```ts\nconst x = 1;\n```"), undefined, "a closed fence leaves nothing open");
+	assert.equal(openCodeFence("```ts\nconst x = 1;"), "```", "an unclosed backtick fence is reported");
+	assert.equal(openCodeFence("~~~ts\nconst x = 1;"), "~~~", "an unclosed tilde fence is reported");
+	assert.equal(openCodeFence("```ts\nconst x = 1;\n```\ntext"), undefined, "a fence closed earlier does not count");
+	assert.equal(openCodeFence("````\n```\nstill open"), "````", "a shorter fence does not close a longer one");
+	assert.equal(openCodeFence("`inline` and ```fence```"), undefined, "an inline span is not a fence");
+	assert.equal(fenceCloser("```ts\nconst x = 1;"), "\n```", "the closer repeats the opening marker");
+	assert.equal(fenceCloser("done"), "", "a closed answer needs no closer");
 });
 
 test("text deltas stream through and the final usage is returned", async () => {

@@ -4,6 +4,43 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Fixed:
+
+- **The `/btw` panel renders Markdown the way the transcript does, and no
+  longer loses the end of a line the model was still writing.** The panel drew
+  the answer with its own line-oriented renderer — a second and much worse
+  Markdown implementation than the one pi already ships: no tables, no nested
+  lists, no syntax-highlighted code, and its own idea of what a heading or a
+  quote looks like. It was also append-only, and an append-only renderer
+  cannot redraw the line it is still writing, so the tail of every streamed
+  line was dropped: the panel showed the answer as far as its last newline and
+  never showed the rest, which made a streaming answer look truncated at every
+  line break.
+
+  The panel now draws through pi-tui's own `Markdown` component — the one the
+  TUI renders an assistant message with — inside pi-tui's `TuiMainScreen`.
+  That buys the whole Markdown surface the transcript has (tables with borders
+  and aligned cells, nested lists, fenced code with syntax highlighting,
+  quotes, links) and it makes the panel a peer of the transcript instead of a
+  second renderer that drifts from it. The screen is redrawn differentially,
+  so a line the model is still writing is corrected in place rather than
+  dropped, and a table that grows a wider column re-lays itself out where it
+  stands. The panel still only draws and never takes the keyboard, so tmux
+  keeps the keys and the pane scrolls natively, as before.
+
+  The panel's colors are the transcript's too. pi's theme lives in pi's
+  process and the panel draws in its own, so the parent resolves the theme it
+  is using right now and hands the viewer its colors
+  (`.pi/extensions/btw/theme.mjs`); the viewer rebuilds a theme from them and
+  renders through the same `getMarkdownTheme()` the TUI uses. Loading the
+  theme by name inside the viewer would have been enough for a named theme,
+  but not for the generated `system` theme, which is built from the colors the
+  terminal reported — and only pi asked the terminal.
+
+  A code fence the answer leaves open is also closed before the usage footer
+  is appended. An unclosed fence runs to the end of the document, so the
+  footer used to be drawn inside the code block.
+
 ## v1.8.0 — 2026-10-19
 
 Added:

@@ -264,6 +264,38 @@ export function buildBtwContext(
 }
 
 /**
+ * The fence marker the text leaves open, if any.
+ *
+ * A code fence that is never closed runs to the end of the document, so
+ * anything appended after the answer - the usage footer - would be drawn
+ * inside the code block instead of after it. The marker is the run of
+ * backticks or tildes that opened the fence, so the caller can close it with
+ * the same character.
+ */
+export function openCodeFence(text: string): string | undefined {
+	let open: string | undefined;
+	for (const line of text.split("\n")) {
+		if (open === undefined) {
+			const start = /^ {0,3}(`{3,}|~{3,})/.exec(line);
+			if (start) open = start[1];
+			continue;
+		}
+		const end = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(line);
+		if (end && end[1][0] === open[0] && end[1].length >= open.length) open = undefined;
+	}
+	return open;
+}
+
+/**
+ * The text that closes a fence the answer left open, or the empty string when
+ * the answer closed its fences.
+ */
+export function fenceCloser(text: string): string {
+	const open = openCodeFence(text);
+	return open === undefined ? "" : `\n${open}`;
+}
+
+/**
  * Remove terminal escape sequences and control characters from answer text.
  *
  * The answer can quote hostile tool output, and the viewer is a real terminal

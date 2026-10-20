@@ -1,89 +1,148 @@
-// Tests for the /btw pane's Markdown renderer.
+// Tests for the /btw panel's Markdown rendering.
 //
 // Risk covered: the renderer is the only thing between the answer file's raw
-// Markdown and the pane. A bug here shows raw markup or mangles text, and the
-// incremental contract — a line already printed is never re-rendered differently
-// as the answer grows — is what lets the viewer append without re-drawing. All
-// of it is deterministic, so it is pinned directly.
+// Markdown and the panel. The panel used to carry its own line-oriented
+// renderer, which could not draw a table and dropped the tail of every
+// half-written line; it now renders through pi-tui's `Markdown` component, the
+// one the TUI renders an assistant message with. These tests pin that the
+// panel draws what the TUI draws - tables, nested lists, highlighted code -
+// and that the theme it draws in is the transcript's theme.
+//
+// The viewer is exercised as a process, because the claim that matters is what
+// lands in the pane: a streamed answer that grows must show its new tail, not
+// the answer as far as its last newline.
 
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { spawn } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+import { after, test } from "node:test";
 
-import { renderFrom, renderMarkdown } from "../../btw/markdown.mjs";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 
-const ESC = "\x1b[";
-const RESET = "\x1b[0m";
-const DASHES = "─".repeat(56);
+import { renderMarkdown } from "../../btw/markdown.mjs";
+import { buildThemeSpec, installThemeSpec } from "../../btw/theme.mjs";
 
-/** Render with color on, as the pane does. */
-const styled = (text: string, options: Record<string, unknown> = {}): string =>
-	renderMarkdown(text, { color: true, ...options });
-/** Render plain, for structure assertions. */
-const plain = (text: string): string => renderMarkdown(text, { color: false });
+const VIEWER = path.join(import.meta.dirname, "..", "..", "btw", "viewer.mjs");
 
-test("ATX headings render at three levels", () => {
-	assert.equal(styled("# Title"), `${ESC}1;97mTitle${RESET}`);
-	assert.equal(styled("## Sub"), `${ESC}1mSub${RESET}`);
-	assert.equal(styled("### Sub"), `${ESC}2mSub${RESET}`);
-	assert.equal(styled("#### Deep"), `${ESC}2mDeep${RESET}`, "h4+ collapse to dim");
-	assert.equal(plain("# Title"), "Title", "the # marker is stripped");
+/** Strip the escape sequences so the assertions read the drawn text. */
+const plain = (text: string): string => text.replace(/\x1b\[[0-9;?]*[A-Za-z]/g, "");
+
+/** A theme spec for the viewer, built from a real pi theme. */
+function themeSpec() {
+	initTheme("dark");
+	const live = globalThis[Symbol.for("@earendil-works/pi-coding-agent:theme")];
+	return buildThemeSpec(live);
+}
+
+/** A theme the assertions can compare against, without touching pi's global. */
+function plainTheme() {
+	initTheme("dark");
+	return installThemeSpec(buildThemeSpec(globalThis[Symbol.for("@earendil-works/pi-coding-agent:theme")]));
+}
+
+test("a table renders as a table", () => {
+	const lines = renderMarkdown("| Feature | Status |\n| --- | --- |\n| Tables | yes |", 60, plainTheme());
+	const text = lines.join("\n");
+	assert.match(text, /│ Feature\s+│ Status\s+│/, "the header row is drawn as cells");
+	assert.match(text, /│ Tables\s+│ yes\s+│/, "the body row is drawn as cells");
+	assert.match(text, /[┌├└][─]*[┬┴┼]/, "the table has borders");
+	assert.ok(!text.includes("| ---"), "the delimiter row is not shown as text");
 });
 
-test("blockquotes, rules, lists and tasks", () => {
-	assert.equal(styled("> quoted"), `${ESC}2m│ ${RESET}quoted`);
-	assert.equal(styled("---"), `${ESC}2m${DASHES}${RESET}`);
-	assert.equal(styled("- item"), `${ESC}2m• ${RESET}item`);
-	assert.equal(styled("1. first"), `${ESC}2m1. ${RESET}first`);
-	assert.equal(styled("- [ ] todo"), `${ESC}2m☐ ${RESET}todo`);
-	assert.equal(styled("- [x] done"), `${ESC}2m☑ ${RESET}done`);
+test("headings, lists, quotes, links and code blocks render", () => {
+	const theme = plainTheme();
+	const heading = renderMarkdown("# Title", 40, theme).join("");
+	assert.ok(!heading.includes("#"), "the heading marker is stripped");
+	const list = renderMarkdown("- one\n- two\n  - nested", 40, theme).join("\n");
+	assert.match(list, /one/);
+	assert.match(list, /nested/);
+	assert.ok(!list.includes("- one"), "the list marker is replaced, not shown as text");
+	const quote = renderMarkdown("> quoted", 40, theme).join("");
+	assert.match(quote, /quoted/);
+	assert.ok(!quote.includes(">"), "the quote marker is replaced");
+	const link = renderMarkdown("[label](https://example.dev)", 60, theme).join("");
+	assert.match(link, /label/);
+	assert.match(link, /example\.dev/);
+	const code = plain(renderMarkdown("```ts\nconst x = 1;\n```", 40, theme).join("\n"));
+	assert.match(code, /const x = 1;/, "the code is drawn");
+	assert.match(code, /```/, "the fence is drawn as a fence");
 });
 
-test("code fences dim their markers and pass content through", () => {
-	const out = styled("```ts\nconst x = 1;\n```").split("\n");
-	assert.equal(out[0], `${ESC}2m\`\`\`ts${RESET}`);
-	assert.equal(out[1], "const x = 1;", "fence content is untouched");
-	assert.equal(out[2], `${ESC}2m\`\`\`${RESET}`);
+test("the theme spec round-trips: the panel renders in the transcript's colors", () => {
+	initTheme("dark");
+	const live = globalThis[Symbol.for("@earendil-works/pi-coding-agent:theme")];
+	const transcript = renderMarkdown("# Title\n\n| a | b |\n| --- | --- |\n| 1 | 2 |", 60, {
+		heading: (text) => live.fg("mdHeading", text),
+		link: (text) => live.fg("mdLink", text),
+		linkUrl: (text) => live.fg("mdLinkUrl", text),
+		code: (text) => live.fg("mdCode", text),
+		codeBlock: (text) => live.fg("mdCodeBlock", text),
+		codeBlockBorder: (text) => live.fg("mdCodeBlockBorder", text),
+		quote: (text) => live.fg("mdQuote", text),
+		quoteBorder: (text) => live.fg("mdQuoteBorder", text),
+		hr: (text) => live.fg("mdHr", text),
+		listBullet: (text) => live.fg("mdListBullet", text),
+		bold: (text) => live.bold(text),
+		italic: (text) => live.italic(text),
+		underline: (text) => live.underline(text),
+		strikethrough: (text) => live.strikethrough(text),
+	});
+	const spec = buildThemeSpec(live);
+	const panel = renderMarkdown("# Title\n\n| a | b |\n| --- | --- |\n| 1 | 2 |", 60, installThemeSpec(spec));
+	assert.equal(panel.join("\n"), transcript.join("\n"), "the panel draws the transcript's colors");
 });
 
-test("inline spans: code, links, bold, italic, strike", () => {
-	assert.equal(styled("use `x` here"), `use ${ESC}7m x ${RESET} here`);
-	assert.equal(styled("[label](https://x.dev)"), `${ESC}4mlabel${RESET}${ESC}2m (https://x.dev)${RESET}`);
-	assert.equal(styled("a **b** c"), `a ${ESC}1mb${RESET} c`);
-	assert.equal(styled("a *i* c"), `a ${ESC}3mi${RESET} c`);
-	assert.equal(styled("a ~~s~~ c"), `a ${ESC}9ms${RESET} c`);
+const cleanups: (() => Promise<void>)[] = [];
+after(async () => {
+	for (const cleanup of cleanups) await cleanup();
 });
 
-test("escapes and HTML tags are neutralised", () => {
-	assert.equal(plain("a \\*not\\* b"), "a *not* b");
-	assert.equal(plain("a <b>bold</b> c"), "a bold c");
-});
+/** Run the viewer against a temp answer file and collect what it draws. */
+async function startViewer(answer: string) {
+	const dir = await mkdtemp(path.join(tmpdir(), "btw-viewer-"));
+	cleanups.push(() => rm(dir, { recursive: true, force: true }));
+	const answerPath = path.join(dir, "answer.md");
+	const themePath = path.join(dir, "theme.json");
+	await writeFile(answerPath, answer, "utf8");
+	await writeFile(themePath, JSON.stringify(themeSpec()), "utf8");
+	const child = spawn("node", [VIEWER, answerPath, themePath], { stdio: ["ignore", "pipe", "pipe"] });
+	let output = "";
+	child.stdout.setEncoding("utf8");
+	child.stdout.on("data", (chunk: string) => {
+		output += chunk;
+	});
+	const errors: string[] = [];
+	child.stderr.setEncoding("utf8");
+	child.stderr.on("data", (chunk: string) => {
+		errors.push(chunk);
+	});
+	cleanups.push(async () => {
+		child.kill("SIGKILL");
+	});
+	return {
+		answerPath,
+		drawn: () => plain(output),
+		errors: () => errors.join(""),
+		/** Wait until the drawn text contains `needle`, or give up. */
+		async until(needle: string, timeoutMs = 8000) {
+			const deadline = Date.now() + timeoutMs;
+			while (Date.now() < deadline) {
+				if (plain(output).includes(needle)) return true;
+				await new Promise((resolve) => setTimeout(resolve, 25));
+			}
+			return false;
+		},
+	};
+}
 
-test("the usage footer is dimmed", () => {
-	assert.equal(styled("input 10 · cache read 500 · output 3"), `${ESC}2minput 10 · cache read 500 · output 3${RESET}`);
-});
+test("the viewer draws the answer as Markdown and keeps a streamed tail", async () => {
+	const viewer = await startViewer("# /btw\n\n> why?\n\nHello");
+	assert.ok(await viewer.until("Hello"), "the answer is drawn");
+	assert.ok(await viewer.until("why?"), "the question is drawn as a quote");
 
-test("the gutter is opt-in", () => {
-	assert.deepEqual(renderFrom("a\nb", 0, false, { color: false }).lines, ["a", "b"]);
-	assert.deepEqual(renderFrom("a\nb", 0, false, { color: false, gutter: true }).lines, ["   1 a", "   2 b"]);
-});
-
-test("resume keeps the fence state and appends without re-rendering", () => {
-	const first = renderFrom("```\ncode\n```\nafter", 0, false, { color: false });
-	assert.deepEqual(first, { lines: ["```", "code", "```", "after"], fenceOpen: false });
-	const resumed = renderFrom("```\ncode\n```\nafter\nmore", first.lines.length, first.fenceOpen, { color: false });
-	assert.deepEqual(resumed.lines, ["more"], "only the new line is rendered");
-});
-
-test("a line's rendering does not depend on later lines", () => {
-	// Setext headings and 4-space indented code are deliberately unsupported
-	// because they would break this property; the incremental viewer relies on it.
-	const single = plain("underlined by the next line");
-	const pair = renderFrom("underlined by the next line\n===", 0, false, { color: false }).lines[0];
-	assert.equal(single, pair, "a paragraph line is not re-styled by a later '==='");
-});
-
-test("color off renders no escape sequences", () => {
-	const out = renderMarkdown("# Title\n\n- item", { color: false });
-	assert.ok(!out.includes("\x1b"), "no ANSI sequences when color is off");
-	assert.equal(out, "Title\n\n• item");
+	await writeFile(viewer.answerPath, "# /btw\n\n> why?\n\nHello world", "utf8");
+	assert.ok(await viewer.until("Hello world"), "the tail of a streamed line is drawn, not dropped");
+	assert.equal(viewer.errors(), "", "the viewer reports nothing on stderr");
 });

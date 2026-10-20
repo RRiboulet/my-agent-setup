@@ -19,7 +19,8 @@ import {
 	requireBtwQuestion,
 	type BtwPaths,
 } from "./launch.ts";
-import { runBtwRequest, sanitizeAnswerText, type BtwOutcome } from "./request.ts";
+import { fenceCloser, runBtwRequest, sanitizeAnswerText, type BtwOutcome } from "./request.ts";
+import { buildThemeSpec } from "./theme.mjs";
 
 const DESCRIPTION = "Open a side-question panel that asks for the question and answers without adding anything to the transcript.";
 /** Every tmux call is bounded: a wedged server must not hang the command handler. */
@@ -61,6 +62,15 @@ export interface BtwDeps {
 	isPidAlive: (pid: number) => boolean;
 	/** Mirror the main loop's image-blocking wrapper when the setting is on. */
 	blockImages: boolean;
+	/**
+	 * The theme pi is rendering with right now.
+	 *
+	 * The panel renders in its own process, and pi's theme lives in pi's
+	 * process: the panel is handed the resolved colors (see `theme.mjs`), so
+	 * it draws the answer in the transcript's colors rather than in a theme of
+	 * its own.
+	 */
+	theme?: ExtensionContext["ui"]["theme"];
 }
 
 /** The slice of pi's command context the launch core reads. */
@@ -375,6 +385,30 @@ async function openBtwPopup(deps: BtwDeps, paths: BtwPaths, sessionId: string): 
 	}
 }
 
+/**
+ * Write the theme the panel renders with.
+ *
+ * The viewer is a separate process, so pi's theme instance does not reach it.
+ * The parent resolves the theme it is using right now into a small spec and
+ * the viewer rebuilds a theme from it, which is what makes the panel's
+ * Markdown - and the syntax highlighting inside it - come out in the
+ * transcript's colors.
+ *
+ * A missing theme is not fatal: the viewer falls back to the terminal's own
+ * palette, so a panel still opens on a session where pi's theme cannot be
+ * read.
+ */
+async function writeThemeSpec(deps: BtwDeps, paths: BtwPaths): Promise<void> {
+	const theme = deps.theme;
+	if (!theme) return;
+	try {
+		await writeFile(paths.theme, JSON.stringify(buildThemeSpec(theme)), { encoding: "utf8", mode: 0o600 });
+	} catch {
+		// The viewer copes without a spec; a panel that cannot show the
+		// transcript's colors is better than no panel.
+	}
+}
+
 /** Start (or restart) the view-only tmux session for an existing answer file. */
 async function startViewer(deps: BtwDeps, paths: BtwPaths, cwd: string): Promise<void> {
 	await runTmux(
@@ -389,7 +423,7 @@ async function startViewer(deps: BtwDeps, paths: BtwPaths, cwd: string): Promise
 	);
 	await runTmux(
 		deps,
-		buildBtwSendKeysArgs({ socket: paths.socket, target: paths.target, command: buildBtwViewerCommand(paths.answer) }),
+		buildBtwSendKeysArgs({ socket: paths.socket, target: paths.target, command: buildBtwViewerCommand(paths.answer, paths.theme) }),
 		"Could not start the BTW viewer",
 	);
 	await runTmux(
@@ -473,6 +507,13 @@ async function appendFooter(deps: BtwDeps, paths: BtwPaths, outcome: BtwOutcome)
 			: outcome.status === "cancelled"
 				? withToolNote(`cancelled${outcome.usage ? ` · ${formatBtwUsage(outcome.usage)}` : ""}`)
 				: withToolNote(`error: ${outcome.message}${outcome.usage ? ` · ${formatBtwUsage(outcome.usage)}` : ""}`);
+	// A code fence the answer left open would swallow the footer into the
+	// code block, so the fence is closed before the footer is appended. The
+	// answer is read back because the outcome does not carry the text of a
+	// cancelled or failed request.
+	const answer = await readFile(paths.answer, "utf8").catch(() => "");
+	const closer = fenceCloser(answer);
+	if (closer) await appendFile(paths.answer, closer, "utf8").catch(() => undefined);
 	await appendFile(paths.answer, `${FOOTER}${sanitizeAnswerText(summary)}\n`, "utf8").catch(() => undefined);
 	if (outcome.status === "error") deps.notify(`BTW: ${outcome.message}`, "error");
 	// A zero cache read is the one failure the footer cannot show (it omits
@@ -529,6 +570,9 @@ export async function launchBtwPanel(deps: BtwDeps, ctx: BtwContext, rawQuestion
 
 	try {
 		await resetPanel(deps, paths);
+		// The theme the panel renders with, resolved here because pi's theme
+		// lives in this process and the viewer does not.
+		await writeThemeSpec(deps, paths);
 		const quoted = sanitizeAnswerText(question).split("\n").join("\n> ");
 		await writeFile(paths.answer, `# /btw\n\n> ${quoted}\n\n`, { encoding: "utf8", mode: 0o600 });
 		await startViewer(deps, paths, ctx.cwd);
@@ -585,6 +629,9 @@ export default function btwExtension(pi: ExtensionAPI): void {
 			agentDir: getAgentDir(),
 			isPidAlive: defaultIsPidAlive,
 			blockImages: settings.images?.blockImages === true,
+			// The theme pi renders with right now; the panel is handed its
+			// resolved colors (see `theme.mjs`).
+			theme: ctx.ui.theme,
 			// The main loop forwards these so the provider maps thinking and
 			// attributes the request identically; see request.ts.
 			thinkingBudgets: settings.thinkingBudgets,
