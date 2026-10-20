@@ -56,7 +56,7 @@ the self-building loop in §4 practical.
 - [5. Risks and decision points](#5-risks-and-decision-points)
 - [6. Phased plan](#6-phased-plan)
 - [Appendix A — Verified API surface](#appendix-a--verified-api-surface)
-- [Appendix B — Open questions to answer before Phase 1](#appendix-b--open-questions-to-answer-before-phase-1)
+- [Appendix B — Decisions taken, and what is still open](#appendix-b--decisions-taken-and-what-is-still-open)
 
 ---
 
@@ -1202,6 +1202,14 @@ is why the plan insists on that seam from day one.
 
 ### R2 — The SQLite facade (Option B) and SQLite under a foreground service
 
+**Status: the facade half is conditional, the storage half is not.** Option A
+is the target and it uses `openNodeSqliteStorage` — Node's own SQLite — so the
+facade question only bites if the plan falls back to Option B, which the
+offline-shell requirement rules out (§1.6). Spike S0.2 is therefore scheduled
+conditionally (§6, Phase 0). The storage-pressure question stays live either
+way: the database lives in app-private storage that Android may delete, and
+`SQLiteDatabase.deleteDatabase` can be called on it.
+
 **Unknown.** Does a hand-written `SqliteDatabase` facade over
 `android.database.sqlite` pass `registerStorageConformance`? And does SQLite
 behave under Android's storage pressure (the OS will delete app caches, and
@@ -1221,10 +1229,13 @@ Sub-questions:
   conditions (not on low-RAM devices, and not across a `files/` path on some
   OEM builds). `node:sqlite` (Option A) has no such caveat.
 
-**Spike S0.2 (2 days).** Implement the facade over `android.database.sqlite`
-and run `registerStorageConformance` from `@earendil-works/pi-durable/testing`
-against it. Then run the storage benchmarks (`STORAGE_WRITE_BENCHMARKS`,
-`STORAGE_READ_BENCHMARKS`) on a low-end device to get real numbers.
+**Spike S0.2 (2 days, conditional).** Implement the facade over
+`android.database.sqlite` and run `registerStorageConformance` from
+`@earendil-works/pi-durable/testing` against it. Then run the storage
+benchmarks (`STORAGE_WRITE_BENCHMARKS`, `STORAGE_READ_BENCHMARKS`) on a
+low-end device to get real numbers. Skip it unless Option B is still live;
+the benchmark half is worth doing anyway, because it measures the Node
+adapter's behaviour on the same device.
 
 **Fallback.** Option A's `openNodeSqliteStorage` (which needs no facade at
 all), or `openNodeJsonlStorage` — which is portable and takes a `FileSystem`
