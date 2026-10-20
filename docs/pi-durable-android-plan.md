@@ -1,10 +1,18 @@
 # A phone-native durable coding agent on Android
 
-**Pi Durable as the kernel, Jetpack Compose as a passive client, a foreground service owning SQLite.**
+**Pi Durable as the kernel, a web client as the passive UI, a foreground service owning SQLite.**
 
 Status: plan, not implementation. Everything below was checked against the
 actual sources listed in [§0](#0-sources-checked); anything I could not verify
 is marked as an assumption or as a spike.
+
+The native Android layer is a Kotlin host shell only: foreground service,
+WebView/browser container, notifications, wake locks, credential access, and
+narrow phone-capability bridges. The transcript, composer, status strip, task
+tree, and subagent views are a web app served by the kernel over loopback and
+hosted in a WebView or the device browser. This is a deliberate choice: a web
+client can be hot-reloaded without reinstalling the APK, which is what makes
+the self-building loop in §4 practical.
 
 ---
 
@@ -30,9 +38,10 @@ is marked as an assumption or as a spike.
   - [2.5 Subagent: the native ownership model](#25-subagent-the-native-ownership-model)
   - [2.6 Hooks worth adding on a phone](#26-hooks-worth-adding-on-a-phone)
   - [2.7 Skills become sections](#27-skills-become-sections)
-- [3. UI/UX plan (native Android)](#3-uiux-plan-native-android)
+- [3. UI/UX plan (web client in a native host)](#3-uiux-plan-web-client-in-a-native-host)
   - [3.1 The invariant](#31-the-invariant)
   - [3.2 Minimum viable screen set](#32-minimum-viable-screen-set)
+  - [WebView/browser specifics](#webviewbrowser-specifics)
   - [3.3 Paged loading](#33-paged-loading)
   - [3.4 Task status indicators](#34-task-status-indicators)
   - [3.5 Subagent visualization](#35-subagent-visualization)
@@ -93,6 +102,13 @@ actually contributes:
 Your six skills therefore have to become sections (plus tools for their
 scripts) — §2.7.
 
+**The UI is a web client, not Compose.** The passive client is a browser-based
+app served over loopback and hosted in a WebView or the device browser.
+Jetpack Compose is optional for tiny native shell screens only. The
+transcript, composer, task tree and subagent views must be web-based so they
+can be hot-reloaded without reinstalling the APK. This is also what makes the
+self-building loop in §4.2 (R2) work.
+
 ### 1.2 The constraint that decides the architecture
 
 Two facts from the source, together, decide almost everything:
@@ -104,19 +120,25 @@ Two facts from the source, together, decide almost everything:
 (QuickJS/WASM), the tools, the extensions — is a JS program.
 
 **(b) The UI must not own the runtime that holds the durable state.** Your
-requirement is "a native Android UI (e.g. Jetpack Compose) that only renders
+requirement is "a native Android host with a web UI that only renders
 committed state". React Native's JS context is bound to the Activity: there is
 no supported way to keep a live JS runtime with open WebSockets and streaming
 model responses inside an Android `Service` process. So the RN shape
 ("one JS runtime, React UI") fights the foreground-service requirement
-directly, while the Compose shape ("Kotlin UI in the Activity, kernel in a
-service") does not.
+directly. The Compose shape ("Kotlin UI in the Activity, kernel in a service")
+gets the process separation right but the wrong UI technology: Compose cannot
+be hot-reloaded at runtime. The WebView shape ("web client in a WebView,
+kernel in a service") gets both the process separation and the hot-reload
+property.
 
-**Therefore: the kernel is a separate process from the UI.** The kernel is a JS
-runtime hosted by the foreground service; the UI is Kotlin/Compose in the
-Activity; they talk over a loopback socket. The UI can be destroyed and
-recreated at will — rotation, low memory, user swipe — without touching the
-kernel, the storage, or the in-flight agent run. That property *is* the
+**Therefore: the kernel is a separate process from the UI, and the UI is a web
+client served by the kernel.** The kernel is a JS runtime hosted by the
+foreground service; the web client runs in a WebView or browser and talks to
+the kernel over loopback HTTP/WS. The Activity/WebView can be destroyed and
+recreated at will — rotation, low memory, user swipe, WebView renderer death —
+without touching the kernel, the storage, or the in-flight agent run. This
+also gives the self-building loop a real hot-reload path: the web UI can be
+rebuilt or HMR-reloaded without an APK reinstall. That property *is* the
 "phone-native durable agent" you are after, and it is exactly the property
 Termux cannot give you (there, the agent dies with the terminal session).
 
@@ -218,9 +240,10 @@ C1 is not a throwaway: build the app so that swapping the env is one line.
 
 ### 1.6 Decision
 
-**Target: Option A** — Kotlin/Compose app, Pi Durable kernel in a foreground
-service on a bundled Node runtime, `NodeExecutionEnv` (decorated with an
-Android bridge for phone capabilities), SQLite owned by the kernel process.
+**Target: Option A** — Kotlin Android host shell, Pi Durable kernel in a
+foreground service on a bundled Node runtime, a web client served over loopback
+and hosted in a WebView, `NodeExecutionEnv` (decorated with an Android bridge
+for phone capabilities), SQLite owned by the kernel process.
 
 **Ship C1 first if the Phase 0 spike on Node-on-Android fails.** The app, the
 IPC, the storage, the UI and every ported extension are identical; only the
@@ -325,24 +348,24 @@ tables in the same process*, not for sharing across processes.
 ### 1.8 Process model: who owns what
 
 ```
-┌───────────────────────────── APP (one uid) ─────────────────────────────┐
+┌───────────────────────────── APP (one uid) ──────────────────────────────┐
 │                                                                          │
-│  Activity (Compose UI)              ForegroundService                    │
-│  ┌────────────────────┐             ┌──────────────────────────────┐    │
-│  │ Kotlin/Compose     │   WS/HTTP  │ supervises: node kernel       │    │
-│  │ holds NO durable   │◄───────────►│  ┌────────────────────────┐  │    │
-│  │ state, only a       │  127.0.0.1 │  │ Pi Durable kernel      │  │    │
-│  │ projection of it    │  + bearer   │  │  Harness               │  │    │
-│  └────────────────────┘             │  │  ├ registry            │  │    │
-│                                      │  │  ├ models (pi-ai)      │  │    │
-│                                      │  │  └ env (ExecutionEnv)  │  │    │
-│                                      │  └───────────┬────────────┘  │    │
-│                                      └──────────────┼───────────────┘    │
-│                                                     │                    │
+│  Activity (WebView host)            ForegroundService                    │
+│  ┌────────────────────┐             ┌──────────────────────────────┐     │
+│  │ Kotlin host shell  │             │ supervises: node kernel      │     │
+│  │ ┌────────────────┐ │◄───────────►│  ┌────────────────────────┐  │     │
+│  │ │ Web client     │ │static assets│  │ Pi Durable kernel      │  │     │
+│  │ │ (HTML/JS)      │ │ + WS/HTTP   │  │  Harness               │  │     │
+│  │ └────────────────┘ │ 127.0.0.1   │  │  ├ registry            │  │     │
+│  │ holds NO durable   │  + bearer   │  │  ├ models (pi-ai)      │  │     │
+│  │ state, only a      │             │  │  └ env (ExecutionEnv)  │  │     │
+│  │ projection of it   │             │  └───────────┬────────────┘  │     │
+│  └────────────────────┘             └──────────────┼───────────────┘     │
+│                                                    │                     │
 │                                     app-private /data/data/<pkg>/        │
 │                                        pi/session.sqlite   (WAL)         │
-│                                        pi/workspace/       (files)        │
-│                                        pi/kernel.log                      │
+│                                        pi/workspace/       (files)       │
+│                                        pi/kernel.log                     │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -363,6 +386,10 @@ Rules, in order of how much they matter:
    the kernel calls `Harness.open(...)` + `harness.resume()`, which picks up
    whatever the last process left unfinished ("Work interrupted by a crash or
    close stays pending. `resume()` starts the task scheduler").
+6. **The WebView is disposable and untrusted.** It holds no durable state and
+   never opens the SQLite file. It may be killed by the WebView renderer
+   process death, rotation, or low memory; reconnect always starts from a
+   fresh snapshot (§3.7).
 
 ### 1.9 The kernel↔UI contract
 
@@ -406,6 +433,11 @@ POST /v1/commands/…     →  submit | abort | compact | reset | resume
                             | retryTask | abortTask | fork | entries | steer
 ```
 
+In development, the WebView may load a Vite/Webpack dev server over `adb
+reverse` or a kernel-proxied dev endpoint so the web UI gets hot-module
+replacement. In production, the kernel serves the built assets from the
+APK/workspace at `GET /`. The event protocol is identical in both modes.
+
 The event vocabulary (v1):
 
 | Event | Payload | Derived from |
@@ -430,7 +462,9 @@ can therefore be destroyed and rebuilt at any moment with zero loss, which is
 the mechanical guarantee behind "the UI never owns progress" (§3.1). A `reset`
 event tells the client to drop everything and take a new snapshot — the kernel
 emits it whenever it detects the client fell more than 100 batches behind
-(the same threshold `watchEvents` uses).
+(the same threshold `watchEvents` uses). The web client must treat a `reset`
+event as "drop all local projection and refetch `/v1/snapshot`." It must never
+reconcile local state against the kernel.
 
 **Transport.** Loopback HTTP + WebSocket on `127.0.0.1`, with a per-launch
 bearer token, exactly as `pocket-pi` does with its `127.0.0.1:9998` bridge.
@@ -594,10 +628,10 @@ The table covers all 13 extensions and 6 skills in this repo.
 | 2 | **review-triage** (`triage_change`) | `triage_change` **tool** + `app.triage.decisions` **doc** | **unsafe** | It runs `git` and pays for a classifier call. The *decision* is written to a doc in the same commit, so the audit trail is durable rather than a transcript artefact. |
 | 3 | **goal** (`get_goal`, `create_goal`, `update_goal`) | three **tools** + `app.goal` **doc** (scope: conversation, `history: "rewindable"`) | `get_goal` **safe**; `create_goal`/`update_goal` **safe if** a stable `goalId` is in the arguments, else **unsafe** | Today's implementation reconstructs state from the active branch on reload. A `defineDoc` with `history: "rewindable"` gives that for free, plus `snapshotAsOf()`. |
 | 4 | **todos** (`todo` with 9 verbs) | one **tool** + `app.todos` **doc family** (one doc per todo, keyed by id) | **safe** for all verbs | `create`/`append`/`update`/`claim` are upserts keyed by a caller-supplied id; `delete` is idempotent; `claim` is a compare-and-set inside one commit (claim-if-unclaimed), so a rerun returns "already claimed" rather than stealing. |
-| 5 | **voice** (`/voice`) | **not an extension** — becomes an input path in the app | n/a | The phone *is* the microphone now. The app records, transcribes, and calls `conversation.submit({type:"input", content})`. The current implementation reaches the phone over ssh from a desktop; that inversion is the entire point of this project. |
-| 6 | **answer** (`/answer`) | `answer_questions` **tool** (model call → structured JSON) + a Compose screen that collects the answers and submits them | **unsafe** | Paid model call. The interactive TUI becomes a Compose sheet; the compiled answers become one follow-up input. |
-| 7 | **continue** (shortcut) | **gone** — a Compose button that submits `"continue"` | n/a | The shortcut was a TUI affordance. |
-| 8 | **session-breakdown** | `session_stats` **tool** + a Compose stats screen | **safe** | It reads `~/.pi/agent/sessions/*.jsonl` today. In Durable the transcript *is* the database: read `harness.usage(context)` and scan entries. Strictly better. |
+| 5 | **voice** (`/voice`) | **not an extension** — becomes an input path in the web client (MediaRecorder or a native bridge) | n/a | The phone *is* the microphone now. The app records, transcribes, and calls `conversation.submit({type:"input", content})`. The current implementation reaches the phone over ssh from a desktop; that inversion is the entire point of this project. |
+| 6 | **answer** (`/answer`) | `answer_questions` **tool** (model call → structured JSON) + a web screen that collects the answers and submits them | **unsafe** | Paid model call. The interactive TUI becomes a web sheet. The compiled answers become one follow-up input. |
+| 7 | **continue** (shortcut) | **gone** — a web button that submits `"continue"` | n/a | The shortcut was a TUI affordance. |
+| 8 | **session-breakdown** | `session_stats` **tool** + a web stats screen | **safe** | It reads `~/.pi/agent/sessions/*.jsonl` today. In Durable the transcript *is* the database: read `harness.usage(context)` and scan entries. Strictly better. |
 | 9 | **btw** (side-question panel) | `btw` **tool** + a **background anchor task** + a child conversation | **safe** | Exactly example 23's pattern (§2.5). "Without adding anything to the transcript" becomes "in a separate conversation", which is stronger. |
 | 10 | **review** (`/review`) | `review_start` **tool** that creates an `app.review` **task** with phases `collect → plan → run` | **unsafe** (spawns git + child conversations) | The *review children* are owned conversations, so they survive process death. |
 | 11 | **repo-explorer** | `repo_explore` **tool** (read-only git + file reads) | **safe** | Read-only subprocesses, no side effects → rerunning is harmless. **Requires a shell-capable env**: under Option B it returns `shell_unavailable`. |
@@ -756,9 +790,10 @@ want them.
 | `beforeTool` guard | `ToolTask` | Block or rewrite dangerous commands on a phone: `rm -rf`, `git push --force`, anything touching paths outside the workspace. `{ block: "…" }` produces a `blocked` error result the model sees. **This is the single most valuable hook for the mobile port**, because the phone is where a stray `rm` is unrecoverable. |
 | `beforeTool` rewriter | `ToolTask` | Rewrite `cwd`-relative paths into the app workspace, so the model cannot address the whole device. |
 | `afterTool` redactor | `ToolTask` | Strip API keys / tokens from tool output before they enter the transcript. **Caveat from the README:** "An `afterTool` hook that redacts a schema tool's `output` must redact its `structuredOutput` too." |
-| `afterTools` | `GenerationTask` | Emit a durable "turn complete" marker into a doc; the Compose status bar can then show "idle, last turn N". |
+| `afterTools` | `GenerationTask` | Emit a durable "turn complete" marker into a doc; the web status bar can then show "idle, last turn N". |
 | `beforeCompact` | `CompactionTask` | Inject a phone-specific compaction instruction ("keep file paths and command names verbatim"). |
 | `beforeRequest` | `GenerationTask` | Inject a device-state section (battery, network, foreground/background) — but note the README's warning: "A section that returns something different every time, such as the current time, defeats that [prompt caching]." Use a `section`, not a per-request hook, and keep it stable. |
+| Phone-capability bridge | ToolTask | The web client cannot directly call every Android API. Expose a narrow native bridge for microphone, file picker, notifications and share intents only, and keep it outside the durable state path. The bridge is not a tool; it is an app-to-app IPC surface for the WebView. |
 
 ### 2.7 Skills become sections
 
@@ -784,7 +819,7 @@ extensions that hard-require Option A or C1**).
 
 ---
 
-## 3. UI/UX plan (native Android)
+## 3. UI/UX plan (web client in a native host)
 
 ### 3.1 The invariant
 
@@ -819,8 +854,9 @@ that a UI can be a passive consumer.
 ### 3.2 Minimum viable screen set
 
 **S1 — Conversation (the transcript).**
-A `LazyColumn` over `EntryRecord`s. Each entry renders by kind: `pi.user`,
-`pi.assistant` (text + thinking + tool calls), `pi.tool-result` (output +
+A virtualized web list over `EntryRecord`s. Each entry renders by kind:
+`pi.user`, `pi.assistant` (text + thinking + tool calls), `pi.tool-result`
+(output +
 `details`), `pi.system`, `pi.reset`, `pi.compaction`, and your custom kinds
 (`defineEntry`). Tool calls render their `details` — which is where the
 subagent's `conversationId` lives, so the subagent row is tappable from the
@@ -894,6 +930,15 @@ Shown when the app reopens and finds work in flight. See §3.6.
 and cost. Cheap to build, and on a phone (metered connections, battery) it
 matters.
 
+### WebView/browser specifics.
+
+The web client must treat reconnect, back-button navigation, and WebView
+renderer death as normal events. It must not use local storage for durable
+state. The only local state allowed is ephemeral UI state (scroll position,
+draft text); draft text should be submitted as a durable input when the user
+sends. The WebView must not receive the SQLite file path or unrestricted shell
+access.
+
 ### 3.3 Paged loading
 
 `Conversation.entries(query, limit, cursor, context)` returns
@@ -904,8 +949,8 @@ The transcript screen pages with a windowed cursor over `entries`, keyed by the
 newest entry id, and appends live entries from the event stream. Two details
 that matter on a phone:
 
-- **The initial load must not be the whole history.** A `LazyColumn` over a
-  `Page` with a "load older" trigger at the top, backed by
+- **The initial load must not be the whole history.** A virtualized web list
+  over a `Page` with a "load older" trigger at the top, backed by
   `entries(query, limit, cursor, context)`.
 - **`viewState()` returns the whole active transcript.** That is fine for a
   transcript of tens of entries and wrong for thousands. The kernel should
@@ -1001,6 +1046,11 @@ entry with an `interrupted` diagnostic and the durable partial output. The
 transcript should show it as an error row, not as a spinner that never
 finishes.
 
+The Recovery sheet is a web screen; Resume posts to `/v1/commands/resume`,
+Retry posts to `/v1/commands/retryTask`, and Discard posts to
+`/v1/commands/abortTask`. The web client never sets a local "stopping" flag;
+it waits for the committed effects.
+
 ### 3.7 UI state rules
 
 - **Reconnect = resnapshot.** On WebSocket reconnect, the client requests a
@@ -1015,6 +1065,9 @@ finishes.
 - **Errors are states, not toasts.** A failed submission settles as
   `unanswered` with a reason (`run_failed`, `stale`, `aborted`); the UI shows
   it in the transcript, not as a transient snackbar.
+- **WebView renderer death = reconnect.** If the WebView renderer process is
+  killed, the web client reconnects and resnapshots exactly as if the Activity
+  had rotated. This is a normal event, not an error state.
 
 ---
 
@@ -1031,7 +1084,7 @@ Two things must be separated, and this is the crux:
 | Layer | Owned by | Lifetime |
 |---|---|---|
 | **The session** (conversation, tasks, in-flight run) | the **durable kernel** | survives Activity death, service restarts, process death |
-| **The app binary** (Compose UI, kernel service, kernel code) | the **build** | replaced by a rebuild |
+| **The app binary** (web client assets, native host shell, kernel code) | the **build** | replaced by a rebuild |
 
 The agent edits layer 2's *source*. The running session in layer 1 is
 unaffected by that edit until the new code is actually loaded — at which point
@@ -1058,25 +1111,26 @@ So there are three distinct reload paths, and they are *not* the same event:
 | Path | Mechanism | What it affects |
 |---|---|---|
 | **R1 — extension reload** | `registry.install(newExtension)` under the same name, in the running kernel | The next phase/request/call uses the new code. **No process restart. No session interruption.** This is the hot path. |
-| **R2 — kernel restart** | `harness.close(ctx)` → process exit → `Harness.open(storage, …)` → `harness.resume()` | The session survives; pending tasks resume; tasks that were `running` re-run their phase. |
-| **R3 — app rebuild** | `gradlew installDebug` (or `assembleDebug` + sideload) | Replaces the APK. The *running kernel* is killed with the app. The session survives via R2, because the transcript and task state are in SQLite. |
+| **R2 — web UI hot reload / rebuild** | Vite/Webpack HMR in dev, or rebuild static assets and reload the WebView in production | UI changes without an APK reinstall. The session is untouched. |
+| **R3 — kernel restart / APK rebuild** | `harness.close(ctx)` → process exit → `Harness.open(...)` → `harness.resume()`, or `gradlew installDebug` for native host shell changes | The session survives via SQLite; pending tasks resume. |
 
 **R1 is the interesting one and it is fully native to Pi Durable.** If the
 kernel can load an extension from a file at runtime — pi-coding-agent does
 this with `jiti` — then the agent can write `workspace/extensions/foo.ts`,
 call a `registry.install()` for it, and the change is live on the *next*
-request, with zero downtime and zero risk to the running turn. The Compose
-app, however, cannot be hot-reloaded without a restart: Android has no
-runtime code loading for the UI. So the loop is:
+request, with zero downtime and zero risk to the running turn. R2 is what the
+web client buys you. Because the UI is served as static assets, the agent can
+edit web/src/..., trigger a Vite HMR update (or a rebuild + WebView reload),
+and see the change without reinstalling the APK. This is the UI analogue of R1
+and is the reason the UI is not Compose. So the loop is:
 
 ```
+agent edits web/src/Screen.tsx
+   → Vite HMR updates the WebView                    ← R2: no APK rebuild
 agent edits workspace/extensions/foo.ts
-   → kernel: registry.install(loadExtension("foo.ts"))     ← R1: instant
-   → agent edits app/src/main/java/.../Screen.kt
-   → kernel: bash("cd workspace/app && ./gradlew installDebug")
-   → Android: replaces the APK; the old kernel dies       ← R3: the session survives via SQLite
-   → user reopens the app; the kernel reopens the same root conversation
-     and resumes the pending work                        ← R2
+   → kernel: registry.install(loadExtension("foo.ts")) ← R1: instant
+agent edits app/src/main/java/.../Service.kt
+   → ./gradlew installDebug                           ← R3: APK rebuild; session survives via SQLite
 ```
 
 ### 4.3 Restarting the worker is a normal event
@@ -1123,13 +1177,16 @@ A parked task shows a Retry button, not a crash dialog.
    and fixes it. (This is why Option B, with no shell, is not a coding agent.)
 5. The agent commits the change (`git_commit` tool, unsafe) and pushes
    (`gh` tool, unsafe).
-6. The agent writes a new extension into `workspace/extensions/` and installs
+6. The agent edits the web UI source (`web/src/…`) and the WebView
+   hot-reloads (R2); no APK rebuild is needed for UI changes.
+7. The agent writes a new extension into `workspace/extensions/` and installs
    it (R1) to change *its own* behaviour mid-session.
 
-**The self-referential part:** the agent can edit the app that hosts it, and
-then the app it is running in is replaced underneath it (R3). The session
-survives because it lives in SQLite, not in the process. The agent comes back
-after the reinstall, mid-task, with its context intact.
+**The self-referential part:** the agent can edit the app that hosts it — the
+web UI via R2, the extensions via R1, and the native host shell via R3 — and
+then the app it is running in is replaced underneath it. The session survives
+because it lives in SQLite, not in the process. The agent comes back after the
+reinstall, mid-task, with its context intact.
 
 **The hard constraint:** the agent must not be able to break the kernel in a
 way that loses the transcript. Two guards:
@@ -1152,7 +1209,7 @@ Concretely, and this is deliberately *not* a UI milestone:
    calls `Harness.open(...)`, `harness.root(ctx)`, and registers **one** tool:
    `echo` (`replay: "safe"`).
 4. The kernel exposes `POST /submit` and `GET /snapshot`.
-5. **No Compose UI yet** — `curl` from `adb shell` is enough.
+5. **No web UI yet** — `curl` from `adb shell` is enough.
 
 **Acceptance criteria for Milestone 0** (this is the whole point of the
 milestone — it proves durability before anything else is built):
@@ -1166,6 +1223,7 @@ milestone — it proves durability before anything else is built):
 | M0.5 | The SQLite file survives `adb shell am force-stop` and a reboot; `sqlite3` on the pulled file shows the entries | pull and inspect |
 | M0.6 | Exactly one kernel process exists at a time; a second launch attempt is refused | assert on the lock |
 | M0.7 | `harness.inspect()` after the kill reports the previously-running task as `pending`, and `harness.resume()` runs it | via the snapshot |
+| M0.8 | The kernel serves a trivial `GET /` page and the WebView loads it over loopback with the bearer token | Load the WebView; check the page renders |
 
 M0.2/M0.3/M0.4 are the three that actually prove the kernel is durable, and
 they are cheap. Everything else in this plan is downstream of them.
@@ -1325,7 +1383,12 @@ because the failure mode is silent corruption.
 6-hour/24h cap on Android 15+; `specialUse` requires a Play justification;
 starting a foreground service from the background is restricted on API 31+;
 exact alarms need `SCHEDULE_EXACT_ALARM` (and `USE_EXACT_ALARM` on API 33+,
-which Play restricts to alarm-clock-like apps).
+which Play restricts to alarm-clock-like apps). The service must also host a
+WebView (or the app must hand off to the device browser) without violating the
+FGS type's contract. If the WebView is inside the service process, treat
+WebView renderer death as a normal event and reconnect from a snapshot; if the
+WebView is in the Activity, the service does not need to know the WebView
+exists.
 
 **Spike S0.5.** Install on API 30, 33, 34 and 35 emulators; start the service
 from each allowed entry point; verify the notification, the type, and that
@@ -1368,7 +1431,9 @@ reconnect and resnapshot; if the UI dies, nothing should happen to the kernel.
 
 **Mitigation.** The reconnect path is "fetch a fresh snapshot" — no
 reconciliation. Every client-visible invariant is therefore "reconstructible
-from a snapshot", which is the same invariant §3.1 already demands.
+from a snapshot", which is the same invariant §3.1 already demands. WebView
+renderer death is also an IPC boundary event: the web client reconnects and
+resnapshots exactly as a rotated Activity would.
 
 ### R10 — The self-build loop can destroy the workspace
 
@@ -1379,6 +1444,20 @@ worse.
 workspace and a deny-list of destructive commands. The Pi state directory is
 outside the workspace. A `pre-commit` hook in the workspace's git repo refuses
 destructive ref operations.
+
+### R11 — Loopback web server and WebView security
+
+**Unknown.** The web client is served over `127.0.0.1` and loaded in a WebView
+(or browser). If the server binds to `0.0.0.0`, if the bearer token leaks, or
+if the WebView is given access to the SQLite file path or unrestricted shell
+access, the durability story is undermined.
+
+**Mitigation.** Bind only to `127.0.0.1`; issue a per-launch bearer token; use
+a `NetworkSecurityConfig` that permits cleartext only for `127.0.0.1`; never
+expose the dev HMR server beyond `adb reverse` unless you intentionally want
+remote access; treat the WebView as untrusted and give it only the event
+protocol and narrow bridge calls. Do not pass the SQLite path or shell access
+to the web client.
 
 ---
 
@@ -1428,27 +1507,30 @@ criteria. The criteria are the point: they are what "done" means.
 
 **Acceptance** = Milestone 0's M0.1–M0.7 (§4.5), all seven.
 
-### Phase 2 — Reactive UI v0
+### Phase 2 — Reactive web UI v0
 
 **Depends on:** Phase 1.
 
 **Deliverables**
 
-- Compose screens S1 (transcript), S2 (composer with steer/follow-up),
-  S3 (status strip).
+- Web client screens S1 (transcript), S2 (composer with steer/follow-up),
+  S3 (status strip), plus static asset serving from the kernel (`GET /`).
 - `GET /v1/snapshot` + `WS /v1/events` with the §1.9 vocabulary.
 - Paged `entries` loading (§3.3).
 
 **Acceptance**
 
-- [ ] Rotating the device, or `adb shell am kill`ing the Activity, leaves the
-      transcript, the run and the pending tools exactly as they were.
+- [ ] Rotating the device, killing the WebView renderer, or `adb shell am kill`ing
+      the Activity leaves the transcript, the run and the pending tools exactly
+      as they were.
 - [ ] A model turn streams into the transcript with no local "thinking"
       animation that is not backed by a committed field.
 - [ ] A steer submitted during a run is visibly applied to the running turn
       (it lands after the current tool round).
 - [ ] The UI can be force-stopped and relaunched mid-turn; the transcript
       continues from the same point.
+- [ ] Editing the web UI source in dev mode hot-reloads the WebView without
+      reinstalling the APK.
 
 ### Phase 3 — Task panel and subagents
 
@@ -1508,8 +1590,10 @@ kernel config), and the skills as sections.
 
 **Acceptance**
 
-- [ ] The agent, running inside the app, adds a Compose screen and the screen
-      appears after a rebuild, with the session intact across the reinstall.
+- [ ] The agent, running inside the app, edits the web UI source and the WebView
+      hot-reloads (R2); no APK rebuild is needed for UI changes.
+- [ ] The agent edits the native host shell and `gradlew installDebug` replaces
+      the APK; the session survives via SQLite and `resume()` (R3).
 - [ ] The agent writes a new extension file, installs it, and the next request
       uses the new code **without a kernel restart**.
 - [ ] A running tool call completes under the code it started with, even
@@ -1663,3 +1747,9 @@ export interface ExecutionEnv extends FileSystem, Shell {}
    says no; a backup rule says yes. SQLite + WAL + backup is a bad combination
    (a restored WAL against a restored main DB can be inconsistent), so this
    needs a deliberate answer, not a default.
+6. **Which phone capabilities need a native bridge?** Microphone, file picker,
+   share intents, notifications, background location? Keep the bridge narrow
+   and outside the durable state path.
+7. **Dev HMR transport:** `adb reverse` to a host Vite server, or a
+   kernel-proxied dev endpoint? Production always serves built assets from the
+   kernel at `GET /`.
