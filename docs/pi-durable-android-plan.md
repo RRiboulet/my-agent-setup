@@ -547,7 +547,11 @@ view (§3.6) attaches a **second subscription** to the same kernel —
 `harness.subscribeCommits` listener and fans the folded events out to every
 connection; each connection keeps only what its scope covers — entries by
 `EntryRecord.conversationId`, conversation-scoped docs by their
-`conversationId`, and every global document. What a scoped snapshot carries:
+`conversationId`, and every global document. The fan-out is **enqueue-only**:
+the listener enqueues onto each connection's own queue and returns, and a
+separate pump writes to that connection's socket. A slow client therefore
+cannot stall the commit line — it can only fill its own queue and lose its
+own events. What a scoped snapshot carries:
 
 - the scoped conversation's record and its **active entry range**;
 - a **child index** — for every conversation it owns, the id, the creator edge
@@ -587,7 +591,7 @@ doc becomes too large, and then add an index doc updated in the same commit.
 | `entry` | `EntryRecord` (append only; carries its `conversationId`) | `entry` changes |
 | `doc` | `{ kind, key?, value, ops?, conversationId? }` | `document.create` / `change` / `retire`. `conversationId` is present for conversation-scoped docs (`pi.live`, `pi.inbox`, `app.*`), so a scoped subscription can route it; a document with no scope is global and goes to every subscription. |
 | `taskgraph` | the live `TaskGraph` (small) | a full-state message sent after a publication that touched tasks; it carries the last publication `seq` for correlation but is **applied unconditionally**, never dropped on an older seq. It reflects committed state at fetch time and is never used to infer progress |
-| `submission` | `SubmissionRecord` | submission changes |
+| `submission` | `SubmissionRecord` (carries its `conversationId`) | submission changes; routed by `conversationId`, like `entry` and conversation-scoped `doc`s |
 | `snapshot` on overflow | the scope's full projection again | when the kernel's bounded queue overflows |
 
 No separate `run`/`usage` events: `pi.live` and `pi.usage` arrive as `doc`
@@ -616,10 +620,12 @@ endpoint, so a child view is the same path with a different scope.
 "load older" pages behind the oldest snapshot entry, and past-head entries
 render only below the head marker.
 
-**Backpressure.** The queue is bounded. When it overflows, drop it and send a
-fresh `snapshot`; never `await` the socket in the commit listener. The client
-keeps the last applied `seq` and ignores older envelopes; a `doc` event carries
-its publication `seq`, so a stale doc does not overwrite a newer snapshot value.
+**Backpressure.** Each connection's queue is bounded, **per connection** — a
+slow child view must not force a resnapshot of the root. When one overflows,
+drop that connection's queue and send that connection a fresh `snapshot`;
+never `await` the socket in the commit listener. The client keeps the last
+applied `seq` and ignores older envelopes; a `doc` event carries its
+publication `seq`, so a stale doc does not overwrite a newer snapshot value.
 `taskgraph` is the one exception: it is full-state, not seq-ordered, so it is
 applied unconditionally (see the event table) and never dropped on an older
 `seq`.
@@ -963,8 +969,8 @@ parent is idle only once the child is, and an owning task created with
 
 What the UI needs from it is the child's conversation id, which the tool
 reports through `api.details({ conversationId: child })`. That is how the
-subagent view (§3.6) opens a second view over the same commit stream, filtered
-to the child — no tmux
+subagent view (§3.2's S5, §3.6) opens a second view over the same commit
+stream, filtered to the child — no tmux
 target, no attach command, no pane scraping.
 
 ### 2.6 Hooks worth adding on a phone
@@ -1239,10 +1245,13 @@ that matter on a phone:
 - **The snapshot is the active transcript of its scope.** v1 serves it whole;
   do not also promise a windowed snapshot. If it grows too large, add a v2
   windowed snapshot later.
-- **Paging goes behind the snapshot.** "Load older" uses
-  `entries({ maxEntryId: oldestLoaded, order: "descending" }, limit, cursor)`;
-  past-head entries render only below the head marker. The snapshot already
-  contains the active window, so the first page must not re-append it.
+- **Paging goes behind the snapshot, and it is scoped.** "Load older" uses
+  `entries({ maxEntryId: oldestLoaded, order: "descending" }, limit, cursor)`
+  on the scope's conversation handle — over the wire that is
+  `GET /v1/entries?conversation=<id>&before=<id>&limit=N` (§1.9), so the
+  conversation is never implicit. Past-head entries render only below the head
+  marker. The snapshot already contains the active window, so the first page
+  must not re-append it.
 
 ### 3.5 Task status indicators
 
@@ -1993,10 +2002,10 @@ spikes. Budget for that before promising Phase 1 dates.
 - [ ] S0.8 names the runtime, the env, the IPC transport and the security
       boundary, and §1.6's `env` factory seam is fixed.
 - [ ] S0.9 passes: a snapshot taken during a commit burst, a head write, a
-      queue overflow, and a stale-doc event all converge on the same state; and
-      a second scope (a child conversation) receives its own snapshot and its
-      own events, while the root's snapshot stays free of the child's
-      transcript.
+      queue overflow, and a stale-doc event all converge on the same state;
+      and a second scope (a child conversation) receives its own snapshot and
+      its own events, with neither scope's snapshot carrying the other
+      conversation's transcript and each bounded by its own active window.
 
 ### Phase 1 — Durable kernel, no UI
 
@@ -2117,21 +2126,29 @@ belongs to Phase 2, where the web client exists.
 - **4b — owned-child extensions** (after Phase 3): btw, review, and the subagent
   tool with the anchor/reporter pattern.
 
-**Acceptance**
+**Acceptance** (items marked **4a** close with 4a; **4b** items close with 4b)
 
-- [ ] Every ported tool declares an explicit `replay` policy, and the table in
-      §2.4 matches the implementation.
-- [ ] The `interrupted` path is exercised on-device: a `replay:"unsafe"` tool
-      killed mid-flight yields an `interrupted` result in the transcript, and a
-      `replay:"safe"` tool reruns.
-- [ ] A `replay:"safe"` tool killed after its `execute` checkpoint and rerun
-      produces its durable effect **exactly once**.
-- [ ] Todos and goals live in singleton docs, not files; a process kill
+- [ ] **4a + 4b** Every ported tool declares an explicit `replay` policy, and
+      the table in §2.4 matches the implementation.
+- [ ] **4a + 4b** The `interrupted` path is exercised on-device: a
+      `replay:"unsafe"` tool killed mid-flight yields an `interrupted` result in
+      the transcript, and a `replay:"safe"` tool reruns.
+- [ ] **4a + 4b** A `replay:"safe"` tool killed after its `execute` checkpoint
+      and rerun produces its durable effect **exactly once**.
+- [ ] **4a** Todos and goals live in singleton docs, not files; a process kill
       preserves them.
-- [ ] `triage_change`'s decision is in a durable doc and is visible in the
-      transcript or a docs read, not the task panel (the task panel renders the
-      task graph, and a doc is not a task).
-- [ ] Every skill's body is reachable as a section and its scripts as tools.
+- [ ] **4a** `triage_change`'s decision is in a durable doc and is visible in
+      the transcript or a docs read, not the task panel (the task panel renders
+      the task graph, and a doc is not a task).
+- [ ] **4a** Every skill's body is reachable as a section and its scripts as
+      tools.
+- [ ] **4b** The owned-child pattern is idempotent: a rerun of the
+      `replay: "safe"` subagent tool finds the existing child
+      (`scanConversations({ ownerTaskId })`) and does not spawn a second one,
+      and a rerun of a `btw` tool finds its existing child and submission
+      (`requestId`) instead of opening a second panel.
+- [ ] **4b** A `btw` panel and a `review` child are owned conversations: they
+      survive kernel process death, and aborting the parent aborts them.
 
 ### Phase 5 — Self-building loop
 
