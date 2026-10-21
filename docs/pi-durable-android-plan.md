@@ -1,5 +1,12 @@
 # A phone-native durable coding agent on Android
 
+> **This copy is not canonical.** The plan now lives with the app it
+> describes, in **https://github.com/RRiboulet/pi-termux-mobile** —
+> `docs/pi-durable-android-plan.md` — together with `docs/plan-revision.md`,
+> which says what changed and why. This branch is kept for the review
+> history, as the plan's own provenance note says. Work on the copy in the
+> app repository.
+
 **Pi Durable as the kernel, a web client as the passive UI, a foreground service owning SQLite.**
 
 Status: plan, not implementation. Everything below was checked against the
