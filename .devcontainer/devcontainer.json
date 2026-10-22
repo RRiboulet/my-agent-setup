@@ -3,7 +3,7 @@
     "dockerComposeFile": "docker-compose.yml",
     "service": "devcontainer",
     "workspaceFolder": "/workspace",
-    "postCreateCommand": "bash /workspace/.devcontainer/postCreate.sh && bash /workspace/.devcontainer/restore-post-rebuild.sh",
+    "postCreateCommand": "bash /workspace/.devcontainer/postCreate.sh && bash /workspace/.devcontainer/restore-post-rebuild.sh && bash /workspace/.devcontainer/android-sdk.sh",
     "customizations": {
         "vscode": {
             "extensions": [
