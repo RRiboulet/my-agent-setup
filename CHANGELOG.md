@@ -133,6 +133,53 @@ Maintenance:
   now excludes `.git`, `node_modules`, `.pi`, the logs and the Android
   leftovers, and the inert file is gone.
 
+- **The devcontainer can build the pi-termux-mobile Android app across a
+  rebuild.** The app lives in its own repository, but it is built from this
+  container, and the toolchain it needs sat entirely in the container layer: a
+  JDK (AGP 8.7.3 needs 17), `unzip` for the SDK's cmdline-tools, and the SDK
+  itself. A rebuild therefore dropped all of it, and the next build failed
+  before it started.
+
+  The JDK and `unzip` now come from `.devcontainer/Dockerfile`, and the build
+  gate there is `javac -version` rather than `java -version`, because a JRE-only
+  image passes a `java` check and still cannot compile. The SDK stays out of
+  the image — it is ~1.5 GB, and only one project needs it — and
+  `.devcontainer/android-sdk.sh` installs it into `~/.pi/android-sdk` on the
+  volume, where a rebuild does not discard it. Because that path is stable, the
+  app's `android/local.properties` keeps working.
+
+  Three details in that script are the ones an earlier draft got wrong, each
+  caught in review:
+
+  - The install is guarded by a sentinel written only once `adb` and
+    `build-tools/35.0.0/aapt2` both exist, not by a directory probe.
+    `postCreateCommand` can be killed mid-install, and an interrupted
+    `sdkmanager` leaves an empty `platforms/android-35` behind — which `-d`
+    reports as installed, forever, with no repair path.
+  - The cached `cmdline-tools.zip` is checked with `unzip -tq` before reuse, and
+    downloads land on `.part` and are renamed only after they validate. An
+    interrupted `curl` leaves a non-empty partial file, and a non-empty test
+    then skips the download and fails to unpack on every later run.
+  - `sdkmanager` output goes to `~/.pi/cache/sdkmanager.log` instead of
+    `/dev/null`, so a failed install says why.
+
+  `ANDROID_HOME` and the PATH entries are **image content**, appended to
+  `~/.zshrc` and `~/.bashrc` in the Dockerfile next to the existing aliases
+  line. The first draft exported them from `restore-post-rebuild.sh` instead,
+  by rewriting both rc files at container creation — and wrote the temp file's
+  *path* rather than its contents, so every rebuild replaced the user's shell
+  configuration with one line naming a file it had already deleted. That is the
+  class of bug a restore script should not be able to have: image-baked lines
+  cannot be lost, and they reach VS Code's non-login terminals, tmux panes and
+  login shells alike. The SDK installer is its own script, called last from
+  `postCreateCommand`, so a slow first download cannot delay the `/voice`
+  verification that `restore-post-rebuild.sh` exists to perform.
+
+  `AGENTS.md` now records where the app's working checkout lives
+  (`~/.pi/workspaces/pi-termux-mobile`, on the volume) and that it must not be
+  built from a checkout of this repository, which is how the APKs ended up in
+  this repo's working tree.
+
 ## v1.8.0 — 2026-10-19
 
 Added:
