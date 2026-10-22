@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.9.0 — 2026-10-22
+
 Fixed:
 
 - **The `/btw` panel renders Markdown the way the transcript does, and no
