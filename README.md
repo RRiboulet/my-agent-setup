@@ -86,7 +86,7 @@ inactive. Installed packages are loaded regardless of project trust.
 | `.pi/extensions/repo-explorer/` | `/explore`: browse a branch's file tree with a directory-by-directory fuzzy filter and print a file into the transcript, or quick-open `/explore <path> [branch]` / `<branch>:<path>` to skip the menus. Read-only git resolved against the session cwd; the process runner, branch menu, browser, transcript renderer, display sanitizer and argument grammar are separate internals. **Ours** |
 | `.pi/extensions/review-triage/` | `triage_change` tool and `/triage`: measure a finished change from its git diff, ask a calibrated decision model (Jev, via `ctx.modelRegistry.classify()`) whether it needs an adversarial and/or complexity review, how hard each should push and which allowed model should run it, and return a depth-runged, fallback-chained plan for the `subagent` tool. Policy (judge model, candidates, thresholds, chains) lives in `~/.pi/agent/review-triage.json`; the verdict is appended to the session for audit. **Ours** |
 | `.pi/extensions/voice/` | `/voice`: dictation with the phone as microphone — start `termux-microphone-record` over ssh, fetch the m4a, transcribe it through an OpenAI-compatible `/audio/transcriptions` endpoint, and paste the transcript at the cursor (or submit it with `autoSubmit`). `/voice cancel` aborts; `alt+r` (and `ctrl+shift+r` on a Kitty terminal) toggle the same cycle. **Ours** |
-| `.pi/extensions/btw/` | `/btw`: opens a panel and asks for the question (submit it empty to reopen a running panel), then answers in-process from the exact conversation prefix, so the provider prompt cache is reused; the streaming answer is shown by a Markdown-rendering viewer in its own tmux popup. Neither the question nor the answer enters the transcript. Escape returns to pi while the answer keeps running; a new question replaces the panel. **Ours** |
+| `.pi/extensions/btw/` | `/btw`: opens a panel and asks for the question (submit it empty to reopen a running panel), then answers in-process from the exact conversation prefix, so the provider prompt cache is reused; the streaming answer is shown in its own tmux popup, rendered by pi-tui's own `Markdown` component in pi's own theme — the panel draws the answer with the renderer and the colours the transcript draws an assistant message with. Neither the question nor the answer enters the transcript. Escape returns to pi while the answer keeps running; a new question replaces the panel. **Ours** |
 | `.pi/extensions/opencode-go-provider/` | An `opencode-go` provider for `/model`: fast GLM, Kimi, MiniMax, Qwen, DeepSeek and Grok models via opencode.ai's Go API, with the correct wire protocol per model (Anthropic, OpenAI Completions, Responses) and a per-account usage-budget widget below the editor. **Vendored** from [monotykamary/pi-opencode-go-provider](https://github.com/monotykamary/pi-opencode-go-provider) (MIT), byte-identical to upstream — see below |
 | `.pi/skills/native-web-search/` | Script + docs for the above. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/native-web-search/`, with local provider patches: OpenRouter support, an `opencode-go` default through the Go API's Anthropic-compatible endpoint, unknown-provider rejection, and a test seam (`__test__` + direct-invocation guard). The two must travel together |
 | `.pi/skills/commit/` | Conventional Commits subjects, and the branch-per-change rule from `AGENTS.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/commit/SKILL.md`, with two local adaptations |
@@ -106,10 +106,21 @@ question after a gap pays full price once (and warms the cache for the next
 main turn). Escape closes the
 popup and never reaches the viewer; the answer keeps streaming into its file.
 Copying text out needs nested tmux copy-mode (`C-b C-b`, because the outer
-client keeps the prefix). The viewer renders the answer as Markdown (a bundled
-renderer), so it scrolls natively — copy mode (`C-b [`), and the mouse wheel
-where the tmux config sets `set -g mouse on` (the devcontainer's does) — like the
-subagent attach views; the next `/btw` restarts the viewer on the same answer. On a session with an active `/goal` the
+client keeps the prefix). The panel renders the answer with pi-tui's own
+`Markdown` component — the one the TUI renders an assistant message with — so
+tables, nested lists and syntax-highlighted code blocks come out as the
+transcript draws them, and the panel's colours are the transcript's colours
+(the parent hands the viewer its resolved theme and the paths of pi's own
+packages; `.pi/extensions/btw/theme.mjs` and
+`.pi/extensions/btw/entry-points.mjs`). Two things the transcript does are
+*not* done in the panel: its Markdown transforms (a mermaid diagram is shown
+as its source) and its scrollback behaviour (the panel's history is the
+answer's history, except after a resize, which redraws the panel and clears
+it, as the transcript does). The pane still scrolls natively — copy mode
+(`C-b [`), and the mouse wheel where the tmux config sets `set -g mouse on`
+(the devcontainer's does) — like the subagent attach views, because the
+viewer only draws and never takes the keyboard. The next `/btw` restarts the
+viewer on the same answer. On a session with an active `/goal` the
 main request's forced system prompt differs, so the panel may re-bill the
 context and show goal notes; `.pi/extensions/btw/request.ts` documents that
 limitation.

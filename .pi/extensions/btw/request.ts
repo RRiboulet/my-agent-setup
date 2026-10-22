@@ -46,7 +46,7 @@ import {
 	type ModelRegistry,
 	type SessionEntry,
 } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences } from "@earendil-works/pi-tui";
+import { Marked, stripTerminalSequences } from "@earendil-works/pi-tui";
 
 /**
  * `off` means "no reasoning" to every provider; pi's agent loop drops it before
@@ -103,19 +103,28 @@ function addUsage(left: Usage | undefined, right: Usage | undefined): Usage | un
 /**
  * The per-session headers pi's own request path adds.
  *
- * The SDK merges `mergeProviderAttributionHeaders` before dispatch, which a raw
+ * Since pi 1.4.0 the attribution headers are not pi-coding-agent's to merge:
+ * they live in pi-ai's client identity (`pi-ai/dist/utils/identity.js`),
+ * where `getAttributionHeaders` builds them from `PI_ATTRIBUTION`, and
+ * pi-coding-agent only decides whether the attribution is on at all
+ * (`dist/core/client-identity.js` → `getClientIdentity`, gated on install
+ * telemetry). The SDK attaches that identity per request, which a raw
  * `modelRegistry.streamSimple` call (the only request API an extension has)
- * skips. Two groups are reproduced here, both from pi's unexported
- * `dist/core/provider-attribution.js`:
+ * skips, so the headers are reproduced here:
  *
  * - Session routing: on opencode providers `x-opencode-session` is mandatory
  *   (a request without it is refused with `MissingSessionID`) and is what pins
  *   the prompt-cache lineage, so the MAIN session id is sent — precisely what
- *   lets this request reuse the main conversation's cache.
- * - Telemetry attribution: the per-provider headers OpenRouter / NVIDIA NIM /
- *   Cloudflare read to bucket the request. The main loop sends them whenever
- *   install telemetry is on; dropping them would make side requests attribute
- *   to no app.
+ *   lets this request reuse the main conversation's cache. pi-ai now derives
+ *   this header from the request's own `sessionId`, which this request
+ *   already carries; it is set here too, so the routing does not depend on
+ *   that staying true.
+ * - Telemetry attribution: the per-provider headers OpenRouter and NVIDIA NIM
+ *   read to bucket the request. The main loop sends them whenever install
+ *   telemetry is on; dropping them would make side requests attribute to no
+ *   app. Cloudflare's own header is gone: pi 1.4.0 gives every provider its
+ *   detailed `User-Agent` instead of the old `pi-coding-agent` one, so there
+ *   is nothing left to mirror there.
  */
 export function providerSessionHeaders(
 	model: Pick<Model<Api>, "provider" | "baseUrl">,
@@ -138,6 +147,11 @@ function sessionRoutingHeaders(model: Pick<Model<Api>, "provider" | "baseUrl">, 
 	if (model.provider !== "opencode" && model.provider !== "opencode-go" && host !== "opencode.ai") {
 		return {};
 	}
+	// `x-opencode-client` is sent whatever the telemetry setting is: pi 1.4.0
+	// takes it from the client identity (so it is attribution-gated), but the
+	// main loop's opencode-go backstop fills it in when it is missing, which
+	// makes it unconditional there. Unconditional here is what keeps the two
+	// requests byte-identical.
 	return { "x-opencode-session": sessionId, "x-opencode-client": "pi" };
 }
 
@@ -158,14 +172,6 @@ function attributionHeaders(model: Pick<Model<Api>, "provider" | "baseUrl">, ena
 	}
 	if (model.provider === "nvidia" || host === "integrate.api.nvidia.com") {
 		return { "X-BILLING-INVOKE-ORIGIN": "Pi" };
-	}
-	if (
-		model.provider === "cloudflare-workers-ai" ||
-		model.provider === "cloudflare-ai-gateway" ||
-		host === "api.cloudflare.com" ||
-		host === "gateway.ai.cloudflare.com"
-	) {
-		return { "User-Agent": "pi-coding-agent" };
 	}
 	return {};
 }
@@ -261,6 +267,47 @@ export function buildBtwContext(
 	options: { blockImages?: boolean } = {},
 ): Context {
 	return buildBtwRequestParts(entries, leafId, question, now, options).context;
+}
+
+/**
+ * The fence the text leaves open, if any.
+ *
+ * A code fence that is never closed runs to the end of the document, so
+ * anything appended after the answer - the usage footer - would be drawn
+ * inside the code block instead of after it.
+ *
+ * The state comes from the parser that draws the answer, not from a line
+ * scanner: a fence inside a list item is closed by the end of that item, and
+ * a scanner that missed that would close a fence that is not open - and the
+ * fence it appended would itself open a new block, which is worse than the
+ * problem it was meant to solve.
+ */
+export function openCodeFence(text: string): string | undefined {
+	const tokens = new Marked().lexer(text);
+	const last = tokens[tokens.length - 1];
+	// Only a code block can leave a fence open, and only at the top level: a
+	// fence inside a list item is closed by the end of the item.
+	if (last?.type !== "code") return undefined;
+	// The block's source, without the newline the document may end with. A
+	// closing fence is a line of its own, and it is not the line that opened
+	// the fence - so a fence with nothing after it is still open, and a
+	// closing fence followed by a newline is still closed.
+	const lines = last.raw.replace(/\n+$/, "").split("\n");
+	const marker = /^ {0,3}(`{3,}|~{3,})/.exec(lines[0])?.[1];
+	if (marker === undefined) return undefined;
+	if (lines.length < 2) return marker;
+	const closing = lines[lines.length - 1].trim();
+	const closed = closing.length >= marker.length && [...closing].every((char) => char === marker[0]);
+	return closed ? undefined : marker;
+}
+
+/**
+ * The text that closes a fence the answer left open, or the empty string when
+ * the answer closed its fences.
+ */
+export function fenceCloser(text: string): string {
+	const open = openCodeFence(text);
+	return open === undefined ? "" : `\n${open}`;
 }
 
 /**

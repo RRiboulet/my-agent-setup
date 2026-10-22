@@ -106,6 +106,16 @@ export function btwAnswerPath(agentDir: string, sessionId: string): string {
 	return path.join(btwRunDir(agentDir, sessionId), "answer.md");
 }
 
+/**
+ * The panel's setup: the theme it draws with, and where to find pi.
+ *
+ * The viewer runs in its own process, where a bare specifier does not resolve
+ * (see `entry-points.mjs`), so the parent hands over paths it can import.
+ */
+export function btwPanelPath(agentDir: string, sessionId: string): string {
+	return path.join(btwRunDir(agentDir, sessionId), "panel.json");
+}
+
 /** The main pi process that owns the panel; a dead pid makes the panel reapable. */
 export function btwOwnerPidPath(agentDir: string, sessionId: string): string {
 	return path.join(btwRunDir(agentDir, sessionId), "owner.pid");
@@ -118,6 +128,7 @@ export interface BtwPaths {
 	target: string;
 	runDir: string;
 	answer: string;
+	panel: string;
 	ownerPid: string;
 }
 
@@ -129,6 +140,7 @@ export function buildBtwPaths(agentDir: string, sessionId: string): BtwPaths {
 		target: btwTarget(sessionId),
 		runDir: btwRunDir(agentDir, sessionId),
 		answer: btwAnswerPath(agentDir, sessionId),
+		panel: btwPanelPath(agentDir, sessionId),
 		ownerPid: btwOwnerPidPath(agentDir, sessionId),
 	};
 }
@@ -199,7 +211,11 @@ export function buildBtwSubmitArgs(input: { socket: string; target: string }): s
  * mouse wheel) the same way the subagent attach views do; a pager like `less +F`
  * swallows the tmux prefix and pins the viewport, which is the scroll bug. `exec`
  * replaces the shell so `#{pane_dead}` flips if the renderer itself dies.
+ *
+ * The panel's setup travels with the answer path because the viewer runs in
+ * its own process: pi's theme lives in pi's process, so the parent resolves
+ * it and hands it over (see `theme.mjs`).
  */
-export function buildBtwViewerCommand(answerPath: string): string {
-	return `exec node ${shellQuote(VIEWER_SCRIPT)} ${shellQuote(answerPath)}`;
+export function buildBtwViewerCommand(answerPath: string, panelPath: string): string {
+	return `exec node ${shellQuote(VIEWER_SCRIPT)} ${shellQuote(answerPath)} ${shellQuote(panelPath)}`;
 }

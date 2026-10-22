@@ -25,6 +25,8 @@ import {
 	BTW_INSTRUCTION,
 	buildBtwContext,
 	buildBtwRequestParts,
+	fenceCloser,
+	openCodeFence,
 	providerSessionHeaders,
 	reasoningOption,
 	runBtwRequest,
@@ -239,6 +241,46 @@ test("terminal sequences, C0/C1 controls and bidi overrides are stripped", () =>
 	assert.equal(sanitizeAnswerText("\u202Eevil\u202C"), "evil", "bidi overrides are not display text");
 	assert.equal(sanitizeAnswerText("line\nnext\tend"), "line\nnext\tend");
 	assert.equal(sanitizeAnswerText("x\x1b[3"), "x[3", "a split sequence loses its ESC and becomes inert text");
+});
+
+test("a code fence the answer left open is found, so the footer can close it", () => {
+	assert.equal(openCodeFence("```ts\nconst x = 1;\n```"), undefined, "a closed fence leaves nothing open");
+	assert.equal(openCodeFence("```ts\nconst x = 1;"), "```", "an unclosed backtick fence is reported");
+	assert.equal(openCodeFence("~~~ts\nconst x = 1;"), "~~~", "an unclosed tilde fence is reported");
+	assert.equal(openCodeFence("```ts\nconst x = 1;\n```\ntext"), undefined, "a fence closed earlier does not count");
+	assert.equal(openCodeFence("````\n```\nstill open"), "````", "a shorter fence does not close a longer one");
+	assert.equal(openCodeFence("`inline` and ```fence```"), undefined, "an inline span is not a fence");
+	assert.equal(fenceCloser("```ts\nconst x = 1;"), "\n```", "the closer repeats the opening marker");
+	assert.equal(fenceCloser("done"), "", "a closed answer needs no closer");
+});
+
+test("a fence inside a list item is not an open fence", () => {
+	// The parser closes it at the end of the list item, so the footer that
+	// follows the list is outside the code block. A scanner that missed the
+	// implicit close would append a fence of its own - and that fence would
+	// open a new block, which is worse than the problem it solved.
+	const answer = "- Step one:\n  ```bash\n  npm install\n";
+	assert.equal(openCodeFence(answer), undefined, "the item ends the fence");
+	assert.equal(fenceCloser(answer), "", "so no closer is appended");
+});
+
+test("a closed fence at the end of the answer is closed", () => {
+	// The block's source ends with a newline, and the closing fence is the
+	// line before it. Reading the *last* line as the fence reported a closed
+	// fence as open, and the closer that was then appended opened a block of
+	// its own - with the footer inside it.
+	const answer = "Here is the code:\n\n```ts\nconst x = 1;\n```\n";
+	assert.equal(openCodeFence(answer), undefined, "the fence is closed");
+	assert.equal(fenceCloser(answer), "", "so no closer is appended");
+});
+
+test("a bare fence marker at the end of the answer is still open", () => {
+	// A truncated answer, or one whose stream was cut: the model opened a
+	// block and never closed it. The marker is the line that opened it, so
+	// it cannot also be the line that closed it.
+	const answer = "Here is the code:\n\n```\n";
+	assert.equal(openCodeFence(answer), "```", "the fence is open");
+	assert.equal(fenceCloser(answer), "\n```", "so it is closed before the footer");
 });
 
 test("text deltas stream through and the final usage is returned", async () => {
@@ -598,9 +640,10 @@ test("attribution headers mirror the main loop when install telemetry is on", ()
 	assert.deepEqual(providerSessionHeaders({ provider: "nvidia", baseUrl: "https://integrate.api.nvidia.com/v1" }, SESSION_ID, on), {
 		"X-BILLING-INVOKE-ORIGIN": "Pi",
 	});
-	assert.deepEqual(providerSessionHeaders({ provider: "cloudflare-ai-gateway", baseUrl: "https://gateway.ai.cloudflare.com" }, SESSION_ID, on), {
-		"User-Agent": "pi-coding-agent",
-	});
+	// Cloudflare lost its own header in pi 1.4.0: pi now sends every provider
+	// its detailed `User-Agent` from the client identity, so there is nothing
+	// left for the side request to mirror.
+	assert.deepEqual(providerSessionHeaders({ provider: "cloudflare-ai-gateway", baseUrl: "https://gateway.ai.cloudflare.com" }, SESSION_ID, on), {});
 	assert.deepEqual(providerSessionHeaders({ provider: "anthropic", baseUrl: "https://api.anthropic.com" }, SESSION_ID, on), {});
 });
 
@@ -653,22 +696,44 @@ test("the resolved thinking level wins over the projection's default", async () 
 });
 
 // The request core mirrors two pi internals that are NOT exported — the image-
-// block placeholder (`sdk.js`) and the attribution-header set
-// (`provider-attribution.js`). Both were compared line by line and are correct
-// today; if pi ever changes them, the side request silently diverges from the
-// main request and the cache misses. This guard fails on either side drifting.
+// block placeholder (`sdk.js`) and the attribution-header set. Since pi 1.4.0
+// the attribution lives in pi-ai's client identity
+// (`pi-ai/dist/utils/identity.js`), and pi-coding-agent only decides whether
+// it is on at all (`dist/core/client-identity.js`). Both were compared line by
+// line and are correct today; if pi ever changes them, the side request
+// silently diverges from the main request and the cache misses. This guard
+// fails on either side drifting.
 test("the mirrored pi internals have not drifted", () => {
 	const REPO_ROOT = path.resolve(new URL("../../../..", import.meta.url).pathname);
 	const requestSrc = readFileSync(path.join(REPO_ROOT, ".pi/extensions/btw/request.ts"), "utf8");
 	const piDist = path.join(REPO_ROOT, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "core");
 	const sdk = readFileSync(path.join(piDist, "sdk.js"), "utf8");
-	const attribution = readFileSync(path.join(piDist, "provider-attribution.js"), "utf8");
+	const clientIdentity = readFileSync(path.join(piDist, "client-identity.js"), "utf8");
+	const piAiIdentity = readFileSync(
+		path.join(REPO_ROOT, "node_modules", "@earendil-works", "pi-ai", "dist", "utils", "identity.js"),
+		"utf8",
+	);
 
 	assert.ok(requestSrc.includes('"Image reading is disabled."'), "btw mirrors the placeholder");
 	assert.ok(sdk.includes("Image reading is disabled"), "pi's sdk still uses the same placeholder");
 
-	for (const literal of ["https://pi.dev", "cli-agent", "X-BILLING-INVOKE-ORIGIN", "pi-coding-agent"]) {
-		assert.ok(attribution.includes(literal), `pi's provider-attribution still sends ${literal}`);
+	for (const literal of ["https://pi.dev", "cli-agent", "X-BILLING-INVOKE-ORIGIN", "X-OpenRouter-Title"]) {
+		assert.ok(piAiIdentity.includes(literal), `pi-ai's client identity still sends ${literal}`);
 		assert.ok(requestSrc.includes(literal), `btw still mirrors ${literal}`);
 	}
+
+	// The attribution is still gated on install telemetry, on pi's side and on
+	// the side request's.
+	assert.ok(clientIdentity.includes("isInstallTelemetryEnabled"), "pi still gates the attribution on install telemetry");
+	assert.ok(requestSrc.includes("installTelemetryEnabled"), "btw still gates the attribution on install telemetry");
+
+	// The opencode routing still carries the session id, which is what pins the
+	// prompt-cache lineage.
+	assert.ok(piAiIdentity.includes("x-opencode-session"), "pi-ai still routes opencode by session id");
+	assert.ok(requestSrc.includes("x-opencode-session"), "btw still routes opencode by session id");
+
+	// The retired User-Agent must not come back: pi 1.4.0 gives every provider
+	// its detailed one, and a hand-set header here would override it and
+	// diverge from the main request.
+	assert.ok(!requestSrc.includes('"User-Agent"'), "btw must not set a User-Agent of its own");
 });

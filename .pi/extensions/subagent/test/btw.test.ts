@@ -24,6 +24,7 @@ import {
 	type Usage,
 } from "@earendil-works/pi-ai";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import { rgbColor } from "@earendil-works/pi-tui";
 
 import { __test__, formatBtwUsage, launchBtwPanel, reattachBtwPanel, type BtwContext } from "../../btw/index.ts";
 import { buildBtwPaths, buildBtwViewerCommand } from "../../btw/launch.ts";
@@ -277,7 +278,7 @@ test("a question resets the panel, starts the viewer and streams the answer", as
 					`-S ${paths.socket} kill-server`,
 					`-S ${paths.socket} new-session -d -s ${paths.session} -n btw -c /work/project`,
 					`-S ${paths.socket} set-window-option -t ${paths.session} remain-on-exit on`,
-					`-S ${paths.socket} send-keys -t ${paths.target} -l -- ${buildBtwViewerCommand(paths.answer)}`,
+					`-S ${paths.socket} send-keys -t ${paths.target} -l -- ${buildBtwViewerCommand(paths.answer, paths.panel)}`,
 					`-S ${paths.socket} send-keys -t ${paths.target} Enter`,
 				],
 			);
@@ -296,6 +297,60 @@ test("a question resets the panel, starts the viewer and streams the answer", as
 				"the prefix is the converted projection",
 			);
 			assert.ok(JSON.stringify(sent.context.messages.at(-1)).includes("why?"));
+		});
+	});
+});
+
+test("an answer that leaves a code fence open gets it closed before the footer", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withNoTmux(async () => {
+			const { deps } = fakeDeps(agentDir);
+			const registry = streamingRegistry("```ts\nconst x = 1;", { ...ZERO_USAGE, input: 5, output: 2, totalTokens: 7 });
+			const launch = await launchBtwPanel(deps, fakeContext(registry.modelRegistry), "why?");
+			assert.ok(launch, "the panel starts");
+			await launch.completion;
+
+			const paths = buildBtwPaths(agentDir, SID);
+			assert.equal(
+				readFileSync(paths.answer, "utf8"),
+				"# /btw\n\n> why?\n\n```ts\nconst x = 1;\n```\n\n---\ninput 5 · output 2\n",
+				"the fence is closed, so the footer is not drawn inside the code block",
+			);
+		});
+	});
+});
+
+test("the panel writes the theme it renders with, so the panel's colors are the transcript's", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withNoTmux(async () => {
+			const { deps } = fakeDeps(agentDir);
+			deps.theme = {
+				name: "kokomi",
+				colors: { mdHeading: rgbColor(0x7e, 0xc8, 0xc8), text: rgbColor(0xe8, 0xec, 0xf5) },
+				getColorMode: () => "256color",
+				// The escapes the theme opens its tokens with: the panel reads
+				// the colour back out of them, so a palette index stays an
+				// index and a token left to the terminal stays there.
+				getFgAnsi: (token: string) => (token === "mdHeading" ? "\x1b[38;5;116m" : "\x1b[39m"),
+				getBgAnsi: () => "\x1b[49m",
+			} as never;
+			const registry = streamingRegistry("Hello");
+			const launch = await launchBtwPanel(deps, fakeContext(registry.modelRegistry), "why?");
+			assert.ok(launch, "the panel starts");
+			await launch.completion;
+
+			const paths = buildBtwPaths(agentDir, SID);
+			const spec = JSON.parse(readFileSync(paths.panel, "utf8"));
+			assert.equal(spec.theme.name, "kokomi");
+			assert.equal(spec.theme.mode, "256color");
+			assert.equal(
+				spec.theme.colors.mdHeading,
+				116,
+				"the transcript's color travels to the panel, as the index it is drawn with",
+			);
+			assert.equal(spec.theme.colors.text, "", "a token the theme leaves at the terminal's default stays there");
+			assert.ok(spec.entryPoints.tui, "the panel is told where pi-tui is, since it cannot resolve it itself");
+			assert.ok(spec.entryPoints.theme, "the panel is told where pi's theme module is");
 		});
 	});
 });

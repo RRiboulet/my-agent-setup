@@ -4,6 +4,184 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.9.0 — 2026-10-22
+
+Fixed:
+
+- **The `/btw` panel renders Markdown the way the transcript does, and no
+  longer loses the end of a line the model was still writing.** The panel drew
+  the answer with its own line-oriented renderer — a second and much worse
+  Markdown implementation than the one pi already ships: no tables, no nested
+  lists, no syntax-highlighted code, and its own idea of what a heading or a
+  quote looks like. It was also append-only, and an append-only renderer
+  cannot redraw the line it is still writing, so the tail of every streamed
+  line was dropped: the panel showed the answer as far as its last newline and
+  never showed the rest, which made a streaming answer look truncated at every
+  line break.
+
+  The panel now draws through pi-tui's own `Markdown` component — the one the
+  TUI renders an assistant message with — inside pi-tui's `TuiMainScreen`.
+  That buys the whole Markdown surface the transcript has (tables with borders
+  and aligned cells, nested lists, fenced code with syntax highlighting,
+  quotes, links) and it makes the panel a peer of the transcript instead of a
+  second renderer that drifts from it. The screen is redrawn differentially,
+  so a line the model is still writing is corrected in place rather than
+  dropped, and a table that grows a wider column re-lays itself out where it
+  stands. The panel still only draws and never takes the keyboard, so tmux
+  keeps the keys and the pane scrolls natively, as before.
+
+  The panel's colors are the transcript's too. pi's theme lives in pi's
+  process and the panel draws in its own, so the parent resolves the theme it
+  is using right now and hands the viewer its colors
+  (`.pi/extensions/btw/theme.mjs`); the viewer rebuilds a theme from them and
+  renders through the same `getMarkdownTheme()` the TUI uses. Loading the
+  theme by name inside the viewer would have been enough for a named theme,
+  but not for the generated `system` theme, which is built from the colors the
+  terminal reported — and only pi asked the terminal. What travels is the
+  theme's own color *values* rather than the colors they resolve to: a
+  palette index stays an index, so a terminal with a palette of its own draws
+  the panel's accents in its own magenta, and a token the theme leaves to the
+  terminal stays the terminal's default. A faint token is the case that
+  decides it — the theme's resolved color map mixes a faint token toward the
+  background, so a color taken from there would be faded twice.
+
+  The parent also hands the viewer *where pi is*. The viewer is a separate
+  process, and a bare `@earendil-works/pi-tui` does not resolve there: pi
+  maps that name onto its own installation for the extensions it loads, but a
+  spawned `node` gets no such mapping, and an installed package has no
+  `node_modules` of its own — pi installs the host-provided packages for the
+  extension, not for a process the extension spawns. A viewer that imported
+  them by name would have died on every panel in an installed package, which
+  is how the package is meant to be used. So the parent resolves the entry
+  points where the mapping applies
+  (`.pi/extensions/btw/entry-points.mjs`) and the viewer imports them by
+  path, falling back to the bare name where there is no path to find.
+
+  Two things the transcript does are not done in the panel: its Markdown
+  transforms, so a mermaid diagram is shown as its source, and its scrollback
+  behaviour, so a resize redraws the panel and clears it. The panel's history
+  is the answer's history otherwise.
+
+  A code fence the answer leaves open is also closed before the usage footer
+  is appended. An unclosed fence runs to the end of the document, so the
+  footer used to be drawn inside the code block. The fence state comes from
+  the parser that draws the answer, not from a line scanner: a fence inside a
+  list item is closed by the end of that item, and a scanner that missed the
+  implicit close would append a fence of its own — and that fence would open
+  a new block, which is worse than the problem it was meant to solve.
+
+  The panel's colours survive a truecolor terminal, which is where the
+  hand-off first broke: the channels in a truecolor escape are decimal, and
+  a hex colour is two hex digits per channel. Reading one as the other
+  produced a nine-digit colour that pi's own parser refused, so the panel
+  quietly fell back to the terminal's palette — on every terminal that
+  reports truecolor, which is most of them. The colour that travels is read
+  out of the escape the theme opens the token with, so a palette index stays
+  an index, a token the theme leaves to the terminal stays the terminal's
+  default, and a faint token is faded once rather than twice.
+
+- **The `/btw` side request still sends the headers the main loop sends, now
+  that pi 1.4.0 moved them.** The devcontainer installs the latest
+  `@earendil-works/pi-coding-agent` on every rebuild, and 1.4.0 moved the
+  provider attribution headers out of pi-coding-agent's own
+  `provider-attribution.js` and into pi-ai's client identity: they are built
+  there from `PI_ATTRIBUTION` and applied below the request's own headers, and
+  pi-coding-agent now only decides whether the attribution is on at all
+  (`dist/core/client-identity.js`, still gated on install telemetry).
+  Cloudflare's special case went with the move — pi 1.4.0 gives every
+  provider its detailed `User-Agent` instead of the old `pi-coding-agent`
+  one.
+
+  The `/btw` request mirrors those headers by hand, because a raw
+  `modelRegistry.streamSimple` call skips the client identity the SDK attaches
+  per request. Left alone, the mirror would have kept sending the retired
+  `pi-coding-agent` User-Agent to Cloudflare, which the main loop no longer
+  sends: two requests that differ in a header the provider can see. The
+  OpenRouter and NVIDIA NIM headers are unchanged and still reproduced, under
+  the same telemetry gate.
+
+  The guard that exists to catch exactly this kind of drift read pi's removed
+  file, so it failed on the file's absence rather than on the divergence it
+  was written to catch. It now reads the attribution where it lives —
+  pi-ai's `dist/utils/identity.js` — together with the client identity that
+  gates it, and it fails if `/btw` starts pinning a `User-Agent` of its own
+  again.
+
+Maintenance:
+
+- **The pi-termux-mobile app's build leftovers no longer accumulate in this
+  repository.** The Termux-based Pi Durable app has its own repository
+  (https://github.com/RRiboulet/pi-termux-mobile), but it was built from a
+  checkout of *this* one, so the build dropped its output where it ran: three
+  Android APKs (272 MB) in `.artifacts/`, an `install-pi.bat` for the Windows
+  side, and a `CONTAINER-RECOVERY.md` note about the container that ran out of
+  process slots. `local.properties` — the file the Android SDK writes to point
+  at the local SDK — was the only one git could see, and it was not ignored,
+  so it sat in `git status` as an untracked file on every branch, one
+  `git add -A` away from being committed with a machine-specific path in it.
+
+  `.gitignore` now ignores `local.properties`, `.artifacts/` and `*.apk`, and
+  the leftovers themselves have moved out of the checkout to the
+  pi-agent-config volume (`~/.pi/pi-termux-mobile/`), where they survive a
+  container rebuild without sitting in the repository.
+
+- **The Docker build context is lean again, and the file that says so is the
+  one docker actually reads.** `docker-compose.yml` builds with the repository
+  root as its context (`context: ..`, `dockerfile: .devcontainer/Dockerfile`),
+  and docker reads `<context>/.dockerignore` — so the
+  `.devcontainer/.dockerignore` that sat next to the Dockerfile had never
+  applied to any build. The whole checkout was therefore sent to the daemon on
+  every rebuild, the 272 MB of APKs above included. A root `.dockerignore`
+  now excludes `.git`, `node_modules`, `.pi`, the logs and the Android
+  leftovers, and the inert file is gone.
+
+- **The devcontainer can build the pi-termux-mobile Android app across a
+  rebuild.** The app lives in its own repository, but it is built from this
+  container, and the toolchain it needs sat entirely in the container layer: a
+  JDK (AGP 8.7.3 needs 17), `unzip` for the SDK's cmdline-tools, and the SDK
+  itself. A rebuild therefore dropped all of it, and the next build failed
+  before it started.
+
+  The JDK and `unzip` now come from `.devcontainer/Dockerfile`, and the build
+  gate there is `javac -version` rather than `java -version`, because a JRE-only
+  image passes a `java` check and still cannot compile. The SDK stays out of
+  the image — it is ~1.5 GB, and only one project needs it — and
+  `.devcontainer/android-sdk.sh` installs it into `~/.pi/android-sdk` on the
+  volume, where a rebuild does not discard it. Because that path is stable, the
+  app's `android/local.properties` keeps working.
+
+  Three details in that script are the ones an earlier draft got wrong, each
+  caught in review:
+
+  - The install is guarded by a sentinel written only once `adb` and
+    `build-tools/35.0.0/aapt2` both exist, not by a directory probe.
+    `postCreateCommand` can be killed mid-install, and an interrupted
+    `sdkmanager` leaves an empty `platforms/android-35` behind — which `-d`
+    reports as installed, forever, with no repair path.
+  - The cached `cmdline-tools.zip` is checked with `unzip -tq` before reuse, and
+    downloads land on `.part` and are renamed only after they validate. An
+    interrupted `curl` leaves a non-empty partial file, and a non-empty test
+    then skips the download and fails to unpack on every later run.
+  - `sdkmanager` output goes to `~/.pi/cache/sdkmanager.log` instead of
+    `/dev/null`, so a failed install says why.
+
+  `ANDROID_HOME` and the PATH entries are **image content**, appended to
+  `~/.zshrc` and `~/.bashrc` in the Dockerfile next to the existing aliases
+  line. The first draft exported them from `restore-post-rebuild.sh` instead,
+  by rewriting both rc files at container creation — and wrote the temp file's
+  *path* rather than its contents, so every rebuild replaced the user's shell
+  configuration with one line naming a file it had already deleted. That is the
+  class of bug a restore script should not be able to have: image-baked lines
+  cannot be lost, and they reach VS Code's non-login terminals, tmux panes and
+  login shells alike. The SDK installer is its own script, called last from
+  `postCreateCommand`, so a slow first download cannot delay the `/voice`
+  verification that `restore-post-rebuild.sh` exists to perform.
+
+  `AGENTS.md` now records where the app's working checkout lives
+  (`~/.pi/workspaces/pi-termux-mobile`, on the volume) and that it must not be
+  built from a checkout of this repository, which is how the APKs ended up in
+  this repo's working tree.
+
 ## v1.8.0 — 2026-10-19
 
 Added:

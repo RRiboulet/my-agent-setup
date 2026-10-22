@@ -182,6 +182,43 @@ You can consult pi for reference — the installed `@earendil-works/pi-coding-ag
 docs at `/usr/lib/node_modules/@earendil-works/pi-coding-agent/docs/` are the
 source of truth for the API this code targets — but do not modify pi itself.
 
+## The pi-termux-mobile app
+
+The Termux-based app (`app.pidabl`) has its own repository —
+https://github.com/RRiboulet/pi-termux-mobile — and its own plan and review
+docs. It is **built from this container**, but not from this checkout: building
+it here is what scattered 272 MB of APKs into `git status` in the first place.
+
+Its working checkout is
+
+```
+~/.pi/workspaces/pi-termux-mobile
+```
+
+which is on the `pi-agent-config` volume, so it survives a rebuild and is not
+in anyone's `git status`. Do not clone a second copy somewhere else; if that
+directory is missing, re-clone there. Sessions started in that directory keep
+their history in the usual agent dir, so `cd` there and work normally.
+
+The toolchain is in the image and on the volume, not in the app checkout:
+openjdk-17 is installed by `.devcontainer/Dockerfile`, and
+`.devcontainer/android-sdk.sh` installs the Android SDK into
+`~/.pi/android-sdk` on first use — so a rebuild does not cost a re-download, and
+`android/local.properties` written against that path keeps working.
+`ANDROID_HOME` and its PATH entries are baked into the image's shell rc files;
+no postCreate step writes to an rc file, which is the bug an earlier version of
+this setup shipped. Building needs `runtime/node_modules` (`npm ci` in
+`runtime/`) and `assets/rootfs.bin` (from `node scripts/package-rootfs.ts`,
+which downloads Termux packages and is pinned by `scripts/termux-index.lock`).
+If the builder stops because the Termux index moved, that is the guard doing
+its job: review the diff it prints and take it with `--update-index-lock`
+deliberately, rather than deleting the lock.
+
+`~/.pi/pi-termux-mobile/` holds the app material that must not sit in a
+checkout — old APKs, a bundle of the deleted `pi-android` repository, and
+`INVENTORY.md` saying where each item came from. It is a store, not a
+workspace; do not delete from it without reading that file.
+
 ## Subagent tools
 
 The five management tools — `subagent_status`, `subagent_cancel`,
