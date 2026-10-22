@@ -6,3 +6,12 @@ node_modules/
 .pi/settings.json
 .pi/npm/
 lab/
+# Android build leftovers from the pi-termux-mobile app build. That app has its
+# own repository (https://github.com/RRiboulet/pi-termux-mobile); this
+# repository only ever hosts its build in a checkout, and none of it belongs
+# in git. `local.properties` is the worst of them: it is generated on every
+# machine, it points at a local SDK path, and an unignored one shows up as an
+# untracked file in `git status` forever.
+local.properties
+.artifacts/
+*.apk

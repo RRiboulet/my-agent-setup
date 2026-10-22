@@ -105,6 +105,34 @@ Fixed:
   gates it, and it fails if `/btw` starts pinning a `User-Agent` of its own
   again.
 
+Maintenance:
+
+- **The pi-termux-mobile app's build leftovers no longer accumulate in this
+  repository.** The Termux-based Pi Durable app has its own repository
+  (https://github.com/RRiboulet/pi-termux-mobile), but it was built from a
+  checkout of *this* one, so the build dropped its output where it ran: three
+  Android APKs (272 MB) in `.artifacts/`, an `install-pi.bat` for the Windows
+  side, and a `CONTAINER-RECOVERY.md` note about the container that ran out of
+  process slots. `local.properties` — the file the Android SDK writes to point
+  at the local SDK — was the only one git could see, and it was not ignored,
+  so it sat in `git status` as an untracked file on every branch, one
+  `git add -A` away from being committed with a machine-specific path in it.
+
+  `.gitignore` now ignores `local.properties`, `.artifacts/` and `*.apk`, and
+  the leftovers themselves have moved out of the checkout to the
+  pi-agent-config volume (`~/.pi/pi-termux-mobile/`), where they survive a
+  container rebuild without sitting in the repository.
+
+- **The Docker build context is lean again, and the file that says so is the
+  one docker actually reads.** `docker-compose.yml` builds with the repository
+  root as its context (`context: ..`, `dockerfile: .devcontainer/Dockerfile`),
+  and docker reads `<context>/.dockerignore` — so the
+  `.devcontainer/.dockerignore` that sat next to the Dockerfile had never
+  applied to any build. The whole checkout was therefore sent to the daemon on
+  every rebuild, the 272 MB of APKs above included. A root `.dockerignore`
+  now excludes `.git`, `node_modules`, `.pi`, the logs and the Android
+  leftovers, and the inert file is gone.
+
 ## v1.8.0 — 2026-10-19
 
 Added:
