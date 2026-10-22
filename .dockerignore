@@ -1,0 +1,20 @@
+# Keep the Docker build context lean and predictable.
+#
+# This file is at the repository root on purpose. docker-compose.yml builds
+# with the REPOSITORY ROOT as the context (`context: ..`,
+# `dockerfile: .devcontainer/Dockerfile`), and docker reads
+# `<context>/.dockerignore` — so a `.dockerignore` next to the Dockerfile was
+# never read by this build. Without a root file, every rebuild ships the whole
+# checkout to the daemon, including node_modules and whatever the Android app
+# build has left in the tree.
+.git
+.gitignore
+node_modules
+.pi
+*.log
+
+# Android build leftovers (the pi-termux-mobile app build; see .gitignore).
+# The APKs are ~100 MB each, so they dwarf everything else in the context.
+.artifacts
+local.properties
+*.apk
