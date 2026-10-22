@@ -78,6 +78,33 @@ Fixed:
   an index, a token the theme leaves to the terminal stays the terminal's
   default, and a faint token is faded once rather than twice.
 
+- **The `/btw` side request still sends the headers the main loop sends, now
+  that pi 1.4.0 moved them.** The devcontainer installs the latest
+  `@earendil-works/pi-coding-agent` on every rebuild, and 1.4.0 moved the
+  provider attribution headers out of pi-coding-agent's own
+  `provider-attribution.js` and into pi-ai's client identity: they are built
+  there from `PI_ATTRIBUTION` and applied below the request's own headers, and
+  pi-coding-agent now only decides whether the attribution is on at all
+  (`dist/core/client-identity.js`, still gated on install telemetry).
+  Cloudflare's special case went with the move — pi 1.4.0 gives every
+  provider its detailed `User-Agent` instead of the old `pi-coding-agent`
+  one.
+
+  The `/btw` request mirrors those headers by hand, because a raw
+  `modelRegistry.streamSimple` call skips the client identity the SDK attaches
+  per request. Left alone, the mirror would have kept sending the retired
+  `pi-coding-agent` User-Agent to Cloudflare, which the main loop no longer
+  sends: two requests that differ in a header the provider can see. The
+  OpenRouter and NVIDIA NIM headers are unchanged and still reproduced, under
+  the same telemetry gate.
+
+  The guard that exists to catch exactly this kind of drift read pi's removed
+  file, so it failed on the file's absence rather than on the divergence it
+  was written to catch. It now reads the attribution where it lives —
+  pi-ai's `dist/utils/identity.js` — together with the client identity that
+  gates it, and it fails if `/btw` starts pinning a `User-Agent` of its own
+  again.
+
 ## v1.8.0 — 2026-10-19
 
 Added:

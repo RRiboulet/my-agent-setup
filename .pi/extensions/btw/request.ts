@@ -103,19 +103,28 @@ function addUsage(left: Usage | undefined, right: Usage | undefined): Usage | un
 /**
  * The per-session headers pi's own request path adds.
  *
- * The SDK merges `mergeProviderAttributionHeaders` before dispatch, which a raw
+ * Since pi 1.4.0 the attribution headers are not pi-coding-agent's to merge:
+ * they live in pi-ai's client identity (`pi-ai/dist/utils/identity.js`),
+ * where `getAttributionHeaders` builds them from `PI_ATTRIBUTION`, and
+ * pi-coding-agent only decides whether the attribution is on at all
+ * (`dist/core/client-identity.js` → `getClientIdentity`, gated on install
+ * telemetry). The SDK attaches that identity per request, which a raw
  * `modelRegistry.streamSimple` call (the only request API an extension has)
- * skips. Two groups are reproduced here, both from pi's unexported
- * `dist/core/provider-attribution.js`:
+ * skips, so the headers are reproduced here:
  *
  * - Session routing: on opencode providers `x-opencode-session` is mandatory
  *   (a request without it is refused with `MissingSessionID`) and is what pins
  *   the prompt-cache lineage, so the MAIN session id is sent — precisely what
- *   lets this request reuse the main conversation's cache.
- * - Telemetry attribution: the per-provider headers OpenRouter / NVIDIA NIM /
- *   Cloudflare read to bucket the request. The main loop sends them whenever
- *   install telemetry is on; dropping them would make side requests attribute
- *   to no app.
+ *   lets this request reuse the main conversation's cache. pi-ai now derives
+ *   this header from the request's own `sessionId`, which this request
+ *   already carries; it is set here too, so the routing does not depend on
+ *   that staying true.
+ * - Telemetry attribution: the per-provider headers OpenRouter and NVIDIA NIM
+ *   read to bucket the request. The main loop sends them whenever install
+ *   telemetry is on; dropping them would make side requests attribute to no
+ *   app. Cloudflare's own header is gone: pi 1.4.0 gives every provider its
+ *   detailed `User-Agent` instead of the old `pi-coding-agent` one, so there
+ *   is nothing left to mirror there.
  */
 export function providerSessionHeaders(
 	model: Pick<Model<Api>, "provider" | "baseUrl">,
@@ -138,6 +147,11 @@ function sessionRoutingHeaders(model: Pick<Model<Api>, "provider" | "baseUrl">, 
 	if (model.provider !== "opencode" && model.provider !== "opencode-go" && host !== "opencode.ai") {
 		return {};
 	}
+	// `x-opencode-client` is sent whatever the telemetry setting is: pi 1.4.0
+	// takes it from the client identity (so it is attribution-gated), but the
+	// main loop's opencode-go backstop fills it in when it is missing, which
+	// makes it unconditional there. Unconditional here is what keeps the two
+	// requests byte-identical.
 	return { "x-opencode-session": sessionId, "x-opencode-client": "pi" };
 }
 
@@ -158,14 +172,6 @@ function attributionHeaders(model: Pick<Model<Api>, "provider" | "baseUrl">, ena
 	}
 	if (model.provider === "nvidia" || host === "integrate.api.nvidia.com") {
 		return { "X-BILLING-INVOKE-ORIGIN": "Pi" };
-	}
-	if (
-		model.provider === "cloudflare-workers-ai" ||
-		model.provider === "cloudflare-ai-gateway" ||
-		host === "api.cloudflare.com" ||
-		host === "gateway.ai.cloudflare.com"
-	) {
-		return { "User-Agent": "pi-coding-agent" };
 	}
 	return {};
 }

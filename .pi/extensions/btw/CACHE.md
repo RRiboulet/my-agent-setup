@@ -25,8 +25,8 @@ This document states the exact invariants that make the `/btw` side request reus
    `x-opencode-session` (and `x-opencode-client: "pi"`) are sent with the **main** session id.  
    - opencode-go refuses requests without this header (`MissingSessionID`).  
    - It is also what pins the prompt-cache lineage to the main conversation.  
-   - A raw `modelRegistry.streamSimple` call skips pi's `mergeProviderAttributionHeaders` transform, so `runBtwRequest` adds the headers itself.
-   - The telemetry attribution headers (OpenRouter / NVIDIA NIM / Cloudflare) the main loop merges are reproduced too, gated on install telemetry the same way pi's `isInstallTelemetryEnabled` does (`PI_TELEMETRY` wins, then the settings flag).
+   - A raw `modelRegistry.streamSimple` call skips the SDK's per-request client identity, so `runBtwRequest` adds the headers itself. Since pi 1.4.0 that identity lives in pi-ai (`pi-ai/dist/utils/identity.js`), and pi-coding-agent only decides whether the attribution is on at all (`dist/core/client-identity.js`). pi-ai derives `x-opencode-session` from the request's own `sessionId` — which this request already carries — so the header is set here as well, and the routing does not depend on that staying true.  
+   - The telemetry attribution headers (OpenRouter / NVIDIA NIM) the main loop sends are reproduced too, gated on install telemetry the same way pi's `isInstallTelemetryEnabled` does (`PI_TELEMETRY` wins, then the settings flag). Cloudflare has no header of its own any more: pi 1.4.0 gives every provider its detailed `User-Agent` from the identity instead of the old `pi-coding-agent` one, so there is nothing left to mirror.
 
 4. **Thinking level mirrored correctly**  
    The session's thinking level is forwarded as `reasoning`.  

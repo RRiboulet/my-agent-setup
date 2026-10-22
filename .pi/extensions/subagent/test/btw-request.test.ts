@@ -640,9 +640,10 @@ test("attribution headers mirror the main loop when install telemetry is on", ()
 	assert.deepEqual(providerSessionHeaders({ provider: "nvidia", baseUrl: "https://integrate.api.nvidia.com/v1" }, SESSION_ID, on), {
 		"X-BILLING-INVOKE-ORIGIN": "Pi",
 	});
-	assert.deepEqual(providerSessionHeaders({ provider: "cloudflare-ai-gateway", baseUrl: "https://gateway.ai.cloudflare.com" }, SESSION_ID, on), {
-		"User-Agent": "pi-coding-agent",
-	});
+	// Cloudflare lost its own header in pi 1.4.0: pi now sends every provider
+	// its detailed `User-Agent` from the client identity, so there is nothing
+	// left for the side request to mirror.
+	assert.deepEqual(providerSessionHeaders({ provider: "cloudflare-ai-gateway", baseUrl: "https://gateway.ai.cloudflare.com" }, SESSION_ID, on), {});
 	assert.deepEqual(providerSessionHeaders({ provider: "anthropic", baseUrl: "https://api.anthropic.com" }, SESSION_ID, on), {});
 });
 
@@ -695,22 +696,44 @@ test("the resolved thinking level wins over the projection's default", async () 
 });
 
 // The request core mirrors two pi internals that are NOT exported — the image-
-// block placeholder (`sdk.js`) and the attribution-header set
-// (`provider-attribution.js`). Both were compared line by line and are correct
-// today; if pi ever changes them, the side request silently diverges from the
-// main request and the cache misses. This guard fails on either side drifting.
+// block placeholder (`sdk.js`) and the attribution-header set. Since pi 1.4.0
+// the attribution lives in pi-ai's client identity
+// (`pi-ai/dist/utils/identity.js`), and pi-coding-agent only decides whether
+// it is on at all (`dist/core/client-identity.js`). Both were compared line by
+// line and are correct today; if pi ever changes them, the side request
+// silently diverges from the main request and the cache misses. This guard
+// fails on either side drifting.
 test("the mirrored pi internals have not drifted", () => {
 	const REPO_ROOT = path.resolve(new URL("../../../..", import.meta.url).pathname);
 	const requestSrc = readFileSync(path.join(REPO_ROOT, ".pi/extensions/btw/request.ts"), "utf8");
 	const piDist = path.join(REPO_ROOT, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "core");
 	const sdk = readFileSync(path.join(piDist, "sdk.js"), "utf8");
-	const attribution = readFileSync(path.join(piDist, "provider-attribution.js"), "utf8");
+	const clientIdentity = readFileSync(path.join(piDist, "client-identity.js"), "utf8");
+	const piAiIdentity = readFileSync(
+		path.join(REPO_ROOT, "node_modules", "@earendil-works", "pi-ai", "dist", "utils", "identity.js"),
+		"utf8",
+	);
 
 	assert.ok(requestSrc.includes('"Image reading is disabled."'), "btw mirrors the placeholder");
 	assert.ok(sdk.includes("Image reading is disabled"), "pi's sdk still uses the same placeholder");
 
-	for (const literal of ["https://pi.dev", "cli-agent", "X-BILLING-INVOKE-ORIGIN", "pi-coding-agent"]) {
-		assert.ok(attribution.includes(literal), `pi's provider-attribution still sends ${literal}`);
+	for (const literal of ["https://pi.dev", "cli-agent", "X-BILLING-INVOKE-ORIGIN", "X-OpenRouter-Title"]) {
+		assert.ok(piAiIdentity.includes(literal), `pi-ai's client identity still sends ${literal}`);
 		assert.ok(requestSrc.includes(literal), `btw still mirrors ${literal}`);
 	}
+
+	// The attribution is still gated on install telemetry, on pi's side and on
+	// the side request's.
+	assert.ok(clientIdentity.includes("isInstallTelemetryEnabled"), "pi still gates the attribution on install telemetry");
+	assert.ok(requestSrc.includes("installTelemetryEnabled"), "btw still gates the attribution on install telemetry");
+
+	// The opencode routing still carries the session id, which is what pins the
+	// prompt-cache lineage.
+	assert.ok(piAiIdentity.includes("x-opencode-session"), "pi-ai still routes opencode by session id");
+	assert.ok(requestSrc.includes("x-opencode-session"), "btw still routes opencode by session id");
+
+	// The retired User-Agent must not come back: pi 1.4.0 gives every provider
+	// its detailed one, and a hand-set header here would override it and
+	// diverge from the main request.
+	assert.ok(!requestSrc.includes('"User-Agent"'), "btw must not set a User-Agent of its own");
 });
