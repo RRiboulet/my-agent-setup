@@ -116,6 +116,13 @@ export interface RepoGit {
 	listBranches(): Promise<BranchList>;
 	listFiles(branch: string): Promise<string[]>;
 	readFile(branch: string, path: string): Promise<FileRead>;
+	/**
+	 * Paths that differ between `branch` and its remote-tracking counterpart
+	 * (e.g. local `main` vs `origin/main`), returned as repo-relative paths.
+	 * Empty when there is no upstream / remote-tracking ref for `branch`. Used
+	 * by the browser to render changed files in red.
+	 */
+	changedFiles(branch: string): Promise<string[]>;
 }
 
 const firstLine = (text: string): string => text.trim().split("\n")[0] ?? "";
@@ -366,5 +373,88 @@ export async function openGit(run: GitRunner, cwd: string): Promise<RepoGit> {
 		};
 	}
 
-	return { root, listBranches, listFiles, readFile };
+
+	async function currentBranchRef(): Promise<string | null> {
+		const res = await run(["symbolic-ref", "-q", "HEAD"], root);
+		return res.code === 0 && res.stdout.trim() ? res.stdout.trim() : null;
+	}
+
+	async function upstreamOf(branch: string): Promise<string | null> {
+		// Remote-tracking refs have no upstream of their own; nothing to diff against.
+		if (branch.startsWith("refs/remotes/")) return null;
+		const short = branch.startsWith("refs/heads/") ? branch.slice("refs/heads/".length) : branch;
+
+		// Prefer git's own upstream configuration when it exists.
+		const upstreamRes = await run(["rev-parse", "--verify", "--symbolic-full-name", "--end-of-options", `${branch}@{upstream}`], root);
+		if (upstreamRes.code === 0 && upstreamRes.stdout.trim()) return upstreamRes.stdout.trim();
+
+		// Fall back to the conventional origin/<branch> tracking ref, which is
+		// what a fresh checkout's remote contains even before `branch -u`.
+		const candidate = `refs/remotes/origin/${short}`;
+		const tip = await tipOfOrNull(candidate);
+		return tip ? candidate : null;
+	}
+
+	async function tipOfOrNull(ref: string): Promise<string | null> {
+		const res = await run(["rev-parse", "--verify", "--end-of-options", `${ref}^{commit}`], root);
+		return res.code === 0 ? res.stdout.trim() : null;
+	}
+
+	async function baseBranchFor(branch: string): Promise<string | null> {
+		const candidates = [
+			"refs/remotes/origin/dev",
+			"refs/heads/dev",
+			"refs/remotes/origin/main",
+			"refs/heads/main",
+		];
+		for (const candidate of candidates) {
+			if (candidate === branch) continue;
+			if (await tipOfOrNull(candidate)) return candidate;
+		}
+		return null;
+	}
+
+	async function changedFiles(branch: string): Promise<string[]> {
+		const upstream = await upstreamOf(branch);
+
+		// Remote-tracking refs have no local counterpart; do not color them
+		// against the integration branch, which would mark the whole tree red.
+		if (upstream === null && branch.startsWith("refs/remotes/")) return [];
+
+		let collected: string[] = [];
+
+		if (upstream) {
+			const res = await run(["diff", "--name-only", "-z", "--end-of-options", branch, upstream], root);
+			if (res.code !== 0) {
+				throw new RepoGitError("git-failed", `git diff failed for "${branch}" — ${firstLine(res.stderr)}`);
+			}
+			collected = [...collected, ...res.stdout.split("\0").filter((line) => line.length > 0)];
+		} else if (!branch.startsWith("refs/remotes/")) {
+			const base = await baseBranchFor(branch);
+			if (base) {
+				const mbRes = await run(["merge-base", "--end-of-options", branch, base], root);
+				if (mbRes.code === 0 && mbRes.stdout.trim()) {
+					const from = mbRes.stdout.trim();
+					const res = await run(["diff", "--name-only", "-z", "--end-of-options", from, branch], root);
+					if (res.code === 0) {
+						collected = [...collected, ...res.stdout.split("\0").filter((line) => line.length > 0)];
+					}
+				}
+			}
+		}
+
+		// Uncommitted working-tree changes for the checked-out branch only.
+		const headBranch = await currentBranchRef();
+		if (headBranch === branch) {
+			const res = await run(["diff", "--name-only", "-z", "--end-of-options", "HEAD"], root);
+			if (res.code === 0) {
+				collected = [...collected, ...res.stdout.split("\0").filter((line) => line.length > 0)];
+			}
+		}
+
+		return [...new Set(collected)];
+	}
+
+	const repo = { root, listBranches, listFiles, readFile, changedFiles } as RepoGit;
+	return repo;
 }
