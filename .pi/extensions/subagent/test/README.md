@@ -150,10 +150,10 @@ not timing at all. `mkdtemp` can name the agent dir `subagent-test-Vxxxxx`, and
 the fake tmux recognised the version probe with `joined.includes("-V")` — so in
 such a directory EVERY tmux call was answered with `tmux 3.3a`. The `pane_dead`
 probe never read `1`, the probe hook never fired, and the 30s bound expired.
-About 1.6% of harness dirs are affected, which is why it passed alone, failed
-twice in a row under the full suite, and then passed again. The mock now matches
-the version call on its argv, and `lifecycle.test.ts` pins the classification
-with a socket path that contains `-V`.
+About 1.6% of harness dirs are affected — frequent enough to appear across a
+session, rare enough to pass alone and on a rerun. The mock now matches the
+version call on its argv, and `lifecycle.test.ts` pins the classification with
+a socket path that contains `-V`.
 
 Driving the extension from a subagent shell needs `env -u PI_TMUX_SUBAGENT_CHILD`:
 the factory checks that variable first and takes the child branch, registering
