@@ -6,6 +6,29 @@ Versions are git tags. This repository is not published to npm.
 
 Maintenance:
 
+- **The 30-second lifecycle flake was a harness bug, not a timing problem.**
+  "a result that lands during the pane probe still wins" failed twice on
+  2026-10-18 under full-suite load, with passing reruns in between. That looked
+  like timer starvation — the test waits 30s for a run the watcher should
+  finalize in well under a second — but the watcher was never given the chance.
+
+  The fake tmux in `createHarness` recognised the version probe with
+  `joined.includes("-V")` on the joined argv, and those argv strings embed the
+  agent dir, which `mkdtemp` names `subagent-test-XXXXXX`. When the random
+  suffix begins with `V`, every tmux call in that harness contains `-V` and was
+  answered with `tmux 3.3a`: `pane_dead` never read `"1"`,
+  `finalizeMissingChild` never ran, the pane-probe hook never wrote its result,
+  and the run stayed `running` for the full bound. Roughly 1.6% of harness
+  directories per run are affected — frequent enough to appear across a
+  session, rare enough to pass alone and on a rerun.
+
+  The mock now matches `-V` on the argv itself (`args.length === 1 &&
+  args[0] === "-V"`), and a harness test drives a `capture-pane` and a
+  `pane_dead` probe through a socket path containing `-V` to pin the
+  classification. Reproduced before the fix by repeating the pane-probe test
+  150 times (one failure at iteration 59); verified after it by forcing every
+  temp agent dir to contain `-V` (30/30).
+
 - **The click-to-open popup has one implementation, not two.** `/btw` reused
   the subagent extension's popup builders, but it carried its own copy of the
   three effectful pieces wrapped around them: the detached launcher, the `TMUX`
