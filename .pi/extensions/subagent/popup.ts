@@ -1,16 +1,21 @@
-// The effectful half of the click-to-open popup, shared by the subagent
-// extension and by `/btw`.
+// The effectful tmux helpers the click-to-open panel and `/btw` share.
 //
-// `panel.ts` builds the argv and the quoting and stays pure; `openSubagentPanel`
-// (in `index.ts`) and `openBtwPopup` (in `btw/index.ts`) hold their own guard
+// `panel.ts` builds the argv and the quoting and stays pure. `openSubagentPanel`
+// (in `index.ts`) and `openBtwPopup` (in `btw/index.ts`) keep their own guard
 // ladders, because those ladders are not the same: the subagent one admits a
 // run that still shows a pane, refuses to run from inside a subagent pane, and
-// reports through the status widget, while `/btw` has no run record, passes a
-// timeout to every probe and phrases every fallback around its own attach
-// command. What they DID copy verbatim — the launcher, the `TMUX` socket helper
-// and the window/client resolution — lives here. The differences that remain
-// are parameters (`timeoutMs`, the launcher binding), not branches merged into
-// one blob.
+// reports through the status widget, while `/btw` has no run record, bounds
+// every tmux call with a timeout and phrases every fallback around its own
+// attach command. This module holds exactly what the two have to agree on:
+// where "here" is, which client the popup is drawn over, and how it is
+// launched. The differences that reach these helpers are parameters
+// (`timeoutMs`, the launcher binding), not branches merged into one blob.
+//
+// The tail of the ladder — the `has-session` probe, the Escape binding, the
+// launch itself — deliberately stays with the callers. Their failure wording
+// and their fallbacks differ, and a shared tail today would mean a result union
+// whose kinds each caller immediately rewrites. If a third caller ever makes
+// that tail genuinely identical, move it here then; do not merge it early.
 
 import { spawn } from "node:child_process";
 
@@ -42,6 +47,26 @@ export function currentTmuxSocket(): string | undefined {
 	return socket || undefined;
 }
 
+/** Where pi is drawn from: the outer tmux server's socket and pi's own pane. */
+export interface TmuxPointer {
+	socket: string;
+	pane: string;
+}
+
+/**
+ * The outer tmux pointer, or undefined when this process is not inside tmux.
+ *
+ * The two halves come from different variables and both are required: the popup
+ * is drawn over a client attached to the socket in `TMUX`, at the pane named by
+ * `TMUX_PANE`. Keeping the pair here means a caller asks "where am I" once
+ * instead of assembling it from two helpers.
+ */
+export function currentTmuxPointer(): TmuxPointer | undefined {
+	const socket = currentTmuxSocket();
+	const pane = process.env.TMUX_PANE?.trim();
+	return socket && pane ? { socket, pane } : undefined;
+}
+
 /**
  * The client the popup has to draw over, or why there is none.
  *
@@ -51,7 +76,7 @@ export function currentTmuxSocket(): string | undefined {
  * folded into `no-client` — at this point the two are indistinguishable to the
  * caller and both mean "do not launch".
  */
-export type PaneClient = { kind: "client"; client: string } | { kind: "pane-gone" } | { kind: "no-client" };
+export type PaneClientResolution = { kind: "client"; client: string } | { kind: "pane-gone" } | { kind: "no-client" };
 
 /**
  * Resolve the outermost client to draw the popup over.
@@ -68,14 +93,20 @@ export type PaneClient = { kind: "client"; client: string } | { kind: "pane-gone
  * effort, not a guarantee that the clicked client wins.
  *
  * `timeoutMs` bounds each probe where the caller needs it (`/btw` bounds every
- * tmux call); the subagent ladder passes none, as it always has.
+ * tmux call; the subagent ladder passes none).
+ *
+ * Rejects when `exec` rejects — an aborted or timed-out probe, or a tmux binary
+ * that cannot be spawned. Catching is the caller's decision, and the two
+ * callers legitimately make different ones (`/btw` reports it as an error and
+ * keeps its attach hint; the subagent click handler owns its own catch), so this
+ * helper does not fold a rejection into a third failure kind.
  */
 export async function resolvePaneClient(
 	exec: ExtensionAPI["exec"],
 	outerSocket: string,
 	outerPane: string,
 	options: { timeoutMs?: number } = {},
-): Promise<PaneClient> {
+): Promise<PaneClientResolution> {
 	const probe = options.timeoutMs === undefined ? undefined : { timeout: options.timeoutMs };
 	const target = await exec(
 		"tmux",

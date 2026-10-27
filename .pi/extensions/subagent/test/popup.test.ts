@@ -12,7 +12,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { currentTmuxSocket, defaultPanelLauncher, resolvePaneClient } from "../popup.ts";
+import { currentTmuxPointer, currentTmuxSocket, defaultPanelLauncher, resolvePaneClient } from "../popup.ts";
 import { withEnv } from "./helpers.ts";
 
 const OUTER_SOCKET = "/tmp/outer.sock";
@@ -148,6 +148,43 @@ test("the socket helper reads the TMUX socket component", async () => {
 	for (const value of [undefined, "", "   "]) {
 		await withEnv({ TMUX: value }, async () => {
 			assert.equal(currentTmuxSocket(), undefined, `TMUX=${JSON.stringify(value)} is not a socket`);
+		});
+	}
+});
+
+test("a rejecting exec propagates: catching is the caller's choice", async () => {
+	// `/btw` catches it and keeps its attach hint; the subagent click handler owns
+	// its own catch. Folding a rejection into `no-client` here would silently
+	// turn an aborted probe into a user-facing warning on one of those paths.
+	const exec = async () => {
+		throw new Error("tmux aborted");
+	};
+	await assert.rejects(() => resolvePaneClient(exec, OUTER_SOCKET, OUTER_PANE), /tmux aborted/);
+});
+
+test("the probe reads only its arguments, never the ambient tmux env", async () => {
+	// `currentTmuxPointer` owns the environment. The resolver must not second-guess
+	// the socket and pane it is given, or it could not be tested without a tmux.
+	await withEnv({ TMUX: "/tmp/decoy.sock,1,0", TMUX_PANE: "%99" }, async () => {
+		const { calls, exec } = probeModel({ clients: clientLine("/dev/pts/1", "@1", 100) });
+		await resolvePaneClient(exec, OUTER_SOCKET, OUTER_PANE);
+		assert.equal(calls[0]?.args[1], OUTER_SOCKET, "the given socket, not the one in TMUX");
+		assert.equal(calls[0]?.args[5], OUTER_PANE, "the given pane, not the one in TMUX_PANE");
+	});
+});
+
+test("the pointer exists only where both TMUX and TMUX_PANE do", async () => {
+	await withEnv({ TMUX: "/tmp/outer.sock,1,0", TMUX_PANE: " %7 " }, async () => {
+		assert.deepEqual(currentTmuxPointer(), { socket: "/tmp/outer.sock", pane: "%7" });
+	});
+	const missing = [
+		{ TMUX: undefined, TMUX_PANE: "%7" },
+		{ TMUX: "/tmp/outer.sock,1,0", TMUX_PANE: undefined },
+		{ TMUX: "/tmp/outer.sock,1,0", TMUX_PANE: "   " },
+	];
+	for (const vars of missing) {
+		await withEnv(vars, async () => {
+			assert.equal(currentTmuxPointer(), undefined, JSON.stringify(vars));
 		});
 	}
 });

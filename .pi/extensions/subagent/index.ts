@@ -218,7 +218,7 @@ import {
 import { formatUsage, readSessionUsage, type RunUsage } from "./usage.ts";
 import { renderRunList, runHeadline, type ListRow } from "./listview.ts";
 import { buildEscapeBindArgs, buildPanelLaunch } from "./panel.ts";
-import { currentTmuxSocket, defaultPanelLauncher, resolvePaneClient, type PanelLauncher } from "./popup.ts";
+import { currentTmuxPointer, currentTmuxSocket, defaultPanelLauncher, resolvePaneClient, type PanelLauncher } from "./popup.ts";
 import { shellQuote } from "./shell.ts";
 
 const ATTACH_FLAG = "attach-subagent";
@@ -919,23 +919,22 @@ async function openSubagentPanel(deps: OpenPanelDeps, runId: string): Promise<vo
 		return;
 	}
 
-	const outerSocket = currentTmuxSocket();
-	const outerPane = process.env.TMUX_PANE?.trim();
-	if (!outerSocket || !outerPane) {
+	const outer = currentTmuxPointer();
+	if (!outer) {
 		notify(`Not running inside tmux. Attach with: ${run.attachCommand}`);
 		return;
 	}
 	const socket = tmuxSocketPath();
 	// A pi running inside a subagent pane has currentTmuxSocket() === the subagent
 	// socket; the global Escape binding would then land on pi's own server.
-	if (outerSocket === socket) {
+	if (outer.socket === socket) {
 		notify("The panel is not available from inside a subagent pane.");
 		return;
 	}
 
 	// The client has to be one actually looking at the pane; popup.ts explains
 	// why the window filter, not `-t <session>`, is what finds it.
-	const resolved = await resolvePaneClient(deps.exec, outerSocket, outerPane);
+	const resolved = await resolvePaneClient(deps.exec, outer.socket, outer.pane);
 	if (resolved.kind === "pane-gone") {
 		notify("That tmux pane is gone.");
 		return;
@@ -960,7 +959,7 @@ async function openSubagentPanel(deps: OpenPanelDeps, runId: string): Promise<vo
 		return;
 	}
 
-	const launch = buildPanelLaunch({ outerSocket, pane: outerPane, client, socket, session: run.tmuxSession, runId: run.id });
+	const launch = buildPanelLaunch({ outerSocket: outer.socket, pane: outer.pane, client, socket, session: run.tmuxSession, runId: run.id });
 	deps.launch(launch.command, launch.args, { detached: true, stdio: "ignore" }, (message) => {
 		ui.ui.notify(`Could not open panel: ${message}`, "error");
 	});

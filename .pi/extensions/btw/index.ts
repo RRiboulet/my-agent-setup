@@ -6,7 +6,12 @@ import { getAgentDir, getPackageDir, type ExtensionAPI, type ExtensionContext } 
 import type { Usage } from "@earendil-works/pi-ai";
 
 import { buildAttachCommand, buildEscapeBindArgs, buildPanelLaunch } from "../subagent/panel.ts";
-import { currentTmuxSocket, defaultPanelLauncher, resolvePaneClient, type PanelLauncher } from "../subagent/popup.ts";
+import { currentTmuxPointer, defaultPanelLauncher, resolvePaneClient, type PanelLauncher } from "../subagent/popup.ts";
+
+// Kept exported: `BtwDeps.launch` and `__test__.setPanelLauncher` name this type,
+// so a typed consumer of this entry point should not have to reach into the
+// subagent tree to spell it.
+export type { PanelLauncher };
 import {
 	buildBtwKillServerArgs,
 	buildBtwPaths,
@@ -322,13 +327,12 @@ async function openBtwPopup(deps: BtwDeps, paths: BtwPaths, sessionId: string): 
 	};
 
 	try {
-		const outerSocket = currentTmuxSocket();
-		const outerPane = process.env.TMUX_PANE?.trim();
-		if (!outerSocket || !outerPane) return fallback("Not running inside tmux.", "info");
+		const outer = currentTmuxPointer();
+		if (!outer) return fallback("Not running inside tmux.", "info");
 
 		// The client has to be one actually looking at pi's window; popup.ts
 		// explains why the window filter, not `-t <pane>`, is what finds it.
-		const resolved = await resolvePaneClient(deps.exec, outerSocket, outerPane, { timeoutMs: TMUX_TIMEOUT_MS });
+		const resolved = await resolvePaneClient(deps.exec, outer.socket, outer.pane, { timeoutMs: TMUX_TIMEOUT_MS });
 		if (resolved.kind === "pane-gone") return fallback("That tmux pane is gone.", "warning");
 		if (resolved.kind === "no-client") return fallback("No attached tmux client is viewing this pane.", "warning");
 		const client = resolved.client;
@@ -350,8 +354,8 @@ async function openBtwPopup(deps: BtwDeps, paths: BtwPaths, sessionId: string): 
 		}
 
 		const launch = buildPanelLaunch({
-			outerSocket,
-			pane: outerPane,
+			outerSocket: outer.socket,
+			pane: outer.pane,
 			client,
 			socket: paths.socket,
 			session: paths.session,
