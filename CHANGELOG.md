@@ -4,6 +4,35 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Maintenance:
+
+- **The click-to-open popup has one implementation, not two.** `/btw` reused
+  the subagent extension's popup builders, but it carried its own copy of the
+  three effectful pieces wrapped around them: the detached launcher, the `TMUX`
+  socket helper, and the ~27-line window/client ladder that decides which
+  terminal the popup is drawn over. Two copies of a probe that parses tmux's
+  format output is the kind of duplication that goes wrong differently in each
+  caller: a fix to the grouped-session window filter, or to the activity
+  tie-break, has to be made twice and can silently be made once. Those three
+  now live in `.pi/extensions/subagent/popup.ts`, and both extensions call
+  them.
+
+  What stayed separate stayed separate on purpose. The subagent ladder guards
+  on a live run's pane and refuses to open from inside a subagent pane, where
+  pi's own tmux server IS the subagent server; `/btw` has no run record and
+  phrases every fallback around its own attach command. The two differences
+  that reach the probe are parameters: `/btw` bounds both tmux calls with its
+  5-second timeout while the subagent ladder passes none, as before, and each
+  extension keeps its own module-level launcher binding so
+  `__test__.setPanelLauncher` still substitutes one without a reload.
+  `panel.ts` stays pure.
+
+  `popup.test.ts` now tests the probe directly — the window filter, the
+  activity tie-break and its stability on same-second values, the
+  `pane-gone`/`no-client` split, the optional timeout, and the launcher's
+  spawn-error callback — instead of inferring all of it through the subagent
+  guard ladder.
+
 ## v1.9.0 — 2026-10-22
 
 Fixed:

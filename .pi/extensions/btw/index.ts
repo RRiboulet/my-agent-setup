@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { appendFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import * as path from "node:path";
@@ -7,6 +6,7 @@ import { getAgentDir, getPackageDir, type ExtensionAPI, type ExtensionContext } 
 import type { Usage } from "@earendil-works/pi-ai";
 
 import { buildAttachCommand, buildEscapeBindArgs, buildPanelLaunch } from "../subagent/panel.ts";
+import { currentTmuxSocket, defaultPanelLauncher, resolvePaneClient, type PanelLauncher } from "../subagent/popup.ts";
 import {
 	buildBtwKillServerArgs,
 	buildBtwPaths,
@@ -28,28 +28,10 @@ const DESCRIPTION = "Open a side-question panel that asks for the question and a
 const TMUX_TIMEOUT_MS = 5_000;
 const FOOTER = "\n\n---\n";
 
-/** How the popup CLI is started, injectable so tests never spawn one. */
-export type PanelLauncher = (
-	command: string,
-	args: string[],
-	options: { detached: true; stdio: "ignore" },
-	onError: (message: string) => void,
-) => void;
-
-/**
- * Start the popup detached, so pi neither waits for it nor is kept alive by it.
- * A spawn error is the only failure this can report: once tmux is running, a
- * display-popup failure exits in an unobserved process.
- */
-const defaultPanelLauncher: PanelLauncher = (command, args, options, onError) => {
-	const child = spawn(command, args, options);
-	child.once("error", (error) => onError(error instanceof Error ? error.message : String(error)));
-	child.unref();
-};
-
 // A module-level binding rather than a direct call so factory-driven tests can
 // substitute it (`__test__.setPanelLauncher`). The extension reads it at popup
-// time, so a test can change it without reloading the factory.
+// time, so a test can change it without reloading the factory. The launcher
+// itself is shared with the subagent extension (see popup.ts).
 let panelLauncher: PanelLauncher = defaultPanelLauncher;
 
 /** What the launch core needs from its caller; tests inject their own. */
@@ -123,12 +105,6 @@ function defaultIsPidAlive(pid: number): boolean {
 	} catch (error) {
 		return (error as { code?: string }).code === "EPERM";
 	}
-}
-
-/** The TMUX env var's socket component, when this process runs under tmux. */
-function currentTmuxSocket(): string | undefined {
-	const socket = process.env.TMUX?.split(",", 1)[0]?.trim();
-	return socket || undefined;
 }
 
 async function runTmux(deps: BtwDeps, args: string[], what: string): Promise<void> {
@@ -350,29 +326,12 @@ async function openBtwPopup(deps: BtwDeps, paths: BtwPaths, sessionId: string): 
 		const outerPane = process.env.TMUX_PANE?.trim();
 		if (!outerSocket || !outerPane) return fallback("Not running inside tmux.", "info");
 
-		// Scope the popup to a client actually looking at pi's window: `-t <pane>`
-		// alone resolves the most recently active client on the whole server.
-		const target = await deps.exec(
-			"tmux",
-			["-S", outerSocket, "display-message", "-p", "-t", outerPane, "#{window_id}"],
-			{ timeout: TMUX_TIMEOUT_MS },
-		);
-		const outerWindow = target.stdout.trim();
-		if (target.code !== 0 || !outerWindow) return fallback("That tmux pane is gone.", "warning");
-
-		const clients = await deps.exec(
-			"tmux",
-			["-S", outerSocket, "list-clients", "-F", "#{client_tty}\t#{window_id}\t#{client_activity}"],
-			{ timeout: TMUX_TIMEOUT_MS },
-		);
-		const client = clients.stdout
-			.split("\n")
-			.map((line) => line.split("\t"))
-			.filter(([, window]) => window?.trim() === outerWindow)
-			.map(([tty, , activity]) => ({ tty: tty?.trim() ?? "", activity: Number.parseInt(activity ?? "", 10) || 0 }))
-			.filter((entry) => entry.tty)
-			.sort((a, b) => b.activity - a.activity)[0]?.tty;
-		if (clients.code !== 0 || !client) return fallback("No attached tmux client is viewing this pane.", "warning");
+		// The client has to be one actually looking at pi's window; popup.ts
+		// explains why the window filter, not `-t <pane>`, is what finds it.
+		const resolved = await resolvePaneClient(deps.exec, outerSocket, outerPane, { timeoutMs: TMUX_TIMEOUT_MS });
+		if (resolved.kind === "pane-gone") return fallback("That tmux pane is gone.", "warning");
+		if (resolved.kind === "no-client") return fallback("No attached tmux client is viewing this pane.", "warning");
+		const client = resolved.client;
 
 		const alive = await deps.exec("tmux", ["-S", paths.socket, "has-session", "-t", paths.session], {
 			timeout: TMUX_TIMEOUT_MS,

@@ -7,9 +7,9 @@
 // nested tmux client and a tmux format string is exactly the kind of work that
 // cannot be exercised in the unit suite, so everything that CAN be pure — the
 // argv, the nested command string and the quoting — is built here and asserted
-// by `panel.test.ts`. `index.ts` holds the guard ladder, the `pi.exec` calls and
-// the detached `spawn` (see `openSubagentPanel`, local patch 17); this module
-// stays pure and side-effect-free.
+// by `panel.test.ts`. `index.ts` holds the guard ladder and popup.ts the
+// `pi.exec` probe and the detached `spawn` (see `openSubagentPanel`, local patch
+// 17); this module stays pure and side-effect-free.
 //
 // The btw extension reuses these builders for its own panel, passing
 // `titlePrefix: "btw"`; nothing else in the argv varies between the callers.
