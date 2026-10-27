@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { appendFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 
 import { getAgentDir, getPackageDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -32,6 +32,16 @@ const DESCRIPTION = "Open a side-question panel that asks for the question and a
 /** Every tmux call is bounded: a wedged server must not hang the command handler. */
 const TMUX_TIMEOUT_MS = 5_000;
 const FOOTER = "\n\n---\n";
+
+/**
+ * The answer file's header: the question as a blockquote paragraph, one `> `
+ * line per question line. The popup title reads it back, so writer and parser
+ * share these literals rather than agreeing by coincidence.
+ */
+const ANSWER_HEADING = "# /btw";
+const ANSWER_QUOTE_PREFIX = "> ";
+/** The header is read from the start; the answer after it can be large. */
+const ANSWER_HEADER_BYTES = 4_096;
 
 // A module-level binding rather than a direct call so factory-driven tests can
 // substitute it (`__test__.setPanelLauncher`). The extension reads it at popup
@@ -318,6 +328,10 @@ async function panelState(deps: BtwDeps, paths: BtwPaths): Promise<PanelState> {
  * it exits, so kill-then-reopen can in principle land `unbind` after the new
  * `bind`; the bind is re-applied on every open, and the panel's own socket
  * bounds any stale binding to this one session's server.
+ *
+ * The popup title carries the question read from the answer file's header, so
+ * a reattach shows the same title the launch did; the panel builder sanitizes
+ * and truncates it.
  */
 async function openBtwPopup(deps: BtwDeps, paths: BtwPaths, sessionId: string): Promise<boolean> {
 	const attach = buildAttachCommand(paths.socket, paths.session);
@@ -361,6 +375,7 @@ async function openBtwPopup(deps: BtwDeps, paths: BtwPaths, sessionId: string): 
 			session: paths.session,
 			runId: sessionId,
 			titlePrefix: "btw",
+			titleSuffix: await questionFromAnswer(paths.answer),
 		});
 		deps.launch(launch.command, launch.args, { detached: true, stdio: "ignore" }, (message) => {
 			deps.notify(`Could not open the panel: ${message}. Attach with: ${attach}`, "error");
@@ -415,6 +430,45 @@ async function writePanelSpec(deps: BtwDeps, paths: BtwPaths): Promise<void> {
 /** Write the panel's setup down for the viewer. */
 async function writePanelSpecFile(paths: BtwPaths, spec: unknown): Promise<void> {
 	await writeFile(paths.panel, JSON.stringify(spec), { encoding: "utf8", mode: 0o600 }).catch(() => undefined);
+}
+
+/**
+ * The question as the answer file's header recorded it, for the popup title.
+ *
+ * Only the header is read, and only from the start: the answer after it can
+ * be large, and reattach happens while it may still be streaming. The block is
+ * anchored to the heading, so a blockquote in the answer body is never
+ * mistaken for the question; a panel whose file predates the header simply
+ * opens without a suffix. Its lines are joined because the title is one line,
+ * which makes a reattach produce the same title the launch did.
+ *
+ * A failed read costs the suffix, not the panel, so it is not reported: the
+ * title is decoration, and the viewer reports an answer file it cannot read.
+ */
+async function questionFromAnswer(answerPath: string): Promise<string | undefined> {
+	let header: string;
+	try {
+		const handle = await open(answerPath, "r");
+		try {
+			const buffer = Buffer.alloc(ANSWER_HEADER_BYTES);
+			const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+			header = buffer.toString("utf8", 0, bytesRead);
+		} finally {
+			await handle.close();
+		}
+	} catch {
+		return undefined;
+	}
+	const lines = header.split("\n");
+	if (lines[0] !== ANSWER_HEADING) return undefined;
+	let index = 1;
+	while (index < lines.length && lines[index] === "") index++;
+	if (index >= lines.length || !lines[index]!.startsWith(ANSWER_QUOTE_PREFIX)) return undefined;
+	const quoted: string[] = [];
+	for (; index < lines.length && lines[index]!.startsWith(ANSWER_QUOTE_PREFIX); index++) {
+		quoted.push(lines[index]!.slice(ANSWER_QUOTE_PREFIX.length).trim());
+	}
+	return quoted.join(" ").trim() || undefined;
 }
 
 /** Start (or restart) the view-only tmux session for an existing answer file. */
@@ -594,8 +648,11 @@ export async function launchBtwPanel(deps: BtwDeps, ctx: BtwContext, rawQuestion
 
 	try {
 		await resetPanel(deps, paths);
-		const quoted = sanitizeAnswerText(question).split("\n").join("\n> ");
-		await writeFile(paths.answer, `# /btw\n\n> ${quoted}\n\n`, { encoding: "utf8", mode: 0o600 });
+		const quoted = sanitizeAnswerText(question).split("\n").join(`\n${ANSWER_QUOTE_PREFIX}`);
+		await writeFile(paths.answer, `${ANSWER_HEADING}\n\n${ANSWER_QUOTE_PREFIX}${quoted}\n\n`, {
+			encoding: "utf8",
+			mode: 0o600,
+		});
 		await startViewer(deps, paths, ctx.cwd);
 		await openBtwPopup(deps, paths, sessionId);
 	} catch (error) {

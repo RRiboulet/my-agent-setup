@@ -119,8 +119,13 @@ answer's history, except after a resize, which redraws the panel and clears
 it, as the transcript does). The pane still scrolls natively — copy mode
 (`C-b [`), and the mouse wheel where the tmux config sets `set -g mouse on`
 (the devcontainer's does) — like the subagent attach views, because the
-viewer only draws and never takes the keyboard. The next `/btw` restarts the
-viewer on the same answer. On a session with an active `/goal` the
+viewer only draws and never takes the keyboard. The popup's title bar names the
+panel and its question (`btw 01a14e96 why does the cache matter?`); the id alone
+is a UUIDv7 timestamp and could not tell two panels apart. The question is
+collapsed to one line and truncated to fit; it is read from the answer file's
+header, so a launch and a reattach show the same title and a reopened panel
+still says what it is answering, and a blockquote in the answer itself is
+never mistaken for it. The next `/btw` restarts the viewer on the same answer. On a session with an active `/goal` the
 main request's forced system prompt differs, so the panel may re-bill the
 context and show goal notes; `.pi/extensions/btw/request.ts` documents that
 limitation.
