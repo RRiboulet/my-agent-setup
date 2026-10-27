@@ -12,9 +12,17 @@
 // 17); this module stays pure and side-effect-free.
 //
 // The btw extension reuses these builders for its own panel, passing
-// `titlePrefix: "btw"`; nothing else in the argv varies between the callers.
+// `titlePrefix: "btw"` and, when it has one, the question it is answering as
+// `titleSuffix`; nothing else in the argv varies between the callers.
 
 import { shellQuote } from "./shell.ts";
+
+/**
+ * How much of a title suffix to keep. The popup is 90% of the client's width,
+ * and the suffix follows a prefix and an id; forty characters is enough to
+ * recognise the question in a border without crowding the rest of the title.
+ */
+const TITLE_SUFFIX_MAX = 40;
 
 /** A detached command: the binary and the argv to hand it. */
 export interface Launch {
@@ -66,8 +74,9 @@ export function buildPopupCommand(socket: string, session: string): string {
 }
 
 /**
- * The panel's title: `<titlePrefix> <id8>`, the prefix naming the owning
- * extension (`subagent` by default, `btw` for the side-panel extension).
+ * The panel's title: `<titlePrefix> <id8> [<titleSuffix>]`, the prefix naming
+ * the owning extension (`subagent` by default, `btw` for the side-panel
+ * extension).
  *
  * The id half is derived, never task text, because tmux renders `-T` as a
  * *format string*: `#` starts an expansion (including `#(...)` shell commands),
@@ -80,9 +89,15 @@ export function buildPopupCommand(socket: string, session: string): string {
  * The `#` check is what actually enforces the invariant, at the one point the
  * title is composed. Its message deliberately omits the run id so an untrusted
  * value is never echoed into a log or notification.
+ *
+ * `titleSuffix` is the exception to the derived-only rule: the caller owns it
+ * and passes text worth showing (the btw question). It is sanitized before it
+ * reaches the composed title — one line, no `#`, truncated — because the
+ * format-string rules apply to it exactly as to the rest.
  */
-function panelTitle(runId: string, titlePrefix: string): string {
-	const title = `${titlePrefix} ${runId.slice(0, 8)}`;
+function panelTitle(input: { runId: string; titlePrefix: string; titleSuffix?: string }): string {
+	const head = `${input.titlePrefix} ${input.runId.slice(0, 8)}`;
+	const title = input.titleSuffix ? `${head} ${input.titleSuffix}` : head;
 	if (title.includes("#")) {
 		throw new TypeError("refusing to build a panel title containing '#' (a tmux format metacharacter)");
 	}
@@ -114,6 +129,12 @@ export function buildPanelLaunch(input: {
 	 * rather than composing a title with a leading space.
 	 */
 	titlePrefix?: string;
+	/**
+	 * Appended to the title after the run id, sanitized: one line, no `#`,
+	 * truncated. The btw extension passes the question, so the popup shows what
+	 * the panel is answering.
+	 */
+	titleSuffix?: string;
 }): Launch {
 	return {
 		command: "tmux",
@@ -131,8 +152,38 @@ export function buildPanelLaunch(input: {
 			"-h",
 			"90%",
 			"-T",
-			panelTitle(input.runId, input.titlePrefix?.trim() || "subagent"),
+			panelTitle({
+				runId: input.runId,
+				titlePrefix: input.titlePrefix?.trim() || "subagent",
+				titleSuffix: sanitizeTitleSuffix(input.titleSuffix),
+			}),
 			buildPopupCommand(input.socket, input.session),
 		],
 	};
+}
+
+/**
+ * One line, no `#`, no control characters, truncated: the popup title is a
+ * tmux format string drawn in a terminal, so both layers get a say in what
+ * may travel. The control ranges follow the answer text's sanitizer, adapted
+ * to a title: whitespace is collapsed rather than dropped, so a multi-line
+ * question still reads as one, and a split escape loses its introducer and
+ * stays inert text. The question is another string a user can paste anything
+ * into, so the sanitizer is a boundary, not a formality.
+ *
+ * Truncation counts code points, not UTF-16 units: slicing units at the
+ * boundary would leave half a surrogate pair, which travels to tmux as U+FFFD.
+ */
+function sanitizeTitleSuffix(suffix: string | undefined): string | undefined {
+	if (suffix === undefined) return undefined;
+	const oneLine = suffix
+		.replace(/#/g, "")
+		.replace(/\s+/g, " ")
+		.replace(/[\x00-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
+		.trim();
+	if (!oneLine) return undefined;
+	const characters = [...oneLine];
+	return characters.length > TITLE_SUFFIX_MAX
+		? `${characters.slice(0, TITLE_SUFFIX_MAX - 1).join("").trimEnd()}…`
+		: oneLine;
 }

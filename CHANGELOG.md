@@ -4,6 +4,24 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Added:
+
+- **The `/btw` popup's title bar now says what the panel is answering.** The
+  title was `btw <id8>` and the id half is the first characters of a UUIDv7,
+  which is a timestamp before it is an identifier: two panels opened in the
+  same session, or two sessions opened in the same minute, carried titles a
+  reader could not tell apart, and a reopened panel lost the question it was
+  answering. The question now follows the id, read from the header of
+  `answer.md` so that a launch and a reattach show the same title without
+  asking again, and sanitized for the one consumer that matters: tmux renders
+  `-T` as a format string, so the suffix is collapsed to one line, has `#`
+  removed rather than escaped, and is truncated to 40 characters — counted as
+  code points, so an emoji at the boundary is not cut in half. Only the header
+  block after `# /btw` is read, which keeps a blockquote in the answer body
+  from being promoted into the title, and only the first few kilobytes of the
+  file, because the answer after it can still be streaming. `panel.ts` stays
+  pure; the suffix is just another input it validates.
+
 Maintenance:
 
 - **The 30-second lifecycle flake was a harness bug, not a timing problem.**
