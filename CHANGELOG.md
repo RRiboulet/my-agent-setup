@@ -36,6 +36,18 @@ Added:
   file, because the answer after it can still be streaming. `panel.ts` stays
   pure; the suffix is just another input it validates.
 
+- **A `devcontainer` skill, so the agent can drive `devc` without breaking it.**
+  The workflow is easy to get wrong from a tool call: the attaching form
+  (`devc <name>`) execs `tmux new-session -A` and blocks until the human's
+  session ends, and the obvious repair for a stale container (`docker ps`, a
+  volume prune, `sudo`) is what loses sessions or chowns a checkout. The skill
+  states the one rule first (never attach from a tool call; use `devc up` and
+  `devc <name> -- cmd`), then the command table, the detached-build and
+  detached-server recipes, the volume/uid/port rules, a symptom → check → fix
+  table covering the failures this host actually produced (uid mismatch, config
+  drift, the Docker 29 bake entitlement, `postgres` as a service, the voice
+  forward), and the per-project facts worth knowing before touching a build.
+
 Changed:
 
 - **`/voice` reaches the phone over an ssh reverse forward instead of a
