@@ -190,6 +190,11 @@ function fakeDeps(agentDir: string, tmux = tmuxModel()) {
 	};
 }
 
+/** The value one recorded popup launch passed to `-T`. */
+function popupTitle(launched: { args: string[] }): string {
+	return launched.args[launched.args.indexOf("-T") + 1] as string;
+}
+
 /** A registry that answers immediately with one delta and a final usage. */
 function streamingRegistry(text: string, usage: Usage = ZERO_USAGE) {
 	const calls: { context: Context; options: Record<string, unknown> }[] = [];
@@ -376,8 +381,7 @@ test("the popup opens over pi's client with the btw title and a fresh bind", asy
 			);
 			assert.equal(launches.length, 1);
 			const launched = launches[0] as (typeof launches)[number];
-			const titleAt = launched.args.indexOf("-T");
-			assert.equal(launched.args[titleAt + 1], "btw 01a14e96");
+			assert.equal(popupTitle(launched), "btw 01a14e96 why?", "the title carries the question");
 			assert.ok(launched.args.includes("/dev/pts/7"));
 			assert.deepEqual(launched.options, { detached: true, stdio: "ignore" });
 		});
@@ -439,7 +443,7 @@ test("a live panel is reattached without a new request; the bind is re-applied",
 		await withOuterTmux(async () => {
 			const paths = buildBtwPaths(agentDir, SID);
 			await mkdir(paths.runDir, { recursive: true });
-			await writeFile(paths.answer, "# old\n");
+			await writeFile(paths.answer, "# /btw\n\n> why does\n> the cache matter?\n\nanswer\n");
 			const { calls, launches, deps } = fakeDeps(agentDir, tmuxModel({ serverUp: true }));
 			const reused = await reattachBtwPanel(deps, fakeContext({}));
 			assert.equal(reused, true);
@@ -449,6 +453,11 @@ test("a live panel is reattached without a new request; the bind is re-applied",
 				"the bind targets the panel socket",
 			);
 			assert.equal(launches.length, 1);
+			assert.equal(
+				popupTitle(launches[0] as (typeof launches)[number]),
+				"btw 01a14e96 why does the cache matter?",
+				"a reattach recovers the whole header block, with its lines joined",
+			);
 		});
 	});
 });
@@ -483,6 +492,60 @@ test("a missing session with an answer restarts the viewer; without one it repor
 			assert.equal(reused, true);
 			assert.ok(calls.some((call) => call.args.includes("new-session")));
 			assert.equal(launches.length, 1);
+		});
+	});
+});
+
+test("launch and reattach show the same title for a multi-line question", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withOuterTmux(async () => {
+			const { launches, deps } = fakeDeps(agentDir, tmuxModel({ serverUp: true }));
+			const registry = streamingRegistry("ok");
+			const launch = await launchBtwPanel(deps, fakeContext(registry.modelRegistry), "line one\nline two");
+			assert.ok(launch);
+			await launch.completion;
+			assert.equal(popupTitle(launches[0] as (typeof launches)[number]), "btw 01a14e96 line one line two");
+
+			const reused = await reattachBtwPanel(deps, fakeContext({}));
+			assert.equal(reused, true);
+			assert.equal(launches.length, 2, "the reattach opens a second popup");
+			assert.equal(
+				popupTitle(launches[1] as (typeof launches)[number]),
+				popupTitle(launches[0] as (typeof launches)[number]),
+				"the title is derived from the answer file on both paths",
+			);
+		});
+	});
+});
+
+test("a blockquote in the answer body is not mistaken for the question", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withOuterTmux(async () => {
+			const paths = buildBtwPaths(agentDir, SID);
+			await mkdir(paths.runDir, { recursive: true });
+			await writeFile(paths.answer, "# old\n\nanswer:\n> a model quote\n");
+			const { launches, deps } = fakeDeps(agentDir, tmuxModel({ serverUp: true }));
+			const reused = await reattachBtwPanel(deps, fakeContext({}));
+			assert.equal(reused, true);
+			assert.equal(popupTitle(launches[0] as (typeof launches)[number]), "btw 01a14e96");
+		});
+	});
+});
+
+test("a question with '#' or a terminal escape still opens the panel, with a clean title", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withOuterTmux(async () => {
+			const { launches, notifications, deps } = fakeDeps(agentDir);
+			const registry = streamingRegistry("ok");
+			const launch = await launchBtwPanel(deps, fakeContext(registry.modelRegistry), "why \x1b[31m#72\x1b[0m?");
+			assert.ok(launch, "the panel starts instead of tripping the title guard");
+			await launch.completion;
+			assert.equal(launches.length, 1);
+			assert.equal(popupTitle(launches[0] as (typeof launches)[number]), "btw 01a14e96 why 72?");
+			assert.ok(
+				!notifications.some((entry) => entry.message.includes("Could not start the BTW panel")),
+				"the title guard did not take the panel down",
+			);
 		});
 	});
 });

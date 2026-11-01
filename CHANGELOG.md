@@ -4,6 +4,146 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.10.0 — 2026-11-01
+
+Added:
+
+- **`bin/devc` opens a project's devcontainer from a terminal.** Built for a
+  headless host: no `code`, no GUI, and the Dev Containers CLI has no `open`
+  subcommand, so "open" is `up` plus an interactive login shell in tmux. It
+  deliberately carries neither a registry (an allowlist of roots plus each
+  repo's `devcontainer.json` is the source of truth), nor a `docker ps`
+  idempotency check, nor a URI handoff. Two behaviours exist because both fail
+  silently otherwise: it recreates a container whose config hash moved, since
+  `devcontainer up` on 0.90 reports success and leaves an existing container
+  alone even after `devcontainer.json` or the compose file changed; and it
+  refuses to attach when the container's uid does not match the host's, because
+  the project's `postCreate` would then chown the bind-mounted host checkout to
+  a uid the host user does not own. `rebuild` recreates the container and never
+  removes named volumes.
+
+- **The `/btw` popup's title bar now says what the panel is answering.** The
+  title was `btw <id8>` and the id half is the first characters of a UUIDv7,
+  which is a timestamp before it is an identifier: two panels opened in the
+  same session, or two sessions opened in the same minute, carried titles a
+  reader could not tell apart, and a reopened panel lost the question it was
+  answering. The question now follows the id, read from the header of
+  `answer.md` so that a launch and a reattach show the same title without
+  asking again, and sanitized for the one consumer that matters: tmux renders
+  `-T` as a format string, so the suffix is collapsed to one line, has `#`
+  removed rather than escaped, and is truncated to 40 characters — counted as
+  code points, so an emoji at the boundary is not cut in half. Only the header
+  block after `# /btw` is read, which keeps a blockquote in the answer body
+  from being promoted into the title, and only the first few kilobytes of the
+  file, because the answer after it can still be streaming. `panel.ts` stays
+  pure; the suffix is just another input it validates.
+
+- **A `devcontainer` skill, so the agent can drive `devc` without breaking it.**
+  The workflow is easy to get wrong from a tool call: the attaching form
+  (`devc <name>`) execs `tmux new-session -A` and blocks until the human's
+  session ends, and the obvious repair for a stale container (`docker ps`, a
+  volume prune, `sudo`) is what loses sessions or chowns a checkout. The skill
+  states the one rule first (never attach from a tool call; use `devc up` and
+  `devc <name> -- cmd`), then the command table, the detached-build and
+  detached-server recipes, the volume/uid/port rules, a symptom → check → fix
+  table covering the failures this host actually produced (uid mismatch, config
+  drift, the Docker 29 bake entitlement, `postgres` as a service, the voice
+  forward), and the per-project facts worth knowing before touching a build.
+
+Changed:
+
+- **`/voice` reaches the phone over an ssh reverse forward instead of a
+  tailnet.** The container has no `/dev/tun`, so the old chain ran a userspace
+  `tailscaled` and tunnelled ssh through its SOCKS5 proxy, which needed a tailnet
+  identity, a per-volume approval step, two binaries on the pi-config volume and
+  the `netcat-openbsd` package for the `ProxyCommand`. The phone is the side that
+  can dial out, so it now opens an ordinary remote forward to the host —
+  `ssh -N -R 0.0.0.0:8022:localhost:8022 <user>@<host>` — and the container
+  connects to `host.docker.internal:8022`, which `docker-compose.yml` already
+  maps. One host-side line makes it work: `GatewayPorts clientspecified` in
+  `sshd_config.d`, because a `-R` forward binds to the host's loopback by default
+  and the container arrives on the docker bridge gateway. The restore script no
+  longer installs a package or launches a daemon; it restores `~/.ssh/config`,
+  waits up to ten seconds for the forward to accept a connection, and reports
+  the exact phone command when it does not. Liveness is a TCP connect, not a
+  process or socket-file check: the listener belongs to the phone's session, so
+  this container can neither see nor own it.
+
+Removed:
+
+- **The Android SDK install, and the JDK that existed only to build it.**
+  `android-sdk.sh`, its `postCreateCommand` step and the `openjdk-17-jdk-headless`
+  package are gone, along with the `ANDROID_HOME`/`ANDROID_SDK_ROOT`/`PATH`
+  exports from `.zshrc` and `.bashrc` that baked in an SDK path this container
+  no longer installs. The SDK was ~1.5 GB on the volume for one project, and
+  Google publishes no arm64 Linux build-tools, so a host without emulation could
+  not use it anyway. Also removed: `.devcontainer/start-tailscaled.sh`. A volume
+  that still carries `~/.pi/{bin/tailscale*,tailscale,android-sdk}` can be
+  cleaned by hand; nothing reads them any more.
+
+- **The devcontainer image builds again on Docker 29.** `@devcontainers/cli`
+  0.90 leaves the feature install to the base image's auto-mapped defaults when
+  `devcontainer.json` has no `features` key, and that path produces a compose
+  bake definition missing the feature-content source; Docker 29's bake then
+  refuses to read the generated `Dockerfile-with-features` from outside the
+  build context ("additional privileges requested: pass
+  `--allow=fs.read=...`"). Declaring `common-utils` explicitly takes the path
+  that inlines it. The failure is deterministic for this repo and only for this
+  repo: `pupkeep` and `analytics-agent` declare features, so their builds were
+  unaffected. Verified with a `--no-cache` rebuild, then a normal `up`.
+
+Maintenance:
+
+- **The 30-second lifecycle flake was a harness bug, not a timing problem.**
+  "a result that lands during the pane probe still wins" failed twice on
+  2026-10-18 under full-suite load, with passing reruns in between. That looked
+  like timer starvation — the test waits 30s for a run the watcher should
+  finalize in well under a second — but the watcher was never given the chance.
+
+  The fake tmux in `createHarness` recognised the version probe with
+  `joined.includes("-V")` on the joined argv, and those argv strings embed the
+  agent dir, which `mkdtemp` names `subagent-test-XXXXXX`. When the random
+  suffix begins with `V`, every tmux call in that harness contains `-V` and was
+  answered with `tmux 3.3a`: `pane_dead` never read `"1"`,
+  `finalizeMissingChild` never ran, the pane-probe hook never wrote its result,
+  and the run stayed `running` for the full bound. Roughly 1.6% of harness
+  directories per run are affected — frequent enough to appear across a
+  session, rare enough to pass alone and on a rerun.
+
+  The mock now matches `-V` on the argv itself (`args.length === 1 &&
+  args[0] === "-V"`), and a harness test drives a `capture-pane` and a
+  `pane_dead` probe through a socket path containing `-V` to pin the
+  classification. Reproduced before the fix by repeating the pane-probe test
+  150 times (one failure at iteration 59); verified after it by forcing every
+  temp agent dir to contain `-V` (30/30).
+
+- **The click-to-open popup has one implementation, not two.** `/btw` reused
+  the subagent extension's popup builders, but it carried its own copy of the
+  three effectful pieces wrapped around them: the detached launcher, the `TMUX`
+  socket helper, and the ~27-line window/client ladder that decides which
+  terminal the popup is drawn over. Two copies of a probe that parses tmux's
+  format output is the kind of duplication that goes wrong differently in each
+  caller: a fix to the grouped-session window filter, or to the activity
+  tie-break, has to be made twice and can silently be made once. Those three
+  now live in `.pi/extensions/subagent/popup.ts`, and both extensions call
+  them.
+
+  What stayed separate stayed separate on purpose. The subagent ladder guards
+  on a live run's pane and refuses to open from inside a subagent pane, where
+  pi's own tmux server IS the subagent server; `/btw` has no run record and
+  phrases every fallback around its own attach command. The two differences
+  that reach the probe are parameters: `/btw` bounds both tmux calls with its
+  5-second timeout while the subagent ladder passes none, as before, and each
+  extension keeps its own module-level launcher binding so
+  `__test__.setPanelLauncher` still substitutes one without a reload.
+  `panel.ts` stays pure.
+
+  `popup.test.ts` now tests the probe directly — the window filter, the
+  activity tie-break and its stability on same-second values, the
+  `pane-gone`/`no-client` split, the optional timeout, and the launcher's
+  spawn-error callback — instead of inferring all of it through the subagent
+  guard ladder.
+
 ## v1.9.0 — 2026-10-22
 
 Fixed:

@@ -188,7 +188,13 @@ async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 			if (options.afterEscapeSent && joined.includes("send-keys") && args.includes("Escape")) {
 				await options.afterEscapeSent();
 			}
-			if (joined.includes("-V")) return { code: 0, stdout: "tmux 3.3a", stderr: "" };
+			// The version probe is the only tmux call with no socket in its argv, and
+			// the socket path can itself contain "-V" (mkdtemp may name the agent dir
+			// `subagent-test-Vxxxxx`), so match the argv exactly. A substring match
+			// here once answered EVERY tmux call as a version probe whenever the
+			// random name started with V: pane_dead never read as "1", the pane-probe
+			// hook never fired, and the run being tested polled for 30s.
+			if (args.length === 1 && args[0] === "-V") return { code: 0, stdout: "tmux 3.3a", stderr: "" };
 			// Panel calls (local patch 17) are answered before the pane-call machinery,
 			// which they must not disturb: the client probe is not a liveness poll.
 			// The failure variants of these guards are unit-tested in panel.test.ts.
@@ -469,6 +475,37 @@ test("the harness exercises the parent branch even inside a pi subagent child", 
 			});
 		},
 	);
+});
+
+test("the fake tmux does not read a socket path containing '-V' as the version probe", async () => {
+	// The lifecycle flake: `mkdtemp` can name the agent dir `subagent-test-Vxxxxx`,
+	// so the socket path embedded in every tmux argv contains "-V". The mock used
+	// to recognise the version call with `joined.includes("-V")`, which then
+	// answered EVERY tmux call with "tmux 3.3a": `pane_dead` never read as "1",
+	// the pane-probe hook never fired, and a run whose result arrives in that
+	// window (the test below) polled forever and timed out at 30s. Recognise the
+	// version call on its own argv, never on a substring of a joined line.
+	await withTempAgentDir(async () => {
+		const harness = await createHarness();
+		try {
+			const exec = harness.pi.exec as (
+				command: string,
+				args: string[],
+			) => Promise<{ code: number; stdout: string }>;
+			const socket = "/tmp/subagent-test-Vabcde/tmux-subagents.sock";
+
+			const pane = await exec("tmux", ["-S", socket, "capture-pane", "-p", "-J", "-t", "pi-agent-x:0.0"]);
+			assert.equal(pane.stdout, "child working\n", "a pane call is a pane call, whatever the path spells");
+
+			const dead = await exec("tmux", ["-S", socket, "display-message", "-p", "-t", "pi-agent-x:0.0", "#{pane_dead}"]);
+			assert.equal(dead.stdout, "0", "a pane_dead probe answers pane_dead, not a version");
+
+			const version = await exec("tmux", ["-V"]);
+			assert.equal(version.stdout, "tmux 3.3a");
+		} finally {
+			await harness.shutdown();
+		}
+	});
 });
 
 test("subagent launches a child in a detached tmux session and returns immediately", async () => {

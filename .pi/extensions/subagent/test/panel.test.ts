@@ -34,8 +34,8 @@ function launch(overrides: Partial<Parameters<typeof buildPanelLaunch>[0]> = {})
 }
 
 /** The value passed to `-T`, computed once from a single launch. */
-function titleOf(runId: string, titlePrefix?: string): string {
-	const args = launch(titlePrefix === undefined ? { runId } : { runId, titlePrefix }).args;
+function titleOf(runId: string, titlePrefix?: string, titleSuffix?: string): string {
+	const args = launch({ runId, titlePrefix, titleSuffix }).args;
 	return args[args.indexOf("-T") + 1] as string;
 }
 
@@ -102,6 +102,38 @@ test("a blank title prefix falls back to the default", () => {
 	assert.equal(titleOf(RUN_ID, " btw "), "btw 1a2b3c4d");
 });
 
+test("a title suffix is appended after the run id", () => {
+	assert.equal(titleOf(RUN_ID, "btw", "why does the cache matter?"), "btw 1a2b3c4d why does the cache matter?");
+	assert.equal(titleOf(RUN_ID, undefined, "why?"), "subagent 1a2b3c4d why?");
+});
+
+test("a title suffix is sanitized: one line, no '#', truncated", () => {
+	assert.equal(titleOf(RUN_ID, "btw", "line one\nline two"), "btw 1a2b3c4d line one line two");
+	assert.equal(titleOf(RUN_ID, "btw", "why #72 matters"), "btw 1a2b3c4d why 72 matters");
+	assert.equal(titleOf(RUN_ID, "btw", "why # matters"), "btw 1a2b3c4d why matters", "the gap left by '#' collapses");
+	assert.equal(titleOf(RUN_ID, "btw", "one\u2028two\u2029three"), "btw 1a2b3c4d one two three");
+	assert.equal(titleOf(RUN_ID, "btw", "  padded  "), "btw 1a2b3c4d padded");
+	assert.equal(titleOf(RUN_ID, "btw", "a\x1b[31mb\x7fc\x9bd"), "btw 1a2b3c4d a[31mbcd", "control characters are dropped");
+	const truncated = titleOf(RUN_ID, "btw", "this question is definitely longer than forty characters");
+	assert.equal(truncated, "btw 1a2b3c4d this question is definitely longer than…");
+});
+
+test("a blank title suffix composes no suffix", () => {
+	assert.equal(titleOf(RUN_ID, "btw", ""), "btw 1a2b3c4d");
+	assert.equal(titleOf(RUN_ID, "btw", "  \n "), "btw 1a2b3c4d");
+});
+
+test("a title suffix truncates at 40 code points, never mid-surrogate", () => {
+	const forty = "x".repeat(40);
+	assert.equal(titleOf(RUN_ID, "btw", forty), `btw 1a2b3c4d ${forty}`, "exactly 40 is kept whole");
+	assert.equal(titleOf(RUN_ID, "btw", "x".repeat(41)), `btw 1a2b3c4d ${"x".repeat(39)}…`);
+	assert.equal(
+		titleOf(RUN_ID, "btw", `${"x".repeat(38)}😀tail`),
+		`btw 1a2b3c4d ${"x".repeat(38)}😀…`,
+		"an astral character at the boundary is kept, not cut in half",
+	);
+});
+
 test("a '#' in the prefix is refused like one in the run id", () => {
 	assert.throws(() => titleOf(RUN_ID, "#btw"), TypeError);
 });
@@ -120,13 +152,15 @@ test("a run id containing '#' is refused, without echoing the run id", () => {
 test("no '#' can reach the -T format slot", () => {
 	for (const runId of [RUN_ID, "abcdefgh-rest", "01234567", "#abcdefg", "ab#defgh", "#######x"]) {
 		for (const titlePrefix of [undefined, "subagent", "btw", "#btw", "bt#w", "###", " btw "]) {
-			let title: string;
-			try {
-				title = titleOf(runId, titlePrefix);
-			} catch {
-				continue; // refused, so nothing reached -T
+			for (const titleSuffix of [undefined, "why #72 matters", "#(id)", "####", "C# vs F#"]) {
+				let title: string;
+				try {
+					title = titleOf(runId, titlePrefix, titleSuffix);
+				} catch {
+					continue; // refused, so nothing reached -T
+				}
+				assert.ok(!title.includes("#"), `title ${JSON.stringify(title)} must not contain '#'`);
 			}
-			assert.ok(!title.includes("#"), `title ${JSON.stringify(title)} must not contain '#'`);
 		}
 	}
 });

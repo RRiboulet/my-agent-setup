@@ -1,12 +1,17 @@
-import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { appendFile, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 
 import { getAgentDir, getPackageDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { Usage } from "@earendil-works/pi-ai";
 
 import { buildAttachCommand, buildEscapeBindArgs, buildPanelLaunch } from "../subagent/panel.ts";
+import { currentTmuxPointer, defaultPanelLauncher, resolvePaneClient, type PanelLauncher } from "../subagent/popup.ts";
+
+// Kept exported: `BtwDeps.launch` and `__test__.setPanelLauncher` name this type,
+// so a typed consumer of this entry point should not have to reach into the
+// subagent tree to spell it.
+export type { PanelLauncher };
 import {
 	buildBtwKillServerArgs,
 	buildBtwPaths,
@@ -28,28 +33,20 @@ const DESCRIPTION = "Open a side-question panel that asks for the question and a
 const TMUX_TIMEOUT_MS = 5_000;
 const FOOTER = "\n\n---\n";
 
-/** How the popup CLI is started, injectable so tests never spawn one. */
-export type PanelLauncher = (
-	command: string,
-	args: string[],
-	options: { detached: true; stdio: "ignore" },
-	onError: (message: string) => void,
-) => void;
-
 /**
- * Start the popup detached, so pi neither waits for it nor is kept alive by it.
- * A spawn error is the only failure this can report: once tmux is running, a
- * display-popup failure exits in an unobserved process.
+ * The answer file's header: the question as a blockquote paragraph, one `> `
+ * line per question line. The popup title reads it back, so writer and parser
+ * share these literals rather than agreeing by coincidence.
  */
-const defaultPanelLauncher: PanelLauncher = (command, args, options, onError) => {
-	const child = spawn(command, args, options);
-	child.once("error", (error) => onError(error instanceof Error ? error.message : String(error)));
-	child.unref();
-};
+const ANSWER_HEADING = "# /btw";
+const ANSWER_QUOTE_PREFIX = "> ";
+/** The header is read from the start; the answer after it can be large. */
+const ANSWER_HEADER_BYTES = 4_096;
 
 // A module-level binding rather than a direct call so factory-driven tests can
 // substitute it (`__test__.setPanelLauncher`). The extension reads it at popup
-// time, so a test can change it without reloading the factory.
+// time, so a test can change it without reloading the factory. The launcher
+// itself is shared with the subagent extension (see popup.ts).
 let panelLauncher: PanelLauncher = defaultPanelLauncher;
 
 /** What the launch core needs from its caller; tests inject their own. */
@@ -123,12 +120,6 @@ function defaultIsPidAlive(pid: number): boolean {
 	} catch (error) {
 		return (error as { code?: string }).code === "EPERM";
 	}
-}
-
-/** The TMUX env var's socket component, when this process runs under tmux. */
-function currentTmuxSocket(): string | undefined {
-	const socket = process.env.TMUX?.split(",", 1)[0]?.trim();
-	return socket || undefined;
 }
 
 async function runTmux(deps: BtwDeps, args: string[], what: string): Promise<void> {
@@ -337,6 +328,10 @@ async function panelState(deps: BtwDeps, paths: BtwPaths): Promise<PanelState> {
  * it exits, so kill-then-reopen can in principle land `unbind` after the new
  * `bind`; the bind is re-applied on every open, and the panel's own socket
  * bounds any stale binding to this one session's server.
+ *
+ * The popup title carries the question read from the answer file's header, so
+ * a reattach shows the same title the launch did; the panel builder sanitizes
+ * and truncates it.
  */
 async function openBtwPopup(deps: BtwDeps, paths: BtwPaths, sessionId: string): Promise<boolean> {
 	const attach = buildAttachCommand(paths.socket, paths.session);
@@ -346,33 +341,15 @@ async function openBtwPopup(deps: BtwDeps, paths: BtwPaths, sessionId: string): 
 	};
 
 	try {
-		const outerSocket = currentTmuxSocket();
-		const outerPane = process.env.TMUX_PANE?.trim();
-		if (!outerSocket || !outerPane) return fallback("Not running inside tmux.", "info");
+		const outer = currentTmuxPointer();
+		if (!outer) return fallback("Not running inside tmux.", "info");
 
-		// Scope the popup to a client actually looking at pi's window: `-t <pane>`
-		// alone resolves the most recently active client on the whole server.
-		const target = await deps.exec(
-			"tmux",
-			["-S", outerSocket, "display-message", "-p", "-t", outerPane, "#{window_id}"],
-			{ timeout: TMUX_TIMEOUT_MS },
-		);
-		const outerWindow = target.stdout.trim();
-		if (target.code !== 0 || !outerWindow) return fallback("That tmux pane is gone.", "warning");
-
-		const clients = await deps.exec(
-			"tmux",
-			["-S", outerSocket, "list-clients", "-F", "#{client_tty}\t#{window_id}\t#{client_activity}"],
-			{ timeout: TMUX_TIMEOUT_MS },
-		);
-		const client = clients.stdout
-			.split("\n")
-			.map((line) => line.split("\t"))
-			.filter(([, window]) => window?.trim() === outerWindow)
-			.map(([tty, , activity]) => ({ tty: tty?.trim() ?? "", activity: Number.parseInt(activity ?? "", 10) || 0 }))
-			.filter((entry) => entry.tty)
-			.sort((a, b) => b.activity - a.activity)[0]?.tty;
-		if (clients.code !== 0 || !client) return fallback("No attached tmux client is viewing this pane.", "warning");
+		// The client has to be one actually looking at pi's window; popup.ts
+		// explains why the window filter, not `-t <pane>`, is what finds it.
+		const resolved = await resolvePaneClient(deps.exec, outer.socket, outer.pane, { timeoutMs: TMUX_TIMEOUT_MS });
+		if (resolved.kind === "pane-gone") return fallback("That tmux pane is gone.", "warning");
+		if (resolved.kind === "no-client") return fallback("No attached tmux client is viewing this pane.", "warning");
+		const client = resolved.client;
 
 		const alive = await deps.exec("tmux", ["-S", paths.socket, "has-session", "-t", paths.session], {
 			timeout: TMUX_TIMEOUT_MS,
@@ -391,13 +368,14 @@ async function openBtwPopup(deps: BtwDeps, paths: BtwPaths, sessionId: string): 
 		}
 
 		const launch = buildPanelLaunch({
-			outerSocket,
-			pane: outerPane,
+			outerSocket: outer.socket,
+			pane: outer.pane,
 			client,
 			socket: paths.socket,
 			session: paths.session,
 			runId: sessionId,
 			titlePrefix: "btw",
+			titleSuffix: await questionFromAnswer(paths.answer),
 		});
 		deps.launch(launch.command, launch.args, { detached: true, stdio: "ignore" }, (message) => {
 			deps.notify(`Could not open the panel: ${message}. Attach with: ${attach}`, "error");
@@ -452,6 +430,45 @@ async function writePanelSpec(deps: BtwDeps, paths: BtwPaths): Promise<void> {
 /** Write the panel's setup down for the viewer. */
 async function writePanelSpecFile(paths: BtwPaths, spec: unknown): Promise<void> {
 	await writeFile(paths.panel, JSON.stringify(spec), { encoding: "utf8", mode: 0o600 }).catch(() => undefined);
+}
+
+/**
+ * The question as the answer file's header recorded it, for the popup title.
+ *
+ * Only the header is read, and only from the start: the answer after it can
+ * be large, and reattach happens while it may still be streaming. The block is
+ * anchored to the heading, so a blockquote in the answer body is never
+ * mistaken for the question; a panel whose file predates the header simply
+ * opens without a suffix. Its lines are joined because the title is one line,
+ * which makes a reattach produce the same title the launch did.
+ *
+ * A failed read costs the suffix, not the panel, so it is not reported: the
+ * title is decoration, and the viewer reports an answer file it cannot read.
+ */
+async function questionFromAnswer(answerPath: string): Promise<string | undefined> {
+	let header: string;
+	try {
+		const handle = await open(answerPath, "r");
+		try {
+			const buffer = Buffer.alloc(ANSWER_HEADER_BYTES);
+			const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+			header = buffer.toString("utf8", 0, bytesRead);
+		} finally {
+			await handle.close();
+		}
+	} catch {
+		return undefined;
+	}
+	const lines = header.split("\n");
+	if (lines[0] !== ANSWER_HEADING) return undefined;
+	let index = 1;
+	while (index < lines.length && lines[index] === "") index++;
+	if (index >= lines.length || !lines[index]!.startsWith(ANSWER_QUOTE_PREFIX)) return undefined;
+	const quoted: string[] = [];
+	for (; index < lines.length && lines[index]!.startsWith(ANSWER_QUOTE_PREFIX); index++) {
+		quoted.push(lines[index]!.slice(ANSWER_QUOTE_PREFIX.length).trim());
+	}
+	return quoted.join(" ").trim() || undefined;
 }
 
 /** Start (or restart) the view-only tmux session for an existing answer file. */
@@ -631,8 +648,11 @@ export async function launchBtwPanel(deps: BtwDeps, ctx: BtwContext, rawQuestion
 
 	try {
 		await resetPanel(deps, paths);
-		const quoted = sanitizeAnswerText(question).split("\n").join("\n> ");
-		await writeFile(paths.answer, `# /btw\n\n> ${quoted}\n\n`, { encoding: "utf8", mode: 0o600 });
+		const quoted = sanitizeAnswerText(question).split("\n").join(`\n${ANSWER_QUOTE_PREFIX}`);
+		await writeFile(paths.answer, `${ANSWER_HEADING}\n\n${ANSWER_QUOTE_PREFIX}${quoted}\n\n`, {
+			encoding: "utf8",
+			mode: 0o600,
+		});
 		await startViewer(deps, paths, ctx.cwd);
 		await openBtwPopup(deps, paths, sessionId);
 	} catch (error) {

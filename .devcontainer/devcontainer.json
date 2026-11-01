@@ -3,7 +3,23 @@
     "dockerComposeFile": "docker-compose.yml",
     "service": "devcontainer",
     "workspaceFolder": "/workspace",
-    "postCreateCommand": "bash /workspace/.devcontainer/postCreate.sh && bash /workspace/.devcontainer/restore-post-rebuild.sh && bash /workspace/.devcontainer/android-sdk.sh",
+    "postCreateCommand": "bash /workspace/.devcontainer/postCreate.sh && bash /workspace/.devcontainer/restore-post-rebuild.sh",
+    // Declared explicitly, not left to the base image's auto-mapped defaults.
+    // With @devcontainers/cli 0.90 on Docker 29, a build that relies on the
+    // auto-mapped features fails in the compose bake step with
+    //   additional privileges requested: pass "--allow=fs.read=...
+    // because the generated feature Dockerfile lives outside the build context
+    // and the definition is missing the feature-content source that makes bake
+    // inline it. Declaring the feature here takes the working path; verified by
+    // a --no-cache rebuild.
+    "features": {
+        "ghcr.io/devcontainers/features/common-utils:2": {
+            "installZsh": true,
+            "configureZshAsDefaultShell": true,
+            "installOhMyZsh": false,
+            "installOhMyZshConfig": false
+        }
+    },
     "customizations": {
         "vscode": {
             "extensions": [

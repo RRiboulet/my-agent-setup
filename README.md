@@ -43,6 +43,7 @@ each entry point explicitly:
   ],
   "skills": [
     ".pi/skills/commit",
+    ".pi/skills/devcontainer",
     ".pi/skills/github",
     ".pi/skills/librarian",
     ".pi/skills/native-web-search",
@@ -90,12 +91,14 @@ inactive. Installed packages are loaded regardless of project trust.
 | `.pi/extensions/opencode-go-provider/` | An `opencode-go` provider for `/model`: fast GLM, Kimi, MiniMax, Qwen, DeepSeek and Grok models via opencode.ai's Go API, with the correct wire protocol per model (Anthropic, OpenAI Completions, Responses) and a per-account usage-budget widget below the editor. **Vendored** from [monotykamary/pi-opencode-go-provider](https://github.com/monotykamary/pi-opencode-go-provider) (MIT), byte-identical to upstream — see below |
 | `.pi/skills/native-web-search/` | Script + docs for the above. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/native-web-search/`, with local provider patches: OpenRouter support, an `opencode-go` default through the Go API's Anthropic-compatible endpoint, unknown-provider rejection, and a test seam (`__test__` + direct-invocation guard). The two must travel together |
 | `.pi/skills/commit/` | Conventional Commits subjects, and the branch-per-change rule from `AGENTS.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/commit/SKILL.md`, with two local adaptations |
+| `.pi/skills/devcontainer/` | Drive a project's devcontainer from a headless host: `devc` (`devcontainer up` + `exec`), the rule that an agent must never run the attaching form, long-build and long-server recipes, the volume/uid/port rules that prevent damage, and a symptom→fix table. **Ours** |
 | `.pi/skills/github/` | gh CLI usage: PRs, CI runs, `gh api`, structured JSON. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/github/SKILL.md`, with four local adaptations — this repo's `GH_CONFIG_DIR` auth setup, the AGENTS.md squash workflow, the token rule, and the credential-helper note |
 | `.pi/skills/librarian/` | Caches and refreshes remote git repos under the pi agent dir (`<agent dir>/cache/checkouts/<host>/<org>/<repo>`) with partial clones, so repeated references reuse a stable local checkout. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/librarian/`, with the cache root moved from `~/.cache/checkouts` to the persistent agent dir and the script invoked by skill-relative path |
 | `.pi/skills/tmux/` | Drive interactive CLIs (python, gdb, lldb, psql, …) over a private tmux socket: literal `send-keys`, `capture-pane -J`, prompt polling, and `find-sessions.sh`/`wait-for-text.sh`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/tmux/`, with local adaptations — `PI_TMUX_SOCKET_DIR`/`pi-*` naming, an explicit split from the subagent extension's socket and reserved `pi-agent-*` sessions, `-S` support in `wait-for-text.sh`, and fixes in `find-sessions.sh` for the format strings, `-q` name matching and the attached-client count |
 | `.pi/skills/update-changelog/` | Writes `CHANGELOG.md`'s `Unreleased` section from the commits since the last tag. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/update-changelog/SKILL.md`, with one local adaptation |
 | `REVIEW_GUIDELINES.md` | Project-level review guidelines read by `/review` — branch hygiene, token rules, changelog shape, PR workflow, line endings |
 | `pi-session.sh` | Launch pi under tmux with an OpenRouter model |
+| `bin/devc` | Open a project's devcontainer from a terminal — headless, no GUI, tmux-backed. See [`devc`](#devc) |
 
 `/btw` notes: the command takes no arguments — it always asks for the question
 (submit it empty to reopen a running panel), so spaces and punctuation in it
@@ -119,8 +122,13 @@ answer's history, except after a resize, which redraws the panel and clears
 it, as the transcript does). The pane still scrolls natively — copy mode
 (`C-b [`), and the mouse wheel where the tmux config sets `set -g mouse on`
 (the devcontainer's does) — like the subagent attach views, because the
-viewer only draws and never takes the keyboard. The next `/btw` restarts the
-viewer on the same answer. On a session with an active `/goal` the
+viewer only draws and never takes the keyboard. The popup's title bar names the
+panel and its question (`btw 01a14e96 why does the cache matter?`); the id alone
+is a UUIDv7 timestamp and could not tell two panels apart. The question is
+collapsed to one line and truncated to fit; it is read from the answer file's
+header, so a launch and a reattach show the same title and a reopened panel
+still says what it is answering, and a blockquote in the answer itself is
+never mistaken for it. The next `/btw` restarts the viewer on the same answer. On a session with an active `/goal` the
 main request's forced system prompt differs, so the panel may re-bill the
 context and show goal notes; `.pi/extensions/btw/request.ts` documents that
 limitation.
@@ -134,6 +142,53 @@ limitation.
 - An `opencode-go` key for web search — in `~/.pi/agent/auth.json` under `opencode-go`, or via `OPENCODE_API_KEY`. The `web_search` tool and the native-web-search skill both default to this provider. An OpenRouter key is only needed for `pi-session.sh`, which launches a model through OpenRouter.
 
 The `.devcontainer/` provides all of these.
+
+## devc
+
+`bin/devc` opens a project's devcontainer from a terminal, which is what "open"
+has to mean on a headless host: there is no `code`, and the Dev Containers CLI
+has no `open` subcommand. It makes sure the container is built and running, then
+attaches a login shell inside it under tmux, so a dropped SSH connection does not
+kill the session.
+
+```bash
+devc                     # pick a project (lists when stdin is not a TTY)
+devc ls                  # names, paths, state, published ports
+devc up <name>           # ensure built/running; no shell
+devc <name>              # ensure, then attach a login shell in tmux
+devc <name> -- <cmd>     # run one command in the container
+devc rebuild <name> [--no-cache]
+devc stop <name>         # stop; named volumes are kept
+devc doctor [name]       # preflight: docker, CLI, disk, iptables, per-project blockers
+```
+
+Install it once with `ln -s "$PWD/bin/devc" ~/bin/devc`. Projects come from
+`~/.config/devc/roots` (seeded on first run with `$HOME`), one directory per
+line; a directory either contains `.devcontainer/devcontainer.json` itself or
+holds projects one level down. There is deliberately no registry: the config
+file in the repo is the source of truth, and an allowlist is what keeps the
+cached copies under `~/.pi/agent/git` out of the list.
+
+Three behaviours are worth knowing because they exist to stop silent breakage:
+
+- **It recreates a container whose config changed.** `devcontainer up` on 0.90
+  reports success and leaves an existing container alone even when
+  `devcontainer.json` or the compose file has changed, so an edited environment
+  silently keeps running the old one. `devc` hashes those files (plus the
+  Dockerfile, lifecycle scripts and `.dockerignore`), records the hash next to
+  the container, and recreates when it moves. `devc doctor` reports the drift.
+- **It refuses a uid mismatch.** If the container's user does not match the
+  host uid, the bind-mounted repo is unwritable and the project's `postCreate`
+  "fixes" it by chowning the host checkout to a uid the host user does not own.
+  `devc` stops before that and says why. The Dev Containers CLI's default
+  `updateRemoteUserUID` is the mechanism; do not disable it.
+- **It never removes volumes.** `rebuild` recreates the container and leaves
+  named volumes (pi sessions, provider auth, gh token, databases) in place.
+  Nothing here runs `docker compose down -v` or `docker system prune --volumes`.
+
+Requires `docker` (the user in the `docker` group) and
+`@devcontainers/cli@0.90.0`. `DEVC_DRY_RUN=1` prints the commands instead of
+running them.
 
 ## Tests
 
