@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.10.0 — 2026-11-01
+
 Added:
 
 - **`bin/devc` opens a project's devcontainer from a terminal.** Built for a
