@@ -67,6 +67,17 @@ Removed:
   that still carries `~/.pi/{bin/tailscale*,tailscale,android-sdk}` can be
   cleaned by hand; nothing reads them any more.
 
+- **The devcontainer image builds again on Docker 29.** `@devcontainers/cli`
+  0.90 leaves the feature install to the base image's auto-mapped defaults when
+  `devcontainer.json` has no `features` key, and that path produces a compose
+  bake definition missing the feature-content source; Docker 29's bake then
+  refuses to read the generated `Dockerfile-with-features` from outside the
+  build context ("additional privileges requested: pass
+  `--allow=fs.read=...`"). Declaring `common-utils` explicitly takes the path
+  that inlines it. The failure is deterministic for this repo and only for this
+  repo: `pupkeep` and `analytics-agent` declare features, so their builds were
+  unaffected. Verified with a `--no-cache` rebuild, then a normal `up`.
+
 Maintenance:
 
 - **The 30-second lifecycle flake was a harness bug, not a timing problem.**
