@@ -43,6 +43,7 @@ each entry point explicitly:
   ],
   "skills": [
     ".pi/skills/commit",
+    ".pi/skills/devcontainer",
     ".pi/skills/github",
     ".pi/skills/librarian",
     ".pi/skills/native-web-search",
@@ -90,6 +91,7 @@ inactive. Installed packages are loaded regardless of project trust.
 | `.pi/extensions/opencode-go-provider/` | An `opencode-go` provider for `/model`: fast GLM, Kimi, MiniMax, Qwen, DeepSeek and Grok models via opencode.ai's Go API, with the correct wire protocol per model (Anthropic, OpenAI Completions, Responses) and a per-account usage-budget widget below the editor. **Vendored** from [monotykamary/pi-opencode-go-provider](https://github.com/monotykamary/pi-opencode-go-provider) (MIT), byte-identical to upstream — see below |
 | `.pi/skills/native-web-search/` | Script + docs for the above. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/native-web-search/`, with local provider patches: OpenRouter support, an `opencode-go` default through the Go API's Anthropic-compatible endpoint, unknown-provider rejection, and a test seam (`__test__` + direct-invocation guard). The two must travel together |
 | `.pi/skills/commit/` | Conventional Commits subjects, and the branch-per-change rule from `AGENTS.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/commit/SKILL.md`, with two local adaptations |
+| `.pi/skills/devcontainer/` | Drive a project's devcontainer from a headless host: `devc` (`devcontainer up` + `exec`), the rule that an agent must never run the attaching form, long-build and long-server recipes, the volume/uid/port rules that prevent damage, and a symptom→fix table. **Ours** |
 | `.pi/skills/github/` | gh CLI usage: PRs, CI runs, `gh api`, structured JSON. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/github/SKILL.md`, with four local adaptations — this repo's `GH_CONFIG_DIR` auth setup, the AGENTS.md squash workflow, the token rule, and the credential-helper note |
 | `.pi/skills/librarian/` | Caches and refreshes remote git repos under the pi agent dir (`<agent dir>/cache/checkouts/<host>/<org>/<repo>`) with partial clones, so repeated references reuse a stable local checkout. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/librarian/`, with the cache root moved from `~/.cache/checkouts` to the persistent agent dir and the script invoked by skill-relative path |
 | `.pi/skills/tmux/` | Drive interactive CLIs (python, gdb, lldb, psql, …) over a private tmux socket: literal `send-keys`, `capture-pane -J`, prompt polling, and `find-sessions.sh`/`wait-for-text.sh`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/tmux/`, with local adaptations — `PI_TMUX_SOCKET_DIR`/`pi-*` naming, an explicit split from the subagent extension's socket and reserved `pi-agent-*` sessions, `-S` support in `wait-for-text.sh`, and fixes in `find-sessions.sh` for the format strings, `-q` name matching and the attached-client count |
