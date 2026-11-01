@@ -1,0 +1,490 @@
+#!/usr/bin/env bash
+#
+# devc — open a project's devcontainer from a terminal.
+#
+# Written for a headless host (SSH, no GUI, no `code`). "Open" here means:
+# make sure the container is built and running, then attach an interactive login
+# shell inside it, inside tmux so a dropped SSH connection does not kill it.
+#
+# Deliberately absent:
+#   * a registry — the allowlist of roots plus each repo's
+#     `.devcontainer/devcontainer.json` is the source of truth;
+#   * `code` / `vscode-remote://` handoff — there is no editor here, and the CLI
+#     has no `open` subcommand; a workstation with VS Code can still use the
+#     Dev Containers extension directly;
+#   * `docker ps` as the idempotency check — a running container can be stale
+#     after a Dockerfile edit, so `devcontainer up` always gets a chance to
+#     reconcile;
+#   * any command that removes volumes. The named volumes hold pi sessions, gh
+#     tokens and (in other projects) database data.
+#
+# Usage:
+#   devc                     pick a project (or list, when not a TTY)
+#   devc ls                  names, paths, state, published ports
+#   devc up <name|path>      ensure it is built and running; no shell
+#   devc <name|path>         ensure, then attach a login shell in tmux
+#   devc <name|path> -- cmd  run one command in the container
+#   devc rebuild <name> [--no-cache]
+#   devc stop <name>         stop the container; volumes are kept
+#   devc doctor [name]       preflight checks and known blockers
+#
+# Configuration: ~/.config/devc/roots holds one project root per line
+# (blank lines and #-comments ignored). It is seeded on first use.
+#
+# Environment: DEVC_DRY_RUN=1 prints the commands instead of running them.
+
+set -euo pipefail
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/devc"
+ROOTS_FILE="$CONFIG_DIR/roots"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/devc"
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+	BOLD=$'\033[1m' DIM=$'\033[2m' RED=$'\033[31m' YELLOW=$'\033[33m' RESET=$'\033[0m'
+else
+	BOLD='' DIM='' RED='' YELLOW='' RESET=''
+fi
+
+die() {
+	printf '%sdevc:%s %s\n' "$RED" "$RESET" "$*" >&2
+	exit 1
+}
+
+warn() {
+	printf '%sdevc:%s %s\n' "$YELLOW" "$RESET" "$*" >&2
+}
+
+note() {
+	printf '%s%s%s\n' "$DIM" "$*" "$RESET" >&2
+}
+
+run() {
+	if [ -n "${DEVC_DRY_RUN:-}" ]; then
+		printf '+ %s\n' "$*" >&2
+		return 0
+	fi
+	"$@"
+}
+
+# ---------------------------------------------------------------- environment
+
+seed_roots() {
+	mkdir -p "$CONFIG_DIR"
+	if [ -f "$ROOTS_FILE" ]; then
+		return 0
+	fi
+	{
+		echo "# Project roots devc may open. One per line; '#' starts a comment."
+		echo "# Each entry is a directory that contains .devcontainer/devcontainer.json,"
+		echo "# or a directory whose immediate children are such projects."
+		echo "$HOME"
+	} >"$ROOTS_FILE"
+	note "seeded $ROOTS_FILE (edit it to add or remove project roots)"
+}
+
+# Allowlisted roots only: scanning all of ~ would also offer the cached copies
+# under ~/.pi/agent/git and any node_modules tree, each with its own container.
+roots() {
+	sed -e 's/[[:space:]]*#.*//' -e 's/[[:space:]]*$//' "$ROOTS_FILE" | grep -v '^$' || true
+}
+
+project_dir() {
+	printf '%s' "$1"
+}
+
+has_devcontainer() {
+	[ -f "$1/.devcontainer/devcontainer.json" ] || [ -f "$1/.devcontainer.json" ]
+}
+
+find_project() {
+	local want="$1" root candidate
+	# A path is taken as-is when it is a project.
+	if [[ "$want" == /* ]]; then
+		has_devcontainer "$want" || die "no devcontainer in $want"
+		project_dir "$(realpath "$want")"
+		return 0
+	fi
+	while IFS= read -r root; do
+		[ -d "$root" ] || continue
+		candidate="$root/$want"
+		if has_devcontainer "$candidate"; then
+			project_dir "$(realpath "$candidate")"
+			return 0
+		fi
+	done < <(roots)
+	while IFS= read -r root; do
+		[ -d "$root" ] || continue
+		if has_devcontainer "$root" && [ "$(basename "$root")" = "$want" ]; then
+			project_dir "$(realpath "$root")"
+			return 0
+		fi
+	done < <(roots)
+	die "no project named '$want'. Try: devc ls"
+}
+
+projects() {
+	local root
+	while IFS= read -r root; do
+		[ -d "$root" ] || continue
+		if has_devcontainer "$root"; then
+			printf '%s\n' "$(realpath "$root")"
+			continue
+		fi
+		# One level of nesting: ~/src/pupkeep style roots.
+		local child
+		for child in "$root"/*/; do
+			[ -d "$child" ] || continue
+			if has_devcontainer "${child%/}"; then
+				printf '%s\n' "$(realpath "${child%/}")"
+			fi
+		done
+	done < <(roots)
+}
+
+require_docker() {
+	command -v docker >/dev/null 2>&1 || die "docker is not installed. See 'devc doctor'."
+	if ! docker info >/dev/null 2>&1; then
+		die "cannot talk to the Docker daemon. Add yourself to the docker group (sudo usermod -aG docker \$USER) and log in again."
+	fi
+	command -v devcontainer >/dev/null 2>&1 ||
+		die "the Dev Containers CLI is not installed: sudo npm install -g @devcontainers/cli@0.90.0"
+}
+
+container_id() {
+	docker ps -q --filter "label=devcontainer.local_folder=$1" | head -n1
+}
+
+# Everything that decides what the container *is*: the devcontainer config, the
+# compose file, the Dockerfile, the lifecycle scripts and the build context's
+# ignore file. `devcontainer up` on 0.90 does not recreate an existing container
+# when these change — it reports success and leaves the old one — so devc tracks
+# the hash itself and recreates when it moves.
+cfg_hash() {
+	local dir="$1"
+	(
+		cd "$dir" || exit 1
+		{
+			find .devcontainer -maxdepth 1 -type f \
+				\( -name '*.json' -o -name '*.yml' -o -name '*.yaml' -o -name 'Dockerfile' -o -name '*.sh' \) \
+				-print0 2>/dev/null | sort -z | xargs -0 -r cat
+			[ -f .dockerignore ] && cat .dockerignore
+		} | sha256sum | cut -d' ' -f1
+	)
+}
+
+is_running() {
+	[ -n "$(container_id "$1")" ]
+}
+
+# ------------------------------------------------------------------- locking
+
+lock_project() {
+	local name="$1"
+	local lockfile="${TMPDIR:-/tmp}/devc-$name.lock"
+	exec 9>"$lockfile"
+	if ! flock -w 900 9; then
+		die "another devc run is still working on $name (lock: $lockfile)"
+	fi
+}
+
+# -------------------------------------------------------------------- actions
+
+ensure_up() {
+	local dir="$1"
+	local name
+	name="$(basename "$dir")"
+	require_docker
+	lock_project "$name"
+
+	if [ -n "${DEVC_DRY_RUN:-}" ]; then
+		printf '+ devcontainer up --workspace-folder %s  (skipped when already running)\n' "$dir" >&2
+		return 0
+	fi
+
+	local stamp="$STATE_DIR/$name.cfgsha" want have
+	want="$(cfg_hash "$dir")"
+	have="$(cat "$stamp" 2>/dev/null || true)"
+
+	# Fast path: a container that answers `exec` is running with this
+	# workspace's config. Anything else (stopped, stale, never built) goes
+	# through `up`, which is idempotent and reconciles config changes.
+	if devcontainer exec --workspace-folder "$dir" true >/dev/null 2>&1; then
+		if [ -n "$have" ] && [ "$have" != "$want" ]; then
+			note "config changed since this container was created; recreating"
+			devcontainer up --workspace-folder "$dir" --remove-existing-container
+		else
+			note "$name is already running"
+		fi
+	else
+		devcontainer up --workspace-folder "$dir"
+	fi
+	mkdir -p "$STATE_DIR"
+	printf '%s\n' "$want" >"$stamp"
+
+	local host_uid cont_uid
+	host_uid="$(id -u)"
+	cont_uid="$(devcontainer exec --workspace-folder "$dir" id -u 2>/dev/null || true)"
+	if [ -z "$cont_uid" ]; then
+		die "$name started but 'devcontainer exec' cannot reach it; re-run with 'devc rebuild $name'"
+	fi
+	if [ "$cont_uid" != "$host_uid" ]; then
+		# This is the trap: a container user that does not match the host uid
+		# leaves the bind-mounted repo unwritable, and the project's postCreate
+		# then "fixes" it by chowning the host checkout to a uid the host user
+		# does not own. Stop before that happens.
+		die "$name runs as uid $cont_uid but this host user is uid $host_uid. The bind mount would be unwritable and postCreate would chown your checkout. Do not pass --update-remote-user-uid-default never; 'devc rebuild $name' with the default is the fix."
+	fi
+
+	local ports
+	ports="$(docker ps --filter "id=$(container_id "$dir")" --format '{{.Ports}}' | head -n1)"
+	if [ -n "$ports" ]; then
+		note "published: $ports"
+	fi
+}
+
+attach_shell() {
+	local dir="$1"
+	local name
+	name="$(basename "$dir")"
+	ensure_up "$dir"
+	local remote='if command -v zsh >/dev/null 2>&1; then exec zsh -l; else exec bash -l; fi'
+	if [ -n "${TMUX:-}" ]; then
+		# Already in tmux: nesting a second session would fight the outer one.
+		if [ -n "${DEVC_DRY_RUN:-}" ]; then
+			printf '+ devcontainer exec --workspace-folder %s bash -lc <login shell>\n' "$dir" >&2
+			return 0
+		fi
+		exec devcontainer exec --workspace-folder "$dir" bash -lc "$remote"
+	fi
+	if [ -n "${DEVC_DRY_RUN:-}" ]; then
+		printf '+ tmux new-session -A -s dev-%s -- devcontainer exec --workspace-folder %s bash -lc <login shell>\n' \
+			"$name" "$dir" >&2
+		return 0
+	fi
+	exec tmux new-session -A -s "dev-$name" -- \
+		devcontainer exec --workspace-folder "$dir" bash -lc "$remote"
+}
+
+exec_in() {
+	local dir="$1"
+	shift
+	ensure_up "$dir"
+	if [ -n "${DEVC_DRY_RUN:-}" ]; then
+		printf '+ devcontainer exec --workspace-folder %s %s\n' "$dir" "$*" >&2
+		return 0
+	fi
+	exec devcontainer exec --workspace-folder "$dir" "$@"
+}
+
+cmd_rebuild() {
+	local dir="$1" no_cache="${2:-}"
+	require_docker
+	local args=(up --workspace-folder "$dir" --remove-existing-container)
+	if [ "$no_cache" = "--no-cache" ]; then
+		args+=(--build-no-cache)
+	fi
+	note "recreating the container; named volumes are kept"
+	run devcontainer "${args[@]}"
+	mkdir -p "$STATE_DIR"
+	cfg_hash "$dir" >"$STATE_DIR/$(basename "$dir").cfgsha"
+}
+
+cmd_stop() {
+	local dir="$1" id
+	require_docker
+	id="$(container_id "$dir")"
+	if [ -z "$id" ]; then
+		note "$(basename "$dir") is not running"
+		return 0
+	fi
+	run docker stop "$id" >/dev/null
+	note "stopped $(basename "$dir"); volumes are kept"
+}
+
+cmd_ls() {
+	local any=0 dir name state ports
+	if ! docker info >/dev/null 2>&1; then
+		warn "cannot read container state (docker group or daemon); showing projects only"
+	fi
+	while IFS= read -r dir; do
+		any=1
+		name="$(basename "$dir")"
+		if [ -n "$(container_id "$dir" 2>/dev/null || true)" ]; then
+			state="running"
+			ports="$(docker ps --filter "id=$(container_id "$dir")" --format '{{.Ports}}' | head -n1)"
+		else
+			state="-"
+			ports=""
+		fi
+		printf '%-20s %-9s %s' "$name" "$state" "$dir"
+		[ -n "$ports" ] && printf '  %s' "$ports"
+		printf '\n'
+	done < <(projects)
+	[ "$any" = 1 ] || note "no projects under: $(roots | tr '\n' ' ')"
+}
+
+pick_project() {
+	local dirs=() dir
+	while IFS= read -r dir; do dirs+=("$dir"); done < <(projects)
+	if [ "${#dirs[@]}" -eq 0 ]; then
+		die "no projects found. Edit $ROOTS_FILE."
+	fi
+	if [ "${#dirs[@]}" -eq 1 ]; then
+		project_dir "${dirs[0]}"
+		return 0
+	fi
+	if [ ! -t 0 ]; then
+		cmd_ls
+		return 1
+	fi
+	if command -v fzf >/dev/null 2>&1; then
+		printf '%s\n' "${dirs[@]}" | fzf --prompt 'devc> ' --height 40%
+		return 0
+	fi
+	local choice
+	select choice in "${dirs[@]}"; do
+		printf '%s' "$choice"
+		break
+	done
+}
+
+doctor() {
+	local dir="${1:-}" problems=0
+	printf '%shost%s   %s %s\n' "$BOLD" "$RESET" "$(uname -m)" "$( . /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-}" )"
+
+	if command -v docker >/dev/null 2>&1; then
+		if docker info >/dev/null 2>&1; then
+			printf '%sdocker%s %s\n' "$BOLD" "$RESET" \
+				"$(docker info --format '{{.ServerVersion}} arch={{.Architecture}} cgroup={{.CgroupVersion}} driver={{.Driver}}' 2>/dev/null)"
+		else
+			printf '%sdocker%s reachable, but this user cannot talk to the daemon\n' "$BOLD" "$RESET"
+			printf '       sudo usermod -aG docker %s  # then log in again\n' "$USER"
+			problems=$((problems + 1))
+		fi
+	else
+		printf '%sdocker%s not installed\n' "$BOLD" "$RESET"
+		problems=$((problems + 1))
+	fi
+
+	if command -v devcontainer >/dev/null 2>&1; then
+		printf '%scli%s    %s\n' "$BOLD" "$RESET" "$(devcontainer --version)"
+	else
+		printf '%scli%s    not installed: sudo npm install -g @devcontainers/cli@0.90.0\n' "$BOLD" "$RESET"
+		problems=$((problems + 1))
+	fi
+
+	local free_gb
+	free_gb="$(df -Pk / | awk 'NR==2 {printf "%d", $4/1024/1024}')"
+	printf '%sdisk%s   %sG free on /\n' "$BOLD" "$RESET" "$free_gb"
+	if [ "$free_gb" -lt 15 ]; then
+		printf '       under 15G free; a full image build can fill this\n'
+		problems=$((problems + 1))
+	fi
+
+	# Best effort: needs privileges, and must never modify anything.
+	if command -v iptables >/dev/null 2>&1; then
+		local input
+		input="$(iptables -S INPUT 2>/dev/null || sudo -n iptables -S INPUT 2>/dev/null || true)"
+		if [ -n "$input" ]; then
+			if printf '%s\n' "$input" | grep -q -- '-j REJECT'; then
+				printf '%siptables%s INPUT rejects by default (expected on Oracle images)\n' "$BOLD" "$RESET"
+			fi
+		else
+			printf '%siptables%s not readable without sudo; skipping\n' "$BOLD" "$RESET"
+		fi
+	fi
+
+	local checked=()
+	[ -n "$dir" ] && checked=("$dir") || { while IFS= read -r d; do checked+=("$d"); done < <(projects); }
+	local d name dc compose
+	for d in "${checked[@]}"; do
+		name="$(basename "$d")"
+		dc="$d/.devcontainer/devcontainer.json"
+		compose="$d/.devcontainer/docker-compose.yml"
+		[ -f "$dc" ] || continue
+		printf '\n%s%s%s %s\n' "$BOLD" "$name" "$RESET" "$d"
+
+		if grep -q 'docker-in-docker' "$dc" 2>/dev/null; then
+			printf '  privileged  Docker-in-Docker feature; needs --privileged and a running inner daemon\n'
+			problems=$((problems + 1))
+		fi
+		if [ -f "$compose" ] && ! grep -qE '^[[:space:]]+ports:' "$compose" && grep -q 'forwardPorts' "$dc"; then
+			printf '  ports      forwardPorts is a VS Code feature; headless clients will not forward anything\n'
+		fi
+		if [ -f "$d/.devcontainer/Dockerfile" ]; then
+			if grep -qE 'linux-amd64\.(deb|tgz)|!= "amd64"' "$d/.devcontainer/Dockerfile"; then
+				printf '  arch       Dockerfile pins an amd64 artifact; it will not build on %s\n' "$(uname -m)"
+				problems=$((problems + 1))
+			fi
+		fi
+		if is_running "$d" 2>/dev/null; then
+			local hcu ccu
+			hcu="$(id -u)"
+			ccu="$(devcontainer exec --workspace-folder "$d" id -u 2>/dev/null || echo '?')"
+			printf '  running    container uid %s, host uid %s%s\n' "$ccu" "$hcu" \
+				"$([ "$ccu" = "$hcu" ] && echo '' || echo '  <-- mismatch: see devc up')"
+			[ "$ccu" = "$hcu" ] || problems=$((problems + 1))
+			local want have
+			want="$(cfg_hash "$d")"
+			have="$(cat "$STATE_DIR/$name.cfgsha" 2>/dev/null || true)"
+			if [ -n "$have" ] && [ "$have" != "$want" ]; then
+				printf '  stale      devcontainer config changed; devc up will recreate it\n'
+			fi
+		fi
+	done
+
+	printf '\n'
+	if [ "$problems" -eq 0 ]; then
+		printf '%snothing blocking%s\n' "$BOLD" "$RESET"
+	else
+		printf '%s%d item(s) need attention%s\n' "$BOLD" "$problems" "$RESET"
+	fi
+}
+
+usage() {
+	sed -n '3,40p' "$0" | sed -e 's/^# \{0,1\}//' -e '/^$/q'
+}
+
+# ----------------------------------------------------------------------- main
+
+seed_roots
+
+case "${1:-}" in
+"")
+	dir="$(pick_project)" || exit 0
+	[ -n "$dir" ] || exit 0
+	attach_shell "$dir"
+	;;
+ls | list)
+	cmd_ls
+	;;
+up)
+	[ $# -ge 2 ] || die "usage: devc up <name>"
+	ensure_up "$(find_project "$2")"
+	;;
+rebuild)
+	[ $# -ge 2 ] || die "usage: devc rebuild <name> [--no-cache]"
+	cmd_rebuild "$(find_project "$2")" "${3:-}"
+	;;
+stop)
+	[ $# -ge 2 ] || die "usage: devc stop <name>"
+	cmd_stop "$(find_project "$2")"
+	;;
+doctor)
+	doctor "${2:+$(find_project "$2")}"
+	;;
+help | -h | --help)
+	usage
+	;;
+*)
+	dir="$(find_project "$1")"
+	shift
+	if [ "${1:-}" = "--" ] || [ $# -gt 0 ]; then
+		[ "${1:-}" = "--" ] && shift
+		[ $# -gt 0 ] || die "nothing to run after --"
+		exec_in "$dir" "$@"
+	else
+		attach_shell "$dir"
+	fi
+	;;
+esac
