@@ -8,21 +8,29 @@ under "Phone prerequisites" — this file covers the rest.
 The chain a `/voice` run drives looks like this:
 
 ```
-pi session → ssh phone <command> → SOCKS5 proxy (tailscaled) → tailnet →
-phone → Termux sshd (port 8022) → termux-microphone-record
+pi session → ssh phone → host.docker.internal:8022 → sshd on this host
+           → the reverse forward the PHONE opened → phone's Termux sshd (8022)
+           → termux-microphone-record
 ```
+
+**No tailnet.** The container has no `/dev/tun`, and the phone is the side that
+can dial out, so the phone opens an ordinary ssh *remote* forward to the host
+and the container reaches the host's forwarded port. Earlier versions ran a
+userspace `tailscaled` in the container with a SOCKS5 `ProxyCommand`; that is
+gone, along with the tailnet approval step and the tailscale binaries on the
+volume.
 
 ## Layout: what lives where
 
 | Where | What | Survives a rebuild? |
 |---|---|---|
-| pi-agent-config volume (`/home/vscode/.pi`) | ssh key pair `ssh/id_ed25519_phone{,.pub}`, ssh config template `ssh/config`, tailscale binaries `bin/{tailscale,tailscaled}`, tailscale state `tailscale/`, pi config incl. `agent/voice.json` | yes — the volume's whole purpose |
-| this repo (`/workspace`, bind mount) | the extension itself (`.pi/extensions/voice/`), this file, the two scripts | yes — it is the host checkout |
-| container layer (everything else) | apt packages (`netcat-openbsd`), `~/.ssh/config` + `known_hosts`, the running `tailscaled` process | no — wiped on rebuild, kept on restart |
+| pi-agent-config volume (`/home/vscode/.pi`) | ssh key pair `ssh/id_ed25519_phone{,.pub}`, ssh config template `ssh/config`, pi config incl. `agent/voice.json` | yes — the volume's whole purpose |
+| this repo (`/workspace`, bind mount) | the extension itself (`.pi/extensions/voice/`), this file, the restore script | yes — it is the host checkout |
+| container layer (everything else) | `~/.ssh/config` + `known_hosts` | no — wiped on rebuild, kept on restart |
 
-The extension itself never needs attention on a rebuild: it lives in the
-repo, which is bind-mounted. Only the three container-layer rows above are
-at risk, and `restore-post-rebuild.sh` (below) puts them back.
+The extension itself never needs attention on a rebuild: it lives in the repo,
+which is bind-mounted. Only the container-layer row above is at risk, and
+`restore-post-rebuild.sh` puts it back.
 
 ## First-time setup
 
@@ -39,46 +47,78 @@ ssh-keygen -t ed25519 -f ~/.pi/ssh/id_ed25519_phone -N "" -C "pi-devcontainer->p
 ```
 
 Install the public half on the phone (`~/.ssh/authorized_keys`, mode `600`,
-`.ssh` mode `700`) — see the voice README's prerequisites.
+`.ssh` mode `700`) — see the voice README's prerequisites. Termux sshd answers
+on port **8022**.
 
-**2. Tailscale, userspace mode** — the container has no `/dev/tun`, so the
-tailscale daemon runs as a userspace SOCKS5 proxy instead of a kernel
-interface:
+**2. Allow the reverse forward on the host.** Two host-side pieces, both
+one-liners; neither is optional, and each has a specific failure mode.
+
+*A `-R` forward binds the host's loopback by default, and the container arrives
+on the docker bridge gateway, not on `127.0.0.1`.* Let the phone choose the bind
+address, then reload sshd:
 
 ```bash
-# one-time: fetch the tarball, install the binaries into the volume
-curl -fsSL -o /tmp/tailscale.tgz https://pkgs.tailscale.com/stable/tailscale_<ver>_amd64.tgz
-tar -xzf /tmp/tailscale.tgz -C /tmp
-install /tmp/tailscale_<ver>_amd64/{tailscale,tailscaled} ~/.pi/bin/
-
-# start it (also: bash /workspace/.devcontainer/start-tailscaled.sh)
-# then join the tailnet: it prints a URL — open it in a browser and approve
-# the node once. The state file on the volume remembers the identity, so a
-# rebuild needs no second approval.
+# /etc/ssh/sshd_config.d/60-reverse-forward.conf
+GatewayPorts clientspecified
 ```
 
-The phone and the container must be on the same tailnet. The daemon's
-socket and state live under `~/.pi/tailscale/` (persistent). Termux sshd
-answers on port **8022**.
+```bash
+sudo sshd -t && sudo systemctl reload ssh   # -t validates before you reload
+```
 
-**3. ssh config** — the template at `~/.pi/ssh/config` (copied to
+*Host listeners are filtered by `INPUT`, unlike Docker-published ports.* On an
+Oracle image `INPUT` accepts established, ICMP, loopback and port 22, then
+rejects everything else — so a connection from a container to the host's 8022
+fails with `Host is unreachable` even though the forward is listening. Accept
+the forwarded port from docker networks only, and keep the rule in the file
+`netfilter-persistent` restores at boot:
+
+```bash
+sudo iptables -I INPUT 5 -s 172.16.0.0/12 -p tcp -m tcp --dport 8022 -j ACCEPT
+```
+
+Then add the same `-A INPUT -s 172.16.0.0/12 -p tcp -m tcp --dport 8022 -j ACCEPT`
+line to `/etc/iptables/rules.v4` **before** its final
+`-A INPUT -j REJECT --reject-with icmp-host-prohibited`, and check it parses:
+
+```bash
+sudo iptables-restore --test < /etc/iptables/rules.v4
+```
+
+Edits to that file survive a reboot only if they are made to the file itself; a
+live `iptables -I` is gone after `netfilter-persistent` restores at boot. The
+source range keeps the port reachable from containers and rejected from
+everything else, so binding `0.0.0.0` below does not expose it to the network.
+
+**3. Start the tunnel from the phone** (it is the side that can reach the host):
+
+```bash
+ssh -N -R 0.0.0.0:8022:localhost:8022 <user>@<this host>
+```
+
+Keep it running — `autossh`, a Termux:Boot entry, or a tmux window. The tunnel
+is a property of the phone's session, not of this container: a container
+rebuild does not drop it, and a phone reboot does.
+
+**4. ssh config** — the template at `~/.pi/ssh/config` (copied to
 `~/.ssh/config`, which is container-local):
 
 ```
 Host phone
-    HostName <phone-tailscale-ip>     # stable; set once, rarely changes
-    User <termux-user>                # `whoami` in Termux
+    HostName host.docker.internal   # the host's docker gateway
+    User <termux-user>              # `whoami` in Termux
     Port 8022
     IdentityFile ~/.pi/ssh/id_ed25519_phone
     IdentitiesOnly yes
     StrictHostKeyChecking accept-new   # non-interactive first trust
-    ProxyCommand nc -X 5 -x 127.0.0.1:1055 %h %p
 ```
 
-The `ProxyCommand` is what makes a plain `ssh phone ...` route through the
-tailscale SOCKS5 proxy; `nc -X 5` is why `netcat-openbsd` is required.
+`host.docker.internal` is added by `.devcontainer/docker-compose.yml`
+(`extra_hosts: host.docker.internal:host-gateway`). No `ProxyCommand` is
+needed: the forward lands on the host's own port, so a plain TCP connection is
+the whole route.
 
-**4. `~/.pi/agent/voice.json`** — transcription config; `sshTarget` is
+**5. `~/.pi/agent/voice.json`** — transcription config; `sshTarget` is
 already correct by default (`phone`). Example with OpenRouter:
 
 ```json
@@ -98,31 +138,32 @@ container creation, so normally there is nothing to do. To run it by hand:
 bash /workspace/.devcontainer/restore-post-rebuild.sh
 ```
 
-It reinstalls `netcat-openbsd` if missing, restores `~/.ssh/config` from the
-volume template, starts `tailscaled` if it is not running, then verifies the
-whole chain with `ssh phone true`. Idempotent, so it is also safe to run on a
-plain restart, where only the daemon process is actually missing. Everything
-it touches is reproducible — if a step fails, its output names the next
-command to check.
+It restores `~/.ssh/config` from the volume template, waits up to ten seconds
+for the reverse tunnel to accept a connection, then verifies the whole chain
+with `ssh phone true`. Idempotent, so it is also safe on a plain restart.
+Everything it touches is reproducible — if a step fails, its output names the
+next thing to check.
 
 Two details of the script are load-bearing and easy to "fix" back into bugs:
 
-- **Liveness is probed by connecting to the daemon's socket** (`nc -z -U`),
-  not by testing that the socket *file* exists. A container teardown SIGKILLs
-  `tailscaled`, which leaves the socket file on the volume; an existence check
-  therefore reports a dead daemon as running and skips the launch.
-  `tailscaled` tolerates and replaces a stale socket, so nothing needs
-  deleting first.
-- **Every script here is invoked through an interpreter** (`bash
-  restore-post-rebuild.sh`, `sh start-tailscaled.sh`). This checkout is
-  bind-mounted and has `core.fileMode false`, so the exec bit is not in git;
-  `./script.sh` fails with "Permission denied". The devcontainer's
-  `postCreateCommand` calls `bash` for the same reason.
+- **Liveness is probed by connecting** to the forwarded port, not by looking
+  for a process or a file. The listener belongs to the phone's tunnel, so this
+  container can neither see nor inspect it; a connection attempt is the only
+  honest test.
+- **Scripts here are invoked through an interpreter** (`bash
+  restore-post-rebuild.sh`). This checkout is bind-mounted and has
+  `core.fileMode false`, so the exec bit is not in git; `./script.sh` fails
+  with "Permission denied". The devcontainer's `postCreateCommand` calls
+  `bash` for the same reason.
 
 ## If the pi-config volume is ever wiped
 
-The restore script cannot help here: the key pair, the tailscale binaries and
-state, and `voice.json` are gone with the volume. Redo First-time setup
-1–4, then re-grant the tailnet approval (step 2's URL), then re-test
-`ssh phone true`. The phone-side `authorized_keys` entry survives a volume
-wipe — only a rebuild *of the phone's Termux* invalidates it.
+The restore script cannot help here: the key pair and `voice.json` are gone
+with the volume. Redo first-time setup steps 1, 4 and 5, then re-test
+`ssh phone true`. The phone-side `authorized_keys` entry survives a volume wipe
+— only a rebuild *of the phone's Termux* invalidates it.
+
+The tailscale binaries and state under `~/.pi/{bin,tailscale}` may still be
+present on an older volume. Nothing reads them any more; `rm -rf
+~/.pi/bin/tailscaled ~/.pi/bin/tailscale ~/.pi/tailscale` is safe once no
+`tailscaled` process is running.

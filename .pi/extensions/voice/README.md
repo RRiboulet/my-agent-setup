@@ -88,7 +88,9 @@ Termux (the terminal app) plus the Termux:API app, on the same phone:
   fail.
 - `sshd` running in Termux, the devcontainer's key in `~/.ssh/authorized_keys`,
   and a host alias in `~/.ssh/config` — the default `sshTarget` is `phone`, and
-  `ssh phone true` should succeed before `/voice` is tried.
+  `ssh phone true` should succeed before `/voice` is tried. The phone must also
+  keep the reverse forward open: `ssh -N -R 0.0.0.0:8022:localhost:8022
+  <user>@<host>` (see `.devcontainer/voice-container.md`).
 - **Use the absolute recorder path.** The non-interactive ssh `PATH` does not
   include Termux's `usr/bin`, so a bare `termux-microphone-record` fails there.
   The default, verified on 2026-10-15, is
@@ -109,20 +111,24 @@ recorder).
 ## Container rebuilds
 
 The extension lives in this repo, so a container rebuild costs nothing on
-its own. Three container-side pieces of the `/voice` setup do not survive a
-rebuild — the ssh config under `~/.ssh`, the `netcat-openbsd` package the
-ssh proxy command needs, and the `tailscaled` process that tunnels to the
-phone — and one command puts them all back:
+its own. One container-side piece of the `/voice` setup does not survive a
+rebuild — the ssh config under `~/.ssh` — and one command puts it back:
 
 ```
 bash /workspace/.devcontainer/restore-post-rebuild.sh
 ```
 
 The devcontainer's post-create hook runs it automatically on container
-creation. What the container-side setup is (ssh key, tailscale tunnel, ssh
-config, `voice.json`) and how to redo it from scratch if the pi-config volume
-is ever wiped is documented in `.devcontainer/voice-container.md`, with the
-phone-side steps in the prerequisites above.
+creation. What the container-side setup is (ssh key, the phone's reverse
+forward, ssh config, `voice.json`) and how to redo it from scratch if the
+pi-config volume is ever wiped is documented in `.devcontainer/voice-container.md`,
+with the phone-side steps in the prerequisites above.
+
+**No tailnet is involved.** The phone opens an ordinary ssh remote forward to
+the host (`ssh -N -R 0.0.0.0:8022:localhost:8022 <user>@<host>`, with
+`GatewayPorts clientspecified` in the host's sshd), and the container reaches
+it at `host.docker.internal:8022`. Earlier versions ran a userspace
+`tailscaled` plus a SOCKS5 `ProxyCommand` here; both are gone.
 
 ## Configuration
 

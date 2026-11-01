@@ -36,6 +36,48 @@ Added:
   file, because the answer after it can still be streaming. `panel.ts` stays
   pure; the suffix is just another input it validates.
 
+Changed:
+
+- **`/voice` reaches the phone over an ssh reverse forward instead of a
+  tailnet.** The container has no `/dev/tun`, so the old chain ran a userspace
+  `tailscaled` and tunnelled ssh through its SOCKS5 proxy, which needed a tailnet
+  identity, a per-volume approval step, two binaries on the pi-config volume and
+  the `netcat-openbsd` package for the `ProxyCommand`. The phone is the side that
+  can dial out, so it now opens an ordinary remote forward to the host —
+  `ssh -N -R 0.0.0.0:8022:localhost:8022 <user>@<host>` — and the container
+  connects to `host.docker.internal:8022`, which `docker-compose.yml` already
+  maps. One host-side line makes it work: `GatewayPorts clientspecified` in
+  `sshd_config.d`, because a `-R` forward binds to the host's loopback by default
+  and the container arrives on the docker bridge gateway. The restore script no
+  longer installs a package or launches a daemon; it restores `~/.ssh/config`,
+  waits up to ten seconds for the forward to accept a connection, and reports
+  the exact phone command when it does not. Liveness is a TCP connect, not a
+  process or socket-file check: the listener belongs to the phone's session, so
+  this container can neither see nor own it.
+
+Removed:
+
+- **The Android SDK install, and the JDK that existed only to build it.**
+  `android-sdk.sh`, its `postCreateCommand` step and the `openjdk-17-jdk-headless`
+  package are gone, along with the `ANDROID_HOME`/`ANDROID_SDK_ROOT`/`PATH`
+  exports from `.zshrc` and `.bashrc` that baked in an SDK path this container
+  no longer installs. The SDK was ~1.5 GB on the volume for one project, and
+  Google publishes no arm64 Linux build-tools, so a host without emulation could
+  not use it anyway. Also removed: `.devcontainer/start-tailscaled.sh`. A volume
+  that still carries `~/.pi/{bin/tailscale*,tailscale,android-sdk}` can be
+  cleaned by hand; nothing reads them any more.
+
+- **The devcontainer image builds again on Docker 29.** `@devcontainers/cli`
+  0.90 leaves the feature install to the base image's auto-mapped defaults when
+  `devcontainer.json` has no `features` key, and that path produces a compose
+  bake definition missing the feature-content source; Docker 29's bake then
+  refuses to read the generated `Dockerfile-with-features` from outside the
+  build context ("additional privileges requested: pass
+  `--allow=fs.read=...`"). Declaring `common-utils` explicitly takes the path
+  that inlines it. The failure is deterministic for this repo and only for this
+  repo: `pupkeep` and `analytics-agent` declare features, so their builds were
+  unaffected. Verified with a `--no-cache` rebuild, then a normal `up`.
+
 Maintenance:
 
 - **The 30-second lifecycle flake was a harness bug, not a timing problem.**
