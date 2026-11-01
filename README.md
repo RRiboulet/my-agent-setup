@@ -96,6 +96,7 @@ inactive. Installed packages are loaded regardless of project trust.
 | `.pi/skills/update-changelog/` | Writes `CHANGELOG.md`'s `Unreleased` section from the commits since the last tag. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/update-changelog/SKILL.md`, with one local adaptation |
 | `REVIEW_GUIDELINES.md` | Project-level review guidelines read by `/review` — branch hygiene, token rules, changelog shape, PR workflow, line endings |
 | `pi-session.sh` | Launch pi under tmux with an OpenRouter model |
+| `bin/devc` | Open a project's devcontainer from a terminal — headless, no GUI, tmux-backed. See [`devc`](#devc) |
 
 `/btw` notes: the command takes no arguments — it always asks for the question
 (submit it empty to reopen a running panel), so spaces and punctuation in it
@@ -139,6 +140,53 @@ limitation.
 - An `opencode-go` key for web search — in `~/.pi/agent/auth.json` under `opencode-go`, or via `OPENCODE_API_KEY`. The `web_search` tool and the native-web-search skill both default to this provider. An OpenRouter key is only needed for `pi-session.sh`, which launches a model through OpenRouter.
 
 The `.devcontainer/` provides all of these.
+
+## devc
+
+`bin/devc` opens a project's devcontainer from a terminal, which is what "open"
+has to mean on a headless host: there is no `code`, and the Dev Containers CLI
+has no `open` subcommand. It makes sure the container is built and running, then
+attaches a login shell inside it under tmux, so a dropped SSH connection does not
+kill the session.
+
+```bash
+devc                     # pick a project (lists when stdin is not a TTY)
+devc ls                  # names, paths, state, published ports
+devc up <name>           # ensure built/running; no shell
+devc <name>              # ensure, then attach a login shell in tmux
+devc <name> -- <cmd>     # run one command in the container
+devc rebuild <name> [--no-cache]
+devc stop <name>         # stop; named volumes are kept
+devc doctor [name]       # preflight: docker, CLI, disk, iptables, per-project blockers
+```
+
+Install it once with `ln -s "$PWD/bin/devc" ~/bin/devc`. Projects come from
+`~/.config/devc/roots` (seeded on first run with `$HOME`), one directory per
+line; a directory either contains `.devcontainer/devcontainer.json` itself or
+holds projects one level down. There is deliberately no registry: the config
+file in the repo is the source of truth, and an allowlist is what keeps the
+cached copies under `~/.pi/agent/git` out of the list.
+
+Three behaviours are worth knowing because they exist to stop silent breakage:
+
+- **It recreates a container whose config changed.** `devcontainer up` on 0.90
+  reports success and leaves an existing container alone even when
+  `devcontainer.json` or the compose file has changed, so an edited environment
+  silently keeps running the old one. `devc` hashes those files (plus the
+  Dockerfile, lifecycle scripts and `.dockerignore`), records the hash next to
+  the container, and recreates when it moves. `devc doctor` reports the drift.
+- **It refuses a uid mismatch.** If the container's user does not match the
+  host uid, the bind-mounted repo is unwritable and the project's `postCreate`
+  "fixes" it by chowning the host checkout to a uid the host user does not own.
+  `devc` stops before that and says why. The Dev Containers CLI's default
+  `updateRemoteUserUID` is the mechanism; do not disable it.
+- **It never removes volumes.** `rebuild` recreates the container and leaves
+  named volumes (pi sessions, provider auth, gh token, databases) in place.
+  Nothing here runs `docker compose down -v` or `docker system prune --volumes`.
+
+Requires `docker` (the user in the `docker` group) and
+`@devcontainers/cli@0.90.0`. `DEVC_DRY_RUN=1` prints the commands instead of
+running them.
 
 ## Tests
 

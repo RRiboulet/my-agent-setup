@@ -6,6 +6,20 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
+- **`bin/devc` opens a project's devcontainer from a terminal.** Built for a
+  headless host: no `code`, no GUI, and the Dev Containers CLI has no `open`
+  subcommand, so "open" is `up` plus an interactive login shell in tmux. It
+  deliberately carries neither a registry (an allowlist of roots plus each
+  repo's `devcontainer.json` is the source of truth), nor a `docker ps`
+  idempotency check, nor a URI handoff. Two behaviours exist because both fail
+  silently otherwise: it recreates a container whose config hash moved, since
+  `devcontainer up` on 0.90 reports success and leaves an existing container
+  alone even after `devcontainer.json` or the compose file changed; and it
+  refuses to attach when the container's uid does not match the host's, because
+  the project's `postCreate` would then chown the bind-mounted host checkout to
+  a uid the host user does not own. `rebuild` recreates the container and never
+  removes named volumes.
+
 - **The `/btw` popup's title bar now says what the panel is answering.** The
   title was `btw <id8>` and the id half is the first characters of a UUIDv7,
   which is a timestamp before it is an identifier: two panels opened in the
