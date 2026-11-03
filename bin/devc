@@ -247,14 +247,14 @@ attach_shell() {
 	local name
 	name="$(basename "$dir")"
 	ensure_up "$dir"
-	local remote='if command -v zsh >/dev/null 2>&1; then exec zsh -l; else exec bash -l; fi'
+	local remote='export PI_TRUE_COLOR=1 COLORTERM=truecolor; if command -v zsh >/dev/null 2>&1; then exec zsh -l; else exec bash -l; fi'
 	if [ -n "${TMUX:-}" ]; then
 		# Already in tmux: nesting a second session would fight the outer one.
 		if [ -n "${DEVC_DRY_RUN:-}" ]; then
 			printf '+ devcontainer exec --workspace-folder %s bash -lc <login shell>\n' "$dir" >&2
 			return 0
 		fi
-		exec devcontainer exec --workspace-folder "$dir" bash -lc "$remote"
+		exec devcontainer exec --workspace-folder "$dir" --remote-env PI_TRUE_COLOR=1 --remote-env COLORTERM=truecolor bash -lc "$remote"
 	fi
 	if [ -n "${DEVC_DRY_RUN:-}" ]; then
 		printf '+ tmux new-session -A -s dev-%s -- devcontainer exec --workspace-folder %s bash -lc <login shell>\n' \
@@ -262,7 +262,7 @@ attach_shell() {
 		return 0
 	fi
 	exec tmux new-session -A -s "dev-$name" -- \
-		devcontainer exec --workspace-folder "$dir" bash -lc "$remote"
+		devcontainer exec --workspace-folder "$dir" --remote-env PI_TRUE_COLOR=1 --remote-env COLORTERM=truecolor bash -lc "$remote"
 }
 
 exec_in() {
@@ -273,7 +273,7 @@ exec_in() {
 		printf '+ devcontainer exec --workspace-folder %s %s\n' "$dir" "$*" >&2
 		return 0
 	fi
-	exec devcontainer exec --workspace-folder "$dir" "$@"
+	exec devcontainer exec --workspace-folder "$dir" --remote-env PI_TRUE_COLOR=1 --remote-env COLORTERM=truecolor "$@"
 }
 
 cmd_rebuild() {

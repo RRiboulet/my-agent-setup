@@ -3,6 +3,10 @@
     "dockerComposeFile": "docker-compose.yml",
     "service": "devcontainer",
     "workspaceFolder": "/workspace",
+    "containerEnv": {
+        "PI_TRUE_COLOR": "1",
+        "COLORTERM": "truecolor"
+    },
     "postCreateCommand": "bash /workspace/.devcontainer/postCreate.sh && bash /workspace/.devcontainer/restore-post-rebuild.sh",
     // Declared explicitly, not left to the base image's auto-mapped defaults.
     // With @devcontainers/cli 0.90 on Docker 29, a build that relies on the
