@@ -191,32 +191,12 @@ function transformApiModel(apiModel: any): JsonModel {
   const input: ("text" | "image")[] = rawInput.filter((m: string) => m === "text" || m === "image") as ("text" | "image")[];
   if (!input.includes("text")) input.unshift("text");
 
-  // Derive reasoning support and thinking-level map from the live API's
-  // capabilities block (the /v1/models endpoint exposes reasoning under
-  // capabilities.reasoning, not as a top-level field). Map every effort the
-  // model advertises to itself; leave the rest null (unsupported).
-  const reasoningSupported =
-    apiModel.capabilities?.reasoning?.supported ?? apiModel.reasoning ?? false;
-  const effortLevels: string[] = apiModel.capabilities?.reasoning?.effort || [];
-  const thinkingLevelMap = reasoningSupported
-    ? {
-        off: effortLevels.includes("off") ? "off" : null,
-        minimal: effortLevels.includes("minimal") ? "minimal" : null,
-        low: effortLevels.includes("low") ? "low" : null,
-        medium: effortLevels.includes("medium") ? "medium" : null,
-        high: effortLevels.includes("high") ? "high" : null,
-        xhigh: effortLevels.includes("xhigh") ? "xhigh" : null,
-        max: effortLevels.includes("max") ? "max" : null,
-      }
-    : undefined;
-
   return {
     id: apiModel.id,
     name: apiModel.name || apiModel.id,
     api,
     baseUrl,
-    reasoning: reasoningSupported,
-    thinkingLevelMap,
+    reasoning: apiModel.reasoning || false,
     input,
     cost: {
       input: apiModel.cost?.input || 0,
@@ -348,41 +328,14 @@ function loadStaleModels(embeddedModels: JsonModel[]): JsonModel[] {
   const cached = loadCachedModels();
   if (!cached || cached.length === 0) return embeddedModels;
 
-  const embeddedMap = new Map(embeddedModels.map(m => [m.id, m]));
+  // Merge embedded models that are missing from cache (newly added models)
   const cachedMap = new Map(cached.map(m => [m.id, m]));
-  const result: JsonModel[] = [];
-
-  // Refresh stale cached entries with curated embedded data so newly added
-  // fields (e.g. thinkingLevelMap) are not shadowed by an outdated cache.
-  for (const cm of cached) {
-    const em = embeddedMap.get(cm.id);
-    if (em) {
-      result.push({
-        ...cm,
-        ...em,
-        cost: {
-          input: cm.cost?.input || em.cost.input,
-          output: cm.cost?.output || em.cost.output,
-          cacheRead: cm.cost?.cacheRead || em.cost.cacheRead,
-          cacheWrite: cm.cost?.cacheWrite || em.cost.cacheWrite,
-        },
-        contextWindow: cm.contextWindow ?? em.contextWindow ?? 131072,
-        maxTokens: cm.maxTokens || em.maxTokens,
-        thinkingLevelMap: em.thinkingLevelMap ?? cm.thinkingLevelMap,
-        reasoning: em.reasoning ?? cm.reasoning,
-      });
-    } else {
-      result.push(cm);
-    }
-  }
-
-  // Append embedded models missing from cache (newly added models).
   for (const em of embeddedModels) {
     if (!cachedMap.has(em.id)) {
-      result.push(em);
+      cached.push(em);
     }
   }
-  return result;
+  return cached;
 }
 
 async function revalidateModels(apiKey: string | undefined, embeddedModels: JsonModel[], signal?: AbortSignal): Promise<JsonModel[] | null> {
