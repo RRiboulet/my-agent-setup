@@ -31,7 +31,8 @@
       ".pi/skills/librarian",
       ".pi/skills/native-web-search",
       ".pi/skills/tmux",
-      ".pi/skills/update-changelog"
+      ".pi/skills/update-changelog",
+      ".pi/skills/worktree"
     ]
   }
 }
