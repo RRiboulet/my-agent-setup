@@ -4,6 +4,10 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Added:
+
+- **A `worktree` skill, so the agent can manage git worktrees for independent tasks.** Covers creating a worktree for a new branch, an existing local branch, or a remote-tracking branch, off a chosen base, listing, opening (one-off commands, persistent tmux sessions, or a subagent rooted in the tree), reviewing (status, diff, tests), and removing (with safety rules for dirty trees and branch deletion). Worktrees live under a gitignored `.worktrees/` directory at the repository root.
+
 ## v1.10.0 — 2026-11-01
 
 Added:

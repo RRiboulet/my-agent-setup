@@ -178,6 +178,8 @@ Adding a new extension or skill means adding it to the `pi` manifest in
 discovery will not glob, so an unlisted extension installs nowhere.
 `test/package-manifest.test.ts` fails if the manifest and the tree disagree.
 
+Linked worktrees for independent tasks live under `.worktrees/` at the repo root (see `.pi/skills/worktree/`); that directory is gitignored and shared refs mean branch names must be unique across worktrees.
+
 You can consult pi for reference — the installed `@earendil-works/pi-coding-agent`
 docs at `/usr/lib/node_modules/@earendil-works/pi-coding-agent/docs/` are the
 source of truth for the API this code targets — but do not modify pi itself.
