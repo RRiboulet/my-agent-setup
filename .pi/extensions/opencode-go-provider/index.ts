@@ -223,7 +223,7 @@ export function transformApiModel(apiModel: any): JsonModel {
     name: apiModel.name || apiModel.id,
     api,
     baseUrl,
-    reasoning: reasoningSupported,
+    reasoning: Boolean(reasoningSupported),
     thinkingLevelMap,
     input,
     cost: {

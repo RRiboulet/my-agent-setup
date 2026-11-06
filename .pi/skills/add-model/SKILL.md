@@ -33,7 +33,7 @@ Ask the user for (or look up from the live API / pi-ai bundled data):
 - **baseUrl** — usually `https://opencode.ai/zen/go/v1` for go-plan models.
   Free/stealth models from the broader catalog
   (`https://opencode.ai/zen/v1/models`) use
-  `https://opencode.ai/inference/openai/v1` instead — check the entry's
+  `https://opencode.ai/inference/go/openai/v1` instead — check the entry's
   `api.chat-completions.base_url`.
 - **reasoning** — `true` / `false`.
 - **thinking levels / effort** — which of `off, minimal, low, medium, high,
