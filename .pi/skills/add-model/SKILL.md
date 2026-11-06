@@ -33,12 +33,16 @@ Ask the user for (or look up from the live API / pi-ai bundled data):
 - **baseUrl** — usually `https://opencode.ai/zen/go/v1` for go-plan models.
   Free/stealth models from the broader catalog
   (`https://opencode.ai/zen/v1/models`) use
-  `https://opencode.ai/inference/go/openai/v1` instead — check the entry's
+  `https://opencode.ai/inference/openai/v1` instead, while go-plan models
+  from the go catalog (`https://opencode.ai/zen/go/v1/models`) use
+  `https://opencode.ai/inference/go/openai/v1` — check the entry's
   `api.chat-completions.base_url`.
 - **reasoning** — `true` / `false`.
 - **thinking levels / effort** — which of `off, minimal, low, medium, high,
   xhigh, max` the model supports. If the API advertises an `effort` list, map
-  each supported level to itself and the rest to `null`. If the model only
+  each supported level to itself and the rest to `null`. Treat the API's
+  `"none"` effort level as pi's `"off"` level (i.e. `"off": "none"`), since
+  pi has no `"none"` level. If the model only
   toggles reasoning or uses a budget (no effort list), **omit**
   `thinkingLevelMap` entirely so pi falls back to its default level set.
 - **input** — `["text"]` and/or `"image"`.

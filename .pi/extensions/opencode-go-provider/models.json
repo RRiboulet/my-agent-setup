@@ -351,7 +351,7 @@
     "baseUrl": "https://opencode.ai/zen/go/v1",
     "reasoning": true,
     "thinkingLevelMap": {
-      "off": null,
+      "off": "none",
       "minimal": null,
       "low": "low",
       "medium": "medium",
@@ -434,7 +434,7 @@
     "baseUrl": "https://opencode.ai/zen/go/v1",
     "reasoning": true,
     "thinkingLevelMap": {
-      "off": null,
+      "off": "none",
       "minimal": null,
       "low": "low",
       "medium": null,
@@ -489,7 +489,7 @@
     "baseUrl": "https://opencode.ai/zen/go/v1",
     "reasoning": true,
     "thinkingLevelMap": {
-      "off": null,
+      "off": "none",
       "minimal": null,
       "low": "low",
       "medium": "medium",
@@ -544,7 +544,7 @@
     "baseUrl": "https://opencode.ai/zen/go/v1",
     "reasoning": true,
     "thinkingLevelMap": {
-      "off": null,
+      "off": "none",
       "minimal": null,
       "low": null,
       "medium": null,
@@ -742,7 +742,8 @@
       "supportsStore": false,
       "supportsDeveloperRole": false,
       "supportsStrictMode": true,
-      "maxTokensField": "max_tokens"
+      "maxTokensField": "max_tokens",
+      "requiresReasoningContentOnAssistantMessages": true
     }
   }
 ]

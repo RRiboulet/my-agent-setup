@@ -208,7 +208,11 @@ export function transformApiModel(apiModel: any): JsonModel {
   const thinkingLevelMap =
     reasoningSupported && Array.isArray(effortLevels) && effortLevels.length > 0
       ? {
-          off: effortLevels.includes("off") ? "off" : null,
+          off: effortLevels.includes("off")
+            ? "off"
+            : effortLevels.includes("none")
+              ? "none"
+              : null,
           minimal: effortLevels.includes("minimal") ? "minimal" : null,
           low: effortLevels.includes("low") ? "low" : null,
           medium: effortLevels.includes("medium") ? "medium" : null,
@@ -305,6 +309,9 @@ export function mergeWithEmbedded(liveModels: JsonModel[], embeddedModels: JsonM
         // bug — it treated the API's 131072-fallback as authoritative and
         // shadowed curated 1M/262K context windows.
         contextWindow: liveModel.contextWindow ?? embedded.contextWindow ?? 131072,
+        // Prefer the live-derived thinking-level map only when the curated
+        // entry has none, so manual curation still wins for curated models.
+        thinkingLevelMap: embedded.thinkingLevelMap ?? liveModel.thinkingLevelMap,
       });
     } else {
       // API-only model (no curated embedded counterpart). The Live API is silent
