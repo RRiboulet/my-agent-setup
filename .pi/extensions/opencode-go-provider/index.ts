@@ -51,11 +51,11 @@ import path from "path";
 
 type Api = "openai-completions" | "openai-responses" | "anthropic-messages" | "google-generative-ai";
 
-interface ThinkingLevelMapValue {
+export interface ThinkingLevelMapValue {
   [level: string]: string | null;
 }
 
-interface JsonModel {
+export interface JsonModel {
   id: string;
   name: string;
   api?: Api;
@@ -183,7 +183,7 @@ const NPM_TO_API: Record<string, { api: Api; baseUrl: string }> = {
 const DEFAULT_API: { api: Api; baseUrl: string } = { api: "openai-completions", baseUrl: "https://opencode.ai/zen/go/v1" };
 
 /** Transform a model from the opencode-go /v1/models API. Returns minimal data. */
-function transformApiModel(apiModel: any): JsonModel {
+export function transformApiModel(apiModel: any): JsonModel {
   const npm = apiModel.provider?.npm;
   const { api, baseUrl } = (npm && NPM_TO_API[npm]) || DEFAULT_API;
   const rawInput = apiModel.modalities?.input || ["text"];
@@ -191,12 +191,44 @@ function transformApiModel(apiModel: any): JsonModel {
   const input: ("text" | "image")[] = rawInput.filter((m: string) => m === "text" || m === "image") as ("text" | "image")[];
   if (!input.includes("text")) input.unshift("text");
 
+  // Derive reasoning support from the live API's capabilities block (the
+  // /v1/models endpoint exposes reasoning under capabilities.reasoning, not
+  // as a top-level field). Map advertised effort levels to themselves; leave
+  // the map undefined when the model only toggles reasoning or uses a budget,
+  // so pi falls back to its default level set instead of an empty one.
+  const reasoningCap = apiModel.capabilities?.reasoning;
+  const effortLevels = reasoningCap?.effort;
+  // An advertised effort list implies reasoning support when the API omits the
+  // explicit `supported` flag (some models only carry `effort`).
+  const reasoningSupported =
+    reasoningCap?.supported ??
+    (Array.isArray(effortLevels) && effortLevels.length > 0 ? true : undefined) ??
+    apiModel.reasoning ??
+    false;
+  const thinkingLevelMap =
+    reasoningSupported && Array.isArray(effortLevels) && effortLevels.length > 0
+      ? {
+          off: effortLevels.includes("off")
+            ? "off"
+            : effortLevels.includes("none")
+              ? "none"
+              : null,
+          minimal: effortLevels.includes("minimal") ? "minimal" : null,
+          low: effortLevels.includes("low") ? "low" : null,
+          medium: effortLevels.includes("medium") ? "medium" : null,
+          high: effortLevels.includes("high") ? "high" : null,
+          xhigh: effortLevels.includes("xhigh") ? "xhigh" : null,
+          max: effortLevels.includes("max") ? "max" : null,
+        }
+      : undefined;
+
   return {
     id: apiModel.id,
     name: apiModel.name || apiModel.id,
     api,
     baseUrl,
-    reasoning: apiModel.reasoning || false,
+    reasoning: Boolean(reasoningSupported),
+    thinkingLevelMap,
     input,
     cost: {
       input: apiModel.cost?.input || 0,
@@ -248,7 +280,7 @@ function cacheModels(models: JsonModel[]): void {
   }
 }
 
-function mergeWithEmbedded(liveModels: JsonModel[], embeddedModels: JsonModel[]): JsonModel[] {
+export function mergeWithEmbedded(liveModels: JsonModel[], embeddedModels: JsonModel[]): JsonModel[] {
   const embeddedMap = new Map(embeddedModels.map(m => [m.id, m]));
   const seen = new Set<string>();
   const result: JsonModel[] = [];
@@ -277,6 +309,9 @@ function mergeWithEmbedded(liveModels: JsonModel[], embeddedModels: JsonModel[])
         // bug — it treated the API's 131072-fallback as authoritative and
         // shadowed curated 1M/262K context windows.
         contextWindow: liveModel.contextWindow ?? embedded.contextWindow ?? 131072,
+        // Prefer the live-derived thinking-level map only when the curated
+        // entry has none, so manual curation still wins for curated models.
+        thinkingLevelMap: embedded.thinkingLevelMap ?? liveModel.thinkingLevelMap,
       });
     } else {
       // API-only model (no curated embedded counterpart). The Live API is silent
@@ -324,7 +359,7 @@ function withDeprecated(models: JsonModel[]): JsonModel[] {
   return extras.length > 0 ? [...models, ...extras] : models;
 }
 
-function loadStaleModels(embeddedModels: JsonModel[]): JsonModel[] {
+export function loadStaleModels(embeddedModels: JsonModel[]): JsonModel[] {
   const cached = loadCachedModels();
   if (!cached || cached.length === 0) return embeddedModels;
 
