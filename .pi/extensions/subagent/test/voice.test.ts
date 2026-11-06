@@ -578,9 +578,9 @@ test("normalizeKeyId accepts pi's grammar and rejects anything else", () => {
 	assert.equal(normalizeKeyId("ctrl+++"), undefined);
 	assert.equal(normalizeKeyId("ctrl+shift+alt+super+ctrl+r"), undefined);
 
-	// Grammatical but dead: pi's matcher refuses a modified escape or f-key
-	// outright, so registering one would be a shortcut that never fires.
-	for (const id of ["alt+escape", "ctrl+esc", "ctrl+f5", "shift+f12", "alt+super+f1"]) {
+	// Grammatical but dead: pi's matcher refuses a modified escape outright,
+	// so registering one would be a shortcut that never fires.
+	for (const id of ["alt+escape", "ctrl+esc"]) {
 		assert.equal(normalizeKeyId(id), undefined, `${id} can never match, so it is refused`);
 	}
 });
@@ -601,6 +601,7 @@ test("normalizeKeyId agrees with matchesKey about which ids can fire", () => {
 		["\x1b\r", "alt+enter"],
 		["\x1b[5~", "pageUp"],
 		["\x1b[15~", "f5"],
+		["\x1b[15;5~", "ctrl+f5"], // modified f-key via Kitty functional-key sequence
 		["\x1b", "escape"],
 	];
 	for (const [sequence, id] of cases) {
@@ -611,8 +612,6 @@ test("normalizeKeyId agrees with matchesKey about which ids can fire", () => {
 	// The refusal is not a guess: pi really cannot match these.
 	for (const [sequence, id] of [
 		["\x1b\x1b", "alt+escape"],
-		["\x1b[15;5~", "ctrl+f5"],
-		["\x1b[24;2~", "shift+f12"],
 	] as Array<[string, string]>) {
 		assert.equal(normalizeKeyId(id), undefined, `we refuse ${id}`);
 		assert.equal(matchesKey(sequence, id), false, `pi cannot match ${id}`);
@@ -703,7 +702,7 @@ test("shortcut: defaults, file, env, invalid and disabled", async () => {
 			assert.match(wrongType[0], /expected a pi key/);
 
 			// An id that is grammatical but can never fire is refused too.
-			await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ shortcut: "ctrl+f5" }));
+			await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ shortcut: "ctrl+esc" }));
 			const dead: string[] = [];
 			assert.deepEqual(
 				loadConfig({ warn: (message) => dead.push(message) }).shortcut,
@@ -775,7 +774,7 @@ test("a rejected shortcut setting is reported in the UI, once, at session start"
 			// A rejected override used to warn through console.warn, which pi's TUI
 			// never shows: the shortcut silently stayed at its default. It now rides
 			// on session_start, where ctx.ui.notify is visible.
-			await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ shortcut: "ctrl+f5" }));
+			await writeFile(path.join(agentDir, CONFIG_BASENAME), JSON.stringify({ shortcut: "ctrl+esc" }));
 			const capture = captureFactory(await loadFactory());
 			assert.deepEqual(
 				capture.shortcuts.map((shortcut) => shortcut.id),
@@ -787,7 +786,7 @@ test("a rejected shortcut setting is reported in the UI, once, at session start"
 			const ctx = { hasUI: true, ui: { notify: (message: string, type: string) => notices.push({ message, type }) } };
 			for (const handler of capture.sessionStart) await handler({}, ctx);
 			assert.equal(notices.length, 1);
-			assert.match(notices[0].message, /ctrl\+f5/);
+			assert.match(notices[0].message, /ctrl\+esc/);
 			assert.equal(notices[0].type, "warning");
 
 			// Drained: a second session start does not repeat it.
