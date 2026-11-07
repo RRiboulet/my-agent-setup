@@ -25,6 +25,7 @@
     ],
     "skills": [
       ".pi/skills/add-model",
+      ".pi/skills/brave-search",
       ".pi/skills/commit",
       ".pi/skills/devcontainer",
       ".pi/skills/github",

@@ -23,6 +23,11 @@ const MODEL_ENV_VAR = "PI_WEB_SEARCH_MODEL";
 const DEFAULT_PROVIDER = "opencode-go";
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
+const BRAVE_API_KEY_ENV = "BRAVE_API_KEY";
+const BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
+const BRAVE_DEFAULT_COUNT = 5;
+const BRAVE_MONTHLY_LIMIT_ENV = "BRAVE_MONTHLY_LIMIT";
+const BRAVE_DEFAULT_MONTHLY_LIMIT = 1000;
 
 export interface WebSearchInput {
 	query: string;
@@ -117,7 +122,7 @@ interface SearchResult {
 	result: string;
 }
 
-async function runSearch(input: WebSearchInput, signal?: AbortSignal): Promise<SearchResult> {
+async function runNativeSearch(input: WebSearchInput, signal?: AbortSignal): Promise<SearchResult> {
 	const query = input.query?.trim();
 	if (!query) {
 		throw new Error("web_search requires a non-empty query");
@@ -184,6 +189,239 @@ async function runSearch(input: WebSearchInput, signal?: AbortSignal): Promise<S
 			`Could not parse web_search output: ${(error as Error).message}${detail ? `\n${detail}` : ""}`,
 		);
 	}
+}
+
+
+async function resolveBraveApiKey(): Promise<string | undefined> {
+	const env = process.env[BRAVE_API_KEY_ENV]?.trim();
+	if (env) return env;
+
+	// Fall back to pi's auth.json, mirroring the native provider chain.
+	const { readFile } = await import("node:fs/promises");
+	const { homedir } = await import("node:os");
+	const { join } = await import("node:path");
+	const candidates = [
+		process.env.PI_AUTH_PATH?.trim(),
+		join(homedir(), ".pi", "agent", "auth.json"),
+	];
+	for (const candidate of candidates) {
+		if (!candidate) continue;
+		try {
+			const raw = await readFile(candidate, "utf8");
+			const parsed = JSON.parse(raw) as Record<string, { type?: string; key?: string } | undefined>;
+			const entry = parsed?.brave ?? parsed?.["brave-search"];
+			if (entry?.key?.trim()) return entry.key.trim();
+		} catch {
+			// ignore missing/unreadable auth files
+		}
+	}
+	return undefined;
+}
+
+function braveMonthlyLimit(): number {
+	const raw = process.env[BRAVE_MONTHLY_LIMIT_ENV]?.trim();
+	const n = raw ? Number(raw) : NaN;
+	return Number.isFinite(n) && n > 0 ? Math.floor(n) : BRAVE_DEFAULT_MONTHLY_LIMIT;
+}
+
+function currentMonthKey(): string {
+	const d = new Date();
+	return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+interface BraveUsage { month: string; count: number; lastUsed?: string }
+
+async function readBraveUsage(): Promise<BraveUsage> {
+	const { readFile } = await import("node:fs/promises");
+	const { homedir } = await import("node:os");
+	const { join } = await import("node:path");
+	const file = join(homedir(), ".pi", "agent", "brave-search-usage.json");
+	try {
+		const raw = await readFile(file, "utf8");
+		const parsed = JSON.parse(raw) as BraveUsage;
+		if (parsed?.month === currentMonthKey() && typeof parsed.count === "number") {
+			return parsed;
+		}
+	} catch {
+		// missing/corrupt -> reset
+	}
+	return { month: currentMonthKey(), count: 0 };
+}
+
+async function braveQuotaReached(): Promise<boolean> {
+	const usage = await readBraveUsage();
+	return usage.count >= braveMonthlyLimit();
+}
+
+async function incrementBraveUsage(): Promise<number> {
+	const { readFile, writeFile, mkdir, appendFile } = await import("node:fs/promises");
+	const { homedir } = await import("node:os");
+	const { join } = await import("node:path");
+	const dir = join(homedir(), ".pi", "agent");
+	await mkdir(dir, { recursive: true });
+	const file = join(dir, "brave-search-usage.json");
+	const lockFile = join(dir, "brave-search-usage.lock");
+
+	// Simple file lock with retry for cross-process safety.
+	const { openSync, closeSync, unlinkSync, constants } = await import("node:fs");
+	let lockFd: number | undefined;
+	const start = Date.now();
+	while (true) {
+		try {
+			lockFd = openSync(lockFile, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY);
+			break;
+		} catch {
+			if (Date.now() - start > 2000) break;
+			await new Promise((r) => setTimeout(r, 25));
+		}
+	}
+
+	try {
+		let current: BraveUsage = { month: currentMonthKey(), count: 0 };
+		try {
+			const raw = await readFile(file, "utf8");
+			const parsed = JSON.parse(raw) as BraveUsage;
+			if (parsed?.month === currentMonthKey() && typeof parsed.count === "number") {
+				current = parsed;
+			}
+		} catch {
+			// reset
+		}
+		current.count += 1;
+		current.lastUsed = new Date().toISOString();
+		current.month = currentMonthKey();
+		await writeFile(file, JSON.stringify(current, null, 2));
+		// Append-only audit log (one line per successful Brave search).
+		try {
+			const logFile = join(dir, "brave-search.log");
+			await appendFile(logFile, `${current.lastUsed} month=${current.month} count=${current.count}\n`);
+		} catch {
+			// best-effort
+		}
+		return current.count;
+	} finally {
+		if (lockFd !== undefined) {
+			try { closeSync(lockFd); } catch {}
+			try { unlinkSync(lockFile); } catch {}
+		}
+	}
+}
+
+async function runBraveSearch(input: WebSearchInput, signal?: AbortSignal): Promise<SearchResult> {
+	const key = await resolveBraveApiKey();
+	if (!key) {
+		throw new Error("BRAVE_API_KEY is not set (env var or auth.json brave entry)");
+	}
+	if (await braveQuotaReached()) {
+		throw new Error(`Brave monthly quota reached (${braveMonthlyLimit()} calls); falling back to native search`);
+	}
+	const query = input.query?.trim();
+	if (!query) {
+		throw new Error("web_search requires a non-empty query");
+	}
+
+	const params = new URLSearchParams({ q: query, count: String(BRAVE_DEFAULT_COUNT) });
+	const url = `${BRAVE_ENDPOINT}?${params.toString()}`;
+
+	const response = await fetch(url, {
+		headers: {
+			Accept: "application/json",
+			"X-Subscription-Token": key,
+		},
+		signal,
+	});
+
+	if (!response.ok) {
+		const detail = await response.text().catch(() => "");
+		throw new Error(`Brave search failed (HTTP ${response.status}): ${detail || response.statusText}`);
+	}
+
+	// Capture Brave rate-limit headers for visibility into quota usage.
+	const rlRemaining = response.headers.get("x-ratelimit-remaining");
+	const rlLimit = response.headers.get("x-ratelimit-limit");
+	const rlReset = response.headers.get("x-ratelimit-reset");
+
+	// Increment the persistent monthly counter (enforces the 1000-call cap).
+	let localCount: number | undefined;
+	try {
+		localCount = await incrementBraveUsage();
+	} catch {
+		// Counter is best-effort; never fail the search.
+	}
+
+	const data = (await response.json()) as { web?: { results?: Array<{ title?: string; url?: string; description?: string; age?: string; page_age?: string }> } };
+	const results = data.web?.results ?? [];
+	if (results.length === 0) {
+		throw new Error("Brave search returned no results");
+	}
+
+	const lines: string[] = [];
+	for (let i = 0; i < results.length; i++) {
+		const r = results[i];
+		lines.push(`--- Result ${i + 1} ---`);
+		lines.push(`Title: ${r.title ?? ""}`);
+		lines.push(`Link: ${r.url ?? ""}`);
+		const age = r.age ?? r.page_age;
+		if (age) lines.push(`Age: ${age}`);
+		lines.push(`Snippet: ${r.description ?? ""}`);
+		lines.push("");
+	}
+
+	// Usage/quota visibility. Headers may carry comma-separated per-window values
+	// (e.g. per-second and monthly); surface them individually.
+	const usageLines: string[] = [];
+	if (localCount !== undefined) usageLines.push(`Brave searches (local count): ${localCount}`);
+	const rem = (rlRemaining ?? "").split(",").map((v) => v.trim());
+	const lim = (rlLimit ?? "").split(",").map((v) => v.trim());
+	const rst = (rlReset ?? "").split(",").map((v) => v.trim());
+	const labels = ["per-second", "monthly/credit window"];
+	for (let i = 0; i < Math.max(rem.length, lim.length); i++) {
+		const r = rem[i] ?? "?";
+		const l = lim[i] ?? "?";
+		const t = rst[i] ?? "?";
+		const label = labels[i] ?? `window ${i + 1}`;
+		usageLines.push(`Brave rate limit (${label}): ${r}/${l} remaining, resets in ${t}s`);
+	}
+	if (usageLines.length > (localCount !== undefined ? 1 : 0)) {
+		usageLines.push("Note: a monthly limit of 0 means it is not enforced via this header (credit-based); check the Brave dashboard for exact monthly usage.");
+	}
+	if (usageLines.length) {
+		lines.push("--- Brave usage ---");
+		for (const u of usageLines) lines.push(u);
+		lines.push("");
+	}
+
+	return {
+		provider: "brave",
+		model: "brave-search",
+		query,
+		purpose: input.purpose?.trim() ?? "",
+		result: lines.join("\n"),
+	};
+}
+
+/**
+ * Prioritise Brave (when configured) and fall back to the native provider chain
+ * on any failure (missing key is handled by skipping). Explicit provider requests
+ * go straight to the native path so the user's choice is respected.
+ */
+async function runSearch(input: WebSearchInput, signal?: AbortSignal): Promise<SearchResult> {
+	if (input.provider?.trim()) {
+		return runNativeSearch(input, signal);
+	}
+
+	const braveKey = await resolveBraveApiKey();
+	const quotaOk = braveKey ? !(await braveQuotaReached()) : false;
+	if (braveKey && quotaOk) {
+		try {
+			return await runBraveSearch(input, signal);
+		} catch (error) {
+			if (signal?.aborted) throw error;
+			// Fall through to native search on any Brave failure (quota, network, etc.)
+		}
+	}
+
+	return runNativeSearch(input, signal);
 }
 
 function formatResult(search: SearchResult): string {
@@ -300,4 +538,11 @@ export const __test__ = {
 	resolveProvider,
 	resolveModel,
 	buildSearchArgs,
+	runNativeSearch,
+	runBraveSearch,
+	runSearch,
+	readBraveUsage,
+	braveQuotaReached,
+	incrementBraveUsage,
+	braveMonthlyLimit,
 };
