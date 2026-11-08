@@ -6,6 +6,8 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
+- **Brave is a first-choice provider of the existing native web search.** When a Brave key is configured (`BRAVE_API_KEY`, else a `brave`/`brave-search` entry in `auth.json`), `search.mjs` queries Brave's Web Search API and renders a compact result frame; otherwise, and on any Brave failure — missing key, usage/rate limit, invalid subscription token, network, zero results — the existing native chain runs unchanged and the result's first line says why. It is the same script the `web_search` tool and the `/web-search` command already wrap, so all three share one provider and one credential path, and it adds no npm dependency. There is deliberately no local quota, counter, lock file or audit log that could drift from the account's real usage: Brave's own account settings are the limit.
+
 - **A `worktree` skill, so the agent can manage git worktrees for independent tasks.** Covers creating a worktree for a new branch, an existing local branch, or a remote-tracking branch, off a chosen base, listing, opening (one-off commands, persistent tmux sessions, or a subagent rooted in the tree), reviewing (status, diff, tests), and removing (with safety rules for dirty trees and branch deletion). Worktrees live under a gitignored `.worktrees/` directory at the repository root.
 
 ## v1.10.0 — 2026-11-01

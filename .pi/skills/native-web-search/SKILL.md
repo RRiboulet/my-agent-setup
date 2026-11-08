@@ -30,16 +30,31 @@ description: "Trigger native web search. Use when you need quick internet resear
        5. A direct-invocation guard and a `__test__` export, so the script's
           provider resolution and request shape can be unit-tested without a
           network call.
+       6. 2026-11: `brave` added as a provider value and made the first choice
+          whenever a key resolves (`BRAVE_API_KEY`, else the `brave`/
+          `brave-search` entry in auth.json), through Brave's Web Search API
+          (`/res/v1/web/search`, `X-Subscription-Token`, five results). Any
+          Brave failure — missing key, 429, 422, network, zero results — falls
+          through to the chain above and prefixes the result with one line
+          saying why; `pickNativeProvider` was split out so that fallback still
+          resolves a provider when Brave was requested explicitly. No local
+          quota, counter, lock file or audit log: the account's own limit is
+          the only one, and a 429 is just another failure. Each rendered field
+          is newline-collapsed, so a hostile title cannot forge a sibling
+          result block.
      Plus one behaviour note that is ours and not a patch: if the `web_search`
      tool is available in the session, prefer it and treat this skill as the
      manual fallback.
 
      Verified against upstream 0865c84: every function upstream defines is still
-     defined here, and the six added are `runOpenRouterSearch`,
+     defined here, and the fourteen added are `runOpenRouterSearch`,
      `opencodeGoHeaders`, `defaultModelId`, `defaultBaseUrl`,
-     `supportsTemperature` and `buildAnthropicRequest`. `normalizeProvider`,
-     `pickProvider`, `buildAnthropicHeaders`, `runAnthropicSearch` and
-     `resolveApiKey` are modified rather than added. Nothing upstream was
+     `supportsTemperature`, `buildAnthropicRequest`, `pickNativeProvider`,
+     `runNativeProvider`, `resolveBraveApiKey`, `runBraveSearch`,
+     `renderBraveResults`, `sanitizeField`, `describeBraveFailure` and
+     `runSearch`. `normalizeProvider`, `pickProvider`, `buildAnthropicHeaders`,
+     `runAnthropicSearch` and `resolveApiKey` are modified rather than added.
+     Nothing upstream was
      dropped. (The body is space-indented where upstream uses tabs, so compare
      with `diff -w`.) -->
 
@@ -68,18 +83,26 @@ node search.mjs "latest python release" --purpose "update dependency notes"
 node search.mjs "vite 7 breaking changes" --purpose "prepare migration checklist"
 node search.mjs "rust async runtime status" --provider openrouter --model perplexity/sonar-pro
 node search.mjs "rust async runtime status" --provider opencode-go --model claude-haiku-5-5
+node search.mjs "rust async runtime status" --provider brave
 ```
 
 Optional flags:
 
-- `--provider opencode-go|openrouter|openai-codex|anthropic` (defaults to the first provider found in `settings.json`/`auth.json`, preferring `opencode-go`)
+- `--provider brave|opencode-go|openrouter|openai-codex|anthropic` (unset uses Brave when a key is configured, else the first provider found in `settings.json`/`auth.json`, preferring `opencode-go`)
 - `--model <model-id>` (opencode-go default: `claude-haiku-5-5`; OpenRouter default: `openai/gpt-4o-mini:online`)
 - `--timeout <ms>`
 - `--json`
 
 ## Providers
 
-- `opencode-go` (preferred when credentials exist): native `web_search_20260318`
+- `brave` (first choice when a key is configured): Brave's Web Search API,
+  `https://api.search.brave.com/res/v1/web/search`, five results per query. The
+  key comes from `BRAVE_API_KEY`, else the `brave`/`brave-search` entry in
+  `auth.json`. There is no local quota or accounting: the account's own limit is
+  the only one, and a usage/rate-limit answer (HTTP 429) is just another failure
+  that falls back to the native chain below, with one line at the top of the
+  result saying why. No usage block is printed.
+- `opencode-go` (the native default when credentials exist): native `web_search_20260318`
   through opencode.ai's Go API (`https://opencode.ai/zen/go/v1/messages`),
   billed against the Go plan. Requires a Go API key in `auth.json` under
   `opencode-go` or `OPENCODE_API_KEY` in the environment, and uses a
@@ -104,8 +127,8 @@ The script instructs the model to:
 ## Notes
 
 - No extra npm install is required.
-- Provider precedence: `--provider` flag > `PI_WEB_SEARCH_PROVIDER` > `defaultProvider` in `settings.json` > first available credential in `auth.json` (`opencode-go`, then `openrouter`, then `openai-codex`, then `anthropic`). The script reads `PI_WEB_SEARCH_PROVIDER` itself, so a standalone invocation follows the same order; the `web_search` tool omits `--provider` when nothing is set, which is what lets `settings.json` and `auth.json` decide.
-- An unrecognized `--provider` (or `PI_WEB_SEARCH_PROVIDER`) is an error, not a fallback: a typo must not quietly spend another plan's budget. An unrecognized `settings.defaultProvider` is ignored instead, because that key may name an unrelated pi provider (a local model server, say).
+- Provider precedence: `--provider` flag > `PI_WEB_SEARCH_PROVIDER` > Brave (when a key is configured) > `defaultProvider` in `settings.json` > first available credential in `auth.json` (`opencode-go`, then `openrouter`, then `openai-codex`, then `anthropic`). The script reads `PI_WEB_SEARCH_PROVIDER` itself, so a standalone invocation follows the same order; the `web_search` tool omits `--provider` when nothing is set, which is what lets Brave, `settings.json` and `auth.json` decide. A Brave failure falls back to the native chain even when `--provider brave` was explicit; the result's first line names the reason and never contains a response body or stack trace.
+- An unrecognized `--provider` (or `PI_WEB_SEARCH_PROVIDER`) is an error, and an unknown explicit provider is rejected rather than resolved, so a typo cannot quietly spend another plan's budget. An unrecognized `settings.defaultProvider` is ignored instead, because that key may name an unrelated pi provider (a local model server, say).
 - `temperature` is omitted for every `opencode-go` request (the endpoint rejected it for the search model) and for `claude-haiku-5-5` on any provider; omitting it is safe because the API default applies.
 - OpenRouter only works with web-enabled model ids (`:online` suffix, Perplexity Sonar models); other model ids silently lose web access.
 - opencode-go searches with an Anthropic-protocol model; an OpenAI-Completions model id from that provider will not have the tool and the call will fail rather than silently answer from memory.
