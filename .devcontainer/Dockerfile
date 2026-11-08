@@ -22,6 +22,17 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive \
     && apt-get install -y tmux git curl jq unzip \
     && rm -rf /var/lib/apt/lists/*
 
+# Give non-interactive shells a no-op git editor. Nothing here sets core.editor,
+# so git falls back to vi, and vi blocks forever when stdin is not a terminal:
+# `git rebase --continue`, `git commit --amend` without -m and `git rebase -i`
+# then hang an agent's command instead of failing, leaving the work staged with
+# no error to read - a rebase that looks "stuck" when it is only waiting on an
+# editor nobody can see. `true` accepts the existing message unchanged, and a
+# bare `git commit` with no message aborts instead of hanging. BASH_ENV is read
+# by non-interactive bash only, so an interactive shell keeps its real editor.
+RUN printf 'export GIT_EDITOR=true\n' > /etc/agent-bash-env
+ENV BASH_ENV=/etc/agent-bash-env
+
 # gh (GitHub CLI) is how branches reach the remote: `gh pr create` / `gh pr merge`
 # drive the PR workflow, and `gh auth setup-git` makes plain `git push` work
 # afterwards by installing gh as git's credential helper. Installed from GitHub's

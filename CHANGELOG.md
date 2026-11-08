@@ -36,6 +36,10 @@ Fixed:
   `/workspace`, and names this error with the workaround for a checkout
   predating the fix.
 
+Maintenance:
+
+- **Non-interactive shells get a no-op git editor, so a rebase that is waiting stops looking stuck.** Nothing in the image sets `core.editor`, so git falls back to `vi`, and `vi` cannot run without a terminal: on a stdin that is open but silent it blocks, and on `/dev/null` it fails with an editor error the calling script rarely surfaces. Either way `git rebase --continue`, `git commit --amend` without `-m` and `git rebase -i` die with the work already staged and nothing useful to read. `BASH_ENV` now exports `GIT_EDITOR=true` for non-interactive bash only, so an interactive shell keeps its real editor and a bare `git commit` aborts instead of hanging. Two consequences worth knowing: `git rebase -i` no longer stops to edit the todo list, it replays the picks unchanged; and `GIT_EDITOR` outranks `core.editor` and `$EDITOR`, so a script that needs its own editor must `unset GIT_EDITOR` or set it per command. Takes effect on the next rebuild.
+
 ## v1.10.0 — 2026-11-01
 
 Added:
