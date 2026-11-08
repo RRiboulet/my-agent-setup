@@ -24,6 +24,13 @@
 //     `web_search_20260318` with `allowed_callers: ["direct"]` (see
 //     ANTHROPIC_WEB_SEARCH_TOOL and OPENCODE_GO_WEB_SEARCH_TOOL). Default
 //     `anthropic` model is now `claude-haiku-5-5`.
+//   - 2026-11: `brave` added as a provider value and made the first choice when
+//     a Brave key resolves (`BRAVE_API_KEY`, else the `brave`/`brave-search`
+//     entry in auth.json), with the native chain above as the fallback on any
+//     failure. No local quota, counter or audit log: the account settings are
+//     the only limit. `resolveBraveApiKey`, `runBraveSearch`,
+//     `renderBraveResults`, `sanitizeField`, `describeBraveFailure`,
+//     `pickNativeProvider`, `runNativeProvider` and `runSearch` added.
 // The body is indented with spaces; upstream uses tabs, so a plain diff against
 // upstream is not meaningful — compare with `diff -w`. See the LOCAL PATCH
 // hunks listed in SKILL.md beside this file.
@@ -36,6 +43,9 @@ import { spawnSync, execSync } from "child_process";
 import { homedir } from "os";
 import { dirname, isAbsolute, join, resolve } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
+
+const BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/web/search";
+const BRAVE_DEFAULT_COUNT = 5;
 
 function parseArgs(argv) {
     const out = {
@@ -100,7 +110,10 @@ function parseArgs(argv) {
 
 function usage() {
     return `Usage:
-  node search.mjs "<query>" [--purpose "<why>"] [--provider opencode-go|openai-codex|anthropic|openrouter] [--model <id>] [--json]
+  node search.mjs "<query>" [--purpose "<why>"] [--provider brave|opencode-go|openai-codex|anthropic|openrouter] [--model <id>] [--json]
+
+Brave is used whenever a Brave key is configured; the native chain runs when it
+is not, and takes over (with the reason in the result) when Brave fails.
 
 Examples:
   node search.mjs "latest python release" --purpose "update dependency notes"
@@ -146,21 +159,59 @@ function getAgentDir() {
     return configured;
 }
 
+// Brave is the one credential resolved here rather than through
+// `resolveApiKey`: auth.json stores it as `{type:"str", key:"..."}` rather than
+// as an OAuth or API-key entry, and the native chain has no Brave provider to
+// hand it to. Precedence stays in this one place — env first, then auth.json —
+// and `resolveConfigValue` handles env-var/`!command` indirection exactly as it
+// does for every other credential below.
+function resolveBraveApiKey(auth) {
+    const env = process.env.BRAVE_API_KEY?.trim();
+    if (env) return env;
+
+    const entry = auth?.brave ?? auth?.["brave-search"];
+    if (!entry) return undefined;
+    const key = resolveConfigValue(entry.key);
+    return key?.trim() || undefined;
+}
+
 function normalizeProvider(provider) {
     if (!provider) return undefined;
     const p = String(provider).toLowerCase().trim();
     // Exact provider ids first, so a composite string cannot be captured by a
     // substring meant for a different provider.
+    if (p === "brave" || p === "brave-search") return "brave";
     if (p === "opencode-go" || p === "opencode") return "opencode-go";
     if (p === "openrouter") return "openrouter";
     if (p === "openai-codex" || p === "openai" || p === "codex") return "openai-codex";
     if (p === "anthropic") return "anthropic";
     // Then model-shaped strings (`claude-haiku-5-5`, `openai/gpt-4o-mini:online`).
+    if (p.includes("brave")) return "brave";
     if (p.includes("opencode")) return "opencode-go";
     if (p.includes("anthropic") || p.includes("claude")) return "anthropic";
     if (p.includes("openrouter") || p.includes("sonar")) return "openrouter";
     if (p.includes("codex") || p.startsWith("openai")) return "openai-codex";
     return undefined;
+}
+
+// Brave is the first choice whenever a key resolves; this is the native chain
+// on its own, and also what a Brave failure falls back to. A `brave` value in
+// settings is ignored here rather than returned: this function cannot serve it,
+// and falling through to a real native credential beats looping back to Brave.
+function pickNativeProvider(settings, auth) {
+    // settings.defaultProvider may name an unrelated pi provider (a local model
+    // server, say), so an unknown value is ignored rather than fatal.
+    const fromSettings = normalizeProvider(settings?.defaultProvider);
+    if (fromSettings && fromSettings !== "brave") return fromSettings;
+
+    // opencode-go first: it is this machine's main provider, and the Go plan is
+    // where the search budget should land when several credentials exist.
+    if (auth?.["opencode-go"] || process.env.OPENCODE_API_KEY) return "opencode-go";
+    if (auth?.openrouter) return "openrouter";
+    if (auth?.["openai-codex"]) return "openai-codex";
+    if (auth?.anthropic) return "anthropic";
+
+    throw new Error("Could not determine provider. Pass --provider brave|opencode-go|openrouter|openai-codex|anthropic");
 }
 
 function pickProvider(argProvider, settings, auth) {
@@ -170,30 +221,23 @@ function pickProvider(argProvider, settings, auth) {
     // fall through to whatever credential happens to exist: silently spending
     // another plan's budget is worse than failing.
     if (argProvider && String(argProvider).trim()) {
-        throw new Error(`Unknown provider '${argProvider}'. Use opencode-go|openrouter|openai-codex|anthropic`);
+        throw new Error(`Unknown provider '${argProvider}'. Use brave|opencode-go|openrouter|openai-codex|anthropic`);
     }
 
     const fromEnv = normalizeProvider(process.env.PI_WEB_SEARCH_PROVIDER);
     if (fromEnv) return fromEnv;
     if (process.env.PI_WEB_SEARCH_PROVIDER && String(process.env.PI_WEB_SEARCH_PROVIDER).trim()) {
         throw new Error(
-            `Unknown provider in PI_WEB_SEARCH_PROVIDER: '${process.env.PI_WEB_SEARCH_PROVIDER}'. Use opencode-go|openrouter|openai-codex|anthropic`,
+            `Unknown provider in PI_WEB_SEARCH_PROVIDER: '${process.env.PI_WEB_SEARCH_PROVIDER}'. Use brave|opencode-go|openrouter|openai-codex|anthropic`,
         );
     }
 
-    // settings.defaultProvider may name an unrelated pi provider (a local model
-    // server, say), so an unknown value is ignored rather than fatal.
-    const fromSettings = normalizeProvider(settings?.defaultProvider);
-    if (fromSettings) return fromSettings;
+    // Brave is first choice whenever a key is configured. There is no local
+    // quota to consult: the account's own limit lives in Brave's dashboard, and
+    // a 429 falls through to the native chain instead of being pre-empted here.
+    if (resolveBraveApiKey(auth)) return "brave";
 
-    // opencode-go first: it is this machine's main provider, and the Go plan is
-    // where the search budget should land when several credentials exist.
-    if (auth?.["opencode-go"] || process.env.OPENCODE_API_KEY) return "opencode-go";
-    if (auth?.openrouter) return "openrouter";
-    if (auth?.["openai-codex"]) return "openai-codex";
-    if (auth?.anthropic) return "anthropic";
-
-    throw new Error("Could not determine provider. Pass --provider opencode-go|openrouter|openai-codex|anthropic");
+    return pickNativeProvider(settings, auth);
 }
 
 function decodeJwtAccountId(jwt) {
@@ -803,20 +847,93 @@ async function runAnthropicSearch({ model, apiKey, query, purpose, timeoutMs, ba
     return text;
 }
 
-async function main() {
-    const args = parseArgs(process.argv.slice(2));
-    if (args.help || !args.query) {
-        console.error(usage());
-        process.exit(args.help ? 0 : 1);
+// One line per field: a hostile result must not be able to forge a sibling
+// `--- Result N ---` block (or anything else) by embedding newlines in a title,
+// link or snippet.
+function sanitizeField(value) {
+    return String(value ?? "")
+        .replace(/[\r\n]+/g, " ")
+        .trim();
+}
+
+function renderBraveResults(results) {
+    const lines = [];
+    for (let i = 0; i < results.length; i++) {
+        const r = results[i] || {};
+        lines.push(`--- Result ${i + 1} ---`);
+        lines.push(`Title: ${sanitizeField(r.title)}`);
+        lines.push(`Link: ${sanitizeField(r.url)}`);
+        const age = sanitizeField(r.age ?? r.page_age);
+        if (age) lines.push(`Age: ${age}`);
+        lines.push(`Snippet: ${sanitizeField(r.description)}`);
+        lines.push("");
+    }
+    return lines.join("\n").trim();
+}
+
+// A short, controlled reason string: `describeBraveFailure` turns it into the
+// one line that heads a fallback result, so no response body or stack trace can
+// leak into the output.
+function braveFailure(reason, status) {
+    const err = new Error(`Brave search failed: ${reason}`);
+    err.braveReason = reason;
+    if (status) err.braveStatus = status;
+    return err;
+}
+
+function describeBraveFailure(err) {
+    if (err?.braveStatus) return `HTTP ${err.braveStatus}`;
+    if (err?.braveReason) return err.braveReason;
+    return "request failed";
+}
+
+function braveSignal(timeoutMs, signal) {
+    const timeout =
+        typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(timeoutMs) : undefined;
+    // A caller's signal (there is none from the CLI, but the function takes one)
+    // must still cancel the request, and the timeout must still fire.
+    if (timeout && signal && typeof AbortSignal.any === "function") return AbortSignal.any([timeout, signal]);
+    return signal || timeout;
+}
+
+async function runBraveSearch({ apiKey, query, timeoutMs, signal, fetchImpl = fetch }) {
+    const params = new URLSearchParams({ q: query, count: String(BRAVE_DEFAULT_COUNT) });
+
+    let res;
+    try {
+        res = await fetchImpl(`${BRAVE_ENDPOINT}?${params.toString()}`, {
+            headers: {
+                accept: "application/json",
+                "X-Subscription-Token": apiKey,
+            },
+            signal: braveSignal(timeoutMs, signal),
+        });
+    } catch (err) {
+        const timedOut = err?.name === "TimeoutError" || err?.name === "AbortError";
+        throw braveFailure(timedOut ? "timed out" : "network error");
     }
 
-    const agentDir = getAgentDir();
-    const authPath = join(agentDir, "auth.json");
-    const settingsPath = join(agentDir, "settings.json");
-    const auth = readJson(authPath, {});
-    const settings = readJson(settingsPath, {});
+    // No response body in the message: it can be long, and a 422 body is not
+    // something a model should be reading.
+    if (!res.ok) throw braveFailure(`HTTP ${res.status}`, res.status);
 
-    const provider = pickProvider(args.provider, settings, auth);
+    let data;
+    try {
+        data = await res.json();
+    } catch {
+        throw braveFailure("non-JSON response");
+    }
+
+    const results = Array.isArray(data?.web?.results) ? data.web.results : [];
+    if (results.length === 0) throw braveFailure("no results");
+
+    return renderBraveResults(results);
+}
+
+// The native chain's one-shot call: resolve the model and credential, then
+// dispatch to the provider's runner. Split out of `main` so a Brave failure can
+// reach it without re-deriving the provider chain.
+async function runNativeProvider(provider, args, { auth, authPath }) {
     const piAi = await loadPiAi();
     const model = pickFastModel(provider, args.model, piAi);
     const { apiKey, accountId } = await resolveApiKey(provider, auth, authPath, piAi);
@@ -856,12 +973,64 @@ async function main() {
                       toolDefinition: provider === "opencode-go" ? OPENCODE_GO_WEB_SEARCH_TOOL : ANTHROPIC_WEB_SEARCH_TOOL,
                   });
 
+    return { model: model.id, text };
+}
+
+// Brave first when its key resolves, otherwise the native chain. Any Brave
+// failure — missing key, 429, 422, network, zero results — falls through to
+// that chain and puts one short line saying why at the top of the result. There
+// is no counter, lock file or audit log: the account settings are the limit.
+// `fetchImpl` and `runNative` are injectable so that fallback is testable
+// without a network call or a pi-ai install.
+async function runSearch(args, { auth, settings, authPath, fetchImpl = fetch, runNative = runNativeProvider }) {
+    const provider = pickProvider(args.provider, settings, auth);
+
+    if (provider !== "brave") {
+        const native = await runNative(provider, args, { auth, authPath });
+        return { provider, model: native.model, text: native.text };
+    }
+
+    const apiKey = resolveBraveApiKey(auth);
+    let note;
+    if (!apiKey) {
+        note = "Brave unavailable (no API key); fell back to native search.";
+    } else {
+        try {
+            const text = await runBraveSearch({ apiKey, query: args.query, timeoutMs: args.timeoutMs, fetchImpl });
+            return { provider: "brave", model: "brave-search", text };
+        } catch (err) {
+            note = `Brave unavailable (${describeBraveFailure(err)}); fell back to native search.`;
+        }
+    }
+
+    // An explicit `--provider brave` still falls back — the tool must keep
+    // working — but through the native chain, never back into Brave.
+    const nativeProvider = pickNativeProvider(settings, auth);
+    const native = await runNative(nativeProvider, args, { auth, authPath });
+    return { provider: nativeProvider, model: native.model, text: `${note}\n\n${native.text}` };
+}
+
+async function main() {
+    const args = parseArgs(process.argv.slice(2));
+    if (args.help || !args.query) {
+        console.error(usage());
+        process.exit(args.help ? 0 : 1);
+    }
+
+    const agentDir = getAgentDir();
+    const authPath = join(agentDir, "auth.json");
+    const settingsPath = join(agentDir, "settings.json");
+    const auth = readJson(authPath, {});
+    const settings = readJson(settingsPath, {});
+
+    const { provider, model, text } = await runSearch(args, { auth, settings, authPath });
+
     if (args.json) {
         console.log(
             JSON.stringify(
                 {
                     provider,
-                    model: model.id,
+                    model,
                     query: args.query,
                     purpose: args.purpose,
                     result: text,
@@ -874,7 +1043,7 @@ async function main() {
     }
 
     console.log(`Provider: ${provider}`);
-    console.log(`Model: ${model.id}`);
+    console.log(`Model: ${model}`);
     console.log("");
     console.log(text);
 }
@@ -907,6 +1076,14 @@ export const __test__ = {
     parseArgs,
     normalizeProvider,
     pickProvider,
+    pickNativeProvider,
+    resolveBraveApiKey,
+    sanitizeField,
+    renderBraveResults,
+    describeBraveFailure,
+    runBraveSearch,
+    runNativeProvider,
+    runSearch,
     defaultModelId,
     defaultBaseUrl,
     supportsTemperature,
