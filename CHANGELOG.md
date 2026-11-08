@@ -8,6 +8,10 @@ Added:
 
 - **A `worktree` skill, so the agent can manage git worktrees for independent tasks.** Covers creating a worktree for a new branch, an existing local branch, or a remote-tracking branch, off a chosen base, listing, opening (one-off commands, persistent tmux sessions, or a subagent rooted in the tree), reviewing (status, diff, tests), and removing (with safety rules for dirty trees and branch deletion). Worktrees live under a gitignored `.worktrees/` directory at the repository root.
 
+Fixed:
+
+- **`devc` no longer leaves an interactive session holding the project lock.** `ensure_up` took the per-project lock on fd 9 and then `exec`'d into `devcontainer`/`tmux`, and descriptors survive `exec`, so the lock stayed held for as long as the session lived: the next `devc` run for that project waited on `flock -w 900` and died with "another devc run is still working on it". The lock is now released (`flock -u 9`) before the caller execs. Release rather than close, because the obvious `exec 9>&- 2>/dev/null` also applies the redirection to the shell itself, which would send the stderr of every later command — including the container command's — to `/dev/null`.
+
 ## v1.10.0 — 2026-11-01
 
 Added:

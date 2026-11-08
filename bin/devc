@@ -240,6 +240,15 @@ ensure_up() {
 	if [ -n "$ports" ]; then
 		note "published: $ports"
 	fi
+	# Release the per-project lock before the caller execs into the container.
+	# File descriptors survive `exec`, so a lock fd inherited by an interactive
+	# tmux session stays held for as long as that session lives, and the next
+	# `devc` run for this project then waits on `flock -w 900` and dies.
+	#
+	# Release rather than close: `exec 9>&- 2>/dev/null` also applies the
+	# redirection to this shell, which would send the stderr of every later
+	# command - including the exec'd container command - to /dev/null.
+	flock -u 9
 }
 
 attach_shell() {
