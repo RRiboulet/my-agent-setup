@@ -236,16 +236,49 @@ fi
 Then tell the user the expanded attach command, as the `tmux` skill requires.
 
 Delegate a task to a subagent rooted in the worktree (the subagent tool takes
-an absolute `cwd`):
+an absolute `cwd`). Resolve the path the same way the recipes above do:
+
+```bash
+R="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"; SLUG="task-name"; WT="$R/.worktrees/$SLUG"
+echo "$WT"   # /path/to/that/clone/.worktrees/task-name - pass this as cwd
+```
+
+Then pass that expanded path, not a variable (a tool call is not a shell):
 
 ```
-subagent({ task: "...", cwd: "/workspace/.worktrees/task-name" })
+subagent({ task: "...", cwd: "<the path printed above>" })
 ```
 
-Use the repository root, not a relative path, for `cwd`. One worktree per
+The child loads the **worktree's own** copy of this repo's extension: pi
+discovers project extensions from the child's `cwd` when that project is
+trusted, so within this repo the launcher hands it that path explicitly rather
+than the main checkout's. That is also why the two must not be mixed - the
+failure is in the note below. A `cwd` outside this repo's trusted tree keeps the
+launcher's own copy instead, because an explicit extension path is loaded even
+for a project pi would refuse to trust.
+
+Use an absolute path for `cwd`, never a relative one. One worktree per
 subagent: the same branch cannot be checked out twice, and two subagents in one
 worktree collide on `index.lock`. Do not remove a worktree while a subagent
 rooted in it is still running - cancel or wait for it to finish first.
+
+If such a subagent exits about two seconds in and all you see is "Child Pi
+exited before reporting a result", read the dead child's tmux pane before
+anything else: `subagent_status` reports only that generic line, while the pane
+holds the reason. A launcher that passed the main checkout's extension path to
+a child rooted in a worktree hit this:
+
+```
+Failed to load extension ".../.worktrees/task-name/.pi/extensions/subagent/index.ts":
+Flag "--attach-subagent" conflicts with /path/to/repo/.pi/extensions/subagent/index.ts
+```
+
+That is two copies of one extension, not two extensions: pi discovers the
+worktree's copy as the project extension, so the explicit flag must name the
+same file the child would discover. This repo's launcher resolves the child's
+copy, so the recipe above works. On a checkout without that fix, launch with
+`cwd` = the repository root and `cd` into the worktree inside each command
+instead, which keeps the child's discovery pointed at the main checkout.
 
 ## Review
 

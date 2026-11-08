@@ -140,6 +140,46 @@ export function usesSessionFile(mode: LaunchMode): boolean {
 	return SESSION_FILE_MODES.has(mode);
 }
 
+/** Where a checkout of this repo keeps this extension, relative to its root. */
+const CHILD_EXTENSION_RELATIVE_PATH = path.join(".pi", "extensions", "subagent", "index.ts");
+
+/**
+ * The `--extension` argument for a child launched with `cwd`.
+ *
+ * A child whose cwd is another checkout of this repo has its own copy of this
+ * extension, and pi discovers it there as that project's extension without
+ * being asked: a linked worktree under `.worktrees/` is exactly that case, and
+ * running a subagent in one is the documented way to work a branch (see
+ * `.pi/skills/worktree/SKILL.md`). Handing the child this checkout's path as
+ * well loads one file under two paths, and pi refuses to start:
+ *
+ *   Failed to load extension "<child>/.pi/extensions/subagent/index.ts":
+ *   Flag "--attach-subagent" conflicts with <this checkout>/index.ts
+ *
+ * So the child's copy wins when its tree has one: the child runs that branch's
+ * tooling, so it should load that branch's extension.
+ *
+ * `trusted` gates that, and is not optional. An explicit `--extension` loads
+ * regardless of project trust *and* regardless of `--no-extensions`, while
+ * discovery is trust-gated - so pointing the flag at an untrusted tree would
+ * execute code from a directory this process just refused to trust, which the
+ * flag never did before it started naming the child's copy. An untrusted cwd
+ * gets no discovery either, so there is no duplicate to avoid and the fallback
+ * is correct as well as safe.
+ *
+ * `fallback` is this process's own path, used whenever the child's tree is
+ * untrusted or has no copy - a plain directory, another project, or a branch
+ * predating this file. The flag stays explicit in every case, so a launch does
+ * not depend on the child's discovery settings.
+ */
+export function resolveChildExtensionPath(cwd: string, fallback: string, trusted: boolean): string {
+	if (!trusted) return fallback;
+	// Absolute, because a relative candidate would resolve against the CHILD's
+	// cwd at launch time, naming a different file.
+	const candidate = path.join(path.resolve(cwd), CHILD_EXTENSION_RELATIVE_PATH);
+	return existsSync(candidate) ? candidate : fallback;
+}
+
 /** The v3 header pi writes for a new session. */
 export function buildSessionHeader(options: {
 	id: string;
