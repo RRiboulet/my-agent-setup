@@ -14,6 +14,28 @@ Fixed:
 
 - **`devc` no longer leaves an interactive session holding the project lock.** `ensure_up` took the per-project lock on fd 9 and then `exec`'d into `devcontainer`/`tmux`, and descriptors survive `exec`, so the lock stayed held for as long as the session lived: the next `devc` run for that project waited on `flock -w 900` and died with "another devc run is still working on it". The lock is now released (`flock -u 9`) before the caller execs. Release rather than close, because the obvious `exec 9>&- 2>/dev/null` also applies the redirection to the shell itself, which would send the stderr of every later command — including the container command's — to `/dev/null`.
 
+- **A subagent rooted in a worktree no longer dies at start on an extension
+  flag conflict.** The launcher passed its own absolute
+  `.pi/extensions/subagent/index.ts` as `--extension`, and pi also discovers the
+  child's copy as that project's extension, so a worktree cwd — the pattern the
+  `worktree` skill documents — loaded one file under two paths and pi refused to
+  start: `Flag "--attach-subagent" conflicts with
+  <main checkout>/.pi/extensions/subagent/index.ts`. The parent saw only "Child
+  Pi exited before reporting a result" about two seconds later, with the reason
+  left in a dead tmux pane, so the failure read as the subagent machinery being
+  broken rather than as a path being wrong. The launch spec now resolves the
+  child's own copy when its tree has one, which makes the explicit flag and the
+  auto-discovered path the same file, so pi loads it once; the child then runs
+  the tooling of the branch it was rooted in rather than the caller's. That
+  resolution is gated on the child's trust, because an explicit extension path
+  is loaded even for a project pi would refuse to trust and even under
+  `--no-extensions`, while discovery is trust-gated: an untrusted `cwd` keeps
+  the launcher's own copy, which is the only copy it has. The flag stays
+  explicit in every case so a launch does not depend on the child's discovery
+  settings. The `worktree` skill's subagent recipe no longer hardcodes
+  `/workspace`, and names this error with the workaround for a checkout
+  predating the fix.
+
 ## v1.10.0 — 2026-11-01
 
 Added:

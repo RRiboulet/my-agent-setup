@@ -87,6 +87,7 @@ const MODULES: Record<string, string[]> = {
 		"forkLiveBranch",
 		"getPiInvocationParts",
 		"requireExistingSession",
+		"resolveChildExtensionPath",
 		"seedLineageSession",
 		"usesSessionFile",
 	],

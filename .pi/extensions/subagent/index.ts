@@ -169,6 +169,7 @@ import {
 	forkLiveBranch,
 	getPiInvocationParts,
 	requireExistingSession,
+	resolveChildExtensionPath,
 	seedLineageSession,
 	usesSessionFile,
 	type LaunchMode,
@@ -1909,7 +1910,11 @@ const noteInterrupt = async (
 				sessionId: run.id,
 				tmuxSession: run.tmuxSession,
 				trusted: run.trusted,
-				extensionPath: EXTENSION_PATH,
+				// The child's own copy wins when its tree has one, but only for a
+				// trusted tree: an explicit --extension bypasses project trust, so
+				// naming an untrusted cwd's copy would execute that tree's code.
+				// See handoff.ts.
+				extensionPath: resolveChildExtensionPath(run.cwd, EXTENSION_PATH, run.trusted),
 				promptPath,
 			});
 			const childCommand = [

@@ -96,3 +96,26 @@ test("worktree skill: git clean advice names the form that actually deletes", ()
 	// -xdff recurses into it.
 	assert.ok(SKILL.includes("-xdff"), "only -xdff deletes linked worktrees");
 });
+
+test("worktree skill: the subagent recipe resolves the worktree root", () => {
+	const openBlock = SKILL.slice(SKILL.indexOf("## Open"), SKILL.indexOf("## Review"));
+	// A hardcoded /workspace pins the recipe to one machine's clone, and a
+	// worktree cwd is what surfaced the extension flag conflict below.
+	assert.ok(!/cwd: "\/workspace/.test(openBlock), "the subagent cwd must not hardcode /workspace");
+	assert.ok(
+		openBlock.includes("--path-format=absolute --git-common-dir"),
+		"the recipe must resolve the root the way every other recipe does",
+	);
+	assert.ok(openBlock.includes('echo "$WT"'), "the recipe must print the resolved path to pass as cwd");
+	assert.ok(openBlock.includes('cwd: "<the path printed above>"'), "the expanded path is what cwd takes");
+});
+
+test("worktree skill: names the extension conflict a worktree cwd used to cause", () => {
+	// The parent only reports "Child Pi exited before reporting a result", so the
+	// pane text is the only thing that identifies this failure.
+	assert.ok(SKILL.includes('Flag "--attach-subagent" conflicts with'), "must quote the error a reader sees");
+	assert.ok(
+		SKILL.includes("cd` into the worktree inside each command"),
+		"must give the workaround for a checkout without the launcher fix",
+	);
+});
