@@ -184,6 +184,42 @@ You can consult pi for reference — the installed `@earendil-works/pi-coding-ag
 docs at `/usr/lib/node_modules/@earendil-works/pi-coding-agent/docs/` are the
 source of truth for the API this code targets — but do not modify pi itself.
 
+## Coding skills
+
+Twelve skills adapted from
+[RRiboulet/agent-coding-skills](https://github.com/RRiboulet/agent-coding-skills)
+cover the coding loop and now live here as ours: they carry this repo's rules in
+their bodies, and `licenses/NOTICE.md` records the MIT provenance. They are
+advertised by their descriptions, so load one when its trigger applies rather
+than waiting to be told:
+
+- Trivial, unambiguous edit: make it, then check it. No ceremony.
+- Non-trivial or ambiguous request: `in-your-own-words` before building.
+- A change crossing a module, service, API, schema or config boundary:
+  `blast-radius`.
+- A bug, failing test, CI failure, crash, flake or regression: `diagnosing-bugs`.
+- New or changed behavior with a testable seam: `tdd`.
+- Retries, queues, webhooks, jobs, migrations or setup scripts:
+  `idempotent-operations`.
+- Producing or acting on a performance number: `benchmark-checklist`.
+- A **big task left unsupervised for a long time** — hours of work the user did
+  not watch and will judge afterwards: `show-me-your-work`. Not for ordinary
+  sessions.
+- Before saying work is done: `prove-it-works`.
+
+Only the user starts the four user-invoked entry points, which pi spells
+`/skill:<name>`: `/skill:to-spec`, `/skill:to-tickets`, `/skill:implement`,
+`/skill:handoff`. Suggest them when they fit; never start them yourself.
+
+Three repo rules win over those skill bodies, and the skills say so in place:
+
+- **Commits** follow the `commit` skill (branch and base checks), not
+  `implement`'s looser "commit on the current branch".
+- **Worktrees** live under `.worktrees/` per the `worktree` skill.
+- **Reviews** follow the next section: one per change, only when asked, and
+  `prove-it-works` never starts one. `implement` therefore ends at proof, not at
+  a review.
+
 ## Subagent tools
 
 The five management tools — `subagent_status`, `subagent_cancel`,
@@ -202,25 +238,40 @@ There is no blocking wait, so collecting a result means polling
 `subagent_status` — `subagent_status({ compact: true })` is the cheap
 one-line-per-run form, and the single-run path is the one that returns output.
 
-## Review subagents: ask first, and take the model from the triage config
+## Reviews: one per change, and only when asked
 
-`triage_change` (the tool) and `/triage` are **recommendation-only**. They gather
-evidence, ask the judge, and return a plan; they never launch a review, switch a
-model, or run a test. Nothing in this repo starts a reviewer on its own.
+There is **one** review pipeline, and it starts only on request. `prove-it-works`
+is how the author proves and reports a change; it is not a review and it never
+commissions one. Do not run a review because a change feels non-trivial, because
+a skill suggested it, or because `/review` and `/triage` both exist.
 
-**Always ask the user before launching a review subagent.** A recommendation is
-not an instruction, and a question that merely *sounds* like it invites a review
-is not approval either: starting a reviewer spends real tokens and runs an
-independent process, so it is the user's call every time. Propose the lenses and
-models, then wait for a yes.
+When the user asks for a review, pick exactly one door:
+
+- **`/review`** when they want to drive it interactively (PR, branch, commit,
+  folder, uncommitted). `/review` appends `REVIEW_GUIDELINES.md`, which carries
+  the Spec / Correctness / Standards method and this repo's rules.
+- **`triage_change` (or `/triage`) and one sub-agent** when they want an
+  independent read without staying in the loop. Triage is
+  **recommendation-only**: it measures the diff, asks the judge, and returns a
+  plan; it never launches anything.
+
+Never do both for the same change, and never start a second reviewer because the
+first found little. The sub-agent must not spawn further reviewers.
+
+**Always ask the user before launching a review subagent**, even when triage
+recommends one. A recommendation is not an instruction, and a question that
+merely *sounds* like it invites a review is not approval either: starting a
+reviewer spends real tokens and runs an independent process, so it is the user's
+call every time. Propose the lens and model, then wait for a yes.
 
 When the user does approve one, the reviewer's `provider`, `model` and
-`thinking` come from the `candidates` in `~/.pi/agent/review-triage.json` — for a
-single change, the model `triage_change` names; for a multi-lens review (which
-`triage_change` does not serve, because it resolves one profile), a model picked
-from that `candidates` list per lens. Never hand-pick a model outside the list:
-if a lens needs a model the config lacks, add it to the config first. Which
-model sits in which capability band is a human judgement, not the agent's.
+`thinking` come from the `candidates` in `~/.pi/agent/review-triage.json`. Never
+hand-pick a model outside that list: if a lens needs a model the config lacks,
+add it to the config first. Which model sits in which capability band is a human
+judgement, not the agent's.
+
+A `show-me-your-work` trail does not get its own reviewer. If a review is
+commissioned, hand the trail to that one reviewer alongside the diff.
 
 ## Tests
 

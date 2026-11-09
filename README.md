@@ -42,12 +42,25 @@ each entry point explicitly:
     ".pi/extensions/voice/index.ts"
   ],
   "skills": [
+    ".pi/skills/add-model",
+    ".pi/skills/benchmark-checklist",
+    ".pi/skills/blast-radius",
     ".pi/skills/commit",
     ".pi/skills/devcontainer",
+    ".pi/skills/diagnosing-bugs",
     ".pi/skills/github",
+    ".pi/skills/handoff",
+    ".pi/skills/idempotent-operations",
+    ".pi/skills/implement",
+    ".pi/skills/in-your-own-words",
     ".pi/skills/librarian",
     ".pi/skills/native-web-search",
+    ".pi/skills/prove-it-works",
+    ".pi/skills/show-me-your-work",
+    ".pi/skills/tdd",
     ".pi/skills/tmux",
+    ".pi/skills/to-spec",
+    ".pi/skills/to-tickets",
     ".pi/skills/update-changelog",
     ".pi/skills/worktree"
   ]
@@ -92,6 +105,18 @@ inactive. Installed packages are loaded regardless of project trust.
 | `.pi/extensions/opencode-go-provider/` | An `opencode-go` provider for `/model`: fast GLM, Kimi, MiniMax, Qwen, DeepSeek and Grok models via opencode.ai's Go API, with the correct wire protocol per model (Anthropic, OpenAI Completions, Responses) and a per-account usage-budget widget below the editor. **Vendored** from [monotykamary/pi-opencode-go-provider](https://github.com/monotykamary/pi-opencode-go-provider) (MIT), byte-identical to upstream — see below |
 | `.pi/skills/native-web-search/` | Script + docs for the above. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/native-web-search/`, with local provider patches: OpenRouter support, an `opencode-go` default through the Go API's Anthropic-compatible endpoint, unknown-provider rejection, and a test seam (`__test__` + direct-invocation guard). The two must travel together |
 | `.pi/skills/commit/` | Conventional Commits subjects, and the branch-per-change rule from `AGENTS.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/commit/SKILL.md`, with two local adaptations |
+| `.pi/skills/in-your-own-words/` | Plays the goal, done-when, scope and risky assumptions back before non-trivial work; asks only about decisions, never facts. Part of the coding skill stack below |
+| `.pi/skills/blast-radius/` | Finds what a change can break beyond its diff, names the one fact it is safe because of, and proves it by running real code |
+| `.pi/skills/tdd/` | Red-green-refactor at public seams, one vertical slice at a time, with the two-imagined-edits test and mocking rules |
+| `.pi/skills/diagnosing-bugs/` | Feedback loop first, then reproduce, minimise, rank hypotheses, instrument, and fix the root cause with a regression test |
+| `.pi/skills/idempotent-operations/` | Retries, consumers, jobs, locks and migrations that converge however many times they run or however far a previous run got |
+| `.pi/skills/benchmark-checklist/` | Seven questions that vet a performance number before it is reported or acted on |
+| `.pi/skills/show-me-your-work/` | Append-only TSV decision log for a big task left unsupervised for a long time, self-audited before handing back; `scripts/log.sh` writes a sanitised row |
+| `.pi/skills/prove-it-works/` | Verifies the real artifact, runs the repository's quality gate, checks the final diff for scope and hygiene, and reports statuses with honest meaning. The one finishing step — it never starts a reviewer |
+| `.pi/skills/to-spec/` | User-invoked `/skill:to-spec`: writes the conversation up as a spec with test seams and acceptance criteria |
+| `.pi/skills/to-tickets/` | User-invoked `/skill:to-tickets`: splits a spec into tracer-bullet tickets with blocked-by edges |
+| `.pi/skills/implement/` | User-invoked `/skill:implement`: builds a spec or ticket end to end through the skills above |
+| `.pi/skills/handoff/` | User-invoked `/skill:handoff`: writes a handoff document a fresh session can continue from |
 | `.pi/skills/devcontainer/` | Drive a project's devcontainer from a headless host: `devc` (`devcontainer up` + `exec`), the rule that an agent must never run the attaching form, long-build and long-server recipes, the volume/uid/port rules that prevent damage, and a symptom→fix table. **Ours** |
 | `.pi/skills/github/` | gh CLI usage: PRs, CI runs, `gh api`, structured JSON. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/github/SKILL.md`, with four local adaptations — this repo's `GH_CONFIG_DIR` auth setup, the AGENTS.md squash workflow, the token rule, and the credential-helper note |
 | `.pi/skills/librarian/` | Caches and refreshes remote git repos under the pi agent dir (`<agent dir>/cache/checkouts/<host>/<org>/<repo>`) with partial clones, so repeated references reuse a stable local checkout. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/librarian/`, with the cache root moved from `~/.cache/checkouts` to the persistent agent dir and the script invoked by skill-relative path |
@@ -99,8 +124,32 @@ inactive. Installed packages are loaded regardless of project trust.
 | `.pi/skills/update-changelog/` | Writes `CHANGELOG.md`'s `Unreleased` section from the commits since the last tag. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/update-changelog/SKILL.md`, with one local adaptation |
 | `.pi/skills/worktree/` | Creates, lists, opens, reviews and removes git worktrees (linked working trees) for independent tasks, under a gitignored `.worktrees/` directory. **Ours** |
 | `REVIEW_GUIDELINES.md` | Project-level review guidelines read by `/review` — branch hygiene, token rules, changelog shape, PR workflow, line endings |
+| `licenses/` | MIT notices for the two projects the coding skill stack adapts, plus `NOTICE.md` with per-skill provenance and what changed here |
 | `pi-session.sh` | Launch pi under tmux with an OpenRouter model |
 | `bin/devc` | Open a project's devcontainer from a terminal — headless, no GUI, tmux-backed. See [`devc`](#devc) |
+
+### The coding skill stack
+
+The twelve skills from `in-your-own-words` to `handoff` were adapted from
+[RRiboulet/agent-coding-skills](https://github.com/RRiboulet/agent-coding-skills)
+and are now maintained here as ours: pi invocation syntax (`/skill:<name>` for
+the four user-invoked entry points), this repo's commit and worktree rules,
+`dev` as the review base, the gate read from `AGENTS.md`, and the handoff written
+under the persistent agent dir instead of `/tmp`. The stack adapts MIT material
+from mattpocock/skills and cursor/plugins `pstack`; their notices and the
+per-skill provenance are in [`licenses/NOTICE.md`](licenses/NOTICE.md).
+
+The review workflow is deliberately narrow:
+
+- `prove-it-works` closes every change. It is the author's own proof and diff
+  check, and it never starts a reviewer.
+- A change gets **one** independent review, only when asked, through exactly one
+  door: `/review` for an interactive review, or `triage_change`/`/triage` and one
+  approved sub-agent. Never both, never a second reviewer.
+- The rubric either one follows is `REVIEW_GUIDELINES.md`, which now carries the
+  Spec / Correctness / Standards method that used to be a separate skill.
+- `show-me-your-work` is only for a big task left unsupervised for a long time;
+  its trail is handed to that one reviewer rather than reviewed separately.
 
 `/btw` notes: the command takes no arguments — it always asks for the question
 (submit it empty to reopen a running panel), so spaces and punctuation in it
