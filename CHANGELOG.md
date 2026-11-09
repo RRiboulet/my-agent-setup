@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.11.0 — 2026-11-09
+
 Added:
 
 - **A twelve-skill coding stack, adapted from
@@ -53,6 +55,8 @@ Added:
 
 - **A `worktree` skill, so the agent can manage git worktrees for independent tasks.** Covers creating a worktree for a new branch, an existing local branch, or a remote-tracking branch, off a chosen base, listing, opening (one-off commands, persistent tmux sessions, or a subagent rooted in the tree), reviewing (status, diff, tests), and removing (with safety rules for dirty trees and branch deletion). Worktrees live under a gitignored `.worktrees/` directory at the repository root.
 
+- **An `add-model` skill, and `beam-free` in the curated `opencode-go` model list.** The skill documents how to add or fix a model from the live API's own metadata — id, api and baseUrl, reasoning, thinking levels, input, cost, context and compat — and the four-way merge order that makes editing `models.json` the reliable fix (embedded beats live, live beats cached). It also states the rule the provider now follows: an advertised `effort` list maps to pi's thinking levels, while a toggle- or budget-only model omits `thinkingLevelMap`. `beam-free` is curated with its `low`–`max` effort map and `requiresReasoningContentOnAssistantMessages`.
+
 Fixed:
 
 - **`devc` no longer leaves an interactive session holding the project lock.** `ensure_up` took the per-project lock on fd 9 and then `exec`'d into `devcontainer`/`tmux`, and descriptors survive `exec`, so the lock stayed held for as long as the session lived: the next `devc` run for that project waited on `flock -w 900` and died with "another devc run is still working on it". The lock is now released (`flock -u 9`) before the caller execs. Release rather than close, because the obvious `exec 9>&- 2>/dev/null` also applies the redirection to the shell itself, which would send the stderr of every later command — including the container command's — to `/dev/null`.
@@ -78,6 +82,12 @@ Fixed:
   settings. The `worktree` skill's subagent recipe no longer hardcodes
   `/workspace`, and names this error with the workaround for a checkout
   predating the fix.
+
+- **`opencode-go` no longer mis-flags live models as non-reasoning.** The provider read `reasoning` from a top-level API field the Go endpoint does not send, so models that expose it under `capabilities.reasoning` were listed as non-reasoning with no thinking levels. `transformApiModel` now derives both from that block, maps advertised effort levels to themselves, and leaves the map absent for toggle- or budget-only models; a curated entry still wins when it has one. An advertised effort list now also implies reasoning support when the explicit flag is omitted, and four curated entries map `off` to the API's `none` effort instead of `null`.
+
+- **`/voice` shortcuts accept modified function keys.** The validator rejected every modifier on `f1`–`f12` on the theory that pi's matcher refuses them, but pi accepts them via Kitty functional-key sequences; only `escape`/`esc` refuse modifiers. `ctrl+f5` and similar are now valid, and the docs and tests match pi's actual matcher.
+
+- **pi gets truecolor inside tmux.** tmux reported only 256 colours, so pi approximated its palette and the colored tool-call and thinking sections looked different in a panel. `tmux.conf` now advertises `terminal-features ",*:RGB"` and `setenv COLORTERM truecolor` (plus `PI_TRUE_COLOR`), `devc` passes both as `--remote-env`, and `devcontainer.json` sets them in the container; `extended-keys-format csi-u` is enabled on tmux 3.5+. The `devcontainer` skill's symptom table names the check.
 
 Maintenance:
 
