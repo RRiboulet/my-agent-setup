@@ -4,6 +4,95 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.11.0 — 2026-11-09
+
+Added:
+
+- **A twelve-skill coding stack, adapted from
+  [`RRiboulet/agent-coding-skills`](https://github.com/RRiboulet/agent-coding-skills)
+  and wired into this repository's workflow.** The model-invoked half covers the
+  loop around a change — `in-your-own-words` (play the goal back before
+  building), `blast-radius` (what the diff can break, and the one fact it is safe
+  because of), `tdd`, `diagnosing-bugs`, `idempotent-operations`,
+  `benchmark-checklist`, `show-me-your-work` and `prove-it-works` (real
+  artifact, real gate, honest statuses). The four user-invoked entry points are
+  `/skill:to-spec`, `/skill:to-tickets`, `/skill:implement` and
+  `/skill:handoff`; they set `disable-model-invocation`, which pi honors, so the
+  agent cannot start them on its own. They are maintained here as ours rather
+  than tracked as copies: pi's `/skill:<name>` syntax, `dev` as the review base,
+  the quality gate read from `AGENTS.md` rather than a `.agent/quality.yaml` this
+  repo does not have, commits deferred to the `commit` skill, worktrees to the
+  `worktree` skill, and the handoff written under the persistent agent dir
+  because `/tmp` here dies with the container. The MIT notices for the two
+  upstream projects they adapt (mattpocock/skills and cursor/plugins `pstack`)
+  are in `licenses/`, with per-skill provenance in `licenses/NOTICE.md`.
+
+- **One review pipeline instead of three overlapping ones.** `prove-it-works`
+  closes every change as the author's own proof and diff check and never starts a
+  reviewer; its "review the final diff" step is now explicitly a hygiene check,
+  not a review. `implement` ends at proof for the same reason. A change gets one
+  independent review, only when the user asks, through exactly one door —
+  `/review` for an interactive review, or `triage_change`/`/triage` and one
+  approved sub-agent — never both and never a second reviewer. The adapted
+  `review-change` skill is gone; its Spec / Correctness / Standards method, the
+  rule that correctness findings need proof, and the smell baseline now live in
+  `REVIEW_GUIDELINES.md`, which `/review` already appends and a triage-launched
+  reviewer follows, so there is one rubric rather than two. `show-me-your-work`
+  is narrowed to a big task left unsupervised for a long time (not an ordinary
+  session), and its separate independent-review step is gone: it self-audits, and
+  a commissioned reviewer gets the trail alongside the diff.
+
+  Two upstream defects were fixed on the way in:
+  `diagnosing-bugs/scripts/hitl-loop.template.sh` and
+  `show-me-your-work/scripts/log.sh` are committed mode 644 upstream while its
+  own `validate.py` requires the executable bit, so the upstream quality gate
+  fails on a fresh clone; both are `+x` here. A new `coding-skills.test.ts` pins
+  what editing the skills can silently break: name matching its folder, unique
+  names, `disable-model-invocation` on the four entry points, executable scripts,
+  and relative links that resolve.
+
+- **Brave is a first-choice provider of the existing native web search.** When a Brave key is configured (`BRAVE_API_KEY`, else a `brave`/`brave-search` entry in `auth.json`), `search.mjs` queries Brave's Web Search API and renders a compact result frame; otherwise, and on any Brave failure — missing key, usage/rate limit, invalid subscription token, network, zero results — the existing native chain runs unchanged and the result's first line says why. It is the same script the `web_search` tool and the `/web-search` command already wrap, so all three share one provider and one credential path, and it adds no npm dependency. There is deliberately no local quota, counter, lock file or audit log that could drift from the account's real usage: Brave's own account settings are the limit.
+
+- **A `worktree` skill, so the agent can manage git worktrees for independent tasks.** Covers creating a worktree for a new branch, an existing local branch, or a remote-tracking branch, off a chosen base, listing, opening (one-off commands, persistent tmux sessions, or a subagent rooted in the tree), reviewing (status, diff, tests), and removing (with safety rules for dirty trees and branch deletion). Worktrees live under a gitignored `.worktrees/` directory at the repository root.
+
+- **An `add-model` skill, and `beam-free` in the curated `opencode-go` model list.** The skill documents how to add or fix a model from the live API's own metadata — id, api and baseUrl, reasoning, thinking levels, input, cost, context and compat — and the four-way merge order that makes editing `models.json` the reliable fix (embedded beats live, live beats cached). It also states the rule the provider now follows: an advertised `effort` list maps to pi's thinking levels, while a toggle- or budget-only model omits `thinkingLevelMap`. `beam-free` is curated with its `low`–`max` effort map and `requiresReasoningContentOnAssistantMessages`.
+
+Fixed:
+
+- **`devc` no longer leaves an interactive session holding the project lock.** `ensure_up` took the per-project lock on fd 9 and then `exec`'d into `devcontainer`/`tmux`, and descriptors survive `exec`, so the lock stayed held for as long as the session lived: the next `devc` run for that project waited on `flock -w 900` and died with "another devc run is still working on it". The lock is now released (`flock -u 9`) before the caller execs. Release rather than close, because the obvious `exec 9>&- 2>/dev/null` also applies the redirection to the shell itself, which would send the stderr of every later command — including the container command's — to `/dev/null`.
+
+- **A subagent rooted in a worktree no longer dies at start on an extension
+  flag conflict.** The launcher passed its own absolute
+  `.pi/extensions/subagent/index.ts` as `--extension`, and pi also discovers the
+  child's copy as that project's extension, so a worktree cwd — the pattern the
+  `worktree` skill documents — loaded one file under two paths and pi refused to
+  start: `Flag "--attach-subagent" conflicts with
+  <main checkout>/.pi/extensions/subagent/index.ts`. The parent saw only "Child
+  Pi exited before reporting a result" about two seconds later, with the reason
+  left in a dead tmux pane, so the failure read as the subagent machinery being
+  broken rather than as a path being wrong. The launch spec now resolves the
+  child's own copy when its tree has one, which makes the explicit flag and the
+  auto-discovered path the same file, so pi loads it once; the child then runs
+  the tooling of the branch it was rooted in rather than the caller's. That
+  resolution is gated on the child's trust, because an explicit extension path
+  is loaded even for a project pi would refuse to trust and even under
+  `--no-extensions`, while discovery is trust-gated: an untrusted `cwd` keeps
+  the launcher's own copy, which is the only copy it has. The flag stays
+  explicit in every case so a launch does not depend on the child's discovery
+  settings. The `worktree` skill's subagent recipe no longer hardcodes
+  `/workspace`, and names this error with the workaround for a checkout
+  predating the fix.
+
+- **`opencode-go` no longer mis-flags live models as non-reasoning.** The provider read `reasoning` from a top-level API field the Go endpoint does not send, so models that expose it under `capabilities.reasoning` were listed as non-reasoning with no thinking levels. `transformApiModel` now derives both from that block, maps advertised effort levels to themselves, and leaves the map absent for toggle- or budget-only models; a curated entry still wins when it has one. An advertised effort list now also implies reasoning support when the explicit flag is omitted, and four curated entries map `off` to the API's `none` effort instead of `null`.
+
+- **`/voice` shortcuts accept modified function keys.** The validator rejected every modifier on `f1`–`f12` on the theory that pi's matcher refuses them, but pi accepts them via Kitty functional-key sequences; only `escape`/`esc` refuse modifiers. `ctrl+f5` and similar are now valid, and the docs and tests match pi's actual matcher.
+
+- **pi gets truecolor inside tmux.** tmux reported only 256 colours, so pi approximated its palette and the colored tool-call and thinking sections looked different in a panel. `tmux.conf` now advertises `terminal-features ",*:RGB"` and `setenv COLORTERM truecolor` (plus `PI_TRUE_COLOR`), `devc` passes both as `--remote-env`, and `devcontainer.json` sets them in the container; `extended-keys-format csi-u` is enabled on tmux 3.5+. The `devcontainer` skill's symptom table names the check.
+
+Maintenance:
+
+- **Non-interactive shells get a no-op git editor, so a rebase that is waiting stops looking stuck.** Nothing in the image sets `core.editor`, so git falls back to `vi`, and `vi` cannot run without a terminal: on a stdin that is open but silent it blocks, and on `/dev/null` it fails with an editor error the calling script rarely surfaces. Either way `git rebase --continue`, `git commit --amend` without `-m` and `git rebase -i` die with the work already staged and nothing useful to read. `BASH_ENV` now exports `GIT_EDITOR=true` for non-interactive bash only, so an interactive shell keeps its real editor and a bare `git commit` aborts instead of hanging. Two consequences worth knowing: `git rebase -i` no longer stops to edit the todo list, it replays the picks unchanged; and `GIT_EDITOR` outranks `core.editor` and `$EDITOR`, so a script that needs its own editor must `unset GIT_EDITOR` or set it per command. Takes effect on the next rebuild.
+
 ## v1.10.0 — 2026-11-01
 
 Added:

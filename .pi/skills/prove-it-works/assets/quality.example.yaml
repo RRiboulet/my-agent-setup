@@ -1,0 +1,52 @@
+# Per-repository quality contract read by the `prove-it-works` skill.
+# Copy to `.agent/quality.yaml` in a repository and replace the placeholders with
+# commands the project actually uses. Use [] for categories that do not apply:
+# an empty list means "not configured", never "pick a tool yourself".
+
+schema: "reusable-coding-quality"
+version: 1
+
+# Repository instruction files agents should read first.
+project_instructions_paths:
+  - "AGENTS.md"
+
+paths:
+  protected: []   # must not change without explicit authorization, e.g. ".env"
+  generated: []   # build or coverage output and vendored code, e.g. "dist/"
+
+# Each entry: name, command, and optionally working_directory (default "."),
+# timeout_seconds, environment (map of variables), required (default true).
+commands:
+  setup:
+    - name: "install-dependencies"
+      command: "<project-defined install command>"
+      timeout_seconds: 600
+  format_check: []
+  lint:
+    - name: "lint"
+      command: "<project-defined lint command>"
+  type_check: []
+  build: []
+  focused_test: []   # optional fast subset used while iterating
+  full_test:
+    - name: "tests"
+      command: "<project-defined test command>"
+      timeout_seconds: 1800
+  coverage: []       # leave empty if full_test already enforces coverage
+  security: []
+  dependency_check: []
+  docs: []
+  package: []
+  final_gate:
+    # Preferred: reference the checks above by name so commands are not duplicated.
+    - name: "full-quality-gate"
+      steps: ["install-dependencies", "lint", "tests"]
+    # Alternative: a single command such as a CI script or task-runner target.
+    # - name: "full-quality-gate"
+    #   command: "<project-defined gate command>"
+
+coverage:
+  scope: "changed_code"   # or "repository"
+  line: 100
+  branch: 100
+  exclusions: []          # each: { path: "<glob>", rationale: "<specific reason>" }

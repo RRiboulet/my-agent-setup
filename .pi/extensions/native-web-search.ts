@@ -27,7 +27,7 @@ const MAX_TIMEOUT_MS = 600_000;
 export interface WebSearchInput {
 	query: string;
 	purpose?: string;
-	provider?: "opencode-go" | "openrouter" | "openai-codex" | "anthropic";
+	provider?: "brave" | "opencode-go" | "openrouter" | "openai-codex" | "anthropic";
 	model?: string;
 	timeout_ms?: number;
 }
@@ -223,10 +223,12 @@ export default function (pi: ExtensionAPI) {
 		name: "web_search",
 		label: "Web Search",
 		description:
-			"Search the internet with a fast, web-enabled model. Returns a concise research summary (3-7 findings) " +
-			"with full canonical source URLs, tailored to a stated purpose. Uses opencode-go by default; pass provider " +
-			"to use OpenRouter, openai-codex or anthropic instead. Use for current facts, documentation, release notes, and any " +
-			"question that needs external information.",
+			"Search the internet. Brave is used whenever a Brave key is configured (`BRAVE_API_KEY` or a brave credential " +
+			"in auth.json); otherwise the native chain runs (opencode-go by default). A Brave failure — rate limit, invalid " +
+			"key, network — falls back to that chain and the result's first line says why. Returns a concise research " +
+			"summary (3-7 findings) with full canonical source URLs, tailored to a stated purpose. Pass provider to force " +
+			"Brave, OpenRouter, openai-codex or anthropic instead. Use for current facts, documentation, release notes, " +
+			"and any question that needs external information.",
 		promptSnippet: "Search the internet and return a concise summary with full source URLs",
 		promptGuidelines: [
 			"Use web_search when the answer depends on information outside the repo, on current versions, or on external documentation.",
@@ -238,8 +240,8 @@ export default function (pi: ExtensionAPI) {
 				Type.String({ description: "Why the information is needed, so the summary is scoped" }),
 			),
 			provider: Type.Optional(
-				StringEnum(["opencode-go", "openrouter", "openai-codex", "anthropic"] as const, {
-					description: `Search provider; unset resolves settings.defaultProvider, then the first auth.json credential (preferring ${DEFAULT_PROVIDER}); override globally with ${PROVIDER_ENV_VAR}`,
+				StringEnum(["brave", "opencode-go", "openrouter", "openai-codex", "anthropic"] as const, {
+					description: `Search provider; unset uses Brave when a key is configured, else settings.defaultProvider, then the first auth.json credential (preferring ${DEFAULT_PROVIDER}). An explicit provider (or ${PROVIDER_ENV_VAR}) wins over Brave; a Brave failure still falls back to the native chain with the reason in the result`,
 				}),
 			),
 			model: Type.Optional(

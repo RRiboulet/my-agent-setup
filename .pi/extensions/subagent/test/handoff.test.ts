@@ -8,7 +8,7 @@
 // therefore asserted directly rather than only by a live smoke test.
 
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
@@ -19,6 +19,7 @@ import {
 	countSessionLines,
 	forkLiveBranch,
 	requireExistingSession,
+	resolveChildExtensionPath,
 	seedLineageSession,
 	SESSION_VERSION,
 	usesSessionFile,
@@ -105,6 +106,41 @@ test("usesSessionFile distinguishes addressed modes", () => {
 	assert.equal(usesSessionFile("lineage"), true);
 	assert.equal(usesSessionFile("fork"), true);
 	assert.equal(usesSessionFile("resume"), true);
+});
+
+test("a child's own copy of the extension wins over this checkout's", async () => {
+	const dir = await mkdtemp(path.join(tmpdir(), "handoff-"));
+	try {
+		// A cwd with no copy of its own keeps the fallback, so a subagent in a
+		// plain directory or another project still loads this extension.
+		assert.equal(resolveChildExtensionPath(dir, "/ext/index.ts", true), "/ext/index.ts");
+
+		const nested = path.join(dir, ".pi", "extensions", "subagent", "index.ts");
+		await mkdir(path.dirname(nested), { recursive: true });
+		await writeFile(nested, "// the child tree's copy\n", "utf8");
+
+		// A worktree cwd carries its own copy, and pi discovers that same file as
+		// the project extension. Returning it here makes the two one path, so pi
+		// loads it once instead of refusing to start on the --attach-subagent
+		// conflict with this checkout's copy.
+		assert.equal(resolveChildExtensionPath(dir, "/ext/index.ts", true), nested);
+
+		// An UNTRUSTED cwd must not do that, even with a copy sitting there. An
+		// explicit --extension loads regardless of project trust and regardless of
+		// --no-extensions, so naming an untrusted tree's copy would execute code
+		// from a directory this process refused to trust. Discovery is trust-gated,
+		// so an untrusted child has no duplicate to avoid and the fallback is also
+		// the right path.
+		assert.equal(resolveChildExtensionPath(dir, "/ext/index.ts", false), "/ext/index.ts");
+
+		// A relative cwd resolves to an absolute candidate: the child resolves a
+		// relative path against its own cwd at launch time, which is a different
+		// file.
+		const relative = path.relative(process.cwd(), dir);
+		assert.equal(resolveChildExtensionPath(relative, "/ext/index.ts", true), nested);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
 });
 
 test("the session header is v3 and records the parent session", () => {
