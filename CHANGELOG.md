@@ -6,6 +6,49 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
+- **A twelve-skill coding stack, adapted from
+  [`RRiboulet/agent-coding-skills`](https://github.com/RRiboulet/agent-coding-skills)
+  and wired into this repository's workflow.** The model-invoked half covers the
+  loop around a change — `in-your-own-words` (play the goal back before
+  building), `blast-radius` (what the diff can break, and the one fact it is safe
+  because of), `tdd`, `diagnosing-bugs`, `idempotent-operations`,
+  `benchmark-checklist`, `show-me-your-work` and `prove-it-works` (real
+  artifact, real gate, honest statuses). The four user-invoked entry points are
+  `/skill:to-spec`, `/skill:to-tickets`, `/skill:implement` and
+  `/skill:handoff`; they set `disable-model-invocation`, which pi honors, so the
+  agent cannot start them on its own. They are maintained here as ours rather
+  than tracked as copies: pi's `/skill:<name>` syntax, `dev` as the review base,
+  the quality gate read from `AGENTS.md` rather than a `.agent/quality.yaml` this
+  repo does not have, commits deferred to the `commit` skill, worktrees to the
+  `worktree` skill, and the handoff written under the persistent agent dir
+  because `/tmp` here dies with the container. The MIT notices for the two
+  upstream projects they adapt (mattpocock/skills and cursor/plugins `pstack`)
+  are in `licenses/`, with per-skill provenance in `licenses/NOTICE.md`.
+
+- **One review pipeline instead of three overlapping ones.** `prove-it-works`
+  closes every change as the author's own proof and diff check and never starts a
+  reviewer; its "review the final diff" step is now explicitly a hygiene check,
+  not a review. `implement` ends at proof for the same reason. A change gets one
+  independent review, only when the user asks, through exactly one door —
+  `/review` for an interactive review, or `triage_change`/`/triage` and one
+  approved sub-agent — never both and never a second reviewer. The adapted
+  `review-change` skill is gone; its Spec / Correctness / Standards method, the
+  rule that correctness findings need proof, and the smell baseline now live in
+  `REVIEW_GUIDELINES.md`, which `/review` already appends and a triage-launched
+  reviewer follows, so there is one rubric rather than two. `show-me-your-work`
+  is narrowed to a big task left unsupervised for a long time (not an ordinary
+  session), and its separate independent-review step is gone: it self-audits, and
+  a commissioned reviewer gets the trail alongside the diff.
+
+  Two upstream defects were fixed on the way in:
+  `diagnosing-bugs/scripts/hitl-loop.template.sh` and
+  `show-me-your-work/scripts/log.sh` are committed mode 644 upstream while its
+  own `validate.py` requires the executable bit, so the upstream quality gate
+  fails on a fresh clone; both are `+x` here. A new `coding-skills.test.ts` pins
+  what editing the skills can silently break: name matching its folder, unique
+  names, `disable-model-invocation` on the four entry points, executable scripts,
+  and relative links that resolve.
+
 - **Brave is a first-choice provider of the existing native web search.** When a Brave key is configured (`BRAVE_API_KEY`, else a `brave`/`brave-search` entry in `auth.json`), `search.mjs` queries Brave's Web Search API and renders a compact result frame; otherwise, and on any Brave failure — missing key, usage/rate limit, invalid subscription token, network, zero results — the existing native chain runs unchanged and the result's first line says why. It is the same script the `web_search` tool and the `/web-search` command already wrap, so all three share one provider and one credential path, and it adds no npm dependency. There is deliberately no local quota, counter, lock file or audit log that could drift from the account's real usage: Brave's own account settings are the limit.
 
 - **A `worktree` skill, so the agent can manage git worktrees for independent tasks.** Covers creating a worktree for a new branch, an existing local branch, or a remote-tracking branch, off a chosen base, listing, opening (one-off commands, persistent tmux sessions, or a subagent rooted in the tree), reviewing (status, diff, tests), and removing (with safety rules for dirty trees and branch deletion). Worktrees live under a gitignored `.worktrees/` directory at the repository root.
