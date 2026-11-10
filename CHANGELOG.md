@@ -285,6 +285,30 @@ Maintenance:
   and `git log origin/dev..BASE`, and that `BASE_STACKED=1` proceeds with a
   warning on stderr. Prose only: no recipe and no test changed.
 
+- **The `worktree` skill can now recover a worktree after the main checkout, or
+  the whole repository root, moves.** That section was missing, and it is the
+  one that matters after a remount: a moved `/workspace` leaves every linked
+  tree's `.git` naming the old main and the main's `worktrees/<slug>/gitdir`
+  naming the old tree, so `git -C <tree>` exits 128 while `worktree list` shows
+  a dead path marked `prunable`. The new `## Repair` section documents the
+  remedy and, more importantly, the two traps around it, both verified on git
+  2.56.0. **A bare `git worktree repair` does nothing in that case** — it only
+  repairs the trees it can find, so it works when the main moved and the trees
+  stayed put, and exits 0 with no output when the whole root moved — so the
+  recipe passes each tree's current path. **`git worktree prune` must not be run
+  first**: in this state it deletes the administrative entry (silently; `-n` is
+  the only way to see what it will remove), and a `repair` afterwards fails with
+  "unable to locate repository", leaving the tree permanently unusable. The
+  recipe then verifies with `worktree list` and a `git -C` inside the tree
+  instead of trusting `repair`'s exit status, which is 0 even when it prints a
+  `fatal:` line and repairs nothing. It also records that a **copied** worktree
+  directory cannot be repaired into a second worktree: both copies share one
+  administrative entry, so repair re-points it, `worktree list` then names the
+  copy and the original is left unlisted. Three executable tests pin the
+  behaviour: recovery after the whole root moves (mutation-checked by reverting
+  the recipe to the bare form, which turns it red), the bare form's legitimate
+  case, and the copy re-pointing its listing rather than adding a second entry.
+
 ## v1.11.0 — 2026-11-09
 
 Added:
