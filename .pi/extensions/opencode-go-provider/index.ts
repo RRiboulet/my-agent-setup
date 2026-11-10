@@ -176,20 +176,40 @@ const CACHE_DIR = path.join(getAgentDir(), "cache");
 const CACHE_PATH = path.join(CACHE_DIR, `${PROVIDER_ID}-models.json`);
 const LIVE_FETCH_TIMEOUT_MS = 8000;
 
-/** Map models.dev provider.npm to pi API type and base URL. */
-const NPM_TO_API: Record<string, { api: Api; baseUrl: string }> = {
-  "@ai-sdk/anthropic": { api: "anthropic-messages", baseUrl: "https://opencode.ai/zen/go" },
-};
-const DEFAULT_API: { api: Api; baseUrl: string } = { api: "openai-completions", baseUrl: "https://opencode.ai/zen/go/v1" };
+/**
+ * Resolve the API type and base URL from the live payload's `api` block. Each
+ * model advertises exactly one endpoint today — `chat-completions` for the
+ * OpenAI-compatible models, `messages` for the Anthropic ones — and
+ * `chat-completions` wins if a model ever offers both.
+ *
+ * The advertised `messages` URL is the base its own Anthropic SDK appends
+ * `/v1/messages` to, and pi's client appends the same, so a trailing `/v1` is
+ * stripped: keeping it requests `/v1/v1/messages`, which 404s (verified
+ * against the live endpoint on 2026-11-10).
+ */
+function resolveEndpoint(apiBlock: any): { api: Api; baseUrl: string } | undefined {
+  const chat = apiBlock?.["chat-completions"];
+  if (chat?.base_url) return { api: "openai-completions", baseUrl: chat.base_url };
+  const messages = apiBlock?.messages;
+  if (messages?.base_url) {
+    return { api: "anthropic-messages", baseUrl: messages.base_url.replace(/\/v1\/?$/, "") };
+  }
+  return undefined;
+}
+const DEFAULT_API: { api: Api; baseUrl: string } = { api: "openai-completions", baseUrl: BASE_URL };
 
 /** Transform a model from the opencode-go /v1/models API. Returns minimal data. */
 export function transformApiModel(apiModel: any): JsonModel {
-  const npm = apiModel.provider?.npm;
-  const { api, baseUrl } = (npm && NPM_TO_API[npm]) || DEFAULT_API;
-  const rawInput = apiModel.modalities?.input || ["text"];
-  // Pi Model type only supports "text" and "image"
-  const input: ("text" | "image")[] = rawInput.filter((m: string) => m === "text" || m === "image") as ("text" | "image")[];
-  if (!input.includes("text")) input.unshift("text");
+  const advertised = resolveEndpoint(apiModel.api);
+  const api = advertised?.api ?? DEFAULT_API.api;
+  const baseUrl = advertised?.baseUrl ?? DEFAULT_API.baseUrl;
+
+  // Pi's Model type only knows "text" and "image", while the API lists
+  // concrete MIME types ("image/jpeg", "image/png", "application/pdf", ...).
+  // Keep any image/* modality, drop the rest, and always offer text.
+  const rawInput: string[] = apiModel.modalities?.input || ["text"];
+  const supportsImage = rawInput.some((m) => typeof m === "string" && (m === "image" || m.startsWith("image/")));
+  const input: ("text" | "image")[] = supportsImage ? ["text", "image"] : ["text"];
 
   // Derive reasoning support from the live API's capabilities block (the
   // /v1/models endpoint exposes reasoning under capabilities.reasoning, not
@@ -230,17 +250,18 @@ export function transformApiModel(apiModel: any): JsonModel {
     reasoning: Boolean(reasoningSupported),
     thinkingLevelMap,
     input,
+    // Pricing lives under cost.text.*; cache prices are optional (only some
+    // models report them). Context-tiered `overrides` and peak-hour
+    // `multipliers` are present in the payload and ignored on purpose.
     cost: {
-      input: apiModel.cost?.input || 0,
-      output: apiModel.cost?.output || 0,
-      cacheRead: apiModel.cost?.cache_read || 0,
-      cacheWrite: apiModel.cost?.cache_write || 0,
+      input: apiModel.cost?.text?.input?.price ?? 0,
+      output: apiModel.cost?.text?.output?.price ?? 0,
+      cacheRead: apiModel.cost?.text?.input?.cache?.read ?? 0,
+      cacheWrite: apiModel.cost?.text?.input?.cache?.write ?? 0,
     },
-    // The live /v1/models endpoint exposes only {id, object, created, owned_by}
-    // — no `limit`, no `context_length`. A literal `|| 131072` here used to make
-    // every "API silent" model truthy 131072, which then clobbered the curated
-    // 1M/262K values in mergeWithEmbedded via the `||` truthy check. Use `null`
-    // so the embedded curated value is preferred when the API is silent.
+    // `limit` is present in today's payload, but the null contract stays: a
+    // payload without it must not masquerade as a real 131072 and shadow the
+    // curated value in mergeWithEmbedded's nullish chain.
     contextWindow: apiModel.limit?.context || apiModel.context_length || null,
     maxTokens: apiModel.limit?.output || 0,
   };

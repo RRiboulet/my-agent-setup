@@ -196,6 +196,25 @@ Fixed:
   worktree leaves the block non-zero with the tree and its file intact, a clean
   one removes it and prints no tmux noise, and the end-state and branch-cleanup
   blocks fail with "run from a live checkout" when their cwd has been deleted.
+- **`opencode-go` live models now carry their real pricing, modalities and
+  endpoint.** `transformApiModel` read fields the `/v1/models` payload does not
+  have — a flat `cost.input`, `modalities.input === "image"`, and a
+  `provider.npm` that is never sent — so every model the API reported arrived
+  with four zero costs, text-only input and the provider's default endpoint.
+  The payload actually prices under `cost.text.*`, lists concrete MIME types
+  (`image/jpeg`, `image/png`, ...), and names its endpoint in
+  `api["chat-completions"]` or `api.messages`. The transform reads those now,
+  and strips a trailing `/v1` from the Anthropic URL because pi's client
+  appends `/v1/messages` of its own (the doubled path 404s, verified against
+  the live endpoint). The `limit` reads were already right and are unchanged.
+  The difference shows on models with no curated entry: `claude-haiku-5-5` was
+  listed free and text-only over the OpenAI-compatible default, and now reports
+  0.1 / 0.5 / 0.01 / 0.125 per 1M tokens, accepts images, and routes to
+  `anthropic-messages` on `https://opencode.ai/inference/go/anthropic`;
+  `longcat-2.5-free` gains image input and its advertised
+  `inference/go/openai/v1` base URL. Curated models are unaffected, because
+  `mergeWithEmbedded` still prefers their entry for `api`, `baseUrl`, `input`
+  and `compat`.
 
 - **The `github` skill no longer tells the release merge to pass
   `--delete-branch`, which deletes `dev`.** Local adaptation B prescribed
