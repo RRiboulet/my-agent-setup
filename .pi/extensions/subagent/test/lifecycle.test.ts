@@ -439,6 +439,39 @@ async function writeChildSession(
 	return file;
 }
 
+/**
+ * A failed run must stop the watcher, not keep polling tmux every 500ms.
+ *
+ * Counts pane probes only: a failed run still reaps its tmux session (one
+ * kill-session, which may land after this snapshot), and that is not a poll.
+ */
+async function assertWatcherStopped(h: Harness): Promise<void> {
+	const probes = () =>
+		h.execCalls.filter((call) => call.args.includes("capture-pane") || call.args.includes("display-message")).length;
+	const settled = probes();
+	await new Promise((resolve) => setTimeout(resolve, 1_200));
+	assert.equal(probes(), settled, "the watcher must stop with the run instead of polling forever");
+}
+
+/**
+ * Write a `result.json` this parent cannot use and assert it fails the run.
+ *
+ * The file protocol crosses extension versions — a child may run another
+ * branch's build, via trusted-copy resolution — so a shape the parent does not
+ * understand is expected rather than a hypothetical. It must end the run with a
+ * visible error, once: before, `finalizeRun` threw inside the watch tick, the
+ * error was logged, the tick rescheduled, and the run stayed `running` forever
+ * while its result was never consumed.
+ */
+async function assertUnusableResultFailsRun(h: Harness, raw: string, expected: RegExp): Promise<void> {
+	const run = (await h.call("subagent", { task: "unusable result" })).details as unknown as RunRecord;
+	await writeFile(run.resultPath, raw, "utf8");
+	const failed = await waitForRunStatus(h, "failed", "an unusable result.json must fail the run, not stall it");
+	assert.match(failed.error ?? "", expected);
+	assert.ok((failed.error ?? "").includes(run.resultPath), "the failure names the file a human must inspect");
+	await assertWatcherStopped(h);
+}
+
 async function withHarness<T>(
 	options: HarnessOptions | undefined,
 	fn: (harness: Harness, agentDir: string) => Promise<T>,
@@ -615,13 +648,42 @@ test("a dead pane without a result fails the run with capture guidance", async (
 	});
 });
 
-test("an unreadable result file does not finalize the run", async () => {
+test("an unparseable result file fails the run instead of stalling it", async () => {
 	await withHarness(undefined, async (h) => {
-		await h.call("subagent", { task: "corrupt result" });
-		const run = (await h.readRuns())[0];
-		await writeFile(run.resultPath, "{not json", "utf8");
-		await new Promise((resolve) => setTimeout(resolve, 1_500));
-		assert.equal((await h.readRuns())[0].status, "running", "a parse failure must not be read as completion");
+		await assertUnusableResultFailsRun(h, "{not json", /not valid JSON/);
+	});
+});
+
+test("a result from another protocol version fails the run with a skew message", async () => {
+	await withHarness(undefined, async (h) => {
+		const raw = JSON.stringify({ version: 2, status: "completed", output: "hello", finishedAt: Date.now() });
+		await assertUnusableResultFailsRun(h, raw, /wrote version 2.*only understands version 1/);
+	});
+});
+
+test("a result without its output fails the run instead of throwing in the watcher", async () => {
+	await withHarness(undefined, async (h) => {
+		const raw = JSON.stringify({ version: 1, status: "completed", finishedAt: Date.now() });
+		await assertUnusableResultFailsRun(h, raw, /`output` is missing/);
+	});
+});
+
+test("a result with an unknown status fails the run instead of mislabelling it", async () => {
+	await withHarness(undefined, async (h) => {
+		const raw = JSON.stringify({ version: 1, status: "done", output: "hello", finishedAt: Date.now() });
+		await assertUnusableResultFailsRun(h, raw, /not "completed" or "failed"/);
+	});
+});
+
+test("an unreadable result path fails the run instead of polling a directory forever", async () => {
+	await withHarness(undefined, async (h) => {
+		const run = (await h.call("subagent", { task: "unreadable result" })).details as unknown as RunRecord;
+		// A directory where the file should be: the read fails with EISDIR, which
+		// (unlike ENOENT) will not fix itself on the next tick.
+		await mkdir(run.resultPath);
+		const failed = await waitForRunStatus(h, "failed", "an unreadable result path must fail the run");
+		assert.match(failed.error ?? "", /could not be read/);
+		await assertWatcherStopped(h);
 	});
 });
 

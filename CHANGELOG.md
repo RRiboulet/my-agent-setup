@@ -23,6 +23,24 @@ Fixed:
   configured. The Go plan is still a `/model` provider; it is simply not a
   web-search provider.
 
+- **A subagent's `result.json` is now validated before the parent acts on it,
+  so a child from another build fails the run instead of stalling it forever.**
+  `ChildResult` has always carried a `version`, but the parent cast the parse
+  and never checked it — nothing verified the shape. That was survivable while
+  both sides were always the same build; it stopped being so once a child can
+  run a different branch's copy of the extension (the trusted-copy resolution),
+  which makes `result.json` a protocol spoken across versions. A child that
+  renamed or dropped `output` made finalisation throw inside the watch tick,
+  which only logged the error and rescheduled it: the run stayed `running`
+  forever, one error every poll, and the result was never consumed. An
+  unrecognised `status` mislabelled a good run as failed with no text. Now the
+  watcher rejects bad JSON, a `version` other than `1`, a `status` that is
+  neither `completed` nor `failed`, a missing or non-string `output`, a
+  non-string optional field, and a result path that exists but cannot be read
+  (`ENOENT` still means "still running"). Each failure ends the run once, with
+  the file path and capture command in the message, and stops the watcher
+  rather than polling a file that cannot change.
+
 Maintenance:
 
 - **Upgrading native web search: OpenRouter is the native default again, and

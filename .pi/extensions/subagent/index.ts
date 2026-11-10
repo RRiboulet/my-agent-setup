@@ -150,6 +150,16 @@
 //     subagent server's root table, so left in place it would swallow Escape for
 //     every client of that server for the server's lifetime, including a direct
 //     `pi --attach-subagent` session.
+// 18. Validated child results: `result.json` is a file protocol spoken across
+//     extension versions — a child may run a different build from its parent
+//     (trusted-copy resolution, another branch's checkout) — so the watcher
+//     validates it (`validateChildResult`) instead of casting the parse. A file
+//     that exists but is unusable (bad JSON, wrong `version`, missing `output`,
+//     unknown `status`, a non-string field) fails the run with a message naming
+//     the path and stops the watcher. Before, a child that renamed `output`
+//     made `finalizeRun` throw inside every tick: the error was logged, the tick
+//     rescheduled, and the run stayed `running` forever while its result was
+//     never consumed.
 //
 // The child reporter (CHILD_ENV) still reports completion the same way; patch 11
 // only adds the activity snapshot to it, and patch 13 only diverts the aborted
@@ -269,8 +279,18 @@ type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "
 const SUBAGENT_DESCRIPTION =
 	"Start a delegated task in a separate interactive Pi process inside a detached tmux session and return immediately. The main agent is not blocked and may start more subagents or keep working. Runs execute concurrently (bounded by PI_SUBAGENT_MAX_CONCURRENT, default 4); extra runs are queued. Children inherit the current provider/model/thinking, defaulting the provider to OpenRouter. Use subagent_status to inspect progress and collect results (subagent_status({ id }) returns that run's output once it finishes; subagent_status({ compact: true }) is a cheap one-line-per-run poll), subagent_interrupt to abort a run's current turn while keeping its child alive, and subagent_cancel to stop a run outright. There is no blocking wait: poll subagent_status. Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.";
 
+/**
+ * The `result.json` protocol version both sides speak.
+ *
+ * The file crosses an extension version boundary: a child launched from a
+ * trusted copy of the extension (or from another branch's checkout) may be
+ * running a different build than its parent. Reading it therefore means
+ * checking it, not casting it.
+ */
+const CHILD_RESULT_VERSION = 1;
+
 interface ChildResult {
-	version: 1;
+	version: typeof CHILD_RESULT_VERSION;
 	status: "completed" | "failed";
 	output: string;
 	error?: string;
@@ -280,6 +300,65 @@ interface ChildResult {
 	model?: string;
 	thinking?: string;
 	finishedAt: number;
+}
+
+/**
+ * What `readChildResult` found on disk.
+ *
+ * `absent` is the ordinary "the child has not finished yet" state, and the only
+ * one worth retrying. `invalid` is a file that exists and cannot be used: the
+ * child wrote something this parent does not understand, and polling again would
+ * read the exact same bytes. It is a permanent failure, not a transient one.
+ */
+type ChildResultRead =
+	| { state: "absent" }
+	| { state: "ok"; result: ChildResult }
+	| { state: "invalid"; reason: string };
+
+/** A read error that means "no file yet", as opposed to "a file I cannot read". */
+function isMissingFile(error: unknown): boolean {
+	return (error as { code?: unknown } | null)?.code === "ENOENT";
+}
+
+/**
+ * Validate a parsed `result.json`.
+ *
+ * Everything `finalizeRun` dereferences is checked here, because a blind cast is
+ * what let a child with a renamed field throw inside the watch tick: that error
+ * was logged and the tick rescheduled, so the run stayed `running` forever and
+ * the result was never consumed. A rejection must be a value the caller can
+ * report, never an exception.
+ */
+function validateChildResult(value: unknown): { ok: true; result: ChildResult } | { ok: false; reason: string } {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return { ok: false, reason: "it is not a JSON object" };
+	}
+	const candidate = value as Record<string, unknown>;
+	if (candidate.version !== CHILD_RESULT_VERSION) {
+		const found = candidate.version === undefined ? "no `version` field" : `version ${JSON.stringify(candidate.version)}`;
+		return {
+			ok: false,
+			reason: `the child wrote ${found}, and this parent only understands version ${CHILD_RESULT_VERSION}; it may be running a different build of this extension`,
+		};
+	}
+	if (candidate.status !== "completed" && candidate.status !== "failed") {
+		return { ok: false, reason: `\`status\` is ${JSON.stringify(candidate.status)}, not "completed" or "failed"` };
+	}
+	if (typeof candidate.output !== "string") {
+		return { ok: false, reason: "`output` is missing or is not a string" };
+	}
+	// The optional fields feed `??` and `?.trim()` in `finalizeRun`, where a
+	// non-string either slips through as wrong data or throws on the first call.
+	for (const field of ["error", "stopReason", "sessionFile", "provider", "model", "thinking"]) {
+		const fieldValue = candidate[field];
+		if (fieldValue !== undefined && typeof fieldValue !== "string") {
+			return { ok: false, reason: `\`${field}\` is not a string` };
+		}
+	}
+	if (typeof candidate.finishedAt !== "number" || !Number.isFinite(candidate.finishedAt)) {
+		return { ok: false, reason: "`finishedAt` is missing or is not a finite number" };
+	}
+	return { ok: true, result: candidate as unknown as ChildResult };
 }
 
 interface RunActivity {
@@ -613,7 +692,7 @@ function registerChildReporter(pi: ExtensionAPI, resultPath: string, runId: stri
 		const failed = !assistant || stopReason === "error" || stopReason === "aborted" || Boolean(fallbackError);
 		const output = assistant ? textFromAssistant(assistant) : "";
 		const result: ChildResult = {
-			version: 1,
+			version: CHILD_RESULT_VERSION,
 			status: failed ? "failed" : "completed",
 			output,
 			error: fallbackError ?? assistantError ?? (!assistant ? "Subagent exited without an assistant response." : undefined),
@@ -1410,13 +1489,42 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		await settleRun(run);
 	};
 
-	const readChildResult = async (run: RunRecord): Promise<ChildResult | undefined> => {
+	/**
+	 * Read and validate the child's `result.json`.
+	 *
+	 * The child publishes it with an atomic rename (`writeJsonAtomic`), so the file
+	 * is never half-written: once it exists, its bytes are final and a bad shape
+	 * will not improve on the next poll. Only "no file yet" is worth retrying.
+	 */
+	const readChildResult = async (run: RunRecord): Promise<ChildResultRead> => {
+		let text: string;
 		try {
-			return JSON.parse(await readFile(run.resultPath, "utf8")) as ChildResult;
-		} catch {
-			return undefined;
+			text = await readFile(run.resultPath, "utf8");
+		} catch (error) {
+			// A missing file is the normal running state; any other read failure
+			// (permissions, a directory in its place) repeats forever if polled.
+			if (isMissingFile(error)) return { state: "absent" };
+			return {
+				state: "invalid",
+				reason: `it could not be read (${error instanceof Error ? error.message : String(error)})`,
+			};
 		}
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(text);
+		} catch (error) {
+			return {
+				state: "invalid",
+				reason: `it is not valid JSON (${error instanceof Error ? error.message : String(error)})`,
+			};
+		}
+		const validated = validateChildResult(parsed);
+		return validated.ok ? { state: "ok", result: validated.result } : { state: "invalid", reason: validated.reason };
 	};
+
+	/** The failure text for a result file this parent cannot use, with its path. */
+	const unusableResultMessage = (run: RunRecord, reason: string): string =>
+		`The child's result file at ${run.resultPath} is unusable: ${reason}.\n\nThe run was failed rather than watched forever. Inspect: ${run.captureCommand}`;
 
 // --- Lazy tool exposure (local patch 15) -------------------------------------
 //
@@ -1745,8 +1853,8 @@ const noteInterrupt = async (
 		tmuxFailures.delete(run.id);
 		await abortableDelay(100, undefined);
 		const late = await readChildResult(run);
-		if (late) {
-			await finalizeRun(run, late);
+		if (late.state === "ok") {
+			await finalizeRun(run, late.result);
 			return;
 		}
 		const reason = unreachable
@@ -1754,7 +1862,10 @@ const noteInterrupt = async (
 			: run.pane
 				? `Child Pi exited before reporting a result.\n\n${run.pane}\n\nInspect: ${run.captureCommand}`
 				: `Child Pi exited before reporting a result. Inspect: ${run.captureCommand}`;
-		await markRunFailed(run, reason);
+		// A result that is present but unusable is worth saying out loud: it is the
+		// difference between "the child died" and "the child reported something this
+		// parent could not read".
+		await markRunFailed(run, late.state === "invalid" ? `${reason}\n\n${unusableResultMessage(run, late.reason)}` : reason);
 		void drainQueue();
 	};
 
@@ -1768,8 +1879,18 @@ const noteInterrupt = async (
 
 		try {
 			const result = await readChildResult(run);
-			if (result) {
-				await finalizeRun(run, result);
+			if (result.state === "ok") {
+				await finalizeRun(run, result.result);
+				return;
+			}
+			// A result file this parent cannot use is terminal. Retrying it is the
+			// leak this validation exists to close: the tick would throw (or, worse,
+			// finalize a run from a shape it misread), log, and reschedule forever.
+			// markRunFailed clears the timer and this path returns without
+			// `scheduleWatch`, so the watcher stops here.
+			if (result.state === "invalid") {
+				await markRunFailed(run, unusableResultMessage(run, result.reason));
+				void drainQueue();
 				return;
 			}
 
