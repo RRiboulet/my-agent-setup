@@ -89,13 +89,24 @@ Fixed:
   renamed or dropped `output` made finalisation throw inside the watch tick,
   which only logged the error and rescheduled it: the run stayed `running`
   forever, one error every poll, and the result was never consumed. An
-  unrecognised `status` mislabelled a good run as failed with no text. Now the
-  watcher rejects bad JSON, a `version` other than `1`, a `status` that is
-  neither `completed` nor `failed`, a missing or non-string `output`, a
-  non-string optional field, and a result path that exists but cannot be read
-  (`ENOENT` still means "still running"). Each failure ends the run once, with
-  the file path and capture command in the message, and stops the watcher
-  rather than polling a file that cannot change.
+  unrecognised `status` mislabelled a good run as failed with no text. The
+  reader now lives in `result.ts` beside `activity.ts`/`interrupt.ts`, uses the
+  same `{ ok, reason }` shape, and validates every field finalisation
+  dereferences: a `status` that is neither `completed` nor `failed`, a missing
+  or non-string `output`, a non-string optional field, and a `finishedAt` that
+  is not a finite number. The *shape* is the gate and `version` is advisory —
+  it is quoted when a failure looks like version skew, so a newer protocol
+  version with a compatible shape still reports instead of being thrown away
+  with its answer. An unusable read is not fatal on sight either: a child from
+  another build may publish the file non-atomically, and `EMFILE`/`ESTALE`/a
+  permission blip look like bad bytes, so the watcher tolerates three
+  consecutive unusable reads (the policy already used for an unreachable tmux)
+  and a good result at any point still wins. When the file really is unusable
+  the run fails once and the watcher stops; the message names the file and the
+  child's transcript rather than offering a tmux capture, because the session is
+  reaped immediately and is usually gone by the time it is read. Finalisation
+  also refuses to overwrite a run that another path already settled, so a
+  cancel landing inside a watch tick is no longer replaced by a failure.
 
 - **The `worktree` skill's ignore guard now edits the main checkout's
   `.gitignore`, not the copy belonging to whichever worktree it runs from.**

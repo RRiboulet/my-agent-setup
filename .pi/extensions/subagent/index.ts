@@ -150,16 +150,19 @@
 //     subagent server's root table, so left in place it would swallow Escape for
 //     every client of that server for the server's lifetime, including a direct
 //     `pi --attach-subagent` session.
-// 18. Validated child results: `result.json` is a file protocol spoken across
-//     extension versions — a child may run a different build from its parent
-//     (trusted-copy resolution, another branch's checkout) — so the watcher
-//     validates it (`validateChildResult`) instead of casting the parse. A file
-//     that exists but is unusable (bad JSON, wrong `version`, missing `output`,
-//     unknown `status`, a non-string field) fails the run with a message naming
-//     the path and stops the watcher. Before, a child that renamed `output`
-//     made `finalizeRun` throw inside every tick: the error was logged, the tick
-//     rescheduled, and the run stayed `running` forever while its result was
-//     never consumed.
+// 18. Validated child results (see result.ts): `result.json` is a file protocol
+//     spoken across extension versions — a child may run a different build from
+//     its parent (trusted-copy resolution, another branch's checkout) — so the
+//     watcher validates it instead of casting the parse. Before, a child that
+//     renamed `output` made `finalizeRun` throw inside every tick: the error was
+//     logged, the tick rescheduled, and the run stayed `running` forever while
+//     its result was never consumed. The shape (status, output, the optional
+//     strings, finishedAt) is the gate; `version` is advisory and is quoted when
+//     a shape failure is likely skew, so a newer protocol version with a
+//     compatible shape still reports instead of being thrown away. An unusable
+//     read is not failed on sight either: partial writes and transient errnos
+//     are retried up to MAX_TRANSIENT_RESULT_FAILURES consecutive ticks, and a
+//     good result at any point still wins.
 //
 // The child reporter (CHILD_ENV) still reports completion the same way; patch 11
 // only adds the activity snapshot to it, and patch 13 only diverts the aborted
@@ -227,6 +230,7 @@ import {
 	type SubagentActivityScope,
 } from "./activity.ts";
 import { formatUsage, readSessionUsage, type RunUsage } from "./usage.ts";
+import { CHILD_RESULT_VERSION, readChildResultFile, type ChildResult } from "./result.ts";
 import { renderRunList, runHeadline, type ListRow } from "./listview.ts";
 import { buildEscapeBindArgs, buildPanelLaunch } from "./panel.ts";
 import { currentTmuxPointer, currentTmuxSocket, defaultPanelLauncher, resolvePaneClient, type PanelLauncher } from "./popup.ts";
@@ -256,6 +260,18 @@ const WIDGET_KEY = "subagent-status";
 
 /** How many consecutive unclassifiable tmux failures mean the child is gone. */
 const MAX_TRANSIENT_TMUX_FAILURES = 3;
+/**
+ * How many consecutive unusable `result.json` reads mean the file will never
+ * parse.
+ *
+ * Not one: a child from another build may publish the file non-atomically, and a
+ * read can land mid-write; `EMFILE`, `ESTALE` and a permission blip look the same
+ * as bad bytes. Only a run of them distinguishes "caught it in flight" from
+ * "this file is unusable", and the same policy already governs tmux failures. A
+ * missing file and a usable one both clear the count, so a good result still wins
+ * at any point.
+ */
+const MAX_TRANSIENT_RESULT_FAILURES = 3;
 /** Poll cadence while waiting for a child to confirm an interrupt. */
 const INTERRUPT_POLL_MS = 100;
 /**
@@ -278,88 +294,6 @@ type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "
  */
 const SUBAGENT_DESCRIPTION =
 	"Start a delegated task in a separate interactive Pi process inside a detached tmux session and return immediately. The main agent is not blocked and may start more subagents or keep working. Runs execute concurrently (bounded by PI_SUBAGENT_MAX_CONCURRENT, default 4); extra runs are queued. Children inherit the current provider/model/thinking, defaulting the provider to OpenRouter. Use subagent_status to inspect progress and collect results (subagent_status({ id }) returns that run's output once it finishes; subagent_status({ compact: true }) is a cheap one-line-per-run poll), subagent_interrupt to abort a run's current turn while keeping its child alive, and subagent_cancel to stop a run outright. There is no blocking wait: poll subagent_status. Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.";
-
-/**
- * The `result.json` protocol version both sides speak.
- *
- * The file crosses an extension version boundary: a child launched from a
- * trusted copy of the extension (or from another branch's checkout) may be
- * running a different build than its parent. Reading it therefore means
- * checking it, not casting it.
- */
-const CHILD_RESULT_VERSION = 1;
-
-interface ChildResult {
-	version: typeof CHILD_RESULT_VERSION;
-	status: "completed" | "failed";
-	output: string;
-	error?: string;
-	stopReason?: string;
-	sessionFile?: string;
-	provider?: string;
-	model?: string;
-	thinking?: string;
-	finishedAt: number;
-}
-
-/**
- * What `readChildResult` found on disk.
- *
- * `absent` is the ordinary "the child has not finished yet" state, and the only
- * one worth retrying. `invalid` is a file that exists and cannot be used: the
- * child wrote something this parent does not understand, and polling again would
- * read the exact same bytes. It is a permanent failure, not a transient one.
- */
-type ChildResultRead =
-	| { state: "absent" }
-	| { state: "ok"; result: ChildResult }
-	| { state: "invalid"; reason: string };
-
-/** A read error that means "no file yet", as opposed to "a file I cannot read". */
-function isMissingFile(error: unknown): boolean {
-	return (error as { code?: unknown } | null)?.code === "ENOENT";
-}
-
-/**
- * Validate a parsed `result.json`.
- *
- * Everything `finalizeRun` dereferences is checked here, because a blind cast is
- * what let a child with a renamed field throw inside the watch tick: that error
- * was logged and the tick rescheduled, so the run stayed `running` forever and
- * the result was never consumed. A rejection must be a value the caller can
- * report, never an exception.
- */
-function validateChildResult(value: unknown): { ok: true; result: ChildResult } | { ok: false; reason: string } {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) {
-		return { ok: false, reason: "it is not a JSON object" };
-	}
-	const candidate = value as Record<string, unknown>;
-	if (candidate.version !== CHILD_RESULT_VERSION) {
-		const found = candidate.version === undefined ? "no `version` field" : `version ${JSON.stringify(candidate.version)}`;
-		return {
-			ok: false,
-			reason: `the child wrote ${found}, and this parent only understands version ${CHILD_RESULT_VERSION}; it may be running a different build of this extension`,
-		};
-	}
-	if (candidate.status !== "completed" && candidate.status !== "failed") {
-		return { ok: false, reason: `\`status\` is ${JSON.stringify(candidate.status)}, not "completed" or "failed"` };
-	}
-	if (typeof candidate.output !== "string") {
-		return { ok: false, reason: "`output` is missing or is not a string" };
-	}
-	// The optional fields feed `??` and `?.trim()` in `finalizeRun`, where a
-	// non-string either slips through as wrong data or throws on the first call.
-	for (const field of ["error", "stopReason", "sessionFile", "provider", "model", "thinking"]) {
-		const fieldValue = candidate[field];
-		if (fieldValue !== undefined && typeof fieldValue !== "string") {
-			return { ok: false, reason: `\`${field}\` is not a string` };
-		}
-	}
-	if (typeof candidate.finishedAt !== "number" || !Number.isFinite(candidate.finishedAt)) {
-		return { ok: false, reason: "`finishedAt` is missing or is not a finite number" };
-	}
-	return { ok: true, result: candidate as unknown as ChildResult };
-}
 
 interface RunActivity {
 	phase: SubagentActivityPhase;
@@ -1291,6 +1225,12 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	 * clears it, so only a sustained outage ever counts.
 	 */
 	const tmuxFailures = new Map<string, number>();
+	/**
+	 * Consecutive ticks whose `result.json` read was unusable. Cleared by a
+	 * missing file and by a usable one, so only a sustained run of failures can
+	 * fail the run; see MAX_TRANSIENT_RESULT_FAILURES.
+	 */
+	const resultFailures = new Map<string, number>();
 	// Per-run classifier state (local patch 14). Pure state, kept here because it
 	// is derived from run.activity and thrown away with the run.
 	const statusStates = new Map<string, SubagentStatusState>();
@@ -1312,6 +1252,22 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	const clearTmuxFailures = (run: RunRecord): void => {
 		tmuxFailures.delete(run.id);
 	};
+
+	const countResultFailure = (run: RunRecord): number => {
+		const next = (resultFailures.get(run.id) ?? 0) + 1;
+		resultFailures.set(run.id, next);
+		return next;
+	};
+
+	/**
+	 * A run that is terminal AND owns no live child has nothing left to settle.
+	 *
+	 * The watcher checks this at tick entry, but a tick that is already in flight
+	 * can be outrun by `subagent_cancel` (whose kill-session exec is awaited) or by
+	 * shutdown. Without the same check inside the finalisers, a cancelled run is
+	 * flipped back to completed/failed, persisted and announced a second time.
+	 */
+	const isSettledRun = (run: RunRecord): boolean => isTerminal(run.status) && !holdsChild(run.status);
 	// Set by session_shutdown. The watcher deletes its own timer from the map at
 	// the start of a tick and re-arms one at the end, so a tick already in flight
 	// when shutdown clears the map would otherwise re-arm a timer nothing will
@@ -1443,6 +1399,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	 * the main agent learns the run ended.
 	 */
 	const settleRun = async (run: RunRecord): Promise<void> => {
+		resultFailures.delete(run.id);
 		// The child may have spent real tokens even when it failed at the tmux
 		// level; a failure must not report none. See captureRunUsage.
 		await captureRunUsage(run);
@@ -1453,6 +1410,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	};
 
 	const finalizeRun = async (run: RunRecord, result: ChildResult): Promise<void> => {
+		if (isSettledRun(run)) return;
 		run.status = result.status === "completed" ? "completed" : "failed";
 		run.finishedAt = result.finishedAt || Date.now();
 		// The run is over one way or another, so an outstanding Escape is no longer
@@ -1477,6 +1435,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	};
 
 	const markRunFailed = async (run: RunRecord, message: string): Promise<void> => {
+		if (isSettledRun(run)) return;
 		clearTimer(run.id);
 		// Capture usage (and discover sessionFile) before flipping to "failed", so a
 		// persisted/observable "failed" run never lacks usage or its transcript
@@ -1490,41 +1449,22 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	};
 
 	/**
-	 * Read and validate the child's `result.json`.
+	 * The failure text for a result file this parent cannot use.
 	 *
-	 * The child publishes it with an atomic rename (`writeJsonAtomic`), so the file
-	 * is never half-written: once it exists, its bytes are final and a bad shape
-	 * will not improve on the next poll. Only "no file yet" is worth retrying.
+	 * It deliberately does not offer a tmux capture: `settleRun` reaps the session
+	 * immediately (`PI_SUBAGENT_REAP_DELAY_MS` defaults to 0), so by the time a
+	 * human reads this the session is usually gone. What survives is the file and,
+	 * once known, the child's transcript — so the message names those instead.
 	 */
-	const readChildResult = async (run: RunRecord): Promise<ChildResultRead> => {
-		let text: string;
-		try {
-			text = await readFile(run.resultPath, "utf8");
-		} catch (error) {
-			// A missing file is the normal running state; any other read failure
-			// (permissions, a directory in its place) repeats forever if polled.
-			if (isMissingFile(error)) return { state: "absent" };
-			return {
-				state: "invalid",
-				reason: `it could not be read (${error instanceof Error ? error.message : String(error)})`,
-			};
-		}
-		let parsed: unknown;
-		try {
-			parsed = JSON.parse(text);
-		} catch (error) {
-			return {
-				state: "invalid",
-				reason: `it is not valid JSON (${error instanceof Error ? error.message : String(error)})`,
-			};
-		}
-		const validated = validateChildResult(parsed);
-		return validated.ok ? { state: "ok", result: validated.result } : { state: "invalid", reason: validated.reason };
+	const unusableResultMessage = (run: RunRecord, detail: string | undefined, options: { pane?: boolean } = {}): string => {
+		const lines = [`The child's result file at ${run.resultPath} is unusable: ${detail ?? "unknown reason"}.`];
+		if (options.pane && run.pane) lines.push(`Last pane output:\n${run.pane}`);
+		lines.push(
+			`The run was failed rather than watched forever. Read that file to recover whatever the child wrote` +
+				(run.sessionFile ? `, or resume its transcript (${run.sessionFile}) with subagent_resume.` : "."),
+		);
+		return lines.join("\n\n");
 	};
-
-	/** The failure text for a result file this parent cannot use, with its path. */
-	const unusableResultMessage = (run: RunRecord, reason: string): string =>
-		`The child's result file at ${run.resultPath} is unusable: ${reason}.\n\nThe run was failed rather than watched forever. Inspect: ${run.captureCommand}`;
 
 // --- Lazy tool exposure (local patch 15) -------------------------------------
 //
@@ -1852,8 +1792,8 @@ const noteInterrupt = async (
 	const finalizeMissingChild = async (run: RunRecord, unreachable = false): Promise<void> => {
 		tmuxFailures.delete(run.id);
 		await abortableDelay(100, undefined);
-		const late = await readChildResult(run);
-		if (late.state === "ok") {
+		const late = await readChildResultFile(run.resultPath);
+		if (late.ok) {
 			await finalizeRun(run, late.result);
 			return;
 		}
@@ -1865,7 +1805,8 @@ const noteInterrupt = async (
 		// A result that is present but unusable is worth saying out loud: it is the
 		// difference between "the child died" and "the child reported something this
 		// parent could not read".
-		await markRunFailed(run, late.state === "invalid" ? `${reason}\n\n${unusableResultMessage(run, late.reason)}` : reason);
+		// `pane: false`: this branch's reason already carries the pane snapshot.
+		await markRunFailed(run, late.reason === "invalid" ? `${reason}\n\n${unusableResultMessage(run, late.error, { pane: false })}` : reason);
 		void drainQueue();
 	};
 
@@ -1878,20 +1819,28 @@ const noteInterrupt = async (
 		if (isTerminal(run.status) && !holdsChild(run.status)) return;
 
 		try {
-			const result = await readChildResult(run);
-			if (result.state === "ok") {
+			const result = await readChildResultFile(run.resultPath);
+			if (result.ok) {
+				resultFailures.delete(run.id);
 				await finalizeRun(run, result.result);
 				return;
 			}
-			// A result file this parent cannot use is terminal. Retrying it is the
-			// leak this validation exists to close: the tick would throw (or, worse,
-			// finalize a run from a shape it misread), log, and reschedule forever.
-			// markRunFailed clears the timer and this path returns without
-			// `scheduleWatch`, so the watcher stops here.
-			if (result.state === "invalid") {
-				await markRunFailed(run, unusableResultMessage(run, result.reason));
-				void drainQueue();
-				return;
+			if (result.reason === "invalid") {
+				// Retrying ONE bad read forever is the leak this validation exists to
+				// close: the tick would throw (or, worse, finalize a run from a shape
+				// it misread), log, and reschedule forever. But failing on the first one
+				// would kill a healthy child whose file was caught mid-write by a
+				// non-atomic writer, or whose read hit a transient errno. So a sustained
+				// run of them is required — the same policy as an unreachable tmux.
+				// markRunFailed clears the timer and this path returns without
+				// `scheduleWatch`, so the watcher stops here.
+				if (countResultFailure(run) >= MAX_TRANSIENT_RESULT_FAILURES) {
+					await markRunFailed(run, unusableResultMessage(run, result.error));
+					void drainQueue();
+					return;
+				}
+			} else {
+				resultFailures.delete(run.id);
 			}
 
 			// Liveness (local patch 11): the child's activity snapshot is advisory.
@@ -2433,6 +2382,7 @@ const noteInterrupt = async (
 					return { content: [{ type: "text", text: `Subagent ${id} is already ${run.status}.` }], details: run };
 				}
 				clearTimer(run.id);
+				resultFailures.delete(run.id);
 				run.interruptRequestedAt = undefined;
 				await pi.exec("tmux", tmuxArgs("kill-session", "-t", run.tmuxSession)).catch(() => undefined);
 				run.status = "cancelled";
