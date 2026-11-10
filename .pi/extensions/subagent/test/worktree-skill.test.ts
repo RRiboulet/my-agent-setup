@@ -15,7 +15,7 @@
 // as happily on a broken recipe.
 
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
@@ -73,6 +73,17 @@ test("worktree skill: base check measures BASE against origin/dev", () => {
 	assert.ok(SKILL.includes('--is-ancestor origin/dev "$BASE"'), "must compare BASE to origin/dev");
 	assert.ok(SKILL.includes('"origin/$BASE^{commit}"'), "must accept a remote-only base name");
 	assert.ok(SKILL.includes("--track"), "remote-tracking checkout must use -b ... --track");
+
+	// Ancestry alone cannot see a base that is *ahead* of origin/dev: a branch
+	// containing origin/dev passes --is-ancestor while carrying its own unmerged
+	// commits, which the Create block used to accept as a base. AGENTS.md's
+	// second half is the log check, and BASE_STACKED is the deliberate opt-in.
+	const create = recipe("Create", 0);
+	assert.ok(
+		create.includes('git log --oneline "origin/dev..$BASE"'),
+		"create must list the commits BASE carries beyond origin/dev",
+	);
+	assert.ok(create.includes("BASE_STACKED"), "create must offer the BASE_STACKED opt-in");
 });
 
 test("worktree skill: removal never runs the force delete unconditionally", () => {
@@ -170,6 +181,93 @@ test("create recipe: makes a linked worktree on the new branch, based on origin/
 		assert.ok(listing.includes(`worktree ${wt}`), "the worktree must be registered");
 		assert.ok(listing.includes(`branch refs/heads/${slug}`), "on the new branch");
 		assert.equal(linkedCount(listing), 1);
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+/** Create an unmerged `feature/x` one commit ahead of origin/dev in `repo`. */
+function unmergedFeature(repo: Awaited<ReturnType<typeof scratchRepo>>): { tip: string } {
+	repo.git("checkout", "-q", "-b", "feature/x", "origin/dev");
+	writeFileSync(path.join(repo.main, "feature.txt"), "unpushed\n");
+	repo.git("add", "feature.txt");
+	repo.git("commit", "-q", "-m", "feat: unpushed work on feature/x");
+	const tip = repo.git("rev-parse", "HEAD").trim();
+	repo.git("checkout", "-q", "dev");
+	return { tip };
+}
+
+test("create recipe: the default base, origin/dev, is still accepted", async () => {
+	// Regression guard for the base-hygiene check: origin/dev carries no commits
+	// the log check could find, so the default must be unaffected by it.
+	const repo = await scratchRepo();
+	try {
+		const slug = "task-default-base";
+		const result = runScript(retarget(recipe("Create", 0), { SLUG: slug }), { cwd: repo.main });
+		assert.equal(result.status, 0, `create failed:\n${result.stderr}`);
+		assert.ok(existsSync(repo.pathOf(slug)), "the worktree must exist");
+		assert.equal(
+			repo.gitIn(repo.pathOf(slug), "rev-parse", "HEAD").trim(),
+			repo.originDev(),
+			"must start at origin/dev",
+		);
+		// `git worktree add` writes "Preparing worktree ..." to stderr, so only the
+		// warning itself can be asserted absent.
+		assert.ok(!result.stderr.includes("warning:"), "a clean base must not warn");
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("create recipe: refuses an unmerged feature branch as BASE", async () => {
+	// feature/x contains origin/dev, so the ancestor check passes even though its
+	// own commit has never been pushed. Cutting from it silently stacks the new
+	// branch on unmerged work - the mistake AGENTS.md's log check catches.
+	const repo = await scratchRepo();
+	try {
+		unmergedFeature(repo);
+		const before = repo.worktrees();
+
+		const result = runScript(retarget(recipe("Create", 0), { SLUG: "stacked-by-accident" }), {
+			cwd: repo.main,
+			env: { BASE: "feature/x" },
+		});
+
+		assert.notEqual(result.status, 0, "an unmerged BASE must fail the create");
+		assert.match(result.stderr, /unpushed work on feature\/x/, "must print the foreign commit");
+		assert.match(result.stderr, /BASE_STACKED=1/, "must name the deliberate opt-in");
+		assert.ok(!existsSync(repo.pathOf("stacked-by-accident")), "must not create a worktree");
+		assert.equal(repo.worktrees(), before, "the listing must not change");
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("create recipe: BASE_STACKED=1 stacks on the unmerged base and warns on stderr", async () => {
+	const repo = await scratchRepo();
+	try {
+		const { tip } = unmergedFeature(repo);
+		const slug = "stacked-on-purpose";
+
+		const result = runScript(retarget(recipe("Create", 0), { SLUG: slug }), {
+			cwd: repo.main,
+			env: { BASE: "feature/x", BASE_STACKED: "1" },
+		});
+
+		assert.equal(result.status, 0, `stacked create failed:\n${result.stderr}`);
+		assert.ok(existsSync(repo.pathOf(slug)), "the worktree must exist");
+		assert.equal(
+			repo.gitIn(repo.pathOf(slug), "rev-parse", "HEAD").trim(),
+			tip,
+			"must be cut from feature/x, not origin/dev",
+		);
+		assert.notEqual(tip, repo.originDev(), "fixture: feature/x must be ahead of origin/dev");
+		assert.match(result.stderr, /warning:.*feature\/x/, "the warning must name the base");
+		assert.match(result.stderr, /1 commit/, "the warning must count the foreign commits");
+		assert.ok(
+			!result.stdout.includes("warning:"),
+			"the warning must go to stderr, where the recipe's later output cannot swallow it",
+		);
 	} finally {
 		await repo.cleanup();
 	}

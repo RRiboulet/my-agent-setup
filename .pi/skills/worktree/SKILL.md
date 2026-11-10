@@ -117,8 +117,12 @@ MAIN="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
 
 # Base hygiene (AGENTS.md: check your base before you commit). The new branch is
 # cut from BASE, not from this checkout's HEAD - which may legitimately be `main`,
-# behind `dev` - so measure BASE. A stale local `dev` is the mistake this catches;
-# an unmerged feature branch as BASE fails on purpose (see AGENTS.md).
+# behind `dev` - so measure BASE. Two checks, because a wrong base looks like two
+# different things: BASE behind origin/dev (a stale local `dev`) fails the
+# ancestor check; BASE *ahead* of origin/dev with its own unmerged commits passes
+# it, and only the log check below sees it. AGENTS.md asks for both for that
+# reason. An unmerged base is refused on purpose; `BASE_STACKED=1` is the
+# deliberate way to stack on one.
 git fetch origin
 # Accept a local ref or the remote shorthand (`BASE=dev` when only origin/dev
 # exists), and fail loudly when there is nothing to compare against.
@@ -133,6 +137,23 @@ git rev-parse --verify --quiet "origin/dev^{commit}" >/dev/null || {
   echo "no origin/dev to compare against (run 'git fetch origin')" >&2; exit 1; }
 git merge-base --is-ancestor origin/dev "$BASE" || {
   echo "$BASE does not descend from origin/dev; rebase it or base on origin/dev" >&2; exit 1; }
+# Second half of the check: ancestry cannot see commits BASE carries beyond
+# origin/dev, so a feature branch that already contains origin/dev passes above
+# while stacking the new branch on work nobody has merged.
+FOREIGN="$(git log --oneline "origin/dev..$BASE")"
+if [ -n "$FOREIGN" ]; then
+  COUNT="$(printf '%s\n' "$FOREIGN" | wc -l)"
+  if [ -n "${BASE_STACKED:-}" ]; then
+    # stderr, not stdout: the recipe's own later output would swallow a warning
+    # printed into the stream the caller is reading for the worktree path.
+    echo "warning: stacking on $BASE, which carries $COUNT commit(s) not in origin/dev (BASE_STACKED is set)" >&2
+  else
+    echo "$BASE carries $COUNT commit(s) that origin/dev does not have:" >&2
+    printf '%s\n' "$FOREIGN" >&2
+    echo "refusing to cut a new branch from an unmerged base: rebase $BASE onto origin/dev (or cut from origin/dev), or set BASE_STACKED=1 to stack on $BASE deliberately" >&2
+    exit 1
+  fi
+fi
 
 WT="$R/.worktrees/$SLUG"
 mkdir -p "$(dirname "$WT")"

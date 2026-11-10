@@ -63,6 +63,25 @@ Fixed:
   outside a repository fails loudly rather than writing into the cwd.
   Restoring the relative paths turns both red, and so does deleting the
   newline prelude.
+- **The `worktree` skill's Create recipe now refuses an unmerged feature branch
+  as its base instead of silently stacking on it.** Its comment claimed an
+  unmerged `BASE` "fails on purpose", but the only check was
+  `git merge-base --is-ancestor origin/dev "$BASE"`, and a branch that already
+  contains `origin/dev` passes that while carrying its own unpushed commits —
+  reproduced: `BASE=feature/x` was accepted, and the new worktree was cut from
+  the unmerged tip. That is the second half of AGENTS.md's base check arriving
+  after the first: ancestry cannot see commits *ahead* of `origin/dev`, only a
+  `git log origin/dev..BASE` can. The recipe now lists those commits and exits
+  1, naming both remedies (rebase onto `origin/dev` or cut from it), and
+  `BASE_STACKED=1` is the deliberate opt-in for the legitimate stacked case —
+  which proceeds and prints a one-line warning on **stderr**, where the
+  recipe's later output cannot swallow it. The comment now describes exactly
+  what runs. Covered by executable tests in `worktree-skill.test.ts` against a
+  scratch repository: the default `origin/dev` base still creates the worktree,
+  an unmerged base fails without creating one, and `BASE_STACKED=1` cuts from
+  that base's tip with the warning on stderr; mutation-checked by disabling the
+  log check (the three new assertions go red) and by moving the warning to
+  stdout (the stacking test goes red).
 
 Maintenance:
 
