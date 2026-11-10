@@ -186,6 +186,28 @@ Fixed:
   one removes it and prints no tmux noise, and the end-state and branch-cleanup
   blocks fail with "run from a live checkout" when their cwd has been deleted.
 
+- **The `github` skill no longer tells the release merge to pass
+  `--delete-branch`, which deletes `dev`.** Local adaptation B prescribed
+  `gh pr merge <n> --merge --delete-branch` for the one merge that is not a
+  squash, then told the reader to re-create `dev` locally if it vanished —
+  papering over the flag instead of dropping it. The head of a `dev`→`main` pull
+  request is `dev` itself, the integration branch every feature branch is cut
+  from, so the flag deletes it on the remote and `gh` attempts the local delete
+  too. That is the failure AGENTS.md's Releases step 3 refuses in so many words
+  ("do not pass `--delete-branch`"), and the skill's own header claimed the
+  release merge "must not delete dev" while its body gave the command that
+  does. It now says `gh pr merge <n> --merge` with no `--delete-branch`, names
+  `dev` as the head branch and the reason, and points at AGENTS.md's
+  tag-and-fast-forward steps instead of the re-create workaround;
+  `--squash --delete-branch` stays for feature branches into `dev`, where
+  deleting the merged branch is the point. A new `github-skill.test.ts` pins the
+  asymmetry — no adjacent `--merge --delete-branch` in either document, the
+  release sentence naming `dev`, the feature form intact, and AGENTS.md in
+  agreement — because the failure is not observable without a live remote and
+  its consequence is a deleted integration branch. Both directions were
+  mutation-checked: restoring the old release sentence turns the two skill
+  assertions red, and adding the flag to AGENTS.md turns the agreement test red.
+
 Maintenance:
 
 - **The `opencode-go` model pipeline is now covered by tests.**
