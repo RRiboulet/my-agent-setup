@@ -132,6 +132,21 @@ Fixed:
 
 Maintenance:
 
+- **The `opencode-go` model pipeline is now covered by tests.**
+  `transformApiModel`, `mergeWithEmbedded`, `loadStaleModels` and
+  `buildModels` had none — the suite exercised formatting, glyphs,
+  multiprovider and usage only — so the live-API derivation the `add-model`
+  skill documents, and the four-way precedence underneath it, had nothing to
+  fail against. `tests/models.test.ts` feeds a captured `/zen/go/v1/models`
+  payload through the transform (effort-list mapping including `none` → `off`,
+  toggle-only models that must omit the map, `limit` reads, the text-input
+  default) and pins the merge, stale-cache and patch rules, including that
+  curation still wins when the live API reports no reasoning. Fields the live
+  payload shape currently gets wrong are pinned as characterization tests named
+  after their fix, so correcting them is an explicit change and not a quietly
+  rewritten expectation. `buildModels` is exported for the tests; nothing else
+  in the provider changed.
+
 - **Upgrading native web search: OpenRouter is the native default again, and
   the removed `opencode-go` values are now rejected.** Add an `openrouter`
   entry to `~/.pi/agent/auth.json` (or pass `--provider openai-codex|anthropic`)

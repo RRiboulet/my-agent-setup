@@ -132,8 +132,8 @@ function applyPatch(model: JsonModel, patch: PatchEntry): JsonModel {
   return result;
 }
 
-/** Full pipeline: base models → patch → custom → result */
-function buildModels(base: JsonModel[], custom: JsonModel[], patch: PatchData): JsonModel[] {
+/** Full pipeline: base models → patch → custom → result. Exported for tests. */
+export function buildModels(base: JsonModel[], custom: JsonModel[], patch: PatchData): JsonModel[] {
   const modelMap = new Map<string, JsonModel>();
 
   // Seed with the base list plus grace-period deprecated models so patch.json
