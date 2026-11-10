@@ -143,6 +143,8 @@ export interface ReviewPlan {
 	complexity: TrackPlan;
 	judge: string;
 	latencyMs: number;
+	/** Why the judge did not answer, published so a fallback can be diagnosed. */
+	judgeFailure?: { kind: string; message: string };
 	/** SHA-256 of the dossier Jev judged, so a verdict can be replayed against its evidence. */
 	fingerprint?: string;
 	/** The policy in force, published so a decision can be replayed. */
@@ -560,8 +562,22 @@ export function disabledPlan(evidence: ReviewPlan["evidence"], policy: PolicyCon
  * spends review tokens it was not asked for, and it is deliberate: an
  * unreachable judge should not buy a skipped review.
  */
-export function failOpenPlan(args: Omit<ComposeArgs, "judgment" | "failure"> & { reason: string }): ReviewPlan {
+export function failOpenPlan(
+	args: Omit<ComposeArgs, "judgment" | "failure"> & {
+		reason: string;
+		/** JudgeError.failure, e.g. "unavailable" or "error". */
+		kind?: string;
+		/** The judge's own error message. */
+		message?: string;
+		/** Measured wall time of the failed judge call, not a placeholder. */
+		latencyMs?: number;
+	},
+): ReviewPlan {
 	const plan = composePlan({ ...args, failure: args.reason });
 	plan.verdict = `${plan.verdict} (judge unavailable)`;
+	plan.latencyMs = args.latencyMs ?? 0;
+	// Without this the output says only "unavailable in 0 ms", which reads the
+	// same for a missing model, a missing credential and a provider error.
+	if (args.kind) plan.judgeFailure = { kind: args.kind, message: args.message ?? args.reason };
 	return plan;
 }

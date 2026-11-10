@@ -2244,6 +2244,36 @@ test("compose: fail-open routes through policy and is marked as a fallback", () 
 	assert.ok(plan.verdict.includes("judge unavailable"));
 });
 
+test("compose: a judge failure publishes its kind, message and measured latency", () => {
+	const plan = failOpenPlan({
+		config: config(),
+		candidates: CANDIDATES,
+		available: AVAILABLE,
+		catalog: catalog(),
+		gates: gates(),
+		evidence: EVIDENCE,
+		summary: "x",
+		context: PLAN_CONTEXT,
+		reason: "Provider is not configured: openrouter",
+		kind: "error",
+		message: "Provider is not configured: openrouter",
+		latencyMs: 3,
+	});
+	assert.deepEqual(plan.judgeFailure, {
+		kind: "error",
+		message: "Provider is not configured: openrouter",
+	});
+	assert.equal(plan.latencyMs, 3, "the measured latency, not the 0 placeholder");
+	const text = formatPlan(plan);
+	assert.match(text, /Judge failed \(error\) in 3 ms: Provider is not configured: openrouter/);
+});
+
+test("compose: a successful judgment carries no failure and keeps its latency", () => {
+	const plan = compose();
+	assert.equal(plan.judgeFailure, undefined);
+	assert.equal(formatPlan(plan).includes("Judge failed"), false);
+});
+
 test("compose: a disabled extension says so instead of judging", () => {
 	const plan = disabledPlan(EVIDENCE, config().policy);
 	assert.equal(plan.verdict, "disabled (review-triage is off)");

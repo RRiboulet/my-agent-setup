@@ -299,6 +299,16 @@ Fixed:
   a partial or regressed response cannot silently disable thinking on a curated
   model. The marker is stripped before the model is cached or registered, and
   both directions are mutation-checked in `tests/models.test.ts`.
+- **A `review-triage` fallback now says *why* the judge failed.** Every failure
+  printed `Judge unavailable in 0 ms`: the latency was a literal `0` whenever
+  there was no judgment, and the `JudgeFailure` kind and message were never
+  published — only the `judge-failure` reason code — so a typo'd model id, a
+  provider with no credential and a provider error were indistinguishable. The
+  fail-open verdict then read like a calibration result instead of an outage,
+  which is exactly how this session lost an afternoon of review decisions. The
+  plan now carries `judgeFailure: { kind, message }` and the measured wall time,
+  and the rendered plan prints `Judge failed (<kind>) in <n> ms: <message>`. A
+  successful judgment still carries no failure field.
 
 Maintenance:
 
