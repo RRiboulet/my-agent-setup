@@ -155,6 +155,17 @@ Some special rules for processes:
 - Kill all sessions on a socket: `tmux -S "$SOCKET" list-sessions -F '#{session_name}' | xargs -r -n1 tmux -S "$SOCKET" kill-session -t`.
 - Remove everything on the private socket: `tmux -S "$SOCKET" kill-server`.
 - Never point the two "kill everything" commands above at the subagent socket (`<agent dir>/tmux-subagents.sock`): `kill-server` there takes down every running child Pi.
+- **A config edit reaches nothing until the server restarts.** A tmux server
+  keeps the environment it started with: `setenv -g` applies only to panes
+  created afterwards — measured, a later `setenv -g` is absent from an existing
+  pane's `/proc/<pid>/environ` (`show-environment -g` does list it) and present
+  in a new window. So if colours or `COLORTERM` look unchanged in panels that
+  were already open after editing `~/.tmux.conf`, the config was not the
+  problem: the running server never read it. The remedy is a *server* restart,
+  which is exactly the `kill-server` above — on the subagent socket that kills
+  every running child Pi, and on the default socket it kills the `devc` sessions
+  (`dev-<name>`) the human is attached to. Do it while that server is idle, or
+  accept that only windows created after the edit pick the change up.
 
 ## Helper: wait-for-text.sh
 
