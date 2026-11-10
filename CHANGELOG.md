@@ -214,7 +214,8 @@ Fixed:
   `longcat-2.5-free` gains image input and its advertised
   `inference/go/openai/v1` base URL. Curated models are unaffected, because
   `mergeWithEmbedded` still prefers their entry for `api`, `baseUrl`, `input`
-  and `compat`.
+  and `compat`. Pinned by `tests/models.test.ts`, whose three characterization
+  cases for this bug are now ordinary expectations.
 
 - **The `github` skill no longer tells the release merge to pass
   `--delete-branch`, which deletes `dev`.** Local adaptation B prescribed
@@ -284,10 +285,12 @@ Maintenance:
   toggle-only models that must omit the map, `limit` reads, the text-input
   default) and pins the merge, stale-cache and patch rules, including that
   curation still wins when the live API reports no reasoning. Fields the live
-  payload shape currently gets wrong are pinned as characterization tests named
-  after their fix, so correcting them is an explicit change and not a quietly
-  rewritten expectation. `buildModels` is exported for the tests; nothing else
-  in the provider changed.
+  payload shape got wrong were pinned as characterization tests named after
+  their fix, so correcting them was an explicit change and not a quietly
+  rewritten expectation — which is what the live-payload fix above did for the
+  three transform cases; the stale-cache one still characterizes its open
+  todo. `buildModels` is exported for the tests; nothing else in the provider
+  changed.
 
 - **Upgrading native web search: OpenRouter is the native default again, and
   the removed `opencode-go` values are now rejected.** Add an `openrouter`
