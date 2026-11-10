@@ -24,7 +24,8 @@ import livePayload from "./fixtures/live-models-2026-11-10.json" with { type: "j
 // real ~/.pi/agent cache.
 const agentDir = mkdtempSync(path.join(tmpdir(), "opencode-go-models-test-"));
 process.env.PI_CODING_AGENT_DIR = agentDir;
-const { buildModels, loadStaleModels, mergeWithEmbedded, transformApiModel } = await import("../index.ts");
+const { buildModels, loadStaleModels, mergeWithEmbedded, transformApiModel, transformApiModels } =
+  await import("../index.ts");
 
 const CACHE_DIR = path.join(agentDir, "cache");
 const CACHE_PATH = path.join(CACHE_DIR, "opencode-go-models.json");
@@ -219,6 +220,43 @@ test("strips a trailing /v1/ from the Anthropic endpoint too", () => {
 
   assert.equal(synthetic.api, "anthropic-messages");
   assert.equal(synthetic.baseUrl, "https://example.test/anthropic");
+});
+
+test("falls back to the default endpoint when a base_url is not a usable string", () => {
+  for (const baseUrl of [123, null, "", "   ", true]) {
+    const chat = transformApiModel({ id: "x", api: { "chat-completions": { base_url: baseUrl } } });
+    const messages = transformApiModel({ id: "x", api: { messages: { base_url: baseUrl } } });
+
+    assert.equal(chat.baseUrl, "https://opencode.ai/zen/go/v1", `chat base_url ${JSON.stringify(baseUrl)}`);
+    assert.equal(messages.baseUrl, "https://opencode.ai/zen/go/v1", `messages base_url ${JSON.stringify(baseUrl)}`);
+  }
+});
+
+test("trims a base_url and strips an uppercase /V1", () => {
+  const synthetic = transformApiModel({
+    id: "x",
+    api: { messages: { base_url: "  https://example.test/anthropic/V1  " } },
+  });
+
+  assert.equal(synthetic.baseUrl, "https://example.test/anthropic");
+});
+
+test("treats a non-array modalities block as text-only", () => {
+  const synthetic = transformApiModel({ id: "x", modalities: { input: "text" } });
+
+  assert.deepEqual(synthetic.input, ["text"]);
+});
+
+test("keeps the other models when one entry is malformed", () => {
+  const malformed = {
+    get id(): string {
+      throw new Error("boom");
+    },
+  };
+
+  const models = transformApiModels([{ id: "ok" }, malformed, { id: "also-ok" }]);
+
+  assert.deepEqual(models.map((m) => m.id), ["ok", "also-ok"]);
 });
 
 test("falls back to the provider default endpoint when the payload advertises none", () => {

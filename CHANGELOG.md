@@ -215,7 +215,11 @@ Fixed:
   `inference/go/openai/v1` base URL. Curated models are unaffected, because
   `mergeWithEmbedded` still prefers their entry for `api`, `baseUrl`, `input`
   and `compat`. Pinned by `tests/models.test.ts`, whose three characterization
-  cases for this bug are now ordinary expectations.
+  cases for this bug are now ordinary expectations. The payload is read as
+  untrusted input: a `base_url` that is not a usable string falls back to the
+  provider default instead of registering — and caching — a URL the SDK throws
+  on for every request, a non-array `modalities` block means text-only, and one
+  malformed model is skipped rather than discarding the whole live refresh.
 
 - **The `github` skill no longer tells the release merge to pass
   `--delete-branch`, which deletes `dev`.** Local adaptation B prescribed

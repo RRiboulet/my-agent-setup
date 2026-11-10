@@ -188,11 +188,16 @@ const LIVE_FETCH_TIMEOUT_MS = 8000;
  * against the live endpoint on 2026-11-10).
  */
 function resolveEndpoint(apiBlock: any): { api: Api; baseUrl: string } | undefined {
-  const chat = apiBlock?.["chat-completions"];
-  if (chat?.base_url) return { api: "openai-completions", baseUrl: chat.base_url };
-  const messages = apiBlock?.messages;
-  if (messages?.base_url) {
-    return { api: "anthropic-messages", baseUrl: messages.base_url.replace(/\/v1\/?$/, "") };
+  // The payload is untrusted input: a non-string or blank base_url must fall
+  // back to the default rather than register — and cache — a bogus URL that
+  // the SDK then throws on for every request.
+  const chatUrl = apiBlock?.["chat-completions"]?.base_url;
+  if (typeof chatUrl === "string" && chatUrl.trim()) {
+    return { api: "openai-completions", baseUrl: chatUrl.trim() };
+  }
+  const messagesUrl = apiBlock?.messages?.base_url;
+  if (typeof messagesUrl === "string" && messagesUrl.trim()) {
+    return { api: "anthropic-messages", baseUrl: messagesUrl.trim().replace(/\/v1\/?$/i, "") };
   }
   return undefined;
 }
@@ -207,8 +212,11 @@ export function transformApiModel(apiModel: any): JsonModel {
   // Pi's Model type only knows "text" and "image", while the API lists
   // concrete MIME types ("image/jpeg", "image/png", "application/pdf", ...).
   // Keep any image/* modality, drop the rest, and always offer text.
-  const rawInput: string[] = apiModel.modalities?.input || ["text"];
-  const supportsImage = rawInput.some((m) => typeof m === "string" && (m === "image" || m.startsWith("image/")));
+  const rawInput: unknown = apiModel.modalities?.input;
+  const modalities: unknown[] = Array.isArray(rawInput) ? rawInput : [];
+  const supportsImage = modalities.some(
+    (m) => typeof m === "string" && (m === "image" || m.startsWith("image/")),
+  );
   const input: ("text" | "image")[] = supportsImage ? ["text", "image"] : ["text"];
 
   // Derive reasoning support from the live API's capabilities block (the
@@ -267,6 +275,19 @@ export function transformApiModel(apiModel: any): JsonModel {
   };
 }
 
+export function transformApiModels(apiModels: any[]): JsonModel[] {
+  const models: JsonModel[] = [];
+  for (const apiModel of apiModels) {
+    try {
+      models.push(transformApiModel(apiModel));
+    } catch {
+      // A single malformed entry must not discard the whole refresh; the
+      // surrounding try/catch used to turn it into "no live models at all".
+    }
+  }
+  return models;
+}
+
 async function fetchLiveModels(apiKey: string, signal?: AbortSignal): Promise<JsonModel[] | null> {
   try {
     const response = await fetch(MODELS_URL, {
@@ -277,7 +298,8 @@ async function fetchLiveModels(apiKey: string, signal?: AbortSignal): Promise<Js
     const data = await response.json();
     const apiModels = Array.isArray(data) ? data : (data.data || []);
     if (!Array.isArray(apiModels) || apiModels.length === 0) return null;
-    return apiModels.map(transformApiModel);
+    const models = transformApiModels(apiModels);
+    return models.length > 0 ? models : null;
   } catch {
     return null;
   }
