@@ -4,6 +4,25 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Fixed:
+
+- **Native web search no longer claims the `opencode-go` plan, which never
+  actually searched.** The Go path sent Anthropic's `web_search_20260318` tool
+  to `https://opencode.ai/zen/go/v1/messages` on `claude-haiku-5-5`, and the
+  endpoint accepted the request — but the model answered from memory, because
+  the Go plan does not carry the hosted search tool for its Anthropic models.
+  A live probe against both `/zen/go/v1/messages` and
+  `/inference/go/anthropic/v1/messages` returned "I can't run a live web
+  search", and an explicit `tool_choice` was rejected with "the web_search
+  hosted tool isn't available on OpenCode's models". The tool definition was
+  silently ignored, so the failure looked like a working search returning a
+  stale answer rather than an error. `opencode-go` is removed from the provider
+  list, the credential chain, the default model/base-URL tables, the session
+  headers and the tests; OpenRouter is the native default again, ahead of
+  `openai-codex` and `anthropic`. Brave remains first when its key is
+  configured. The Go plan is still a `/model` provider; it is simply not a
+  web-search provider.
+
 ## v1.11.0 — 2026-11-09
 
 Added:

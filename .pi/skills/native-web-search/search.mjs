@@ -8,21 +8,18 @@
 //
 // LOCAL PATCHES, most of the file: provider support beyond upstream's
 // `openai-codex` and `anthropic`, plus a test seam. In short:
-//   - `openrouter` via its `web` plugin, and `opencode-go` via the Go API's
-//     Anthropic-compatible `/messages` endpoint (native `web_search_20260318`),
-//     with `runOpenRouterSearch`, `opencodeGoHeaders`, `defaultModelId` and
-//     `defaultBaseUrl` added;
-//   - `pickProvider` extended with the opencode-go/openrouter credentials and
+//   - `openrouter` via its `web` plugin, with `runOpenRouterSearch`,
+//     `defaultModelId` and `defaultBaseUrl` added;
+//   - `pickProvider` extended with the openrouter credential and
 //     `PI_WEB_SEARCH_PROVIDER`, and made to reject an unrecognized explicit
 //     provider instead of silently falling through to another plan;
 //   - `normalizeProvider`, `buildAnthropicHeaders`, `runAnthropicSearch` and
 //     `resolveApiKey` modified (exact-id matching, non-clobbering extra headers,
-//     a testable request builder, the OPENCODE_API_KEY fallback);
+//     a testable request builder);
 //   - a direct-invocation guard and a `__test__` export at the bottom, so
 //     importing the module for tests does not run a search.
-//   - 2026-10: direct `anthropic` and `opencode-go` paths moved to
-//     `web_search_20260318` with `allowed_callers: ["direct"]` (see
-//     ANTHROPIC_WEB_SEARCH_TOOL and OPENCODE_GO_WEB_SEARCH_TOOL). Default
+//   - 2026-10: the direct `anthropic` path moved to `web_search_20260318` with
+//     `allowed_callers: ["direct"]` (see ANTHROPIC_WEB_SEARCH_TOOL). Default
 //     `anthropic` model is now `claude-haiku-5-5`.
 //   - 2026-11: `brave` added as a provider value and made the first choice when
 //     a Brave key resolves (`BRAVE_API_KEY`, else the `brave`/`brave-search`
@@ -31,6 +28,11 @@
 //     the only limit. `resolveBraveApiKey`, `runBraveSearch`,
 //     `renderBraveResults`, `sanitizeField`, `describeBraveFailure`,
 //     `pickNativeProvider`, `runNativeProvider` and `runSearch` added.
+//   - 2026-11: `opencode-go` removed. The Go plan's Anthropic models accept the
+//     `web_search` tool definition but silently answer from memory — a live
+//     probe returns "I can't run a live web search", and an explicit
+//     `tool_choice` is rejected with "the web_search hosted tool isn't
+//     available on OpenCode's models". OpenRouter is the native default again.
 // The body is indented with spaces; upstream uses tabs, so a plain diff against
 // upstream is not meaningful — compare with `diff -w`. See the LOCAL PATCH
 // hunks listed in SKILL.md beside this file.
@@ -38,7 +40,6 @@
 // Verified against upstream 0865c84: no upstream function was removed.
 
 import { existsSync, readFileSync, writeFileSync, realpathSync } from "fs";
-import { randomUUID } from "crypto";
 import { spawnSync, execSync } from "child_process";
 import { homedir } from "os";
 import { dirname, isAbsolute, join, resolve } from "path";
@@ -110,7 +111,7 @@ function parseArgs(argv) {
 
 function usage() {
     return `Usage:
-  node search.mjs "<query>" [--purpose "<why>"] [--provider brave|opencode-go|openai-codex|anthropic|openrouter] [--model <id>] [--json]
+  node search.mjs "<query>" [--purpose "<why>"] [--provider brave|openrouter|openai-codex|anthropic] [--model <id>] [--json]
 
 Brave is used whenever a Brave key is configured; the native chain runs when it
 is not, and takes over (with the reason in the result) when Brave fails.
@@ -118,7 +119,7 @@ is not, and takes over (with the reason in the result) when Brave fails.
 Examples:
   node search.mjs "latest python release" --purpose "update dependency notes"
   node search.mjs "HTTP/3 browser support 2026" --provider openai-codex
-  node search.mjs "vite 7 breaking changes" --provider opencode-go --json`;
+  node search.mjs "vite 7 breaking changes" --provider openrouter --json`;
 }
 
 function readJson(path, fallback = {}) {
@@ -181,13 +182,11 @@ function normalizeProvider(provider) {
     // Exact provider ids first, so a composite string cannot be captured by a
     // substring meant for a different provider.
     if (p === "brave" || p === "brave-search") return "brave";
-    if (p === "opencode-go" || p === "opencode") return "opencode-go";
     if (p === "openrouter") return "openrouter";
     if (p === "openai-codex" || p === "openai" || p === "codex") return "openai-codex";
     if (p === "anthropic") return "anthropic";
     // Then model-shaped strings (`claude-haiku-5-5`, `openai/gpt-4o-mini:online`).
     if (p.includes("brave")) return "brave";
-    if (p.includes("opencode")) return "opencode-go";
     if (p.includes("anthropic") || p.includes("claude")) return "anthropic";
     if (p.includes("openrouter") || p.includes("sonar")) return "openrouter";
     if (p.includes("codex") || p.startsWith("openai")) return "openai-codex";
@@ -204,14 +203,14 @@ function pickNativeProvider(settings, auth) {
     const fromSettings = normalizeProvider(settings?.defaultProvider);
     if (fromSettings && fromSettings !== "brave") return fromSettings;
 
-    // opencode-go first: it is this machine's main provider, and the Go plan is
-    // where the search budget should land when several credentials exist.
-    if (auth?.["opencode-go"] || process.env.OPENCODE_API_KEY) return "opencode-go";
+    // OpenRouter first: its `web` plugin is the native chain's default, and a
+    // machine that kept an OpenRouter credential around should spend it before
+    // any other native provider.
     if (auth?.openrouter) return "openrouter";
     if (auth?.["openai-codex"]) return "openai-codex";
     if (auth?.anthropic) return "anthropic";
 
-    throw new Error("Could not determine provider. Pass --provider brave|opencode-go|openrouter|openai-codex|anthropic");
+    throw new Error("Could not determine provider. Pass --provider brave|openrouter|openai-codex|anthropic");
 }
 
 function pickProvider(argProvider, settings, auth) {
@@ -221,14 +220,14 @@ function pickProvider(argProvider, settings, auth) {
     // fall through to whatever credential happens to exist: silently spending
     // another plan's budget is worse than failing.
     if (argProvider && String(argProvider).trim()) {
-        throw new Error(`Unknown provider '${argProvider}'. Use brave|opencode-go|openrouter|openai-codex|anthropic`);
+        throw new Error(`Unknown provider '${argProvider}'. Use brave|openrouter|openai-codex|anthropic`);
     }
 
     const fromEnv = normalizeProvider(process.env.PI_WEB_SEARCH_PROVIDER);
     if (fromEnv) return fromEnv;
     if (process.env.PI_WEB_SEARCH_PROVIDER && String(process.env.PI_WEB_SEARCH_PROVIDER).trim()) {
         throw new Error(
-            `Unknown provider in PI_WEB_SEARCH_PROVIDER: '${process.env.PI_WEB_SEARCH_PROVIDER}'. Use brave|opencode-go|openrouter|openai-codex|anthropic`,
+            `Unknown provider in PI_WEB_SEARCH_PROVIDER: '${process.env.PI_WEB_SEARCH_PROVIDER}'. Use brave|openrouter|openai-codex|anthropic`,
         );
     }
 
@@ -408,8 +407,6 @@ function getCachedOAuthAccess(entry, now = Date.now()) {
 function defaultModelId(provider) {
     if (provider === "openrouter") return "openai/gpt-4o-mini:online";
     if (provider === "openai-codex") return "gpt-5.4-mini";
-    // opencode-go's web search runs on the Go plan's Anthropic-protocol model.
-    if (provider === "opencode-go") return "claude-haiku-5-5";
     // Direct Anthropic API: cheapest web-search-capable model as of 2026-10.
     return "claude-haiku-5-5";
 }
@@ -417,22 +414,13 @@ function defaultModelId(provider) {
 function defaultBaseUrl(provider) {
     if (provider === "openrouter") return "https://openrouter.ai/api/v1";
     if (provider === "openai-codex") return "https://chatgpt.com/backend-api";
-    if (provider === "opencode-go") return "https://opencode.ai/zen/go";
     return "https://api.anthropic.com";
 }
 
-// Web search tool definitions. Both the Go endpoint and the direct Anthropic
-// API use `web_search_20260318` with `allowed_callers: ["direct"]` to force
-// direct invocation regardless of the model's code-execution capabilities —
-// without that pin, `_20260209` and later default to
-// `["code_execution_20260120"]`, which not every model supports.
-const OPENCODE_GO_WEB_SEARCH_TOOL = {
-    type: "web_search_20260318",
-    name: "web_search",
-    max_uses: 5,
-    allowed_callers: ["direct"],
-};
-
+// The direct Anthropic API uses `web_search_20260318` with
+// `allowed_callers: ["direct"]` to force direct invocation regardless of the
+// model's code-execution capabilities — without that pin, `_20260209` and later
+// default to `["code_execution_20260120"]`, which not every model supports.
 const ANTHROPIC_WEB_SEARCH_TOOL = {
     type: "web_search_20260318",
     name: "web_search",
@@ -440,23 +428,12 @@ const ANTHROPIC_WEB_SEARCH_TOOL = {
     allowed_callers: ["direct"],
 };
 
-// Newer Anthropic-protocol models reject `temperature` as deprecated — on the Go
-// plan and on the direct API alike. Add a model id here when one starts
-// rejecting it; the Go path omits temperature wholesale regardless, because
-// omitting it is always safe.
+// Newer Anthropic-protocol models reject `temperature` as deprecated. Add a
+// model id here when one starts rejecting it; omitting it is always safe
+// because the API default applies.
 const MODELS_WITHOUT_TEMPERATURE = new Set(["claude-haiku-5-5"]);
 function supportsTemperature(model) {
     return !MODELS_WITHOUT_TEMPERATURE.has(String(model || "").trim());
-}
-
-// The Go API routes on a stable session header and rejects a request without
-// one (400 MissingSessionID). A one-shot search has no session to pin, so an
-// id per process is enough for routing and prompt caching.
-function opencodeGoHeaders() {
-    return {
-        "x-opencode-session": randomUUID(),
-        "x-opencode-client": "pi-native-web-search",
-    };
 }
 
 function pickFastModel(provider, requestedModel, piAi) {
@@ -471,14 +448,6 @@ function pickFastModel(provider, requestedModel, piAi) {
         const known = models.find((m) => m.id === "perplexity/sonar");
         const id = requestedModel || preferred[0];
         return { id, baseUrl: known?.baseUrl ?? baseUrl };
-    }
-
-    // The Go plan's web-search title is not in pi-ai's catalogue (this runs
-    // standalone, outside pi, so the provider extension is not registered), and
-    // the endpoint carries its own base URL. Resolve it directly rather than
-    // letting a catalogue heuristic pick a model that cannot search.
-    if (provider === "opencode-go") {
-        return { id: requestedModel || defaultModelId(provider), baseUrl };
     }
 
     if (!Array.isArray(models) || models.length === 0) {
@@ -507,13 +476,7 @@ function pickFastModel(provider, requestedModel, piAi) {
 }
 
 async function resolveApiKey(provider, auth, authPath, piAi) {
-    let entry = auth?.[provider];
-    // The opencode-go provider extension documents OPENCODE_API_KEY as an
-    // alternative to auth.json; a web search should not fail just because the
-    // key lives in the environment.
-    if (!entry && provider === "opencode-go" && process.env.OPENCODE_API_KEY) {
-        entry = { type: "api_key", key: "OPENCODE_API_KEY" };
-    }
+    const entry = auth?.[provider];
     if (!entry) {
         throw new Error(`No credentials for provider '${provider}' in ${authPath}`);
     }
@@ -777,40 +740,34 @@ function buildAnthropicHeaders(apiKey, extraHeaders = {}) {
 }
 
 // Pure request builder, so tests can pin the endpoint, headers and body without
-// a network call. Serves the direct Anthropic API and opencode-go's
-// Anthropic-compatible endpoint; the caller passes the base URL, any provider
-// headers, and the tool definition. Both currently use the newest tool version
-// (`web_search_20260318`).
-function buildAnthropicRequest({ model, apiKey, query, purpose, baseUrl, extraHeaders, omitTemperature, toolDefinition }) {
+// a network call. Serves the direct Anthropic API; the caller passes the base
+// URL. Uses the newest tool version (`web_search_20260318`).
+function buildAnthropicRequest({ model, apiKey, query, purpose, baseUrl }) {
     const body = {
         model,
         max_tokens: 1800,
         system: buildSystemPrompt(),
-        tools: [toolDefinition || OPENCODE_GO_WEB_SEARCH_TOOL],
+        tools: [ANTHROPIC_WEB_SEARCH_TOOL],
         messages: [{ role: "user", content: buildUserPrompt(query, purpose) }],
     };
-    // Omitting temperature is always safe — the API default applies — so it is
-    // omitted for the whole Go path (that endpoint rejected it for the search
-    // model) as well as for any model known to reject it on the direct API.
-    if (!omitTemperature && supportsTemperature(model)) body.temperature = 0;
+    // Omitting temperature is always safe — the API default applies — and
+    // `claude-haiku-5-5` rejects it as deprecated.
+    if (supportsTemperature(model)) body.temperature = 0;
 
     return {
         endpoint: `${String(baseUrl || defaultBaseUrl("anthropic")).replace(/\/+$/, "")}/v1/messages`,
-        headers: buildAnthropicHeaders(apiKey, extraHeaders),
+        headers: buildAnthropicHeaders(apiKey),
         body,
     };
 }
 
-async function runAnthropicSearch({ model, apiKey, query, purpose, timeoutMs, baseUrl, extraHeaders, omitTemperature, toolDefinition }) {
+async function runAnthropicSearch({ model, apiKey, query, purpose, timeoutMs, baseUrl }) {
     const { endpoint, headers, body } = buildAnthropicRequest({
         model,
         apiKey,
         query,
         purpose,
         baseUrl,
-        extraHeaders,
-        omitTemperature,
-        toolDefinition,
     });
 
     const signal = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(timeoutMs) : undefined;
@@ -958,9 +915,6 @@ async function runNativeProvider(provider, args, { auth, authPath }) {
                       timeoutMs: args.timeoutMs,
                       baseUrl: model.baseUrl,
                   })
-              // opencode-go rides the same Anthropic-shaped call, pointed at the
-              // Go API and carrying its session headers. Both use the newest
-              // tool version (`web_search_20260318`).
               : await runAnthropicSearch({
                       model: model.id,
                       apiKey,
@@ -968,9 +922,6 @@ async function runNativeProvider(provider, args, { auth, authPath }) {
                       purpose: args.purpose,
                       timeoutMs: args.timeoutMs,
                       baseUrl: model.baseUrl,
-                      extraHeaders: provider === "opencode-go" ? opencodeGoHeaders() : undefined,
-                      omitTemperature: provider === "opencode-go",
-                      toolDefinition: provider === "opencode-go" ? OPENCODE_GO_WEB_SEARCH_TOOL : ANTHROPIC_WEB_SEARCH_TOOL,
                   });
 
     return { model: model.id, text };
@@ -1087,11 +1038,9 @@ export const __test__ = {
     defaultModelId,
     defaultBaseUrl,
     supportsTemperature,
-    opencodeGoHeaders,
     pickFastModel,
     buildAnthropicHeaders,
     buildAnthropicRequest,
     resolveApiKey,
-    OPENCODE_GO_WEB_SEARCH_TOOL,
     ANTHROPIC_WEB_SEARCH_TOOL,
 };
