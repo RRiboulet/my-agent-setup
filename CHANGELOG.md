@@ -343,6 +343,45 @@ Maintenance:
   the recipe to the bare form, which turns it red), the bare form's legitimate
   case, and the copy re-pointing its listing rather than adding a second entry.
 
+- **`devc`'s per-project lock is now keyed on the workspace path, and lives in
+  the per-user state dir instead of `/tmp`.** It was
+  `${TMPDIR:-/tmp}/devc-$basename.lock`, so `~/a/web` and `~/b/web` serialized
+  against each other for up to `flock -w 900` on work neither had asked for —
+  and because `rebuild` takes the same lock, that stall was no longer limited to
+  `up`. `/tmp` is also world-writable: another local user could pre-create
+  `devc-<name>.lock`, hold it (a denial of service), or symlink it to redirect
+  the `exec 9>` write. The file is now
+  `${XDG_STATE_HOME:-$HOME/.local/state}/devc/locks/devc-<name>-<key>.lock`,
+  where `<key>` is the first 16 hex characters of the resolved workspace path
+  and the basename is kept only so the file is recognisable; the directory is
+  created `0700`. Two projects with the same name under different roots now take
+  independent locks. Everything else about the lock is unchanged: a dry run
+  takes none, a real wait says it is waiting, the wait is bounded, and the
+  failure names the lock file. A test holds one `web`'s lock and asserts the
+  other `web` finishes without waiting, and another asserts no lock file appears
+  in `TMPDIR` and that the lock directory is `0700`.
+
+- **The lock release before an interactive attach is pinned, and four test gaps
+  in the `devc` harness are closed.** `.pi/skills/devcontainer/SKILL.md`
+  promises the lock "is released before an interactive session attaches", and
+  nothing tested it — regression #104, a lock fd surviving into the exec'd tmux
+  session so that every later `devc` run for that project died on
+  `flock -w 900`, would have passed the suite. The `tmux` stub inherits fd 9
+  through the `exec`, so it can take `LOCK_EX` on the lock file itself: the
+  build-time half of the run must see it held, and the session must see it
+  free. Both were mutation-checked — deleting `flock -u 9` turns the session
+  assertion red, and keying the lock on a constant basename turns the
+  same-basename test red by blocking the second project. The parity tests now
+  compare argv *elements*: the stub logs one NUL-terminated field per argument
+  instead of the `$*` join, because a single argument containing spaces reads
+  identically to two arguments through a join — dropping `%q` from the preview
+  was invisible before and is caught now. Also pinned: `--no-cache` reaching the
+  CLI as `--build-no-cache`, the uid-mismatch refusal (status, message, and that
+  nothing attaches or spawns a session), and `devc doctor`'s stale-config report
+  against a running container, which is the failure the config stamp exists for
+  and was itself untested. All four were mutation-checked by removing the
+  behaviour from a scratch copy of the script.
+
 ## v1.11.0 — 2026-11-09
 
 Added:

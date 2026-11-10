@@ -246,9 +246,28 @@ is_running() {
 # limit is the price of not holding a lock for the life of every session, which
 # deadlocked the project for everyone else. State it here so the guard in
 # `cmd_rebuild` is not mistaken for more than it is.
+#
+# The lock file names the *resolved workspace path*, not the project's basename:
+# two projects called `web` under different roots used to share one
+# `${TMPDIR:-/tmp}/devc-web.lock` and queue behind each other for up to
+# `flock -w 900` on work neither had asked for — and since `rebuild` takes this
+# lock too, that stall was not limited to `up`. It also lives in the per-user
+# state dir rather than a world-writable /tmp, where any other local user could
+# pre-create it, hold it (a denial of service) or symlink it to redirect the
+# `exec 9>` write below.
+lock_file() {
+	local dir="$1" name key
+	# The basename is only there to make the file recognisable; the hash of the
+	# whole path is what distinguishes two same-named projects.
+	name="$(basename "$dir" | tr -c 'A-Za-z0-9._-' '_')"
+	key="$(printf '%s' "$dir" | sha256sum | cut -c1-16)"
+	mkdir -p -m 700 "$STATE_DIR/locks"
+	printf '%s/devc-%s-%s.lock\n' "$STATE_DIR/locks" "$name" "$key"
+}
+
 lock_project() {
-	local name="$1"
-	local lockfile="${TMPDIR:-/tmp}/devc-$name.lock"
+	local dir="$1" name lockfile
+	name="$(basename "$dir")"
 	# A dry run prints and returns without touching the daemon or the stamp, so it
 	# takes no lock: queueing a preview behind a live build for up to `flock -w`'s
 	# 900s, silently, is worse than useless. (It would also print its preview only
@@ -256,6 +275,7 @@ lock_project() {
 	if [ -n "${DEVC_DRY_RUN:-}" ]; then
 		return 0
 	fi
+	lockfile="$(lock_file "$dir")"
 	exec 9>"$lockfile"
 	# `flock` waits in silence; say so, or a held lock looks like a hang.
 	if ! flock -n 9; then
@@ -271,7 +291,7 @@ ensure_up() {
 	local name
 	name="$(basename "$dir")"
 	require_docker
-	lock_project "$name"
+	lock_project "$dir"
 
 	if [ -n "${DEVC_DRY_RUN:-}" ]; then
 		# Deliberately not a `+` line: which branch this takes (reconcile, create,
@@ -365,7 +385,7 @@ cmd_rebuild() {
 	# Serialized against `ensure_up` for the same reason a build is: both decide
 	# what the container is. What it does not do is protect a live session — see
 	# `lock_project` for why that is the intended limit rather than an oversight.
-	lock_project "$(basename "$dir")"
+	lock_project "$dir"
 	local args=(up --workspace-folder "$dir" --remove-existing-container)
 	if [ "$no_cache" = "--no-cache" ]; then
 		args+=(--build-no-cache)
