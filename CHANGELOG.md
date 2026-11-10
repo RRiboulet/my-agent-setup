@@ -23,6 +23,21 @@ Fixed:
   configured. The Go plan is still a `/model` provider; it is simply not a
   web-search provider.
 
+Maintenance:
+
+- **Upgrading native web search: OpenRouter is the native default again, and
+  the removed `opencode-go` values are now rejected.** Add an `openrouter`
+  entry to `~/.pi/agent/auth.json` (or pass `--provider openai-codex|anthropic`)
+  to keep the native chain available. Without one, a Brave failure ends in an
+  error that names both the Brave reason and the missing credential instead of
+  falling back; a Brave-only setup keeps working while its key is configured,
+  but has no fallback until a native credential is added. Explicit
+  `--provider opencode-go` and `PI_WEB_SEARCH_PROVIDER=opencode-go` (or
+  `opencode`) are now errors, even when a Brave key is configured; a composite
+  id such as `opencode-go/claude-haiku-5-5` is rejected rather than routed to
+  the direct Anthropic API. The `opencode-go` credential itself remains valid
+  for the `/model` provider.
+
 ## v1.11.0 — 2026-11-09
 
 Added:

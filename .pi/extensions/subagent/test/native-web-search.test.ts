@@ -121,6 +121,10 @@ test("normalizeProvider matches exact provider ids before substrings", () => {
 	// Removed providers must not be captured by a substring or alias.
 	assert.equal(normalizeProvider("opencode-go"), undefined);
 	assert.equal(normalizeProvider("opencode"), undefined);
+	// Composite ids for the removed provider must not fall through to the plan
+	// whose model name they contain (`claude` -> direct Anthropic here).
+	assert.equal(normalizeProvider("opencode-go/claude-haiku-5-5"), undefined);
+	assert.equal(normalizeProvider("opencode/anthropic/claude-haiku-5-5"), undefined);
 	assert.equal(normalizeProvider("nope"), undefined);
 });
 
@@ -140,8 +144,37 @@ test("an opencode-go credential alone no longer satisfies the native chain", () 
 	withEnvVars({ PI_WEB_SEARCH_PROVIDER: undefined, BRAVE_API_KEY: undefined }, () => {
 		assert.throws(
 			() => pickProvider(undefined, {}, { "opencode-go": { type: "api_key", key: "a" } }),
-			/Could not determine provider/,
+			/Could not determine a native web-search provider/,
 		);
+	});
+});
+
+test("the no-native-credential error names the file and the fix", () => {
+	withEnvVars({ PI_WEB_SEARCH_PROVIDER: undefined, BRAVE_API_KEY: undefined }, () => {
+		assert.throws(
+			() => pickNativeProvider({}, {}, "/tmp/agent/auth.json"),
+			(err) => {
+				assert.match(
+					err.message,
+					/no openrouter, openai-codex or anthropic credential is configured in \/tmp\/agent\/auth\.json/,
+				);
+				assert.match(err.message, /Add an `openrouter` entry to \/tmp\/agent\/auth\.json/);
+				assert.match(err.message, /--provider openrouter\|openai-codex\|anthropic/);
+				return true;
+			},
+		);
+	});
+});
+
+test("the native chain prefers openrouter, then openai-codex, then anthropic", () => {
+	const cred = { type: "api_key", key: "k" };
+	withEnvVars({ PI_WEB_SEARCH_PROVIDER: undefined, BRAVE_API_KEY: undefined }, () => {
+		assert.equal(
+			pickNativeProvider({}, { openrouter: cred, "openai-codex": cred, anthropic: cred }),
+			"openrouter",
+		);
+		assert.equal(pickNativeProvider({}, { "openai-codex": cred, anthropic: cred }), "openai-codex");
+		assert.equal(pickNativeProvider({}, { anthropic: cred }), "anthropic");
 	});
 });
 
@@ -259,6 +292,32 @@ test("an explicit brave request with no key falls back with a one-line note", as
 	});
 });
 
+test("a Brave failure with no native credential fails with both reasons", async () => {
+	await withEnvVarsAsync({ BRAVE_API_KEY: undefined }, async () => {
+		await assert.rejects(
+			runSearch(
+				{ query: "q", purpose: "p", timeoutMs: 1000 },
+				{
+					auth: { brave: { type: "str", key: "brave-key" } },
+					settings: {},
+					authPath: "/tmp/agent/auth.json",
+					fetchImpl: async () => ({ ok: false, status: 429, json: async () => ({}) }),
+					runNative: async () => {
+						throw new Error("native must not run without a credential");
+					},
+				},
+			),
+			(err) => {
+				assert.match(err.message, /Brave unavailable \(HTTP 429\)/);
+				assert.match(err.message, /the native fallback cannot run/);
+				assert.match(err.message, /no openrouter, openai-codex or anthropic credential/);
+				assert.match(err.message, /\/tmp\/agent\/auth\.json/);
+				return true;
+			},
+		);
+	});
+});
+
 test("a Brave search writes no quota, lock or audit files", async () => {
 	const root = mkdtempSync(join(tmpdir(), "nws-brave-"));
 	try {
@@ -327,10 +386,14 @@ test("temperature is kept for a model that supports it and omitted for the searc
 	assert.equal("temperature" in searchModel, false);
 });
 
-test("provider headers cannot clobber authentication", () => {
-	const evil = { "x-api-key": "evil", authorization: "Bearer evil" };
-	assert.equal(buildAnthropicHeaders("real-key", evil)["x-api-key"], "real-key");
-	assert.equal(buildAnthropicHeaders("sk-ant-oat-real", evil).authorization, "Bearer sk-ant-oat-real");
+test("Anthropic headers choose API-key or OAuth authentication", () => {
+	const apiKey = buildAnthropicHeaders("real-key");
+	assert.equal(apiKey["x-api-key"], "real-key");
+	assert.equal("authorization" in apiKey, false);
+
+	const oauth = buildAnthropicHeaders("sk-ant-oat-real");
+	assert.equal(oauth.authorization, "Bearer sk-ant-oat-real");
+	assert.equal("x-api-key" in oauth, false);
 });
 
 test("the OpenRouter API key resolves from auth.json", async () => {

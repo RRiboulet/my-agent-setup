@@ -14,8 +14,7 @@
 //     `PI_WEB_SEARCH_PROVIDER`, and made to reject an unrecognized explicit
 //     provider instead of silently falling through to another plan;
 //   - `normalizeProvider`, `buildAnthropicHeaders`, `runAnthropicSearch` and
-//     `resolveApiKey` modified (exact-id matching, non-clobbering extra headers,
-//     a testable request builder);
+//     `resolveApiKey` modified (exact-id matching, a testable request builder);
 //   - a direct-invocation guard and a `__test__` export at the bottom, so
 //     importing the module for tests does not run a search.
 //   - 2026-10: the direct `anthropic` path moved to `web_search_20260318` with
@@ -24,7 +23,9 @@
 //   - 2026-11: `brave` added as a provider value and made the first choice when
 //     a Brave key resolves (`BRAVE_API_KEY`, else the `brave`/`brave-search`
 //     entry in auth.json), with the native chain above as the fallback on any
-//     failure. No local quota, counter or audit log: the account settings are
+//     failure when a native credential is configured; with none, the error
+//     names both the Brave failure and the missing credential. No local quota,
+//     counter or audit log: the account settings are
 //     the only limit. `resolveBraveApiKey`, `runBraveSearch`,
 //     `renderBraveResults`, `sanitizeField`, `describeBraveFailure`,
 //     `pickNativeProvider`, `runNativeProvider` and `runSearch` added.
@@ -114,7 +115,9 @@ function usage() {
   node search.mjs "<query>" [--purpose "<why>"] [--provider brave|openrouter|openai-codex|anthropic] [--model <id>] [--json]
 
 Brave is used whenever a Brave key is configured; the native chain runs when it
-is not, and takes over (with the reason in the result) when Brave fails.
+is not, and takes over (with the reason in the result) when Brave fails and a
+native credential is configured. With no native credential, a Brave failure
+fails with both reasons instead of a bare "Could not determine provider".
 
 Examples:
   node search.mjs "latest python release" --purpose "update dependency notes"
@@ -185,6 +188,11 @@ function normalizeProvider(provider) {
     if (p === "openrouter") return "openrouter";
     if (p === "openai-codex" || p === "openai" || p === "codex") return "openai-codex";
     if (p === "anthropic") return "anthropic";
+    // `opencode-go` was removed as a provider. Reject any composite id that still
+    // carries that name before the model-shaped substring rules below, so
+    // `opencode-go/claude-haiku-5-5` cannot be captured by `claude` and quietly
+    // spend the direct Anthropic plan's budget instead of failing.
+    if (p.includes("opencode")) return undefined;
     // Then model-shaped strings (`claude-haiku-5-5`, `openai/gpt-4o-mini:online`).
     if (p.includes("brave")) return "brave";
     if (p.includes("anthropic") || p.includes("claude")) return "anthropic";
@@ -197,7 +205,7 @@ function normalizeProvider(provider) {
 // on its own, and also what a Brave failure falls back to. A `brave` value in
 // settings is ignored here rather than returned: this function cannot serve it,
 // and falling through to a real native credential beats looping back to Brave.
-function pickNativeProvider(settings, auth) {
+function pickNativeProvider(settings, auth, authPath) {
     // settings.defaultProvider may name an unrelated pi provider (a local model
     // server, say), so an unknown value is ignored rather than fatal.
     const fromSettings = normalizeProvider(settings?.defaultProvider);
@@ -210,7 +218,14 @@ function pickNativeProvider(settings, auth) {
     if (auth?.["openai-codex"]) return "openai-codex";
     if (auth?.anthropic) return "anthropic";
 
-    throw new Error("Could not determine provider. Pass --provider brave|openrouter|openai-codex|anthropic");
+    // Name both the cause and the fix: this is also the error a Brave failure
+    // reaches when no native credential exists, and the old "Could not
+    // determine provider" told the user neither.
+    const where = authPath || "auth.json";
+    throw new Error(
+        `Could not determine a native web-search provider: no openrouter, openai-codex or anthropic credential is configured in ${where}. ` +
+            `Add an \`openrouter\` entry to ${where}, or pass --provider openrouter|openai-codex|anthropic.`,
+    );
 }
 
 function pickProvider(argProvider, settings, auth) {
@@ -714,12 +729,10 @@ async function runOpenRouterSearch({ model, apiKey, baseUrl, query, purpose, tim
     return citations.length > 0 ? `${text}\n\nSources:\n${citations.map((c) => `- ${c}`).join("\n")}` : text;
 }
 
-function buildAnthropicHeaders(apiKey, extraHeaders = {}) {
+function buildAnthropicHeaders(apiKey) {
     const oauthToken = typeof apiKey === "string" && apiKey.includes("sk-ant-oat");
-    // extraHeaders first, so a provider header can never clobber authentication.
     if (oauthToken) {
         return {
-            ...extraHeaders,
             authorization: `Bearer ${apiKey}`,
             "anthropic-version": "2023-06-01",
             "anthropic-beta": "claude-code-20250219,oauth-2025-04-20,web-search-2025-03-05",
@@ -730,7 +743,6 @@ function buildAnthropicHeaders(apiKey, extraHeaders = {}) {
         };
     }
     return {
-        ...extraHeaders,
         "x-api-key": apiKey,
         "anthropic-version": "2023-06-01",
         "anthropic-beta": "web-search-2025-03-05",
@@ -929,8 +941,10 @@ async function runNativeProvider(provider, args, { auth, authPath }) {
 
 // Brave first when its key resolves, otherwise the native chain. Any Brave
 // failure — missing key, 429, 422, network, zero results — falls through to
-// that chain and puts one short line saying why at the top of the result. There
-// is no counter, lock file or audit log: the account settings are the limit.
+// that chain and puts one short line saying why at the top of the result. With
+// no native credential, the run fails with both the Brave reason and the
+// missing credential instead of throwing only the latter.
+// There is no counter, lock file or audit log: the account settings are the limit.
 // `fetchImpl` and `runNative` are injectable so that fallback is testable
 // without a network call or a pi-ai install.
 async function runSearch(args, { auth, settings, authPath, fetchImpl = fetch, runNative = runNativeProvider }) {
@@ -944,21 +958,28 @@ async function runSearch(args, { auth, settings, authPath, fetchImpl = fetch, ru
     const apiKey = resolveBraveApiKey(auth);
     let note;
     if (!apiKey) {
-        note = "Brave unavailable (no API key); fell back to native search.";
+        note = "Brave unavailable (no API key)";
     } else {
         try {
             const text = await runBraveSearch({ apiKey, query: args.query, timeoutMs: args.timeoutMs, fetchImpl });
             return { provider: "brave", model: "brave-search", text };
         } catch (err) {
-            note = `Brave unavailable (${describeBraveFailure(err)}); fell back to native search.`;
+            note = `Brave unavailable (${describeBraveFailure(err)})`;
         }
     }
 
     // An explicit `--provider brave` still falls back — the tool must keep
     // working — but through the native chain, never back into Brave.
-    const nativeProvider = pickNativeProvider(settings, auth);
+    let nativeProvider;
+    try {
+        nativeProvider = pickNativeProvider(settings, auth, authPath);
+    } catch (err) {
+        // With no native credential the fallback cannot run. Say both why Brave
+        // was skipped and what is missing, rather than only the latter.
+        throw new Error(`${note}; the native fallback cannot run. ${err?.message || err}`);
+    }
     const native = await runNative(nativeProvider, args, { auth, authPath });
-    return { provider: nativeProvider, model: native.model, text: `${note}\n\n${native.text}` };
+    return { provider: nativeProvider, model: native.model, text: `${note}; fell back to native search.\n\n${native.text}` };
 }
 
 async function main() {

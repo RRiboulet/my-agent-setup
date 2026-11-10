@@ -9,9 +9,8 @@ description: "Trigger native web search. Use when you need quick internet resear
      Licensed under the Apache License, Version 2.0.
      Upstream: mitsupi v1.6.0, commit 0865c84.
 
-     LOCAL PATCHES, all provider support beyond upstream's two, since this
-     machine authenticates through OpenRouter rather than through either
-     upstream provider:
+     LOCAL PATCHES, all provider support beyond upstream's two: the native
+     chain's default is OpenRouter, not either upstream provider.
        1. `openrouter` added as a --provider value, invoked through OpenRouter's
           `web` plugin, with `openai/gpt-4o-mini:online` as its default model id.
        2. `pickProvider` extended: upstream `0865c84` already resolved
@@ -30,8 +29,10 @@ description: "Trigger native web search. Use when you need quick internet resear
           `brave-search` entry in auth.json), through Brave's Web Search API
           (`/res/v1/web/search`, `X-Subscription-Token`, five results). Any
           Brave failure — missing key, 429, 422, network, zero results — falls
-          through to the chain above and prefixes the result with one line
-          saying why; `pickNativeProvider` was split out so that fallback still
+          through to the chain above when a native credential is configured,
+          and prefixes the result with one line saying why; with none, the run
+          fails with both the Brave reason and the missing credential.
+          `pickNativeProvider` was split out so that fallback still
           resolves a provider when Brave was requested explicitly. No local
           quota, counter, lock file or audit log: the account's own limit is
           the only one, and a 429 is just another failure. Each rendered field
@@ -99,8 +100,10 @@ Optional flags:
   key comes from `BRAVE_API_KEY`, else the `brave`/`brave-search` entry in
   `auth.json`. There is no local quota or accounting: the account's own limit is
   the only one, and a usage/rate-limit answer (HTTP 429) is just another failure
-  that falls back to the native chain below, with one line at the top of the
-  result saying why. No usage block is printed.
+  that falls back to the native chain below when a native credential is
+  configured, with one line at the top of the result saying why. With no native
+  credential it fails instead, naming both the Brave failure and the missing
+  credential. No usage block is printed.
 - `openrouter` (the native default when credentials exist): native web search via
   the OpenRouter `web` plugin; requires a web-enabled model id such as
   `openai/gpt-4o-mini:online` or `perplexity/sonar`.
@@ -119,7 +122,7 @@ The script instructs the model to:
 ## Notes
 
 - No extra npm install is required.
-- Provider precedence: `--provider` flag > `PI_WEB_SEARCH_PROVIDER` > Brave (when a key is configured) > `defaultProvider` in `settings.json` > first available credential in `auth.json` (`openrouter`, then `openai-codex`, then `anthropic`). The script reads `PI_WEB_SEARCH_PROVIDER` itself, so a standalone invocation follows the same order; the `web_search` tool omits `--provider` when nothing is set, which is what lets Brave, `settings.json` and `auth.json` decide. A Brave failure falls back to the native chain even when `--provider brave` was explicit; the result's first line names the reason and never contains a response body or stack trace.
+- Provider precedence: `--provider` flag > `PI_WEB_SEARCH_PROVIDER` > Brave (when a key is configured) > `defaultProvider` in `settings.json` > first available credential in `auth.json` (`openrouter`, then `openai-codex`, then `anthropic`). The script reads `PI_WEB_SEARCH_PROVIDER` itself, so a standalone invocation follows the same order; the `web_search` tool omits `--provider` when nothing is set, which is what lets Brave, `settings.json` and `auth.json` decide. A Brave failure falls back to the native chain even when `--provider brave` was explicit, provided a native credential is configured; the result's first line names the reason and never contains a response body or stack trace. Without one, the error names both the Brave failure and the credential that is missing from `auth.json`, because a Brave-only machine cannot reach the fallback.
 - An unrecognized `--provider` (or `PI_WEB_SEARCH_PROVIDER`) is an error, and an unknown explicit provider is rejected rather than resolved, so a typo cannot quietly spend another plan's budget. An unrecognized `settings.defaultProvider` is ignored instead, because that key may name an unrelated pi provider (a local model server, say).
 - `temperature` is omitted for `claude-haiku-5-5` on any provider; omitting it is safe because the API default applies.
 - OpenRouter only works with web-enabled model ids (`:online` suffix, Perplexity Sonar models); other model ids silently lose web access.
