@@ -16,6 +16,8 @@
 
 import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 
@@ -37,7 +39,7 @@ test("worktree skill: ignore guard is exact-line and newline-safe", () => {
 	assert.ok(SKILL.includes("grep -qxF '.worktrees/'"), "guard must match the exact line");
 	// Appending to a file with no trailing newline glues the entry onto its last
 	// line, yielding `node_modules.worktrees/`.
-	assert.ok(SKILL.includes("tail -c 1 .gitignore"), "guard must add a newline first");
+	assert.ok(SKILL.includes('tail -c 1 "$MAIN/.gitignore"'), "guard must add a newline first");
 	assert.ok(GITIGNORE.includes(".worktrees/"), ".worktrees/ must be ignored");
 });
 
@@ -263,5 +265,58 @@ test("ignore guard recipe: newline-safe, and idempotent when actually executed",
 		assert.equal(readFileSync(ignore, "utf8"), "node_modules\n.worktrees/\n", "must be idempotent");
 	} finally {
 		await repo.cleanup();
+	}
+});
+
+test("ignore guard recipe: edits the main checkout's .gitignore when run from a linked worktree", async () => {
+	// This section is the first thing an agent reads and the guard runs before
+	// Create's main-checkout refusal, so it is routinely executed from inside a
+	// linked worktree. A relative `.gitignore` then resolves to that worktree's
+	// copy - the wrong file, untracked by the branch that will be committed.
+	const repo = await scratchRepo();
+	try {
+		const linked = path.join(repo.root, "linked");
+		repo.git("worktree", "add", "-q", linked, "-b", "probe", "origin/dev");
+
+		const mainIgnore = path.join(repo.main, ".gitignore");
+		const linkedIgnore = path.join(linked, ".gitignore");
+		assert.equal(readFileSync(mainIgnore, "utf8"), "node_modules", "fixture: no trailing newline");
+		assert.equal(readFileSync(linkedIgnore, "utf8"), "node_modules", "fixture: the checkout carries the same file");
+
+		const guard = recipe("Location convention", 0);
+		const result = runScript(guard, { cwd: linked });
+		assert.equal(result.status, 0, result.stderr);
+		assert.equal(
+			readFileSync(mainIgnore, "utf8"),
+			"node_modules\n.worktrees/\n",
+			"the main checkout's .gitignore must gain the entry, newline-safe",
+		);
+		assert.equal(
+			readFileSync(linkedIgnore, "utf8"),
+			"node_modules",
+			"the linked worktree's own .gitignore must be left alone",
+		);
+
+		const again = runScript(guard, { cwd: linked });
+		assert.equal(again.status, 0, again.stderr);
+		assert.equal(readFileSync(mainIgnore, "utf8"), "node_modules\n.worktrees/\n", "must be idempotent");
+		assert.equal(readFileSync(linkedIgnore, "utf8"), "node_modules", "still untouched on a second run");
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("ignore guard recipe: fails loudly outside a git repository instead of using an empty root", async () => {
+	// `dirname ""` is `.`, so a failed --git-common-dir silently becomes the cwd
+	// and the guard edits (or creates) a .gitignore it cannot vouch for.
+	const dir = await mkdtemp(path.join(tmpdir(), "worktree-no-repo-"));
+	try {
+		await mkdir(path.join(dir, "empty"));
+		const result = runScript(recipe("Location convention", 0), { cwd: path.join(dir, "empty") });
+		assert.notEqual(result.status, 0, "must exit non-zero when the main root cannot be resolved");
+		assert.ok(result.stderr.trim().length > 0, "must say why on stderr");
+		assert.ok(!existsSync(path.join(dir, "empty", ".gitignore")), "must not invent a .gitignore");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
 	}
 });
