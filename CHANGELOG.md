@@ -272,6 +272,19 @@ Maintenance:
   prelude and weakening Create's main-checkout guard each turn a test red, while
   the static assertions alone caught only the first.
 
+- **The `worktree` skill's Create section now says what `BASE_STACKED` is for,
+  and its root-resolution note no longer overstates what the ignore guard
+  does.** The guard added in #113 was described as appending
+  `.worktrees/<slug>` like every other recipe, but it appends the directory
+  pattern (`.worktrees/`) — the sentence claimed something the block does not
+  do, and the two cases are now stated separately. Separately, `BASE_STACKED`
+  — the opt-in #114 added for deliberately stacking on an unmerged base —
+  existed only inside the recipe's comment, so a reader who skims the section
+  instead of pasting the block never learned that an unmerged `BASE` is refused
+  rather than silently accepted. The notes now say the check is both ancestry
+  and `git log origin/dev..BASE`, and that `BASE_STACKED=1` proceeds with a
+  warning on stderr. Prose only: no recipe and no test changed.
+
 ## v1.11.0 — 2026-11-09
 
 Added:

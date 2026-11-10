@@ -61,8 +61,9 @@ If `.gitignore` changed, commit that change on a feature branch off `dev`
 request workflow.
 
 Every recipe below resolves the **main** checkout root with
-`git rev-parse --path-format=absolute --git-common-dir`, then appends
-`.worktrees/<slug>` - the ignore guard above included. That works from
+`git rev-parse --path-format=absolute --git-common-dir` before touching a path,
+then appends `.worktrees/<slug>`; the ignore guard above resolves that same
+root, but appends the directory pattern rather than a slug. That works from
 anywhere, including from inside a linked worktree - where `--show-toplevel`
 would return the worktree you are standing in and silently nest the path. The
 one thing that still must not happen is a `git worktree remove` issued from
@@ -184,6 +185,11 @@ Notes:
   shared and applies cleanly in the worktree) or commit them to a temp branch.
 - `git worktree add path dev` fails with "already used by worktree" when `dev`
   is checked out in the main tree; base on `origin/dev` instead.
+- An unmerged feature branch as `BASE` is **refused**, not silently stacked on:
+  the block checks `git log origin/dev.."$BASE"` as well as ancestry, and exits
+  non-zero listing the commits it carries. `BASE_STACKED=1` is the deliberate
+  opt-in for the legitimate stacked case - it proceeds and warns on stderr, so
+  the stack is visible in the output instead of implied by it.
 
 After creating, copy project settings (gitignored, so absent from the new tree)
 and link pi's packages if you will run tests:
