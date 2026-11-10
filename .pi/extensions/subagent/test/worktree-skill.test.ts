@@ -16,7 +16,7 @@
 
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
@@ -29,6 +29,113 @@ const GITIGNORE = readFileSync(path.join(REPO_ROOT, ".gitignore"), "utf8");
 /** Number of linked worktrees (main checkout excluded) in a `--porcelain` listing. */
 function linkedCount(porcelain: string): number {
 	return Math.max(0, (porcelain.match(/^worktree /gm) ?? []).length - 1);
+}
+
+// ---------------------------------------------------------------------------
+// A `tmux` stand-in for the Remove recipe's session sweep
+// ---------------------------------------------------------------------------
+
+interface FakeTmux {
+	/** `PATH` (fake bin first) plus the fake's own file locations, for `runScript`. */
+	env: Record<string, string>;
+	/** Every `kill-session -t <name>` the fake received, in call order. */
+	kills(): Promise<string[]>;
+	cleanup(): Promise<void>;
+}
+
+/**
+ * The fake answers exactly two subcommands of the Remove recipe - `list-panes -a
+ * -F` and `kill-session -t` - and fails loudly on anything else, so it cannot
+ * quietly satisfy a recipe that starts talking to a real server.
+ *
+ * It is faithful where the sweep's two bugs live:
+ *
+ * - `list-panes` emits **one row per pane**, tab-separated in the order the
+ *   recipe's own `-F` format names the fields (the fake checks that the format
+ *   still asks for both placeholders, then answers from a fixture), so a session
+ *   with two panes appears twice - which is what `tmux list-panes -a` really
+ *   prints.
+ * - A second `kill-session -t` for the same name fails with tmux's own wording
+ *   (`can't find session: <name>`), because the session is gone by then. That is
+ *   the failure the recipe's missing `sort -u` produced. Each attempt is logged
+ *   *before* that check, so the log records every kill the block asked for, not
+ *   only the ones that would have succeeded.
+ */
+async function fakeTmux(panes: Array<{ session: string; panePath: string }>): Promise<FakeTmux> {
+	const dir = await mkdtemp(path.join(tmpdir(), "fake-tmux-"));
+	const bin = path.join(dir, "bin");
+	const listing = path.join(dir, "panes.tsv");
+	const log = path.join(dir, "kills.log");
+	const killed = path.join(dir, "killed.txt");
+	await mkdir(bin);
+	await writeFile(listing, panes.map((p) => `${p.session}\t${p.panePath}`).join("\n") + "\n");
+
+	// One row per pane, in the order the recipe's format names the fields. Kept
+	// in Node rather than substituted from the recipe's `-F` string so the
+	// fixture survives a path full of backslashes without a second escaping
+	// layer; the fake checks that the format still asks for both fields.
+	const script = `#!/bin/sh
+set -u
+sub=""; fmt=""; target=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -S|-c|-n|-F|-t)
+      opt="$1"
+      shift
+      val=""
+      if [ "$#" -gt 0 ]; then val="$1"; shift; fi
+      case "$opt" in
+        -F) fmt="$val" ;;
+        -t) target="$val" ;;
+      esac
+      ;;
+    *) if [ -z "$sub" ]; then sub="$1"; fi; shift ;;
+  esac
+done
+case "$sub" in
+  list-panes)
+    case "$fmt" in
+      *'#{session_name}'*'#{pane_current_path}'*) ;;
+      *) printf 'fake tmux: unexpected -F format: %s\\n' "$fmt" >&2; exit 2 ;;
+    esac
+    cat "$FAKE_TMUX_PANES"
+    ;;
+  kill-session)
+    if [ -z "$target" ]; then printf 'fake tmux: kill-session without -t\\n' >&2; exit 2; fi
+    printf 'kill-session -t %s\\n' "$target" >> "$FAKE_TMUX_LOG"
+    if grep -qxF -- "$target" "$FAKE_TMUX_KILLED" 2>/dev/null; then
+      printf "can't find session: %s\\n" "$target" >&2
+      exit 1
+    fi
+    printf '%s\\n' "$target" >> "$FAKE_TMUX_KILLED"
+    ;;
+  *)
+    printf 'fake tmux: unsupported subcommand: %s\\n' "$sub" >&2
+    exit 2
+    ;;
+esac
+`;
+
+	const tmuxPath = path.join(bin, "tmux");
+	await writeFile(tmuxPath, script);
+	await chmod(tmuxPath, 0o755);
+
+	return {
+		env: {
+			// Fake first, then everything real the block also calls (`git`, `awk`, `sort`).
+			PATH: `${bin}:${process.env.PATH ?? ""}`,
+			FAKE_TMUX_PANES: listing,
+			FAKE_TMUX_LOG: log,
+			FAKE_TMUX_KILLED: killed,
+		},
+		kills: async () => {
+			if (!existsSync(log)) return [];
+			return (await readFile(log, "utf8")).split("\n").filter((line) => line !== "");
+		},
+		cleanup: async () => {
+			await rm(dir, { recursive: true, force: true });
+		},
+	};
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +202,19 @@ test("worktree skill: removal never runs the force delete unconditionally", () =
 	// A space in the repo root makes `$2` match nothing, leaking the session.
 	assert.ok(SKILL.includes("awk -F'\\t'"), "session sweep must split on a tab, not a space");
 	assert.ok(SKILL.includes("prune -n"), "removal must dry-run prune");
+});
+
+test("worktree skill: session sweep passes the path outside awk's escape rules", () => {
+	const remove = recipe("Remove", 0);
+	// `awk -v wt="$WT"` interprets C-style escapes in the value, so a worktree
+	// path containing a backslash arrives corrupted, matches no pane, and leaks
+	// the session while `git worktree remove` takes the tree out from under it.
+	assert.ok(!remove.includes("-v wt="), "the path must not reach awk through -v");
+	assert.ok(remove.includes('WT="$WT" awk'), "the path must reach awk through the environment");
+	assert.ok(remove.includes('ENVIRON["WT"]'), "awk must read the path from ENVIRON");
+	// `list-panes -a` prints one row per pane, so a multi-pane session appears
+	// several times and the loop kills the already-dead session again.
+	assert.ok(remove.includes("sort -u"), "the kill loop must receive deduplicated session names");
 });
 
 test("worktree skill: end-state check defines SLUG", () => {
@@ -416,5 +536,52 @@ test("ignore guard recipe: fails loudly outside a git repository instead of usin
 		assert.ok(!existsSync(path.join(dir, "empty", ".gitignore")), "must not invent a .gitignore");
 	} finally {
 		await rm(dir, { recursive: true, force: true });
+	}
+});
+test("remove recipe: kills each session rooted in the tree once, even with a backslash in the path", async () => {
+	// Two verified bugs in one sweep: `awk -v wt="$WT"` turns a backslash in the
+	// path into an escape (so the pane never matches and the session leaks while
+	// the tree is removed under a live shell), and `list-panes -a` prints one row
+	// per pane (so a multi-pane session is killed once per pane and errors on the
+	// second). Both are only visible by running the block against a listing.
+	//
+	// The backslash has to be in the *scratch root's* name: git records absolute
+	// paths in the worktree's own metadata, so a tree cannot be renamed into shape
+	// afterwards. `\t` rather than `\s` because `awk -v` only rewrites the escapes
+	// it recognises - mawk leaves an unknown `\s` alone, which would let the bug
+	// through.
+	const repo = await scratchRepo({ rootPrefix: "worktree-skill-back\\tslash-" });
+	const slug = "task-escaped";
+	const session = "pi-wt-task-escaped";
+	const wt = repo.pathOf(slug);
+	let fake: FakeTmux | undefined;
+	try {
+		await mkdir(path.dirname(wt), { recursive: true });
+		repo.git("worktree", "add", "-q", wt, "-b", slug, "origin/dev");
+		assert.ok(wt.includes("\\"), "fixture: the worktree path must contain a backslash");
+		assert.equal(linkedCount(repo.worktrees()), 1, "fixture: one linked worktree to remove");
+		assert.ok(repo.worktrees().includes(`worktree ${wt}`), "fixture: the worktree must be registered");
+
+		fake = await fakeTmux([
+			// Two panes of one session: the exact path, and a descendant.
+			{ session, panePath: wt },
+			{ session, panePath: path.join(wt, ".pi") },
+			// A session rooted elsewhere must survive the sweep.
+			{ session: "pi-unrelated", panePath: path.join(repo.root, "elsewhere") },
+		]);
+
+		const result = runScript(retarget(recipe("Remove", 0), { SLUG: slug }), {
+			cwd: repo.main,
+			env: fake.env,
+		});
+
+		assert.equal(result.status, 0, `remove failed:\n${result.stderr}`);
+		assert.ok(!existsSync(wt), "the worktree directory must be gone");
+		assert.ok(!repo.worktrees().includes(`worktree ${wt}`), "git must no longer list the worktree");
+		assert.deepEqual(await fake.kills(), [`kill-session -t ${session}`], "exactly one kill, of the matching session only");
+		assert.doesNotMatch(result.stderr, /can't find session/, "no kill may target an already-dead session");
+	} finally {
+		await fake?.cleanup();
+		await repo.cleanup();
 	}
 });
