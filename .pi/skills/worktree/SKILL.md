@@ -32,14 +32,25 @@ extensions and skills. A worktree outside the repo (e.g. in `/tmp`) is a
 different project and may not load them in headless mode.
 
 Before creating the first one, make sure the ignore entry exists (idempotent).
+The guard resolves the **main** checkout root first: this section is the first
+thing an agent reads, and the guard runs before Create's main-checkout refusal,
+so it is routinely run from inside a linked worktree - where a relative
+`.gitignore` is that worktree's own ignored copy, not the file the branch will
+commit. It fails loudly rather than falling back to the cwd when the root cannot
+be resolved (`dirname ""` is `.`, which would silently edit an unrelated file).
 The guard uses `-F` because the pattern is a literal path and `-x` so a longer
 line does not count as the entry; the newline is added first because appending
 to a file without a trailing newline would glue the entry onto its last line
 (verified: `node_modules` became `node_modules.worktrees/`):
 
 ```bash
-[ -s .gitignore ] && [ -n "$(tail -c 1 .gitignore)" ] && printf '\n' >> .gitignore
-grep -qxF '.worktrees/' .gitignore 2>/dev/null || printf '.worktrees/\n' >> .gitignore
+GIT_COMMON="$(git rev-parse --path-format=absolute --git-common-dir)" && [ -n "$GIT_COMMON" ] || {
+  echo "cannot resolve the main checkout root: git rev-parse --git-common-dir failed (run this inside the repository)" >&2
+  exit 1
+}
+MAIN="$(dirname "$GIT_COMMON")"
+[ -s "$MAIN/.gitignore" ] && [ -n "$(tail -c 1 "$MAIN/.gitignore")" ] && printf '\n' >> "$MAIN/.gitignore"
+grep -qxF '.worktrees/' "$MAIN/.gitignore" 2>/dev/null || printf '.worktrees/\n' >> "$MAIN/.gitignore"
 ```
 
 Either `.worktrees` or `.worktrees/` ignores the directory; the slash form is
@@ -51,10 +62,11 @@ request workflow.
 
 Every recipe below resolves the **main** checkout root with
 `git rev-parse --path-format=absolute --git-common-dir`, then appends
-`.worktrees/<slug>`. That works from anywhere, including from inside a linked
-worktree - where `--show-toplevel` would return the worktree you are standing
-in and silently nest the path. The one thing that still must not happen is a
-`git worktree remove` issued from inside the tree being removed.
+`.worktrees/<slug>` - the ignore guard above included. That works from
+anywhere, including from inside a linked worktree - where `--show-toplevel`
+would return the worktree you are standing in and silently nest the path. The
+one thing that still must not happen is a `git worktree remove` issued from
+inside the tree being removed.
 
 ## Safety rules (read first)
 

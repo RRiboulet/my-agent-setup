@@ -41,6 +41,29 @@ Fixed:
   the file path and capture command in the message, and stops the watcher
   rather than polling a file that cannot change.
 
+- **The `worktree` skill's ignore guard now edits the main checkout's
+  `.gitignore`, not the copy belonging to whichever worktree it runs from.**
+  The guard appended `.worktrees/` to a *relative* `.gitignore`, and
+  `## Location convention` is the first section an agent reads while the guard
+  runs before Create's main-checkout refusal — so it is routinely executed from
+  inside a linked worktree, where that relative path is the tree's own ignored
+  copy. The write succeeded, which is the problem: the branch that would commit
+  the entry never gained it, and the tree that did is the one that gets deleted.
+  It now resolves the root the way every other recipe does,
+  `dirname "$(git rev-parse --path-format=absolute --git-common-dir)"`, and
+  runs both the newline prelude and the `grep -qxF` probe against
+  `$MAIN/.gitignore`, exiting non-zero with a message when that root cannot be
+  resolved instead of silently using an empty variable — `dirname ""` is `.`,
+  which would edit an unrelated file. The guard's properties are unchanged: a
+  literal whole-line match, and the newline added first so a file with no
+  trailing newline still gains `node_modules\n.worktrees/\n` rather than
+  `node_modules.worktrees/`. Two executable tests pin it: running the block
+  from a linked worktree leaves that worktree's `.gitignore` byte-identical
+  while the main checkout's gains the entry idempotently, and running it
+  outside a repository fails loudly rather than writing into the cwd.
+  Restoring the relative paths turns both red, and so does deleting the
+  newline prelude.
+
 Maintenance:
 
 - **Upgrading native web search: OpenRouter is the native default again, and
