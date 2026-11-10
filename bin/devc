@@ -60,10 +60,33 @@ note() {
 
 run() {
 	if [ -n "${DEVC_DRY_RUN:-}" ]; then
-		printf '+ %s\n' "$*" >&2
+		printf '+ %s\n' "$(render_argv "$@")" >&2
 		return 0
 	fi
 	"$@"
+}
+
+# Render an argv the way a user could paste it back: one word per argument,
+# each shell-quoted. A dry run's job is to show the command that would run, so
+# the preview is generated from the same argv the exec gets, not written by hand
+# beside it — a hand-written preview is exactly how the `--remote-env` pair went
+# missing.
+render_argv() {
+	local out='' a
+	for a in "$@"; do
+		out+="$(printf '%q ' "$a")"
+	done
+	printf '%s' "${out% }"
+}
+
+# Dry run prints the argv; otherwise exec it. Callers build the argv once and
+# pass it here so there is no second copy to drift.
+exec_or_print() {
+	if [ -n "${DEVC_DRY_RUN:-}" ]; then
+		printf '+ %s\n' "$(render_argv "$@")" >&2
+		return 0
+	fi
+	exec "$@"
 }
 
 # ---------------------------------------------------------------- environment
@@ -167,7 +190,14 @@ cfg_hash() {
 			find .devcontainer -maxdepth 1 -type f \
 				\( -name '*.json' -o -name '*.yml' -o -name '*.yaml' -o -name 'Dockerfile' -o -name '*.sh' \) \
 				-print0 2>/dev/null | sort -z | xargs -0 -r cat
-			[ -f .dockerignore ] && cat .dockerignore
+			# `if`, not `[ -f .dockerignore ] && cat .dockerignore`: the group's
+			# status is that of its last command, so the `&&` leaves a project
+			# without a .dockerignore returning 1 — and in a command substitution
+			# under `set -e` that aborts devc with no message at all. Measured:
+			# rc=1, empty output, until `touch .dockerignore` made it rc=0.
+			if [ -f .dockerignore ]; then
+				cat .dockerignore
+			fi
 		} | sha256sum | cut -d' ' -f1
 	)
 }
@@ -178,12 +208,29 @@ is_running() {
 
 # ------------------------------------------------------------------- locking
 
+# The per-project lock serializes the build-time half of a run: `ensure_up`'s
+# probe, stamp and uid checks, and `cmd_rebuild`'s container replacement. It is
+# released before an interactive exec (see `ensure_up`), so it does not — and
+# cannot — protect a shell that is already running inside the container: a
+# `devc rebuild` on an attached project replaces the container under it. That
+# limit is the price of not holding a lock for the life of every session, which
+# deadlocked the project for everyone else. State it here so the guard in
+# `cmd_rebuild` is not mistaken for more than it is.
 lock_project() {
 	local name="$1"
 	local lockfile="${TMPDIR:-/tmp}/devc-$name.lock"
+	# A dry run prints and returns without touching the daemon or the stamp, so it
+	# takes no lock: queueing a preview behind a live build for up to `flock -w`'s
+	# 900s, silently, is worse than useless. (It would also print its preview only
+	# after the wait, so the user sees nothing at all.)
+	if [ -n "${DEVC_DRY_RUN:-}" ]; then
+		return 0
+	fi
 	exec 9>"$lockfile"
-	if ! flock -w 900 9; then
-		die "another devc run is still working on $name (lock: $lockfile)"
+	# `flock` waits in silence; say so, or a held lock looks like a hang.
+	if ! flock -n 9; then
+		note "another devc run holds $name's lock; waiting for it"
+		flock -w 900 9 || die "another devc run is still working on $name (lock: $lockfile)"
 	fi
 }
 
@@ -197,7 +244,11 @@ ensure_up() {
 	lock_project "$name"
 
 	if [ -n "${DEVC_DRY_RUN:-}" ]; then
-		printf '+ devcontainer up --workspace-folder %s  (skipped when already running)\n' "$dir" >&2
+		# Deliberately not a `+` line: which branch this takes (reconcile, create,
+		# or neither) is not known without probing the daemon, so this is a sketch
+		# of the step, not a command to paste. `+` is reserved for the argv that
+		# actually executes, so a preview can be copied as-is.
+		note "would ensure: devcontainer up --workspace-folder $dir (skipped when already running)"
 		return 0
 	fi
 
@@ -257,43 +308,50 @@ attach_shell() {
 	name="$(basename "$dir")"
 	ensure_up "$dir"
 	local remote='export PI_TRUE_COLOR=1 COLORTERM=truecolor; if command -v zsh >/dev/null 2>&1; then exec zsh -l; else exec bash -l; fi'
+	local inner=(devcontainer exec --workspace-folder "$dir" \
+		--remote-env PI_TRUE_COLOR=1 --remote-env COLORTERM=truecolor \
+		bash -lc "$remote")
 	if [ -n "${TMUX:-}" ]; then
 		# Already in tmux: nesting a second session would fight the outer one.
-		if [ -n "${DEVC_DRY_RUN:-}" ]; then
-			printf '+ devcontainer exec --workspace-folder %s bash -lc <login shell>\n' "$dir" >&2
-			return 0
-		fi
-		exec devcontainer exec --workspace-folder "$dir" --remote-env PI_TRUE_COLOR=1 --remote-env COLORTERM=truecolor bash -lc "$remote"
-	fi
-	if [ -n "${DEVC_DRY_RUN:-}" ]; then
-		printf '+ tmux new-session -A -s dev-%s -- devcontainer exec --workspace-folder %s bash -lc <login shell>\n' \
-			"$name" "$dir" >&2
+		exec_or_print "${inner[@]}"
+		# Only reached under a dry run, where exec_or_print returns instead of
+		# exec'ing; without it the tmux form below prints as well.
 		return 0
 	fi
-	exec tmux new-session -A -s "dev-$name" -- \
-		devcontainer exec --workspace-folder "$dir" --remote-env PI_TRUE_COLOR=1 --remote-env COLORTERM=truecolor bash -lc "$remote"
+	exec_or_print tmux new-session -A -s "dev-$name" -- "${inner[@]}"
 }
 
 exec_in() {
 	local dir="$1"
 	shift
 	ensure_up "$dir"
-	if [ -n "${DEVC_DRY_RUN:-}" ]; then
-		printf '+ devcontainer exec --workspace-folder %s %s\n' "$dir" "$*" >&2
-		return 0
-	fi
-	exec devcontainer exec --workspace-folder "$dir" --remote-env PI_TRUE_COLOR=1 --remote-env COLORTERM=truecolor "$@"
+	exec_or_print devcontainer exec --workspace-folder "$dir" \
+		--remote-env PI_TRUE_COLOR=1 --remote-env COLORTERM=truecolor "$@"
 }
 
 cmd_rebuild() {
 	local dir="$1" no_cache="${2:-}"
 	require_docker
+	# Serialized against `ensure_up` for the same reason a build is: both decide
+	# what the container is. What it does not do is protect a live session — see
+	# `lock_project` for why that is the intended limit rather than an oversight.
+	lock_project "$(basename "$dir")"
 	local args=(up --workspace-folder "$dir" --remove-existing-container)
 	if [ "$no_cache" = "--no-cache" ]; then
 		args+=(--build-no-cache)
 	fi
-	note "recreating the container; named volumes are kept"
+	if [ -n "${DEVC_DRY_RUN:-}" ]; then
+		note "would recreate the container; named volumes are kept"
+	else
+		note "recreating the container; named volumes are kept"
+	fi
 	run devcontainer "${args[@]}"
+	if [ -n "${DEVC_DRY_RUN:-}" ]; then
+		# The stamp says "this container was built from this config". A dry run
+		# has not built anything, so writing it would make `devc doctor` call a
+		# stale container current.
+		return 0
+	fi
 	mkdir -p "$STATE_DIR"
 	cfg_hash "$dir" >"$STATE_DIR/$(basename "$dir").cfgsha"
 }
@@ -456,6 +514,14 @@ usage() {
 
 # ----------------------------------------------------------------------- main
 
+# Resolve the project into `dir` before calling anything: `die` runs inside a
+# command substitution here, and a substitution that fails in *argument* position
+# does not abort under `set -e` — the callee simply receives an empty argument.
+# That is how `devc rebuild nosuchproj` used to print "no project named" and then
+# run `devcontainer up --workspace-folder '' --remove-existing-container`, which
+# recreates the container of whatever directory the user was standing in. An
+# assignment does abort, so the failure stays a failure.
+
 seed_roots
 
 case "${1:-}" in
@@ -469,18 +535,26 @@ ls | list)
 	;;
 up)
 	[ $# -ge 2 ] || die "usage: devc up <name>"
-	ensure_up "$(find_project "$2")"
+	dir="$(find_project "$2")"
+	ensure_up "$dir"
 	;;
 rebuild)
 	[ $# -ge 2 ] || die "usage: devc rebuild <name> [--no-cache]"
-	cmd_rebuild "$(find_project "$2")" "${3:-}"
+	dir="$(find_project "$2")"
+	cmd_rebuild "$dir" "${3:-}"
 	;;
 stop)
 	[ $# -ge 2 ] || die "usage: devc stop <name>"
-	cmd_stop "$(find_project "$2")"
+	dir="$(find_project "$2")"
+	cmd_stop "$dir"
 	;;
 doctor)
-	doctor "${2:+$(find_project "$2")}"
+	if [ $# -ge 2 ]; then
+		dir="$(find_project "$2")"
+		doctor "$dir"
+	else
+		doctor
+	fi
 	;;
 help | -h | --help)
 	usage

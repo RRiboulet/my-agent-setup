@@ -4,7 +4,63 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Added:
+
+- **A test harness for `bin/devc`** (`devc.test.ts`), which had none: it runs
+  the real script against a throwaway project with `docker`, `devcontainer` and
+  `tmux` stubbed on PATH. All six tests fail against the previous script, which
+  is the point — none of these bugs is reachable from the dry run, so the
+  artefacts they assert on are the ones that were wrong: exit status, the stamp
+  file, the argv the CLI actually received, and whether the lock was held at the
+  moment `up` ran.
+
 Fixed:
+
+- **`devc up|rebuild|stop|doctor <unknown>` used to carry on with an empty
+  workspace folder.** `find_project` dies with "no project named", but that
+  `die` ran inside `$( … )` in *argument* position, where a failed command
+  substitution does not abort under `set -e` — the callee simply receives `""`.
+  So `devc rebuild nosuchproj` printed the error and then ran `devcontainer up
+  --workspace-folder '' --remove-existing-container`: it recreated the container
+  of whatever directory the user happened to be standing in, while `devc up
+  nosuchproj` reported ` is already running` and exited 0. Every caller now
+  resolves the project into a variable first, whose failed assignment does
+  abort, and a test asserts the CLI is never reached with an empty path. Found
+  by reviewing the `devc` changes below — the same silent-error-path class they
+  fix, one function over.
+
+- **`devc` no longer dies silently on a project that has no `.dockerignore`.**
+  `cfg_hash` ended with `[ -f .dockerignore ] && cat .dockerignore`, so the
+  group's exit status was 1 for any project without that file, and under
+  `set -e` inside a command substitution `want="$(cfg_hash …)"` took the whole
+  run down: rc=1 with no output at all, `touch .dockerignore` and it was rc=0.
+  Every project without one — which is most of them — could not be opened at
+  all. The predicate is now an `if`, so the ignore file is still folded into the
+  hash when it exists and its absence is simply not a failure.
+- **`devc`'s dry run now prints the command it would run, not a sketch of it.**
+  The previews were hand-written next to separately-written `exec` calls, and
+  the printed line had already lost the `--remote-env PI_TRUE_COLOR=1
+  --remote-env COLORTERM=truecolor` pair — the one thing that flips pi's
+  truecolor detection — so a user copying a dry run to debug was copying a
+  command that behaves differently from the real one. The argv is now built
+  once and either printed shell-quoted or exec'd, and `+` marks only that argv:
+  `ensure_up`'s conditional step is a note, because which branch it takes is not
+  knowable without probing the daemon. A dry run also takes no lock: it used to
+  queue behind a live build for up to fifteen silent minutes before printing
+  anything, while holding the lock for nothing, and `rebuild`'s preview now says
+  "would recreate" rather than the affirmative "recreating".
+- **`devc rebuild` takes the project lock, and the lock's scope is written
+  down.** It never called `lock_project`, so `--remove-existing-container` could
+  interleave with a concurrent `devc up`. It is serialized now that the lock is
+  released before an interactive exec — and the comment says plainly what it
+  still cannot do: it does not protect a shell already attached, so a rebuild on
+  an attached project replaces the container under that session. Holding the
+  lock for a session's lifetime instead is what deadlocked the project for
+  every other run.
+- **A dry-run `devc rebuild` no longer writes the config stamp.** It printed the
+  command, then hashed the (unchanged) config and wrote the stamp anyway,
+  claiming the container had been rebuilt from the current config — so
+  `devc doctor` then reported a stale container as current.
 
 - **Native web search no longer claims the `opencode-go` plan, which never
   actually searched.** The Go path sent Anthropic's `web_search_20260318` tool
