@@ -288,6 +288,18 @@ Fixed:
   the two kinds and assert the status, the naming message and the absent stamp;
   they skip when running as root, which reads a 000 file regardless.
 
+- **`opencode-go` stops offering thinking levels when the live API explicitly
+  withdraws reasoning support.** A curated entry always won `reasoning` and
+  `thinkingLevelMap`, so a model that lost the capability upstream kept a
+  picker that did nothing until someone edited `models.json`. The transform now
+  records an explicit `capabilities.reasoning.supported: false`, and a merge
+  demotes that model — `reasoning: false`, no level map — while curation still
+  wins for input, compat, name and cost. The signal is deliberately explicit: a
+  payload with no capability block is information-free rather than a denial, so
+  a partial or regressed response cannot silently disable thinking on a curated
+  model. The marker is stripped before the model is cached or registered, and
+  both directions are mutation-checked in `tests/models.test.ts`.
+
 Maintenance:
 
 - **The `opencode-go` model pipeline is now covered by tests.**

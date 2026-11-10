@@ -132,6 +132,18 @@ test("infers reasoning support from an effort list when the supported flag is ab
   assert.equal(synthetic.thinkingLevelMap?.high, "high");
 });
 
+test("marks an explicit live denial, and only an explicit one", () => {
+  assert.equal(
+    transformApiModel({ id: "denied", capabilities: { reasoning: { supported: false } } }).reasoningDenied,
+    true,
+  );
+  assert.equal(transformApiModel({ id: "silent" }).reasoningDenied, undefined);
+  assert.equal(
+    transformApiModel({ id: "granted", capabilities: { reasoning: { supported: true } } }).reasoningDenied,
+    undefined,
+  );
+});
+
 test("does not infer reasoning support when the API says supported: false", () => {
   const synthetic = transformApiModel({
     id: "synthetic-unsupported",
@@ -303,7 +315,8 @@ test("curation wins for reasoning, input, compat, name and maxTokens", () => {
   assert.deepEqual(merged.compat, { supportsStore: false });
 });
 
-test("curation wins even when the live API reports no reasoning (policy pending TODO-79c4bd01)", () => {
+test("curation keeps its reasoning when the live payload is silent", () => {
+  // A payload with no capabilities block is information-free, not a denial.
   const liveModel = model({ id: "m", reasoning: false });
   const curated = model({ id: "m", reasoning: true, thinkingLevelMap: { low: "low", high: "high" } });
 
@@ -311,6 +324,24 @@ test("curation wins even when the live API reports no reasoning (policy pending 
 
   assert.equal(merged.reasoning, true);
   assert.deepEqual(merged.thinkingLevelMap, { low: "low", high: "high" });
+});
+
+test("lets an explicit live denial turn curated reasoning off", () => {
+  const liveModel = model({ id: "m", reasoning: false, reasoningDenied: true });
+  const curated = model({ id: "m", reasoning: true, thinkingLevelMap: { low: "low", high: "high" } });
+
+  const [merged] = mergeWithEmbedded([liveModel], [curated]);
+
+  assert.equal(merged.reasoning, false);
+  assert.equal(merged.thinkingLevelMap, undefined);
+});
+
+test("strips the live denial marker from merged models", () => {
+  const curated = mergeWithEmbedded([model({ id: "m", reasoningDenied: true })], [model({ id: "m" })])[0];
+  const apiOnly = mergeWithEmbedded([model({ id: "api-only", reasoningDenied: true })], [])[0];
+
+  assert.equal("reasoningDenied" in curated, false);
+  assert.equal("reasoningDenied" in apiOnly, false);
 });
 
 test("keeps the live compat block when curation has none", () => {
