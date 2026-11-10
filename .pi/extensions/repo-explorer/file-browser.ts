@@ -66,6 +66,8 @@ export interface FileBrowserOptions {
 	files: string[];
 	/** Directory to open in; "" (the default) is the repository root. */
 	initialDir?: string;
+	/** Optional collection of repo-relative paths rendered in red (changed vs upstream). */
+	changedFiles?: Iterable<string>;
 }
 
 /** What the browser resolves to: the chosen file, or null when the user backed all the way out. */
@@ -140,12 +142,16 @@ function singleLine(get: () => string, paddingX = 1): Component {
 	};
 }
 
+
+
 export class FileBrowser extends Container implements Focusable {
 	private readonly tui: TUI;
 	private readonly theme: Theme;
 	private readonly keybindings: KeyMatcher;
 	private readonly files: string[];
 	private readonly branchLabel: string;
+	private readonly changed: Set<string>;
+	private readonly changedDirs: Set<string>;
 	private readonly onDone: (result: FileBrowserResult) => void;
 	private readonly query: Input;
 	private readonly noMatch: Component;
@@ -183,6 +189,15 @@ export class FileBrowser extends Container implements Focusable {
 		this.keybindings = keybindings;
 		this.files = options.files;
 		this.branchLabel = options.branchLabel;
+		this.changed = new Set(options.changedFiles ?? []);
+		this.changedDirs = new Set();
+		for (const changedPath of this.changed) {
+			let slash = changedPath.indexOf("/");
+			while (slash > 0) {
+				this.changedDirs.add(changedPath.slice(0, slash));
+				slash = changedPath.indexOf("/", slash + 1);
+			}
+		}
 		this.onDone = done;
 		this.dir = options.initialDir ?? "";
 
@@ -217,7 +232,7 @@ export class FileBrowser extends Container implements Focusable {
 	private selectTheme(): SelectListTheme {
 		return {
 			selectedPrefix: (text: string) => this.theme.fg("accent", text),
-			selectedText: (text: string) => this.theme.fg("accent", text),
+			selectedText: (text: string) => text,
 			description: (text: string) => this.theme.fg("muted", text),
 			scrollInfo: (text: string) => this.theme.fg("dim", text),
 			noMatch: (text: string) => this.theme.fg("warning", text),
@@ -243,11 +258,17 @@ export class FileBrowser extends Container implements Focusable {
 			this.listContainer.addChild(this.noMatch);
 			return;
 		}
-		const items: SelectItem[] = shown.map((entry) => ({
-			// Display is sanitized; `value` stays the byte-faithful path.
-			value: entry.path,
-			label: sanitizeDisplay(entry.isDir ? `${entry.name}/` : entry.name),
-		}));
+		const items: SelectItem[] = shown.map((entry) => {
+			const base = entry.isDir ? `${entry.name}/` : entry.name;
+			const display = sanitizeDisplay(base);
+			const isChanged = this.changed.has(entry.path) || (entry.isDir && this.changedDirs.has(entry.path));
+			const label = isChanged ? this.theme.fg("error", display) : display;
+			return {
+				// Display is sanitized; `value` stays the byte-faithful path.
+				value: entry.path,
+				label,
+			};
+		});
 		const list = new SelectList(items, Math.min(items.length, MAX_VISIBLE), this.selectTheme());
 		list.onSelect = (item) => this.activate(item.value);
 		// No onCancel: `handleInput` routes Esc/Ctrl+C to `back` before the list
