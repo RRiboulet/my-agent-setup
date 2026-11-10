@@ -182,21 +182,51 @@ container_id() {
 # ignore file. `devcontainer up` on 0.90 does not recreate an existing container
 # when these change — it reports success and leaves the old one — so devc tracks
 # the hash itself and recreates when it moves.
+#
+# Both config layouts `has_devcontainer` accepts are hashed: the directory form
+# (`.devcontainer/*`) and the repo-root file (`.devcontainer.json`). Reading only
+# the directory left the root style hashing an empty stream — sha256 e3b0c442… —
+# forever, so `ensure_up` never reconciled it and `doctor` could never call it
+# stale.
+#
+# An unreadable config file is not a config with less in it: it is an unknown
+# config. Hashing whatever `cat` managed to read writes a stamp claiming the
+# container matches a config nobody saw, and the next run then reports "config
+# changed; recreating" on every run. So every read fails loudly, naming the
+# file. A *missing* file stays ordinary — it changes nothing about the config.
 cfg_hash() {
 	local dir="$1"
 	(
 		cd "$dir" || exit 1
+		local found=0 f
 		{
-			find .devcontainer -maxdepth 1 -type f \
+			while IFS= read -r -d '' f; do
+				f="${f#./}"
+				found=1
+				cat "$f" 2>/dev/null || die "cannot read $f"
+			done < <(find .devcontainer -maxdepth 1 -type f \
 				\( -name '*.json' -o -name '*.yml' -o -name '*.yaml' -o -name 'Dockerfile' -o -name '*.sh' \) \
-				-print0 2>/dev/null | sort -z | xargs -0 -r cat
+				-print0 2>/dev/null | sort -z)
+			# The repo-root layout. An `if`, like the ignore file below: the
+			# group's status is its last command's, so `[ -f … ] && cat` here
+			# would make every directory-style project fail under `set -e`.
+			if [ -f .devcontainer.json ]; then
+				found=1
+				cat .devcontainer.json 2>/dev/null || die "cannot read .devcontainer.json"
+			fi
 			# `if`, not `[ -f .dockerignore ] && cat .dockerignore`: the group's
 			# status is that of its last command, so the `&&` leaves a project
 			# without a .dockerignore returning 1 — and in a command substitution
 			# under `set -e` that aborts devc with no message at all. Measured:
 			# rc=1, empty output, until `touch .dockerignore` made it rc=0.
 			if [ -f .dockerignore ]; then
-				cat .dockerignore
+				cat .dockerignore 2>/dev/null || die "cannot read .dockerignore"
+			fi
+			# Nothing matched means there is no config to hash, not a config that
+			# hashes to the empty stream. Saying so is the difference between an
+			# error and a plausible-looking 64-hex stamp that never moves.
+			if [ "$found" -eq 0 ]; then
+				die "no devcontainer config found in $dir"
 			fi
 		} | sha256sum | cut -d' ' -f1
 	)

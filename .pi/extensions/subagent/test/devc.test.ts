@@ -1,4 +1,4 @@
-// `bin/devc` had no test harness, and the three bugs pinned here share a reason
+// `bin/devc` had no test harness, and the bugs pinned here share a reason
 // why: none of them is visible from the dry run. `cfg_hash` runs *after* the
 // dry run has returned, the config stamp is written where only a real run
 // reaches it, and the rebuild lock is only observable while a rebuild is in
@@ -12,7 +12,7 @@
 // these tests failed there.
 
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -142,6 +142,16 @@ function devc(sb: Sandbox, args: string[], extraEnv: NodeJS.ProcessEnv = {}) {
 const stampPath = (sb: Sandbox) => path.join(sb.state, "devc", "proj.cfgsha");
 const stamp = (sb: Sandbox) => readFileSync(stampPath(sb), "utf8").trim();
 
+// sha256 of an empty stream. `cfg_hash` produced exactly this, forever, for any
+// project it failed to read — so it is the one value that proves "nothing was
+// hashed" rather than "this config was hashed".
+const EMPTY_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+// A 000 file is readable by root regardless, so the unreadable-file cases cannot
+// be constructed there; skip rather than assert something the kernel overrides.
+const AS_ROOT = typeof process.getuid === "function" && process.getuid() === 0;
+const SKIP_ROOT = AS_ROOT ? "running as root: a 000 file is still readable" : false;
+
 // `+` marks the argv that would execute, and nothing else: `ensure_up` prints its
 // conditional step as a note. So the preview is the last `+` line.
 const previewLines = (stderr: string) => stderr.split("\n").filter((line) => line.startsWith("+ "));
@@ -173,6 +183,72 @@ test("devc: .dockerignore still feeds the config hash when it exists", () => {
 
 	assert.equal(devc(sb, ["up", "proj"]).status, 0);
 	assert.equal(stamp(sb), withIgnore, "the hash must be stable across identical runs");
+});
+
+test("devc: a root-style .devcontainer.json is hashed, and editing it moves the hash", () => {
+	// `has_devcontainer` accepts a repo-root `.devcontainer.json` as well as
+	// `.devcontainer/devcontainer.json`, but `cfg_hash` used to walk only
+	// `.devcontainer/`. For the root style it therefore hashed an empty stream
+	// (`e3b0c442…`) forever: `ensure_up` never saw a config change and `devc
+	// doctor` could never call the container stale.
+	const sb = sandbox();
+	rmSync(path.join(sb.project, ".devcontainer"), { recursive: true, force: true });
+	const rootConfig = path.join(sb.project, ".devcontainer.json");
+	writeFileSync(rootConfig, '{"image":"alpine"}\n');
+
+	const first = devc(sb, ["up", "proj"]);
+	assert.equal(first.status, 0, `devc up must succeed for the root style; stderr: ${first.stderr}`);
+	assert.match(stamp(sb), /^[0-9a-f]{64}$/);
+	assert.notEqual(stamp(sb), EMPTY_SHA256, "an empty stream is not a hash of this project's config");
+	const base = stamp(sb);
+
+	assert.equal(devc(sb, ["up", "proj"]).status, 0);
+	assert.equal(stamp(sb), base, "the hash must be stable across identical runs");
+
+	writeFileSync(rootConfig, '{"image":"ubuntu"}\n');
+	const changed = devc(sb, ["up", "proj"]);
+	assert.equal(changed.status, 0);
+	assert.notEqual(stamp(sb), base, "editing the root .devcontainer.json must change the hash");
+	// The hash is only worth having if a change reaches the container.
+	assert.match(changed.stderr, /config changed since this container was created; recreating/);
+});
+
+test("devc: an unreadable .dockerignore fails loudly, naming the file", { skip: SKIP_ROOT }, () => {
+	// Missing and unreadable used to take different silent routes: missing was
+	// tolerated (right), unreadable killed the run with rc=1 and no message
+	// (wrong, and the same `set -e` shape as the bug the `if` fixed). An
+	// unreadable config file means the config is unknown, so devc must say so.
+	const sb = sandbox();
+	const ignore = path.join(sb.project, ".dockerignore");
+	writeFileSync(ignore, "node_modules\n");
+	chmodSync(ignore, 0o000);
+	try {
+		const run = devc(sb, ["up", "proj"]);
+		assert.equal(run.status, 1, `an unreadable .dockerignore must fail; stderr: ${run.stderr}`);
+		assert.match(run.stderr, /cannot read (\.\/)?\.dockerignore/, "the failure must name the file");
+		assert.equal(existsSync(stampPath(sb)), false, "no stamp: nothing was built from a config devc could not read");
+		assert.deepEqual(sb.calls(), [], "the CLI must not be reached with an unknown config");
+	} finally {
+		chmodSync(ignore, 0o644);
+	}
+});
+
+test("devc: an unreadable .devcontainer file fails loudly instead of hashing what it could read", { skip: SKIP_ROOT }, () => {
+	// This one used to leak `cat: … Permission denied` to stderr *and* hash the
+	// partial stream, so the next run reported "config changed; recreating" —
+	// churn on every run, for a config devc never actually saw.
+	const sb = sandbox();
+	const cfg = path.join(sb.project, ".devcontainer", "devcontainer.json");
+	chmodSync(cfg, 0o000);
+	try {
+		const run = devc(sb, ["up", "proj"]);
+		assert.equal(run.status, 1, `an unreadable config must fail; stderr: ${run.stderr}`);
+		assert.match(run.stderr, /cannot read .*devcontainer\.json/, "the failure must name the file");
+		assert.equal(existsSync(stampPath(sb)), false, "no stamp for a config that was never fully read");
+		assert.deepEqual(sb.calls(), [], "the CLI must not be reached with an unknown config");
+	} finally {
+		chmodSync(cfg, 0o644);
+	}
 });
 
 test("devc: dry run prints the argv it would exec, --remote-env included", () => {
