@@ -106,6 +106,29 @@ Fixed:
   would let the bug through. Restoring `-v wt="$WT"` leaves zero kill lines;
   dropping `sort -u` leaves two. `scratchRepo` gained a `rootPrefix` option so a
   test can choose the path's shape.
+- **The `worktree` skill's removal recipe now stops at the first failure, so a
+  refused removal of a dirty tree no longer reads as success.** `git worktree
+  remove` exits 128 when the tree has uncommitted work, the tree survives and
+  `git worktree list` still lists it — but the block ended in
+  `rmdir -p ... 2>/dev/null || true`, which absorbed that status, so the whole
+  block exited 0. Reproduced: removal 128, block 0, worktree and its untracked
+  file intact. An agent reads exit 0 as "removed" and moves on to the branch
+  cleanup with the branch still checked out. The removal block, the branch
+  cleanup and the end-state check now each set `set -euo pipefail`, and the
+  prose says so, because a reader pasting one into a larger script turns on
+  errexit for the rest of it. They also resolve the main checkout from
+  `--path-format=absolute --git-common-dir` behind an explicit guard and run
+  every git call as `git -C "$R"`: with a deleted cwd that command exits 128 and
+  prints nothing, while `dirname ""` yields `.`, so the old blocks built `$WT`
+  from `./.worktrees/<slug>` and ran git in the wrong directory instead of
+  saying to run from a live checkout. Only the tmux `list-panes` sweep keeps a
+  `|| true` — no server running is the normal case, and under `pipefail` that
+  status would otherwise abort a clean removal — while the removal itself has no
+  escape hatch, and the `rmdir -p ... || true` survives only after a successful
+  removal. Pinned by executable tests in `worktree-skill.test.ts`: a dirty
+  worktree leaves the block non-zero with the tree and its file intact, a clean
+  one removes it and prints no tmux noise, and the end-state and branch-cleanup
+  blocks fail with "run from a live checkout" when their cwd has been deleted.
 
 Maintenance:
 
