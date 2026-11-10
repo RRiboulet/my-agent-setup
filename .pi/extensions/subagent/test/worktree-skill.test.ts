@@ -1,17 +1,37 @@
-// Static checks on the worktree skill, mirroring tmux-skill-socket.test.ts:
-// the failures that actually happen are documentation drift (a future edit
-// re-introducing a broken recipe), so pin the safe forms. Every assertion below
-// traces to a failure reproduced in a scratch repo, not to a preference - a test
-// that only checks a token appears passes just as happily on a broken recipe.
+// Checks on the worktree skill.
+//
+// Two layers, and both are load-bearing:
+//
+// - Static assertions pin the shape of a recipe where the shape *is* the fix
+//   (the commented-out force removal, the tab-separated sweep). They cannot
+//   catch a block that no longer runs, which is how a Create block that died on
+//   its first command and a Remove block that exited 0 after refusing to remove
+//   a dirty tree both shipped.
+// - Executable tests run the fenced blocks against a scratch repository
+//   (`worktree-recipes.ts`) and assert real exit statuses and real filesystem
+//   state. Anything about "does this recipe work" belongs here.
+//
+// Prefer the executable form for new assertions: a substring check passes just
+// as happily on a broken recipe.
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import * as path from "node:path";
 import { test } from "node:test";
 
-const REPO_ROOT = path.resolve(new URL("../../../..", import.meta.url).pathname);
+import { blocks, REPO_ROOT, recipe, retarget, runScript, scratchRepo } from "./worktree-recipes.ts";
+
 const SKILL = readFileSync(path.join(REPO_ROOT, ".pi/skills/worktree/SKILL.md"), "utf8");
 const GITIGNORE = readFileSync(path.join(REPO_ROOT, ".gitignore"), "utf8");
+
+/** Number of linked worktrees (main checkout excluded) in a `--porcelain` listing. */
+function linkedCount(porcelain: string): number {
+	return Math.max(0, (porcelain.match(/^worktree /gm) ?? []).length - 1);
+}
+
+// ---------------------------------------------------------------------------
+// Static: properties of the file itself
+// ---------------------------------------------------------------------------
 
 test("worktree skill: ignore guard is exact-line and newline-safe", () => {
 	assert.ok(SKILL.includes("grep -qxF '.worktrees/'"), "guard must match the exact line");
@@ -118,4 +138,130 @@ test("worktree skill: names the extension conflict a worktree cwd used to cause"
 		SKILL.includes("cd` into the worktree inside each command"),
 		"must give the workaround for a checkout without the launcher fix",
 	);
+});
+
+test("worktree skill: no recipe block carries a CR", () => {
+	// AGENTS.md: a CRLF shell file makes bash fail with `$'\r': command not
+	// found` while `git status` stays clean, so the recipes must stay LF-only.
+	for (const block of blocks()) {
+		assert.ok(!block.code.includes("\r"), `${block.section}[${block.index}] carries a CR`);
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Executable: the recipes, run against a scratch repository
+// ---------------------------------------------------------------------------
+
+test("create recipe: makes a linked worktree on the new branch, based on origin/dev", async () => {
+	const repo = await scratchRepo();
+	try {
+		const slug = "task-one";
+		const result = runScript(retarget(recipe("Create", 0), { SLUG: slug }), { cwd: repo.main });
+		assert.equal(result.status, 0, `create failed:\n${result.stderr}`);
+
+		const wt = repo.pathOf(slug);
+		assert.ok(existsSync(wt), `expected a worktree at ${wt}`);
+		assert.equal(repo.gitIn(wt, "rev-parse", "--abbrev-ref", "HEAD").trim(), slug);
+		assert.equal(repo.gitIn(wt, "rev-parse", "HEAD").trim(), repo.originDev(), "must start at origin/dev");
+
+		const listing = repo.worktrees();
+		assert.ok(listing.includes(`worktree ${wt}`), "the worktree must be registered");
+		assert.ok(listing.includes(`branch refs/heads/${slug}`), "on the new branch");
+		assert.equal(linkedCount(listing), 1);
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("create recipe: leaves no command that relies on errexit being off", async () => {
+	// The failure the removal fix addresses is a block that only looks safe
+	// because nothing sets -e. Create must also work when a caller does set it,
+	// which catches an early `grep`/`[` probe whose non-zero status is ignored.
+	const repo = await scratchRepo();
+	try {
+		const slug = "task-errexit";
+		const result = runScript(retarget(recipe("Create", 0), { SLUG: slug }), {
+			cwd: repo.main,
+			errexit: true,
+		});
+		assert.equal(result.status, 0, `create failed under set -euo pipefail:\n${result.stderr}`);
+		assert.ok(existsSync(repo.pathOf(slug)));
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("create recipe: exits non-zero when the slug's branch is checked out elsewhere", async () => {
+	// A branch can be checked out in at most one worktree. The block's last
+	// command is the `git worktree add`, so its failure must be the exit status:
+	// an agent that pasted it into a script would otherwise read success.
+	const repo = await scratchRepo();
+	try {
+		const slug = "taken";
+		repo.git("worktree", "add", "-q", path.join(repo.root, "linked"), "-b", slug, "origin/dev");
+
+		const result = runScript(retarget(recipe("Create", 0), { SLUG: slug }), { cwd: repo.main });
+		assert.notEqual(result.status, 0, "create must fail when the branch is checked out elsewhere");
+		assert.match(result.stderr, /already used by worktree/);
+		assert.ok(!existsSync(repo.pathOf(slug)), "must not leave a half-created worktree behind");
+		assert.equal(linkedCount(repo.worktrees()), 1, "only the pre-existing worktree remains");
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("create recipe: re-running it for the same slug fails instead of nesting", async () => {
+	const repo = await scratchRepo();
+	try {
+		const slug = "task-twice";
+		const script = retarget(recipe("Create", 0), { SLUG: slug });
+		assert.equal(runScript(script, { cwd: repo.main }).status, 0);
+		const before = repo.worktrees();
+
+		const again = runScript(script, { cwd: repo.main });
+		assert.notEqual(again.status, 0, "a second create must not exit 0");
+		assert.match(again.stderr, /path already exists/);
+		assert.equal(repo.worktrees(), before, "the listing must not change");
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("create recipe: refuses to run from inside a linked worktree", async () => {
+	// Run from a linked worktree, `--show-toplevel` is that worktree and the new
+	// tree would be nested inside it: `.worktrees/<slug>` under the wrong root.
+	const repo = await scratchRepo();
+	try {
+		const linked = path.join(repo.root, "linked");
+		repo.git("worktree", "add", "-q", linked, "-b", "probe", "origin/dev");
+
+		const result = runScript(retarget(recipe("Create", 0), { SLUG: "nested" }), { cwd: linked });
+		assert.notEqual(result.status, 0, "create must refuse a linked-worktree cwd");
+		assert.match(result.stderr, /run this from the main checkout/);
+		assert.ok(!existsSync(path.join(linked, ".worktrees", "nested")), "must not nest a worktree");
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("ignore guard recipe: newline-safe, and idempotent when actually executed", async () => {
+	// The scratch clone's .gitignore is `node_modules` with no trailing newline,
+	// which is the documented failure mode: appending directly yields
+	// `node_modules.worktrees/`.
+	const repo = await scratchRepo();
+	try {
+		const guard = recipe("Location convention", 0);
+		const ignore = path.join(repo.main, ".gitignore");
+		assert.equal(readFileSync(ignore, "utf8"), "node_modules", "fixture: no trailing newline");
+
+		const first = runScript(guard, { cwd: repo.main });
+		assert.equal(first.status, 0, first.stderr);
+		assert.equal(readFileSync(ignore, "utf8"), "node_modules\n.worktrees/\n");
+
+		const second = runScript(guard, { cwd: repo.main });
+		assert.equal(second.status, 0, second.stderr);
+		assert.equal(readFileSync(ignore, "utf8"), "node_modules\n.worktrees/\n", "must be idempotent");
+	} finally {
+		await repo.cleanup();
+	}
 });

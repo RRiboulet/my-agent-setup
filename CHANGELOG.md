@@ -38,6 +38,29 @@ Maintenance:
   the direct Anthropic API. The `opencode-go` credential itself remains valid
   for the `/model` provider.
 
+- **The `worktree` skill's recipes are now executed, not just read.**
+  `worktree-skill.test.ts` was twelve `SKILL.includes(...)` assertions, and that
+  is how two broken recipes shipped green: a Create block that died on its first
+  command until the launcher fix, and a Remove block whose `rmdir -p ... || true`
+  turned a refused dirty-tree removal (exit 128) into exit 0. A new
+  `test/worktree-recipes.ts` extracts the fenced bash blocks from `SKILL.md` by
+  section and runs them with `bash -c` in a scratch repository — a bare
+  `origin`, a clone on `dev`, and a `.gitignore` with no trailing newline, which
+  is the guard's documented failure mode — so a recipe is pinned by what it does.
+  The runner is deliberately not wrapped in `set -e`: a block is pasted into a
+  shell as written, and a recipe that only looks safe because the harness added
+  errexit would pin the wrong thing. `errexit: true` is a separate, explicit
+  mode that prepends `set -euo pipefail`, so the shape the removal fix
+  introduces can be asserted and a block that relies on a failing probe being
+  ignored is caught. The new tests cover Create end to end (worktree on the new
+  branch, at the `origin/dev` tip, registered under `.worktrees/`), Create
+  refusing a cwd inside a linked worktree, Create failing non-zero when the
+  slug's branch is already checked out elsewhere and when re-run for the same
+  slug, and the ignore guard being newline-safe and idempotent when actually
+  executed. Both behaviours were mutation-checked: deleting the guard's newline
+  prelude and weakening Create's main-checkout guard each turn a test red, while
+  the static assertions alone caught only the first.
+
 ## v1.11.0 — 2026-11-09
 
 Added:
