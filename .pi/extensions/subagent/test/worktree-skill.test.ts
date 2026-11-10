@@ -15,7 +15,7 @@
 // as happily on a broken recipe.
 
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
@@ -707,6 +707,105 @@ test("remove recipe: branch cleanup fails loudly when the cwd is gone", async ()
 			`stderr must say what to do instead:\n${result.stderr}`,
 		);
 	} finally {
+		await repo.cleanup();
+	}
+});
+
+// ---------------------------------------------------------------------------
+// Repair: bookkeeping across a move
+// ---------------------------------------------------------------------------
+
+test("repair recipe: re-points a worktree after the whole root moves", async () => {
+	// A remounted `/workspace` moves main and every linked tree at once, so both
+	// recorded paths go stale: the tree's `.git` names the old main, and the main's
+	// admin entry names the old tree. This is not the "create then rename" mistake
+	// `scratchRepo({ rootPrefix })` exists to avoid - there a rename would
+	// invalidate the fixture; here the move is the scenario under test.
+	const repo = await scratchRepo();
+	const moved = `${repo.root}-moved`;
+	const slug = "task-moved";
+	const newMain = path.join(moved, "main");
+	const newWt = path.join(moved, "main", ".worktrees", slug);
+	try {
+		repo.git("worktree", "add", "-q", repo.pathOf(slug), "-b", slug, "origin/dev");
+		renameSync(repo.root, moved);
+
+		assert.notEqual(
+			runScript("git status --short --branch", { cwd: newWt }).status,
+			0,
+			"the tree's .git still names the old main checkout",
+		);
+		const before = runScript("git worktree list --porcelain", { cwd: newMain });
+		assert.ok(before.stdout.includes("prunable"), "the stale registration is marked prunable");
+		assert.ok(!before.stdout.includes(`worktree ${newWt}`), "and is not listed at its current path");
+
+		// Prune would delete the entry repair needs - the warning the skill gives
+		// before anyone reaches for "clean up".
+		const dryRun = runScript("git worktree prune -n", { cwd: newMain });
+		assert.match(dryRun.stdout + dryRun.stderr, /Removing worktrees\//);
+
+		const result = runScript(retarget(recipe("Repair", 0), { SLUG: slug }), { cwd: newMain });
+		assert.equal(result.status, 0, `repair failed:\n${result.stderr}`);
+
+		const after = runScript("git worktree list --porcelain", { cwd: newMain });
+		assert.ok(after.stdout.includes(`worktree ${newWt}`), "must be listed at its current path");
+		assert.equal(
+			runScript("git rev-parse --abbrev-ref HEAD", { cwd: newWt }).stdout.trim(),
+			slug,
+			"and git must work in the tree again",
+		);
+	} finally {
+		await rm(moved, { recursive: true, force: true });
+		await repo.cleanup();
+	}
+});
+
+test("repair: a repaired copy is not installed as a second worktree", async () => {
+	// Backs the prose warning. The copy shares the original's administrative entry,
+	// so repair re-points that one entry instead of adding the copy beside it.
+	const repo = await scratchRepo();
+	try {
+		const slug = "task-copy";
+		const wt = repo.pathOf(slug);
+		repo.git("worktree", "add", "-q", wt, "-b", slug, "origin/dev");
+		const copy = path.join(repo.root, "wt-copy");
+		cpSync(wt, copy, { recursive: true });
+
+		repo.git("worktree", "repair", copy);
+		const listing = repo.worktrees();
+		assert.ok(listing.includes(`worktree ${copy}`), "the registration follows the copy");
+		assert.ok(!listing.includes(`worktree ${wt}`), "there is no second entry for the original");
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("repair: a bare repair is enough when only the main checkout moved", async () => {
+	// The other half of the argument rule, and the reason the skill names it: a
+	// tree whose directory did not move is still discoverable from its admin
+	// entry, so bare `git worktree repair` rewrites its `.git` file. Reach for the
+	// path form when the tree's own path is stale instead (the test above).
+	const repo = await scratchRepo();
+	const movedMain = `${repo.main}-moved`;
+	const sibling = path.join(repo.root, "sibling-wt");
+	try {
+		repo.git("worktree", "add", "-q", sibling, "-b", "sibling", "origin/dev");
+		renameSync(repo.main, movedMain);
+
+		assert.notEqual(
+			runScript("git status --short --branch", { cwd: sibling }).status,
+			0,
+			"the sibling's .git still names the old main checkout",
+		);
+		const repair = runScript("git worktree repair", { cwd: movedMain });
+		assert.equal(repair.status, 0, repair.stderr);
+		assert.equal(
+			runScript("git rev-parse --abbrev-ref HEAD", { cwd: sibling }).stdout.trim(),
+			"sibling",
+			"bare repair must restore a tree that stayed put",
+		);
+	} finally {
+		await rm(movedMain, { recursive: true, force: true });
 		await repo.cleanup();
 	}
 });
