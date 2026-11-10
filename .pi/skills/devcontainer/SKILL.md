@@ -66,7 +66,12 @@ sleep 60; tail -5 /tmp/devc-aa.log; devc ls
 ```
 
 `devc` takes a per-project `flock`, so a second invocation waits instead of
-racing the first.
+racing the first. The lock covers the build-time half of a run — the probe, the
+config-hash stamp, the uid check, and `devc rebuild` — and is released before an
+interactive session attaches, so it does not protect a shell that is already
+running inside the container: `devc rebuild` on a project you are attached to
+replaces the container under that session. Holding it for the life of every
+session instead is what deadlocked the project for every other run.
 
 ## Running a server
 
