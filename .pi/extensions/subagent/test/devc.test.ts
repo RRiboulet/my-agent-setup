@@ -15,7 +15,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { test } from "node:test";
 
 const REPO_ROOT = path.resolve(new URL("../../../..", import.meta.url).pathname);
@@ -227,6 +227,50 @@ test("devc: the tmux previews are the exec'd argv too", () => {
 	assert.equal(outsidePreview, sb.calls().at(-1));
 });
 
+test("devc: an unknown project fails, and never reaches the CLI with an empty path", () => {
+	// `die` inside `$( )` in argument position does not abort under `set -e`: the
+	// callee just gets "". So `devc rebuild nosuchproj` printed "no project named"
+	// and then ran `devcontainer up --workspace-folder ''
+	// --remove-existing-container` — recreating the container of whatever
+	// directory the user was standing in.
+	const sb = sandbox();
+	for (const args of [["up", "nosuchproj"], ["rebuild", "nosuchproj"], ["stop", "nosuchproj"], ["doctor", "nosuchproj"]]) {
+		sb.reset();
+		const run = devc(sb, args);
+		assert.equal(run.status, 1, `devc ${args.join(" ")} must fail`);
+		assert.match(run.stderr, /no project named 'nosuchproj'/);
+		assert.deepEqual(sb.calls(), [], `devc ${args.join(" ")} must not reach the CLI`);
+		assert.deepEqual(sb.lockCalls(), []);
+	}
+});
+
+test("devc: a dry-run rebuild does not queue behind a held lock", () => {
+	// The lock waits up to `flock -w 900` in silence. A preview that blocks there
+	// prints nothing for fifteen minutes, which reads as a hang — and a dry run
+	// holds the lock for nothing, so it takes none.
+	const sb = sandbox();
+	const lockfile = path.join(sb.root, "tmp", "devc-proj.lock");
+	const ready = path.join(sb.root, "held");
+	const holder = spawn("flock", ["-x", lockfile, "sh", "-c", `echo held > ${ready}; sleep 30`], { stdio: "ignore" });
+	const deadline = Date.now() + 5_000;
+	while (!existsSync(ready) && Date.now() < deadline) {
+		spawnSync("sh", ["-c", "sleep 0.05"]);
+	}
+	try {
+		assert.ok(existsSync(ready), "the test could not take the lock it needs");
+		const run = spawnSync("bash", [DEVC, "rebuild", "proj"], {
+			env: { ...sb.env, DEVC_DRY_RUN: "1" },
+			encoding: "utf8",
+			timeout: 5_000,
+		});
+		assert.equal(run.signal, null, "the dry run was killed by the timeout: it blocked on the lock");
+		assert.equal(run.status, 0);
+		assert.match(run.stderr, /would recreate the container/);
+	} finally {
+		holder.kill("SIGKILL");
+	}
+});
+
 test("devc: rebuild holds the project lock while it replaces the container", () => {
 	// Before the fix `cmd_rebuild` never called `lock_project`, so a rebuild and
 	// a concurrent `devc up`/attach could interleave on the same container.
@@ -247,4 +291,7 @@ test("devc: a dry-run rebuild executes nothing and writes no stamp", () => {
 	assert.deepEqual(sb.lockCalls(), []);
 	assert.equal(existsSync(stampPath(sb)), false, "dry run must not write the config stamp");
 	assert.match(run.stderr, /\+ devcontainer up .*--remove-existing-container/);
+	// A dry run states a conditional, not a fact: the container is still there.
+	assert.match(run.stderr, /would recreate the container/);
+	assert.doesNotMatch(run.stderr, /^recreating the container/m);
 });

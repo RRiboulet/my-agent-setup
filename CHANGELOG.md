@@ -16,6 +16,19 @@ Added:
 
 Fixed:
 
+- **`devc up|rebuild|stop|doctor <unknown>` used to carry on with an empty
+  workspace folder.** `find_project` dies with "no project named", but that
+  `die` ran inside `$( … )` in *argument* position, where a failed command
+  substitution does not abort under `set -e` — the callee simply receives `""`.
+  So `devc rebuild nosuchproj` printed the error and then ran `devcontainer up
+  --workspace-folder '' --remove-existing-container`: it recreated the container
+  of whatever directory the user happened to be standing in, while `devc up
+  nosuchproj` reported ` is already running` and exited 0. Every caller now
+  resolves the project into a variable first, whose failed assignment does
+  abort, and a test asserts the CLI is never reached with an empty path. Found
+  by reviewing the `devc` changes below — the same silent-error-path class they
+  fix, one function over.
+
 - **`devc` no longer dies silently on a project that has no `.dockerignore`.**
   `cfg_hash` ended with `[ -f .dockerignore ] && cat .dockerignore`, so the
   group's exit status was 1 for any project without that file, and under
@@ -32,7 +45,10 @@ Fixed:
   command that behaves differently from the real one. The argv is now built
   once and either printed shell-quoted or exec'd, and `+` marks only that argv:
   `ensure_up`'s conditional step is a note, because which branch it takes is not
-  knowable without probing the daemon.
+  knowable without probing the daemon. A dry run also takes no lock: it used to
+  queue behind a live build for up to fifteen silent minutes before printing
+  anything, while holding the lock for nothing, and `rebuild`'s preview now says
+  "would recreate" rather than the affirmative "recreating".
 - **`devc rebuild` takes the project lock, and the lock's scope is written
   down.** It never called `lock_project`, so `--remove-existing-container` could
   interleave with a concurrent `devc up`. It is serialized now that the lock is

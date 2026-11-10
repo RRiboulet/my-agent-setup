@@ -219,9 +219,18 @@ is_running() {
 lock_project() {
 	local name="$1"
 	local lockfile="${TMPDIR:-/tmp}/devc-$name.lock"
+	# A dry run prints and returns without touching the daemon or the stamp, so it
+	# takes no lock: queueing a preview behind a live build for up to `flock -w`'s
+	# 900s, silently, is worse than useless. (It would also print its preview only
+	# after the wait, so the user sees nothing at all.)
+	if [ -n "${DEVC_DRY_RUN:-}" ]; then
+		return 0
+	fi
 	exec 9>"$lockfile"
-	if ! flock -w 900 9; then
-		die "another devc run is still working on $name (lock: $lockfile)"
+	# `flock` waits in silence; say so, or a held lock looks like a hang.
+	if ! flock -n 9; then
+		note "another devc run holds $name's lock; waiting for it"
+		flock -w 900 9 || die "another devc run is still working on $name (lock: $lockfile)"
 	fi
 }
 
@@ -331,7 +340,11 @@ cmd_rebuild() {
 	if [ "$no_cache" = "--no-cache" ]; then
 		args+=(--build-no-cache)
 	fi
-	note "recreating the container; named volumes are kept"
+	if [ -n "${DEVC_DRY_RUN:-}" ]; then
+		note "would recreate the container; named volumes are kept"
+	else
+		note "recreating the container; named volumes are kept"
+	fi
 	run devcontainer "${args[@]}"
 	if [ -n "${DEVC_DRY_RUN:-}" ]; then
 		# The stamp says "this container was built from this config". A dry run
@@ -501,6 +514,14 @@ usage() {
 
 # ----------------------------------------------------------------------- main
 
+# Resolve the project into `dir` before calling anything: `die` runs inside a
+# command substitution here, and a substitution that fails in *argument* position
+# does not abort under `set -e` — the callee simply receives an empty argument.
+# That is how `devc rebuild nosuchproj` used to print "no project named" and then
+# run `devcontainer up --workspace-folder '' --remove-existing-container`, which
+# recreates the container of whatever directory the user was standing in. An
+# assignment does abort, so the failure stays a failure.
+
 seed_roots
 
 case "${1:-}" in
@@ -514,18 +535,26 @@ ls | list)
 	;;
 up)
 	[ $# -ge 2 ] || die "usage: devc up <name>"
-	ensure_up "$(find_project "$2")"
+	dir="$(find_project "$2")"
+	ensure_up "$dir"
 	;;
 rebuild)
 	[ $# -ge 2 ] || die "usage: devc rebuild <name> [--no-cache]"
-	cmd_rebuild "$(find_project "$2")" "${3:-}"
+	dir="$(find_project "$2")"
+	cmd_rebuild "$dir" "${3:-}"
 	;;
 stop)
 	[ $# -ge 2 ] || die "usage: devc stop <name>"
-	cmd_stop "$(find_project "$2")"
+	dir="$(find_project "$2")"
+	cmd_stop "$dir"
 	;;
 doctor)
-	doctor "${2:+$(find_project "$2")}"
+	if [ $# -ge 2 ]; then
+		dir="$(find_project "$2")"
+		doctor "$dir"
+	else
+		doctor
+	fi
 	;;
 help | -h | --help)
 	usage
