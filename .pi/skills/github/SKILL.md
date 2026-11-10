@@ -12,8 +12,9 @@ description: "Interact with GitHub using the `gh` CLI. Use `gh issue`, `gh pr`, 
      Four LOCAL ADAPTATIONS below, each marked in place:
        A. the auth setup (this repo's token lives in GH_CONFIG_DIR, not
           ~/.gitconfig, and the git credential helper is system-wide)
-       B. the PR workflow (AGENTS.md prescribes --fill, --squash --delete-branch,
-          and dev→main release merges that must not delete dev)
+       B. the PR workflow (AGENTS.md prescribes --fill, --squash --delete-branch
+          for a feature branch into dev, and a dev→main release merge that
+          carries no --delete-branch at all)
        C. the token rule (never in .git/config, the Dockerfile, or a repo file)
        D. the --repo note (pointless inside this repo, and gh is the credential
           helper here rather than a URL-rewriting proxy) -->
@@ -72,8 +73,12 @@ Use the `gh` CLI to interact with GitHub. Always specify `--repo owner/repo` whe
      (`git checkout dev && git pull --ff-only`).
 
      A dev→main release merge is the one exception that is NOT a squash: use
-     `gh pr merge <n> --merge --delete-branch`, and make sure it does not
-     delete `dev` (re-create it locally if needed: `git branch dev origin/dev`).
+     `gh pr merge <n> --merge` with NO `--delete-branch`. The head of that pull
+     request is `dev`, the long-lived integration branch every feature branch
+     is cut from, so the flag deletes it on the remote - and gh tries to delete
+     the local branch too. This is the one merge whose head branch must
+     survive; tag the merge commit on `main` and fast-forward `dev` to it
+     (AGENTS.md "Releases", steps 4 and 5), and nothing needs re-creating.
      The squash-merge consequence for changelogs: a feature branch's commits
      no longer exist in `dev`, so release notes are written from PR titles and
      bodies, not from `git log`. -->
