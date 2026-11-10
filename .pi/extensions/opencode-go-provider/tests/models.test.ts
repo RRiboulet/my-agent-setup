@@ -6,10 +6,6 @@
  * `GET https://opencode.ai/zen/go/v1/models` from 2026-11-10 (four of the six
  * models it listed), kept in the shape the API returns so the transform is fed
  * exactly what the network feeds it.
- *
- * Tests named "characterizes TODO-<id>" deliberately pin behavior that is
- * known to be wrong, so the fix for that todo has an explicit test to flip
- * rather than silently rewritten expectations.
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -408,13 +404,36 @@ test("appends curated models missing from the cache", () => {
   assert.equal(result[0].name, "Cached");
 });
 
-test("characterizes TODO-00690942: the stale path keeps cached reasoning and cost", () => {
-  writeCache([model({ id: "m", reasoning: false, cost: { input: 9, output: 9, cacheRead: 9, cacheWrite: 9 } })]);
-  const curated = [model({ id: "m", reasoning: true, cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 } })];
+test("refreshes cached reasoning and thinking levels from the curated entry", () => {
+  writeCache([model({ id: "m", reasoning: false, thinkingLevelMap: { low: "low" } })]);
+  const curated = [model({ id: "m", reasoning: true, thinkingLevelMap: { low: "low", high: "high" } })];
 
   const [stale] = loadStaleModels(curated);
 
-  assert.equal(stale.reasoning, false);
+  assert.equal(stale.reasoning, true);
+  assert.deepEqual(stale.thinkingLevelMap, { low: "low", high: "high" });
+});
+
+test("drops a cached thinking-level map the curated entry no longer has", () => {
+  writeCache([model({ id: "m", reasoning: true, thinkingLevelMap: { low: "low" } })]);
+  const curated = [model({ id: "m", reasoning: true })];
+
+  const [stale] = loadStaleModels(curated);
+
+  assert.equal(stale.thinkingLevelMap, undefined);
+});
+
+test("keeps cached cost and context window when the curated entry differs", () => {
+  writeCache([
+    model({ id: "m", contextWindow: 500000, cost: { input: 9, output: 9, cacheRead: 9, cacheWrite: 9 } }),
+  ]);
+  const curated = [
+    model({ id: "m", contextWindow: 1000000, cost: { input: 1, output: 1, cacheRead: 1, cacheWrite: 1 } }),
+  ];
+
+  const [stale] = loadStaleModels(curated);
+
+  assert.equal(stale.contextWindow, 500000);
   assert.deepEqual(stale.cost, { input: 9, output: 9, cacheRead: 9, cacheWrite: 9 });
 });
 

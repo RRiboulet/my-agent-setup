@@ -242,6 +242,17 @@ Fixed:
   its consequence is a deleted integration branch. Both directions were
   mutation-checked: restoring the old release sentence turns the two skill
   assertions red, and adding the flag to AGENTS.md turns the agreement test red.
+- **`opencode-go` no longer serves stale reasoning levels after a model is
+  corrected in `models.json`.** The stale-while-revalidate path appended curated
+  models the cache lacked but never refreshed the ones it already had, so a
+  model whose `reasoning` or `thinkingLevelMap` was fixed kept the values
+  captured when the cache was written — until a live revalidation succeeded,
+  which is exactly what is not happening while the stale path is in use. The
+  refresh now covers those two fields from the curated entry, including
+  removing a level map curation dropped, while leaving cached cost and context
+  windows alone: refreshing those from the curated list is the shape that got
+  the earlier revalidation change reverted. Pinned by the model-pipeline tests,
+  with a case that fails if cost or context start being refreshed.
 
 - **`devc` hashed nothing at all for projects that use a repo-root
   `.devcontainer.json`.** `has_devcontainer` accepts both layouts — the
