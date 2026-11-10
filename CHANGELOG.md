@@ -219,6 +219,40 @@ Fixed:
   mutation-checked: restoring the old release sentence turns the two skill
   assertions red, and adding the flag to AGENTS.md turns the agreement test red.
 
+- **`devc` hashed nothing at all for projects that use a repo-root
+  `.devcontainer.json`.** `has_devcontainer` accepts both layouts — the
+  `.devcontainer/` directory and the file beside it — but `cfg_hash` only read
+  `find .devcontainer`, so for the root style the hash was sha256 of an empty
+  stream (`e3b0c442…`), constantly, forever. `ensure_up` therefore never saw a
+  config change and `devc doctor` could never call a container stale: editing
+  the only config the project has moved nothing. The root file is folded into
+  the hashed stream now, behind an `if` like the ignore file below and never a
+  trailing `&&`, so those projects get a real hash that follows their content.
+  The "matched no config file at all" case is no longer an empty hash either:
+  it dies naming the project, because a 64-hex stamp for nothing and a 64-hex
+  stamp for a config are indistinguishable once written. Directory-style
+  projects hash byte-identically to before — checked by computing both forms
+  over the same tree — so existing stamps do not churn on upgrade. Tests: a
+  root-only project gets a non-empty, stable hash, editing the file moves it,
+  and the following `up` reports "config changed; recreating".
+- **`devc` treats an unreadable config file as an unknown config, not as a
+  shorter one.** Three input states, three different silent outcomes before. A
+  *missing* `.dockerignore` was tolerated, which is right. An *unreadable* one
+  was the original silent death back by another route: the failed `cat` was the
+  group's last command, `pipefail` carried its status, and the run exited 1
+  with no message. And an unreadable file under `.devcontainer/` leaked
+  `cat: … Permission denied` to stderr yet *still wrote a fresh stamp*, because
+  a failing `find | sort | xargs cat` is not the group's last command and
+  `set -e` is suppressed for non-final pipeline members — so the hash covered a
+  partial stream and the next run reported "config changed; recreating" every
+  time, for a config devc had never read. All three were reproduced against the
+  previous script (the last one: rc=0, stamp written, `cat:` on stderr). Every
+  read now fails loudly and names the file — `devc: cannot read
+  .devcontainer/devcontainer.json`, exit 1, nothing reached the container, no
+  stamp written — while a missing file stays ordinary. Tests chmod 000 each of
+  the two kinds and assert the status, the naming message and the absent stamp;
+  they skip when running as root, which reads a 000 file regardless.
+
 Maintenance:
 
 - **The `opencode-go` model pipeline is now covered by tests.**
