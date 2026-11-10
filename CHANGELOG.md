@@ -196,6 +196,30 @@ Fixed:
   worktree leaves the block non-zero with the tree and its file intact, a clean
   one removes it and prints no tmux noise, and the end-state and branch-cleanup
   blocks fail with "run from a live checkout" when their cwd has been deleted.
+- **`opencode-go` live models now carry their real pricing, modalities and
+  endpoint.** `transformApiModel` read fields the `/v1/models` payload does not
+  have — a flat `cost.input`, `modalities.input === "image"`, and a
+  `provider.npm` that is never sent — so every model the API reported arrived
+  with four zero costs, text-only input and the provider's default endpoint.
+  The payload actually prices under `cost.text.*`, lists concrete MIME types
+  (`image/jpeg`, `image/png`, ...), and names its endpoint in
+  `api["chat-completions"]` or `api.messages`. The transform reads those now,
+  and strips a trailing `/v1` from the Anthropic URL because pi's client
+  appends `/v1/messages` of its own (the doubled path 404s, verified against
+  the live endpoint). The `limit` reads were already right and are unchanged.
+  The difference shows on models with no curated entry: `claude-haiku-5-5` was
+  listed free and text-only over the OpenAI-compatible default, and now reports
+  0.1 / 0.5 / 0.01 / 0.125 per 1M tokens, accepts images, and routes to
+  `anthropic-messages` on `https://opencode.ai/inference/go/anthropic`;
+  `longcat-2.5-free` gains image input and its advertised
+  `inference/go/openai/v1` base URL. Curated models are unaffected, because
+  `mergeWithEmbedded` still prefers their entry for `api`, `baseUrl`, `input`
+  and `compat`. Pinned by `tests/models.test.ts`, whose three characterization
+  cases for this bug are now ordinary expectations. The payload is read as
+  untrusted input: a `base_url` that is not a usable string falls back to the
+  provider default instead of registering — and caching — a URL the SDK throws
+  on for every request, a non-array `modalities` block means text-only, and one
+  malformed model is skipped rather than discarding the whole live refresh.
 
 - **The `github` skill no longer tells the release merge to pass
   `--delete-branch`, which deletes `dev`.** Local adaptation B prescribed
@@ -265,10 +289,12 @@ Maintenance:
   toggle-only models that must omit the map, `limit` reads, the text-input
   default) and pins the merge, stale-cache and patch rules, including that
   curation still wins when the live API reports no reasoning. Fields the live
-  payload shape currently gets wrong are pinned as characterization tests named
-  after their fix, so correcting them is an explicit change and not a quietly
-  rewritten expectation. `buildModels` is exported for the tests; nothing else
-  in the provider changed.
+  payload shape got wrong were pinned as characterization tests named after
+  their fix, so correcting them was an explicit change and not a quietly
+  rewritten expectation — which is what the live-payload fix above did for the
+  three transform cases; the stale-cache one still characterizes its open
+  todo. `buildModels` is exported for the tests; nothing else in the provider
+  changed.
 
 - **Upgrading native web search: OpenRouter is the native default again, and
   the removed `opencode-go` values are now rejected.** Add an `openrouter`

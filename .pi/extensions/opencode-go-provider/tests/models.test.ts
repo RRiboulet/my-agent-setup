@@ -24,7 +24,8 @@ import livePayload from "./fixtures/live-models-2026-11-10.json" with { type: "j
 // real ~/.pi/agent cache.
 const agentDir = mkdtempSync(path.join(tmpdir(), "opencode-go-models-test-"));
 process.env.PI_CODING_AGENT_DIR = agentDir;
-const { buildModels, loadStaleModels, mergeWithEmbedded, transformApiModel } = await import("../index.ts");
+const { buildModels, loadStaleModels, mergeWithEmbedded, transformApiModel, transformApiModels } =
+  await import("../index.ts");
 
 const CACHE_DIR = path.join(agentDir, "cache");
 const CACHE_PATH = path.join(CACHE_DIR, "opencode-go-models.json");
@@ -167,20 +168,18 @@ test("always offers text input and falls back to the id for the name", () => {
   assert.equal(transformApiModel(live("beam-free")).name, "Beam Free");
 });
 
-test("characterizes TODO-4872a666: flat cost reads zero on the live cost shape", () => {
+test("reads pricing from the payload's cost.text block", () => {
   const haiku = live("claude-haiku-5-5");
-  // The payload does report pricing, under cost.text.*:
   assert.equal(haiku.cost.text.input.price, 0.1);
   assert.equal(haiku.cost.text.output.price, 0.5);
   assert.equal(haiku.cost.text.input.cache.read, 0.01);
   assert.equal(haiku.cost.text.input.cache.write, 0.125);
 
   const transformed = transformApiModel(haiku);
-  // ...which the flat reads miss entirely:
-  assert.deepEqual(transformed.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+  assert.deepEqual(transformed.cost, { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 });
 });
 
-test("characterizes TODO-4872a666: MIME image modalities collapse to text only", () => {
+test("accepts MIME image modalities as image input and drops non-image ones", () => {
   const haiku = live("claude-haiku-5-5");
   assert.deepEqual(haiku.modalities.input, [
     "text",
@@ -192,22 +191,92 @@ test("characterizes TODO-4872a666: MIME image modalities collapse to text only",
   ]);
 
   const transformed = transformApiModel(haiku);
-  assert.deepEqual(transformed.input, ["text"]);
+  assert.deepEqual(transformed.input, ["text", "image"]);
 });
 
-test("characterizes TODO-4872a666: api and baseUrl ignore the advertised endpoint", () => {
+test("derives api and baseUrl from the advertised endpoint", () => {
   const haiku = live("claude-haiku-5-5");
   assert.equal(haiku.api.messages.base_url, "https://opencode.ai/inference/go/anthropic/v1");
 
-  const transformed = transformApiModel(haiku);
-  assert.equal(transformed.api, "openai-completions");
-  assert.equal(transformed.baseUrl, "https://opencode.ai/zen/go/v1");
+  const anthropic = transformApiModel(haiku);
+  assert.equal(anthropic.api, "anthropic-messages");
+  // pi's Anthropic client appends /v1/messages itself, so the advertised /v1
+  // is stripped; keeping it requests /v1/v1/messages, which 404s.
+  assert.equal(anthropic.baseUrl, "https://opencode.ai/inference/go/anthropic");
 
-  // The openai-compatible models advertise inference/go/openai/v1 themselves,
-  // but every live model currently lands on the provider default.
   const deepseek = live("deepseek-v4.1-flash");
   assert.equal(deepseek.api["chat-completions"].base_url, "https://opencode.ai/inference/go/openai/v1");
-  assert.equal(transformApiModel(deepseek).baseUrl, "https://opencode.ai/zen/go/v1");
+
+  const openai = transformApiModel(deepseek);
+  assert.equal(openai.api, "openai-completions");
+  assert.equal(openai.baseUrl, "https://opencode.ai/inference/go/openai/v1");
+});
+
+test("strips a trailing /v1/ from the Anthropic endpoint too", () => {
+  const synthetic = transformApiModel({
+    id: "synthetic-anthropic",
+    api: { messages: { base_url: "https://example.test/anthropic/v1/" } },
+  });
+
+  assert.equal(synthetic.api, "anthropic-messages");
+  assert.equal(synthetic.baseUrl, "https://example.test/anthropic");
+});
+
+test("falls back to the default endpoint when a base_url is not a usable string", () => {
+  for (const baseUrl of [123, null, "", "   ", true]) {
+    const chat = transformApiModel({ id: "x", api: { "chat-completions": { base_url: baseUrl } } });
+    const messages = transformApiModel({ id: "x", api: { messages: { base_url: baseUrl } } });
+
+    assert.equal(chat.baseUrl, "https://opencode.ai/zen/go/v1", `chat base_url ${JSON.stringify(baseUrl)}`);
+    assert.equal(messages.baseUrl, "https://opencode.ai/zen/go/v1", `messages base_url ${JSON.stringify(baseUrl)}`);
+  }
+});
+
+test("trims a base_url and strips an uppercase /V1", () => {
+  const synthetic = transformApiModel({
+    id: "x",
+    api: { messages: { base_url: "  https://example.test/anthropic/V1  " } },
+  });
+
+  assert.equal(synthetic.baseUrl, "https://example.test/anthropic");
+});
+
+test("treats a non-array modalities block as text-only", () => {
+  const synthetic = transformApiModel({ id: "x", modalities: { input: "text" } });
+
+  assert.deepEqual(synthetic.input, ["text"]);
+});
+
+test("keeps the other models when one entry is malformed", () => {
+  const malformed = {
+    get id(): string {
+      throw new Error("boom");
+    },
+  };
+
+  const models = transformApiModels([{ id: "ok" }, malformed, { id: "also-ok" }]);
+
+  assert.deepEqual(models.map((m) => m.id), ["ok", "also-ok"]);
+});
+
+test("falls back to the provider default endpoint when the payload advertises none", () => {
+  const synthetic = transformApiModel({ id: "synthetic-bare" });
+
+  assert.equal(synthetic.api, "openai-completions");
+  assert.equal(synthetic.baseUrl, "https://opencode.ai/zen/go/v1");
+});
+
+test("prefers chat-completions when a payload advertises both endpoints", () => {
+  const synthetic = transformApiModel({
+    id: "synthetic-both",
+    api: {
+      messages: { base_url: "https://example.test/anthropic/v1" },
+      "chat-completions": { base_url: "https://example.test/openai/v1" },
+    },
+  });
+
+  assert.equal(synthetic.api, "openai-completions");
+  assert.equal(synthetic.baseUrl, "https://example.test/openai/v1");
 });
 
 // ─── mergeWithEmbedded ────────────────────────────────────────────────────────
