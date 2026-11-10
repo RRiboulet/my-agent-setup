@@ -165,13 +165,27 @@ export interface ScratchRepo {
 	cleanup(): Promise<void>;
 }
 
+export interface ScratchRepoOptions {
+	/**
+	 * Prefix for the temp directory `mkdtemp` fills in. Defaults to
+	 * `worktree-skill-`.
+	 *
+	 * A test sets it to control the *shape* of every path in the tree, because
+	 * git stores absolute paths in a worktree's metadata: renaming the tree
+	 * afterwards does not rename the worktree, so an awkward character has to be
+	 * in the name from the start. `\\` in a prefix reaches every recipe path as a
+	 * literal backslash.
+	 */
+	rootPrefix?: string;
+}
+
 /**
  * A scratch repository shaped like this one: `dev` as the integration branch,
  * an `origin` to fetch from, and a `.gitignore` that deliberately has no
  * trailing newline (the ignore guard's documented failure mode).
  */
-export async function scratchRepo(): Promise<ScratchRepo> {
-	const root = await mkdtemp(path.join(tmpdir(), "worktree-skill-"));
+export async function scratchRepo(opts: ScratchRepoOptions = {}): Promise<ScratchRepo> {
+	const root = await mkdtemp(path.join(tmpdir(), opts.rootPrefix ?? "worktree-skill-"));
 	const origin = path.join(root, "origin.git");
 	const seed = path.join(root, "seed");
 	const main = path.join(root, "main");

@@ -82,6 +82,30 @@ Fixed:
   that base's tip with the warning on stderr; mutation-checked by disabling the
   log check (the three new assertions go red) and by moving the warning to
   stdout (the stacking test goes red).
+- **The `worktree` skill's session sweep now hands the worktree path to `awk`
+  through the environment, and kills each session once.** `awk -v wt="$WT"`
+  interprets C-style escapes in its value, so a worktree path containing a
+  backslash reached the comparison as a different string and matched no pane:
+  the sweep silently did nothing, and the `git worktree remove` on the next line
+  took the tree away from a shell still running in it. Nothing reports the miss
+  — an empty sweep and a completed sweep are the same output. The path now
+  arrives as `WT="$WT" awk ... ENVIRON["WT"]`, which is passed verbatim. The
+  same block also killed a session once per *pane*: `list-panes -a` prints a row
+  per pane, so a two-pane session produced two `kill-session` calls and the
+  second failed with tmux's "can't find session", because the first had already
+  done the job. `sort -u` now feeds the kill loop.
+
+  Both were reproduced before being fixed. The Remove block runs against a fake
+  `tmux` in a temp bin dir, first on `PATH`, which answers `list-panes -a -F`
+  with two panes of one session rooted at the worktree plus one pane of an
+  unrelated session, and refuses a second kill of a session it has already
+  killed, in tmux's own words. The scratch root's name contains `\t`: git
+  records absolute paths in a worktree's metadata, so the tree cannot be renamed
+  into shape afterwards, and `\t` rather than `\s` because `awk -v` only
+  rewrites the escapes it recognises — mawk leaves an unknown `\s` alone, which
+  would let the bug through. Restoring `-v wt="$WT"` leaves zero kill lines;
+  dropping `sort -u` leaves two. `scratchRepo` gained a `rootPrefix` option so a
+  test can choose the path's shape.
 
 Maintenance:
 

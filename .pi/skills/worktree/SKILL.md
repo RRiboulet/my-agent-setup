@@ -365,15 +365,26 @@ git worktree unlock "$WT"
 ## Remove
 
 Stop any tmux sessions rooted in the tree first (by path, not by name), then
-remove. The sweep is tab-separated rather than space-split, because a pane path
-or session name containing a space makes `$2` match nothing - or the wrong
-session (both verified):
+remove. Three details in the sweep are load-bearing, each verified by breaking
+it:
+
+- **Tab-separated, not space-split**: a pane path or session name containing a
+  space makes `$2` match nothing - or the wrong session.
+- **The path goes in the environment, never `awk -v`**: `-v` interprets C-style
+  escapes in its value, so a worktree path containing a backslash arrives as a
+  different string, matches no pane, and leaks the session - so the removal on
+  the next line takes the tree from under a live shell. `ENVIRON` passes it
+  verbatim.
+- **Deduplicated before the kill loop**: `list-panes -a` prints one row per
+  *pane*, so a multi-pane session appears once per pane and every kill after the
+  first fails with "can't find session".
 
 ```bash
 R="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"; SLUG="task-name"; WT="$R/.worktrees/$SLUG"
 SOCKET="${PI_TMUX_SOCKET_DIR:-${TMPDIR:-/tmp}/pi-tmux-sockets}/pi.sock"
 tmux -S "$SOCKET" list-panes -a -F "#{session_name}"$'\t'"#{pane_current_path}" 2>/dev/null |
-  awk -F'\t' -v wt="$WT" '$2==wt || index($2, wt "/")==1 {print $1}' |
+  WT="$WT" awk -F'\t' '$2==ENVIRON["WT"] || index($2, ENVIRON["WT"] "/")==1 {print $1}' |
+  sort -u |
   while IFS= read -r s; do tmux -S "$SOCKET" kill-session -t "$s"; done
 
 git worktree remove "$WT"     # refuses if dirty - that refusal is the review prompt
