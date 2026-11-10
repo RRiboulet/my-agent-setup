@@ -20,14 +20,14 @@ import { StringEnum } from "@earendil-works/pi-ai";
 const SCRIPT_ENV_VAR = "PI_NATIVE_WEB_SEARCH_SCRIPT";
 const PROVIDER_ENV_VAR = "PI_WEB_SEARCH_PROVIDER";
 const MODEL_ENV_VAR = "PI_WEB_SEARCH_MODEL";
-const DEFAULT_PROVIDER = "opencode-go";
+const DEFAULT_PROVIDER = "openrouter";
 const DEFAULT_TIMEOUT_MS = 120_000;
 const MAX_TIMEOUT_MS = 600_000;
 
 export interface WebSearchInput {
 	query: string;
 	purpose?: string;
-	provider?: "brave" | "opencode-go" | "openrouter" | "openai-codex" | "anthropic";
+	provider?: "brave" | "openrouter" | "openai-codex" | "anthropic";
 	model?: string;
 	timeout_ms?: number;
 }
@@ -75,7 +75,7 @@ function clampTimeout(value: number | undefined): number {
  * requested provider. Leaving it undefined makes `runSearch` omit --provider, so
  * the script applies `PI_WEB_SEARCH_PROVIDER`, then `defaultProvider` in
  * settings.json, then the first credential in auth.json (preferring
- * opencode-go). Reading the env var here too would double-handle it and make the
+ * openrouter). Reading the env var here too would double-handle it and make the
  * script's own order and error message unreachable.
  */
 function resolveProvider(requested: WebSearchInput["provider"]): string | undefined {
@@ -224,8 +224,9 @@ export default function (pi: ExtensionAPI) {
 		label: "Web Search",
 		description:
 			"Search the internet. Brave is used whenever a Brave key is configured (`BRAVE_API_KEY` or a brave credential " +
-			"in auth.json); otherwise the native chain runs (opencode-go by default). A Brave failure — rate limit, invalid " +
-			"key, network — falls back to that chain and the result's first line says why. Returns a concise research " +
+			"in auth.json); otherwise the native chain runs (openrouter by default). A Brave failure — rate limit, invalid " +
+			"key, network — falls back to that chain when a native credential is configured, and the result's first line says " +
+			"why; with no native credential the error names the missing one. Returns a concise research " +
 			"summary (3-7 findings) with full canonical source URLs, tailored to a stated purpose. Pass provider to force " +
 			"Brave, OpenRouter, openai-codex or anthropic instead. Use for current facts, documentation, release notes, " +
 			"and any question that needs external information.",
@@ -240,8 +241,8 @@ export default function (pi: ExtensionAPI) {
 				Type.String({ description: "Why the information is needed, so the summary is scoped" }),
 			),
 			provider: Type.Optional(
-				StringEnum(["brave", "opencode-go", "openrouter", "openai-codex", "anthropic"] as const, {
-					description: `Search provider; unset uses Brave when a key is configured, else settings.defaultProvider, then the first auth.json credential (preferring ${DEFAULT_PROVIDER}). An explicit provider (or ${PROVIDER_ENV_VAR}) wins over Brave; a Brave failure still falls back to the native chain with the reason in the result`,
+				StringEnum(["brave", "openrouter", "openai-codex", "anthropic"] as const, {
+					description: `Search provider; unset uses Brave when a key is configured, else settings.defaultProvider, then the first auth.json credential (preferring ${DEFAULT_PROVIDER}). An explicit provider (or ${PROVIDER_ENV_VAR}) wins over Brave; a Brave failure still falls back to the native chain when a native credential is configured, with the reason in the result`,
 				}),
 			),
 			model: Type.Optional(
