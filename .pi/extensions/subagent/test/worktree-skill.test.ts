@@ -197,7 +197,7 @@ test("worktree skill: removal never runs the force delete unconditionally", () =
 	// A block with both lines deletes a dirty tree, and the edit in it, on paste
 	// (line 1 fails, line 2 succeeds) while still exiting 0.
 	assert.ok(!/^git worktree remove -f/m.test(SKILL), "the force removal must stay commented out");
-	assert.ok(SKILL.includes('git worktree remove "$WT"'), "must try the safe removal first");
+	assert.ok(SKILL.includes('worktree remove "$WT"'), "must try the safe removal first");
 	assert.ok(SKILL.includes("kill-session"), "removal must stop tmux sessions rooted in the tree");
 	// A space in the repo root makes `$2` match nothing, leaking the session.
 	assert.ok(SKILL.includes("awk -F'\\t'"), "session sweep must split on a tab, not a space");
@@ -220,11 +220,10 @@ test("worktree skill: session sweep passes the path outside awk's escape rules",
 test("worktree skill: end-state check defines SLUG", () => {
 	// `git branch --list ""` prints nothing and exits 0, so an unset SLUG makes
 	// "must print nothing" vacuously true.
-	assert.ok(
-		SKILL.includes('SLUG="task-name"\ngit worktree list'),
-		"the end-state block must set SLUG",
-	);
-	assert.ok(SKILL.includes('git branch --list "$SLUG"'), "end state must check the branch");
+	const endState = recipe("Remove", 3);
+	assert.match(endState, /^SLUG="task-name"/m, "the end-state block must set SLUG");
+	assert.ok(endState.includes('git -C "$R" worktree list'), "end state must list worktrees");
+	assert.ok(endState.includes('git -C "$R" branch --list "$SLUG"'), "end state must check the branch");
 });
 
 test("worktree skill: attach command is expanded and verified", () => {
@@ -581,7 +580,133 @@ test("remove recipe: kills each session rooted in the tree once, even with a bac
 		assert.deepEqual(await fake.kills(), [`kill-session -t ${session}`], "exactly one kill, of the matching session only");
 		assert.doesNotMatch(result.stderr, /can't find session/, "no kill may target an already-dead session");
 	} finally {
-		await fake?.cleanup();
+		await fake?.cleanup();	}
+});
+
+// --- Remove: the failure this section exists to stop -----------------------
+//
+// `recipe("Remove", 0)` ended with `rmdir -p ... || true`, so a *refused*
+// removal of a dirty worktree (git exits 128, the tree survives) exited 0. An
+// agent reads that as success and moves on with the branch still checked out.
+// The fix is `set -e` plus a resolved main root; these tests pin the exit
+// statuses and the guidance a reader gets, not the tokens.
+
+/**
+ * Point tmux at an isolated socket under the scratch repo. Whether tmux is
+ * installed here or not, that socket has no server: the sweep's `list-panes`
+ * fails, which the block must tolerate without aborting the removal - and it
+ * must not touch this host's real sessions.
+ */
+function isolatedTmux(repo: { root: string }): Record<string, string> {
+	return { PI_TMUX_SOCKET_DIR: path.join(repo.root, "tmux-sockets") };
+}
+
+/**
+ * Run `code` from a cwd that no longer exists. The directory is created and
+ * removed inside the script, so the recipe runs exactly as a shell would run it
+ * after the cwd vanished - the case where `rev-parse` prints nothing and fails
+ * 128. `where` only seeds the shell's starting directory, outside any repo.
+ */
+function runWithDeletedCwd(
+	code: string,
+	where: string,
+	env: Record<string, string>,
+): { status: number | null; stdout: string; stderr: string } {
+	return runScript(`d="$(mktemp -d)"; cd "$d"; rmdir "$d"; ${code}`, { cwd: where, env });
+}
+
+test("remove recipe: a refused dirty removal exits non-zero and leaves the tree alone", async () => {
+	const repo = await scratchRepo();
+	try {
+		const slug = "dirty-one";
+		const wt = repo.pathOf(slug);
+		repo.git("worktree", "add", "-q", wt, "-b", slug, "origin/dev");
+		writeFileSync(path.join(wt, "untracked.txt"), "not committed\n");
+
+		const result = runScript(retarget(recipe("Remove", 0), { SLUG: slug }), {
+			cwd: repo.main,
+			env: isolatedTmux(repo),
+		});
+
+		assert.notEqual(result.status, 0, "a refused removal must not exit 0 - that is the bug");
+		assert.match(
+			result.stderr,
+			/contains modified or untracked files|use --force/,
+			`stderr must name the refusal:\n${result.stderr}`,
+		);
+		assert.ok(existsSync(wt), "the worktree must survive the refusal");
+		assert.ok(existsSync(path.join(wt, "untracked.txt")), "so must its uncommitted file");
+		assert.ok(repo.worktrees().includes(`worktree ${wt}`), "it must stay registered");
+		assert.equal(linkedCount(repo.worktrees()), 1, "nothing else may be removed");
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("remove recipe: a clean removal exits 0 and leaves nothing behind", async () => {
+	const repo = await scratchRepo();
+	try {
+		const slug = "clean-one";
+		const wt = repo.pathOf(slug);
+		repo.git("worktree", "add", "-q", wt, "-b", slug, "origin/dev");
+
+		const result = runScript(retarget(recipe("Remove", 0), { SLUG: slug }), {
+			cwd: repo.main,
+			env: isolatedTmux(repo),
+		});
+
+		assert.equal(result.status, 0, `clean removal failed:\n${result.stderr}`);
+		assert.ok(!existsSync(wt), "the directory must be gone");
+		assert.equal(linkedCount(repo.worktrees()), 0, "only the main worktree may remain");
+		// The listing failure is tolerated only for the sweep: no tmux noise (a
+		// missing server, or a missing binary) may reach the reader as if it were
+		// part of the removal.
+		assert.ok(
+			!/tmux/i.test(result.stderr + result.stdout),
+			`the tolerated sweep must stay quiet:\n${result.stderr}`,
+		);
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("remove recipe: the end-state check fails loudly when the cwd is gone", async () => {
+	// With a deleted cwd, `rev-parse --path-format=absolute --git-common-dir`
+	// fails 128 and prints nothing, so a recipe that keeps going runs git against
+	// ".", or against "". The reader must be told to run from a live checkout.
+	const repo = await scratchRepo();
+	try {
+		const result = runWithDeletedCwd(
+			retarget(recipe("Remove", 3), { SLUG: "any-slug" }),
+			repo.root,
+			isolatedTmux(repo),
+		);
+		assert.notEqual(result.status, 0, "a vanished cwd must not read as a clean end state");
+		assert.match(
+			result.stderr,
+			/run from a live checkout/,
+			`stderr must say what to do instead:\n${result.stderr}`,
+		);
+	} finally {
+		await repo.cleanup();
+	}
+});
+
+test("remove recipe: branch cleanup fails loudly when the cwd is gone", async () => {
+	const repo = await scratchRepo();
+	try {
+		const result = runWithDeletedCwd(
+			retarget(recipe("Remove", 1), { SLUG: "any-slug" }),
+			repo.root,
+			isolatedTmux(repo),
+		);
+		assert.notEqual(result.status, 0, "branch cleanup must not report success for a no-op");
+		assert.match(
+			result.stderr,
+			/run from a live checkout/,
+			`stderr must say what to do instead:\n${result.stderr}`,
+		);
+	} finally {
 		await repo.cleanup();
 	}
 });

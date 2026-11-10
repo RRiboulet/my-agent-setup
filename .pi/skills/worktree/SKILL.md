@@ -364,6 +364,29 @@ git worktree unlock "$WT"
 
 ## Remove
 
+The three blocks that destroy or check something - the removal, the branch
+cleanup and the end-state check - each set `set -euo pipefail` themselves, and
+that is deliberate: a refused removal is a *stop*, not a warning. Worth saying
+for a reader pasting one of these blocks into a larger script: errexit stays on
+for the rest of that script, so a later command that merely returns non-zero (a
+`grep` that finds nothing, a false `[ ... ]`) will now abort it. The
+alternative, chaining `|| exit 1` after every command, reads worse and gets
+dropped in editing, which is exactly how the removal block came to exit 0 after
+git had refused it: `git worktree remove` exits 128 on a dirty tree, the tree
+survives, `git worktree list` still lists it - and the trailing `|| true` on the
+`rmdir` underneath turned all of that into success. An agent reads exit 0 as
+"removed" and moves on with the branch still checked out.
+
+Each of those blocks also resolves the main checkout itself and fails loudly
+instead of guessing. With a deleted cwd - or outside a checkout entirely -
+`git rev-parse --path-format=absolute --git-common-dir` exits 128 and prints
+**nothing** (verified), so there is no root left to build `$WT` from: `dirname
+""` hands you `.`, and the removal then runs against `./.worktrees/<slug>` - or
+against `/.worktrees/<slug>` if `$R` itself stays empty - instead of the tree you
+named. So the resolution is an explicit guard, not an assumption that a failure
+leaves the old value or `""` behind. It is repeated per block because these
+recipes are copied one at a time and nothing carries over between calls.
+
 Stop any tmux sessions rooted in the tree first (by path, not by name), then
 remove. Three details in the sweep are load-bearing, each verified by breaking
 it:
@@ -379,18 +402,35 @@ it:
   *pane*, so a multi-pane session appears once per pane and every kill after the
   first fails with "can't find session".
 
+Only the sweep is tolerated, and only because its first stage is a listing that
+fails whenever no tmux server is running, which is the normal case for a fresh
+container: with `pipefail` that status would otherwise abort a clean removal.
+Nothing after it - the removal above all - has an escape hatch.
+
 ```bash
-R="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"; SLUG="task-name"; WT="$R/.worktrees/$SLUG"
+set -euo pipefail
+
+# Resolve the main checkout from the common git dir. Fails loudly instead of
+# leaving $R empty, which would point $WT at `/.worktrees/<slug>`.
+COMMON="$(git rev-parse --path-format=absolute --git-common-dir)" || {
+  echo "cannot resolve the main checkout: run from a live checkout" >&2; exit 1; }
+: "${COMMON:?cannot resolve the main checkout: run from a live checkout}"
+R="$(dirname "$COMMON")"
+
+SLUG="task-name"; : "${SLUG:?SLUG must be set}"; WT="$R/.worktrees/$SLUG"
 SOCKET="${PI_TMUX_SOCKET_DIR:-${TMPDIR:-/tmp}/pi-tmux-sockets}/pi.sock"
+
+# No tmux server is the normal case: tolerate the sweep, never the removal.
 tmux -S "$SOCKET" list-panes -a -F "#{session_name}"$'\t'"#{pane_current_path}" 2>/dev/null |
   WT="$WT" awk -F'\t' '$2==ENVIRON["WT"] || index($2, ENVIRON["WT"] "/")==1 {print $1}' |
   sort -u |
-  while IFS= read -r s; do tmux -S "$SOCKET" kill-session -t "$s"; done
+  while IFS= read -r s; do tmux -S "$SOCKET" kill-session -t "$s"; done || true
 
-git worktree remove "$WT"     # refuses if dirty - that refusal is the review prompt
+# No `|| true` on the removal: a refusal must be this block's exit status.
+git -C "$R" worktree remove "$WT"   # refuses if dirty - that refusal is the review prompt
 # Only once you have read `git -C "$WT" status` and accepted the loss:
-#   git worktree remove -f "$WT"
-rmdir -p "$(dirname "$WT")" 2>/dev/null || true
+#   git -C "$R" worktree remove -f "$WT"
+rmdir -p "$(dirname "$WT")" 2>/dev/null || true   # ignored only now that removal succeeded
 ```
 
 Branch cleanup comes *after* the worktree is gone - git refuses to delete a
@@ -400,9 +440,14 @@ is concerned, so `git branch -d` fails after a normal pull request here. Verify
 the PR merged first, then force-delete:
 
 ```bash
-SLUG="task-name"
+set -euo pipefail
+COMMON="$(git rev-parse --path-format=absolute --git-common-dir)" || {
+  echo "cannot resolve the main checkout: run from a live checkout" >&2; exit 1; }
+: "${COMMON:?cannot resolve the main checkout: run from a live checkout}"
+R="$(dirname "$COMMON")"
+SLUG="task-name"; : "${SLUG:?SLUG must be set}"
 # gh pr view "$SLUG" --json state,mergedAt   # confirm merged
-git branch -D "$SLUG"     # only after the worktree is removed and the PR is merged
+git -C "$R" branch -D "$SLUG"   # only after the worktree is removed and the PR is merged
 ```
 
 Clean up administrative metadata for worktrees whose directories were deleted
@@ -414,13 +459,21 @@ git worktree prune
 ```
 
 End-state check after removal (`SLUG` is set here because `git branch --list ""`
-prints nothing and exits 0 - an unset variable would make the check vacuous):
+prints nothing and exits 0 - an unset variable would make the check vacuous). The
+root is resolved here too: from a deleted cwd every bare `git` call fails 128
+with "Unable to read current working directory" and says nothing about what to
+do, which reads like an ordinary failure of the removal rather than a bad cwd.
 
 ```bash
-SLUG="task-name"
-git worktree list                 # only the main worktree expected
-git worktree prune -n             # must print nothing
-git branch --list "$SLUG"         # must print nothing
+set -euo pipefail
+COMMON="$(git rev-parse --path-format=absolute --git-common-dir)" || {
+  echo "cannot resolve the main checkout: run from a live checkout" >&2; exit 1; }
+: "${COMMON:?cannot resolve the main checkout: run from a live checkout}"
+R="$(dirname "$COMMON")"
+SLUG="task-name"; : "${SLUG:?SLUG must be set}"
+git -C "$R" worktree list          # only the main worktree expected
+git -C "$R" worktree prune -n      # must print nothing
+git -C "$R" branch --list "$SLUG"  # must print nothing
 ```
 
 Move a worktree instead of removing/recreating it:
