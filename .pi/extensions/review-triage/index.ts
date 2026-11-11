@@ -340,6 +340,7 @@ async function runTriage(
 	onProgress?.(`asking ${config.judge.provider}/${config.judge.model}`);
 	let judgment: Judgment | undefined;
 	let plan: ReviewPlan;
+	const judgeStartedAt = Date.now();
 	try {
 		judgment = await askJudge(ctx.modelRegistry, config, built, catalog.options, signal);
 		plan = composePlan({
@@ -371,6 +372,9 @@ async function runTriage(
 			evidence: planEvidence,
 			summary: maskedSummary,
 			reason: error.message,
+			kind: error.failure,
+			message: error.message,
+			latencyMs: Date.now() - judgeStartedAt,
 		});
 	}
 
