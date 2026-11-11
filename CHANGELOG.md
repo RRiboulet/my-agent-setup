@@ -536,6 +536,20 @@ Maintenance:
   other recipe — `Create`, `Open`, `List` and `Review` have observable effects,
   so an argv assertion there would be noise.
 
+- **The two test-fidelity specs behind the live-tmux and argv-recorder tests are
+  now in the tree.** `docs/specs/2026-11-10-worktree-tmux-sweep-live-coverage.md`
+  and `docs/specs/2026-11-10-worktree-resolved-root-observability.md` record what
+  was missing before #129 and #130 — the sweep's only fixture was a fake `tmux`,
+  and the removal recipes' `-C "$R"` contract was invisible to every behavioural
+  test because linked worktrees share refs — together with the seam each test
+  now uses, the alternatives rejected after trying them (`GIT_TRACE` cannot see
+  `-C`; a hand-written fixture cannot catch tmux format drift), the acceptance
+  criteria the implementations were verified against, and the assumptions left
+  open (a host without tmux skips the live test, so format drift stays
+  uncatchable there; the argv assertion is a shape test, not a behavioural one).
+  They were written before the code and are committed after it, so the reasoning
+  survives the pull-request bodies it was first stated in.
+
 ## v1.11.0 — 2026-11-09
 
 Added:
