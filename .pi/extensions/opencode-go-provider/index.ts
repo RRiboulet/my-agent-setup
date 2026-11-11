@@ -406,12 +406,23 @@ export function loadStaleModels(embeddedModels: JsonModel[]): JsonModel[] {
   const cached = loadCachedModels();
   if (!cached || cached.length === 0) return embeddedModels;
 
-  // Merge embedded models that are missing from cache (newly added models)
   const cachedMap = new Map(cached.map(m => [m.id, m]));
   for (const em of embeddedModels) {
-    if (!cachedMap.has(em.id)) {
+    const cachedModel = cachedMap.get(em.id);
+    // A model the cache predates: serve the curated entry.
+    if (!cachedModel) {
       cached.push(em);
+      continue;
     }
+
+    // Refresh what curation owns. `reasoning` and `thinkingLevelMap` are the
+    // fields a models.json edit is meant to change, and a failed revalidation
+    // used to keep serving the values captured when the cache was written.
+    // Cost, contextWindow and the rest stay cached deliberately: refreshing
+    // those from the embedded list is the shape that got the earlier
+    // revalidation change reverted.
+    cachedModel.reasoning = em.reasoning;
+    cachedModel.thinkingLevelMap = em.thinkingLevelMap;
   }
   return cached;
 }
