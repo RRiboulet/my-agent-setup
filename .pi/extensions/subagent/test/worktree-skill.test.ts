@@ -15,7 +15,8 @@
 // as happily on a broken recipe.
 
 import assert from "node:assert/strict";
-import { cpSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
@@ -581,6 +582,185 @@ test("remove recipe: kills each session rooted in the tree once, even with a bac
 		assert.doesNotMatch(result.stderr, /can't find session/, "no kill may target an already-dead session");
 	} finally {
 		await fake?.cleanup();	}
+});
+
+// ---------------------------------------------------------------------------
+// The same sweep, against a real tmux server
+// ---------------------------------------------------------------------------
+//
+// The fake above answers from a fixture we wrote, so it can only catch what we
+// already knew to reproduce: change the recipe's `-F` field order, or the way it
+// calls `kill-session`, and the fake happily answers anyway. A real server is
+// the only thing that turns "one row per pane", the survivors of a kill and the
+// wording of a second kill into facts rather than assumptions.
+
+/**
+ * The sweep's own listing format, spelled the way the recipe spells it: one row
+ * per *pane*, `#{session_name}` then `#{pane_current_path}`, tab-separated.
+ */
+const LIVE_PANE_FORMAT = "#{session_name}\t#{pane_current_path}";
+
+interface LiveTmux {
+	/** `tmux -S <socket> <args>`, captured rather than thrown. */
+	run(...args: string[]): { status: number | null; stdout: string; stderr: string };
+	/** One row per pane, straight from the server - not from a fixture. */
+	panes(): Array<{ session: string; panePath: string }>;
+	/** Stop the server. Safe to call when it never started. */
+	stop(): void;
+}
+
+/**
+ * A real tmux server on `<root>/tmux-sockets/pi.sock`, under the scratch repo,
+ * so this test cannot reach this host's ambient sessions. `node --test` runs test *files* in
+ * parallel, and the socket lives under this file's own `mkdtemp` root, so two
+ * files cannot end up sharing one server.
+ *
+ * No TTY: everything is created detached.
+ */
+function liveTmux(root: string): LiveTmux {
+	const socket = path.join(root, "tmux-sockets", "pi.sock");
+	mkdirSync(path.dirname(socket), { recursive: true });
+
+	const run = (...args: string[]) => {
+		// `cwd: root`, not the repo: a tmux client that has to start the server
+		// gives the server its own cwd, which must not be the tree under test.
+		const result = spawnSync("tmux", ["-S", socket, ...args], {
+			cwd: root,
+			encoding: "utf8",
+			timeout: 10_000,
+		});
+		if (result.error) throw result.error;
+		return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+	};
+
+	return {
+		run,
+		panes: () => {
+			const listing = run("list-panes", "-a", "-F", LIVE_PANE_FORMAT);
+			assert.equal(listing.status, 0, `live tmux: list-panes failed:\n${listing.stderr}`);
+			return listing.stdout
+				.split("\n")
+				.filter((line) => line !== "")
+				.map((line) => {
+					const [session, panePath] = line.split("\t");
+					return { session, panePath };
+				});
+		},
+		stop: () => {
+			run("kill-server");
+		},
+	};
+}
+
+/**
+ * Whether a pane's reported cwd is the tree itself or inside it.
+ *
+ * A pane whose directory has since been removed is reported as `<path>
+ * (deleted)` - precisely the state a leaked session is in once the removal has
+ * run - so that suffix is stripped first. Without it, a session whose only pane
+ * sat at the tree's root slips past a prefix comparison on the one run that
+ * matters (verified with the `awk -v` mutation).
+ */
+function insideTree(panePath: string, wt: string): boolean {
+	const at = panePath.replace(/ \(deleted\)$/, "");
+	return at === wt || at.startsWith(wt + path.sep);
+}
+
+test("remove recipe: a live tmux server loses the tree's sessions and keeps the decoy", async (t) => {
+	// tmux missing is an environment fact, not a failure of the recipe: the fake
+	// above still pins the argv shape and the no-server path on such a host, and
+	// the skip says out loud that the live coverage did not run.
+	const probe = spawnSync("tmux", ["-V"], { encoding: "utf8" });
+	if (probe.error || probe.status !== 0) {
+		t.skip("tmux is not installed on this host, so the live sweep coverage did not run");
+		return;
+	}
+
+	// The scratch root carries a backslash for the same reason the fake test's
+	// does: `awk -v` rewrites `\t` in its value, so only a path with a literal
+	// backslash shows that the recipe hands the path to awk through ENVIRON.
+	const repo = await scratchRepo({ rootPrefix: "worktree-skill-live-back\\tslash-" });
+	// tmux reports a pane's cwd as the OS resolved it, while the sweep compares it
+	// with the recipe's raw `$WT`. A scratch root behind a symlink would differ, so
+	// this fails here for a filesystem reason rather than letting the sweep look
+	// broken. (Verified on this host: `/tmp` is not a symlink.)
+	if (realpathSync(repo.root) !== repo.root) {
+		t.skip(`the scratch root resolves to ${realpathSync(repo.root)}, so a pane's cwd cannot match the recipe's raw path`);
+		return;
+	}
+
+	const slug = "live-sweep";
+	const wt = repo.pathOf(slug);
+	const session = `pi-wt-${slug}`;
+	const decoy = "pi-unrelated";
+	const tmux = liveTmux(repo.root);
+	try {
+		repo.git("worktree", "add", "-q", wt, "-b", slug, "origin/dev");
+		assert.ok(wt.includes("\\"), "fixture: the worktree path must contain a backslash");
+
+		// A second pane in a subdirectory of the tree. The directory has to exist:
+		// `split-window -c` silently falls back to the server's own cwd for a
+		// missing path, which would put this pane outside the tree and turn the
+		// whole test into a single-pane case that passes for the wrong reason.
+		const sub = path.join(wt, "sub");
+		await mkdir(sub);
+		assert.equal(tmux.run("new", "-d", "-s", session, "-c", wt).status, 0, "fixture: new-session");
+		assert.equal(tmux.run("split-window", "-d", "-t", session, "-c", sub).status, 0, "fixture: split-window");
+		assert.equal(tmux.run("new", "-d", "-s", decoy, "-c", repo.root).status, 0, "fixture: decoy session");
+
+		// Before the sweep: one row per *pane*, so the deduplication the recipe
+		// needs is actually exercised. A single-pane listing would not catch its
+		// absence.
+		const before = tmux.panes();
+		const targetRows = before.filter((pane) => pane.session === session);
+		assert.equal(targetRows.length, 2, `fixture: expected two rows for ${session}, got:\n${before.map((p) => `${p.session}\t${p.panePath}`).join("\n")}`);
+		assert.deepEqual(
+			targetRows.map((pane) => pane.panePath).sort(),
+			[wt, sub].sort(),
+			"fixture: both panes of the target session must be rooted inside the tree",
+		);
+		assert.deepEqual(
+			before.filter((pane) => pane.session === decoy).map((pane) => pane.panePath),
+			[repo.root],
+			"fixture: the decoy session must be rooted outside the tree",
+		);
+
+		const result = runScript(retarget(recipe("Remove", 0), { SLUG: slug }), {
+			cwd: repo.main,
+			env: isolatedTmux(repo),
+		});
+
+		assert.equal(result.status, 0, `remove failed:\n${result.stderr}`);
+		assert.ok(!existsSync(wt), "the worktree directory must be gone");
+
+		const after = tmux.panes();
+		assert.deepEqual(
+			after.filter((pane) => insideTree(pane.panePath, wt)).map((pane) => `${pane.session}\t${pane.panePath}`),
+			[],
+			"no session with a pane inside the removed tree may survive the sweep",
+		);
+		assert.ok(
+			!after.some((pane) => pane.session === session),
+			`${session}, whose panes were all inside the tree, must not survive the sweep`,
+		);
+		assert.ok(
+			after.some((pane) => pane.session === decoy),
+			"the decoy session is rooted outside the tree and must survive",
+		);
+		// The sweep tolerates its own failure with `|| true`, so a second
+		// `kill-session` against the real server is only visible as its wording.
+		assert.doesNotMatch(result.stderr, /can't find session/, `the sweep killed a session twice:\n${result.stderr}`);
+	} finally {
+		// The server must be gone even when an assertion above failed: a surviving
+		// server keeps its panes alive on a cwd that no longer exists, and the next
+		// run on this host inherits sessions it did not create. `list-sessions`
+		// exits 1 with "no server running" - it never starts one - so this is the
+		// check, and it runs before the scratch repo (socket included) is deleted.
+		tmux.stop();
+		const sessions = tmux.run("list-sessions");
+		assert.equal(sessions.status, 1, `live tmux: kill-server left a server behind:\n${sessions.stdout}`);
+		await repo.cleanup();
+	}
 });
 
 // --- Remove: the failure this section exists to stop -----------------------

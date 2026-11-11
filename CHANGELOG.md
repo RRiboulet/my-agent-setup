@@ -457,6 +457,41 @@ Maintenance:
   with it, the default socket every `devc` session), so it is for an idle
   server, or the change waits for new windows.
 
+- **The `worktree` skill's session sweep is now pinned against a real `tmux`
+  server, not only a fake one.** Every Remove test until now drove a `/bin/sh`
+  stand-in that answered `list-panes` from a hand-written tab-separated
+  fixture, so the sweep's contract with tmux itself was an assumption the suite
+  restated: one row per *pane*, the meaning of the `-F` field order, and what a
+  second `kill-session` of a dead session does. Change the `-F` string's order
+  and the fake still matches, because it prints its own file. That is the wrong
+  half to leave untested, since the behaviour #115 exists for — deduplication
+  before the kill loop — is only visible in a listing a real server produced,
+  and its failure mode is silent: the sweep does nothing, and the
+  `git worktree remove` on the next line takes the tree from under a live pane.
+  A new test in `worktree-skill.test.ts` starts a private server on a socket
+  under the scratch repo, creates one session with two panes rooted inside the
+  tree (the tree itself and a subdirectory) plus a decoy rooted outside it,
+  asserts the pre-sweep listing really has two rows for the target session — so
+  the case cannot decay into a single-pane one that passes for the wrong reason
+  — and then runs `Remove[0]`: exit 0, the tree gone, no session with a pane
+  inside it left, the decoy alive, and no "can't find session" on stderr, which
+  is the only trace a repeated kill leaves because the sweep tolerates its own
+  failure with `|| true`. Both regressions were shown red live: deleting
+  `sort -u` prints `can't find session: pi-wt-live-sweep` on stderr, and
+  reverting to `awk -F'\t' -v wt="$WT"` leaks the session, whose panes report
+  `…/live-sweep (deleted)` — the tree removed, a shell still sitting in it. The
+  scratch root carries a literal backslash, as the fake test's does, and the
+  fixture creates the subdirectory first because `split-window -c` silently
+  falls back to the server's cwd for a missing path. Isolation is the socket
+  plus a `kill-server` in `finally` that is itself asserted: `list-sessions`
+  must report no server, which was mutation-checked by deleting the
+  `kill-server` (the guard names the session it left running), and confirmed
+  after a deliberately failing run with the scratch root kept, so `rm -rf`
+  could not be credited for it. The trade is stated rather than hidden: on a
+  host without `tmux` the live test skips with that reason while the fake tests
+  keep running, so a format or flag drift there is still uncatchable — the fake
+  pins the argv shape, nothing pins tmux's answer.
+
 ## v1.11.0 — 2026-11-09
 
 Added:
