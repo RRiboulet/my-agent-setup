@@ -491,6 +491,40 @@ Maintenance:
   host without `tmux` the live test skips with that reason while the fake tests
   keep running, so a format or flag drift there is still uncatchable — the fake
   pins the argv shape, nothing pins tmux's answer.
+- **The `-C "$R"` contract in the `worktree` skill's branch-cleanup and
+  end-state blocks is now observed at the argv git actually receives.** Since
+  #116 both blocks run git as `git -C "$R" …`, where `$R` is the main checkout
+  resolved from `--git-common-dir`, so that they act on the checkout they just
+  resolved rather than on wherever the reader happens to be standing. Nothing
+  tested it, and nothing *behavioural* can: linked worktrees share refs, so a
+  bare `git branch -D <slug>` and `git -C <main> branch -D <slug>` delete the
+  same ref with identical output and exit status from any cwd inside the
+  repository, and the end-state checks read the same shared `worktree list` and
+  `branch --list`. An edit that dropped `-C` — or resolved some other root —
+  would therefore pass the whole suite. `GIT_TRACE=1` is not a seam either:
+  `-C` is consumed before tracing, so it prints `built-in: git branch -D
+  task-name` whether the flag was passed or not (git 2.56.0), and asserting the
+  string against `SKILL.md` would pass even if the harness stopped running the
+  block. So the test prepends a `git` wrapper to `PATH` that appends its argv to
+  a per-test log and then `exec`s the real binary, resolved from the previous
+  `PATH` before the wrapper's directory is installed — no hardcoded
+  `/usr/bin/git`, and the wrapper cannot find itself. `exec` forwards argv
+  verbatim, so exit status, stdout and stderr stay git's own. Both recipes run
+  from a *linked worktree* cwd, and every call after the initial `git rev-parse
+  --path-format=absolute --git-common-dir` — which carries no `-C` by design,
+  there is no root to point at yet — must start with `-C` and the root the test
+  resolves with that same command, not a hardcoded path. The recorded argv was
+  `-C <root> branch -D task-branch-cleanup` for the cleanup, and `-C <root>
+  worktree list`, `-C <root> worktree prune -n`, `-C <root> branch --list
+  task-end-state` for the end state. Both mutations were shown red, each while
+  the branch and the listing were still correct — which is the point: dropping
+  `-C` from the `branch -D` fails with "every call after the root discovery
+  must carry -C <root>, got: branch -D task-branch-cleanup", and dropping it
+  from all three end-state calls fails the same assertion on `worktree list`.
+  The deleted-cwd tests stay unchanged as the behavioural half (the guard and
+  its exit status); this pins only the rooting, and deliberately covers no
+  other recipe — `Create`, `Open`, `List` and `Review` have observable effects,
+  so an argv assertion there would be noise.
 
 ## v1.11.0 — 2026-11-09
 
