@@ -419,6 +419,32 @@ Maintenance:
   and was itself untested. All four were mutation-checked by removing the
   behaviour from a scratch copy of the script.
 
+- **tmux: the truecolor block says what it actually does, and a config edit now
+  says how to make it take effect.** The paragraph above
+  `set -as terminal-features ",*:RGB"` claimed that *that* setting is what tmux
+  hands to inner programs and what flips pi's colour detection. Measured on tmux
+  3.3a, it is not: with or without those two lines the inner environment is
+  identical — `TERM=tmux-256color`, `tput colors` 256, `COLORTERM=truecolor`,
+  `PI_TRUE_COLOR=1` — because the `setenv -g` pair, not the terminal-features
+  pair, is what puts the variables there. The lines are kept (they are a claim
+  about the *outer* terminal's rendering, and removing them would change
+  behaviour on real terminals that a detached server in this container cannot
+  measure), the comment now states the measured truth and the accepted trade
+  that `",*:RGB"` asserts 24-bit for every client, including a 256-colour one
+  over SSH.
+
+  The companion trap is that a long-lived server never re-reads the file.
+  Measured: a `setenv -g` issued after startup is absent from an existing pane's
+  `/proc/<pid>/environ` while `show-environment -g` already lists it, and a new
+  window sees it. So "the colours did not change after I edited `~/.tmux.conf`"
+  is not a broken config, it is an unread one. Both skills now say so: the
+  devcontainer troubleshooting row points at `setenv` instead of
+  `terminal-features`, and the `tmux` skill names the symptom and the only
+  remedy — a server restart, which is `kill-server` on the very sockets whose
+  rules otherwise forbid it (the subagent socket takes every running child Pi
+  with it, the default socket every `devc` session), so it is for an idle
+  server, or the change waits for new windows.
+
 ## v1.11.0 — 2026-11-09
 
 Added:
