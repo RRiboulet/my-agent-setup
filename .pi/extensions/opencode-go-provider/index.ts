@@ -61,6 +61,11 @@ export interface JsonModel {
   api?: Api;
   baseUrl?: string;
   reasoning: boolean;
+  // Set by transformApiModel when the live payload explicitly reports
+  // `capabilities.reasoning.supported: false`. A payload that is merely silent
+  // leaves it absent, so mergeWithEmbedded can tell "no reasoning" from "no
+  // information". Stripped before a model is cached or registered.
+  reasoningDenied?: boolean;
   thinkingLevelMap?: ThinkingLevelMapValue;
   input: ("text" | "image")[];
   cost: {
@@ -233,6 +238,9 @@ export function transformApiModel(apiModel: any): JsonModel {
     (Array.isArray(effortLevels) && effortLevels.length > 0 ? true : undefined) ??
     apiModel.reasoning ??
     false;
+  // Only an explicit denial may beat curation; an absent capabilities block
+  // means the API said nothing and must not be read as "no reasoning".
+  const reasoningDenied = reasoningCap?.supported === false;
   const thinkingLevelMap =
     reasoningSupported && Array.isArray(effortLevels) && effortLevels.length > 0
       ? {
@@ -250,7 +258,7 @@ export function transformApiModel(apiModel: any): JsonModel {
         }
       : undefined;
 
-  return {
+  const transformed: JsonModel = {
     id: apiModel.id,
     name: apiModel.name || apiModel.id,
     api,
@@ -273,6 +281,8 @@ export function transformApiModel(apiModel: any): JsonModel {
     contextWindow: apiModel.limit?.context || apiModel.context_length || null,
     maxTokens: apiModel.limit?.output || 0,
   };
+  if (reasoningDenied) transformed.reasoningDenied = true;
+  return transformed;
 }
 
 export function transformApiModels(apiModels: any[]): JsonModel[] {
@@ -335,8 +345,15 @@ export function mergeWithEmbedded(liveModels: JsonModel[], embeddedModels: JsonM
       // live cost when the API reports it (non-zero); fall back to embedded when
       // the API is silent (0) so curated cacheRead/cacheWrite isn't clobbered and
       // providers whose /models endpoint exposes no pricing keep their curated
-      // cost. Curation (reasoning/input/compat/name) still wins via ...embedded.
-      result.push({
+      // cost. Curation (input/compat/name) still wins via ...embedded.
+      //
+      // Reasoning is curated too, with one exception: a payload that explicitly
+      // reports `supported: false` demotes the model, because a capability lost
+      // upstream must stop offering levels that no longer work. A payload that
+      // merely omits the block leaves `reasoningDenied` unset, so silence can
+      // never disable a curated model.
+      const demoted = liveModel.reasoningDenied === true;
+      const merged: JsonModel = {
         ...liveModel,
         ...embedded,
         cost: {
@@ -352,16 +369,24 @@ export function mergeWithEmbedded(liveModels: JsonModel[], embeddedModels: JsonM
         // bug — it treated the API's 131072-fallback as authoritative and
         // shadowed curated 1M/262K context windows.
         contextWindow: liveModel.contextWindow ?? embedded.contextWindow ?? 131072,
+        reasoning: demoted ? false : embedded.reasoning,
         // Prefer the live-derived thinking-level map only when the curated
         // entry has none, so manual curation still wins for curated models.
-        thinkingLevelMap: embedded.thinkingLevelMap ?? liveModel.thinkingLevelMap,
-      });
+        // A demoted model advertises no levels at all.
+        thinkingLevelMap: demoted ? undefined : (embedded.thinkingLevelMap ?? liveModel.thinkingLevelMap),
+      };
+      // transformApiModel's live-only marker must not reach the cache or the
+      // registered model.
+      delete merged.reasoningDenied;
+      result.push(merged);
     } else {
       // API-only model (no curated embedded counterpart). The Live API is silent
       // on contextWindow for all current opencode-go models, so liveModel.contextWindow
       // is null. Apply the safe default here so downstream consumers (e.g. pi core's
       // formatTokenCount → count.toString()) don't crash on null.
-      result.push({ ...liveModel, contextWindow: liveModel.contextWindow ?? 131072 });
+      const merged: JsonModel = { ...liveModel, contextWindow: liveModel.contextWindow ?? 131072 };
+      delete merged.reasoningDenied;
+      result.push(merged);
     }
   }
   // Append any embedded models that the live API didn't return
