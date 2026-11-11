@@ -585,7 +585,8 @@ test("remove recipe: kills each session rooted in the tree once, even with a bac
 		assert.deepEqual(await fake.kills(), [`kill-session -t ${session}`], "exactly one kill, of the matching session only");
 		assert.doesNotMatch(result.stderr, /can't find session/, "no kill may target an already-dead session");
 	} finally {
-		await fake?.cleanup();	}
+		await fake?.cleanup();
+	}
 });
 
 // ---------------------------------------------------------------------------
