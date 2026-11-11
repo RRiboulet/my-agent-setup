@@ -37,7 +37,7 @@ import {
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { test } from "node:test";
+import { after, test } from "node:test";
 
 const REPO_ROOT = path.resolve(new URL("../../../..", import.meta.url).pathname);
 const DEVC = path.join(REPO_ROOT, "bin/devc");
@@ -154,8 +154,22 @@ interface Sandbox {
 	reset: () => void;
 }
 
+// Every sandbox root this file creates, removed when the file's tests finish.
+const sandboxRoots: string[] = [];
+
+after(() => {
+	for (const root of sandboxRoots) {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 function sandbox(): Sandbox {
 	const root = realpathSync(mkdtempSync(path.join(tmpdir(), "devc-test-")));
+	// A throwaway project per test is the point, but nothing here removes the
+	// throwaway: measured, one run of this file left 33 directories and ~2MB in
+	// `$TMPDIR` behind it, on every run. Collect the roots and remove them when
+	// the file's tests finish — `after` runs even when a test fails.
+	sandboxRoots.push(root);
 	const home = path.join(root, "home");
 	const project = path.join(home, "proj");
 
