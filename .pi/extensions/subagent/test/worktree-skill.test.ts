@@ -15,7 +15,7 @@
 // as happily on a broken recipe.
 
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -223,8 +223,12 @@ test("worktree skill: end-state check defines SLUG", () => {
 	// "must print nothing" vacuously true.
 	const endState = recipe("Remove", 3);
 	assert.match(endState, /^SLUG="task-name"/m, "the end-state block must set SLUG");
-	assert.ok(endState.includes('git -C "$R" worktree list'), "end state must list worktrees");
-	assert.ok(endState.includes('git -C "$R" branch --list "$SLUG"'), "end state must check the branch");
+	// Deliberately not `includes('git -C "$R" …')`: the `-C` contract belongs to
+	// the executable test below ("every end-state check runs at the resolved main
+	// root"), which asserts the argv git received. A substring match here would
+	// pass even if the harness stopped running the block.
+	assert.ok(endState.includes("worktree list"), "end state must list worktrees");
+	assert.ok(endState.includes('branch --list "$SLUG"'), "end state must check the branch");
 });
 
 test("worktree skill: attach command is expanded and verified", () => {
@@ -887,6 +891,210 @@ test("remove recipe: branch cleanup fails loudly when the cwd is gone", async ()
 			`stderr must say what to do instead:\n${result.stderr}`,
 		);
 	} finally {
+		await repo.cleanup();
+	}
+});
+
+// --- Remove: the resolved-root contract ------------------------------------
+//
+// `Remove[1]` and `Remove[3]` run git as `git -C "$R" ...`, where `$R` is the
+// main checkout resolved from `--git-common-dir`. That contract is invisible to
+// every behavioural test in this file: linked worktrees share refs, so a bare
+// `git branch -D <slug>` and a `git -C <main> branch -D <slug>` delete the same
+// ref with the same output and exit status from any cwd inside the repository
+// (verified), and the end-state checks likewise read the same shared refs. A
+// future edit that drops `-C` - or resolves something other than the checkout
+// the block just resolved - would therefore pass the whole suite while these
+// blocks stopped acting on the root they resolved and started acting on wherever
+// the reader happens to stand.
+//
+// `GIT_TRACE=1` cannot see it either: `-C` is consumed before tracing, so the
+// trace prints `built-in: git branch -D task-name` whether the flag was passed
+// or not (git 2.56.0). The argv git actually receives is the only seam, so that
+// is what these two tests assert - never the text of `SKILL.md`, which would
+// pass even if the harness stopped running the block.
+
+interface GitRecorder {
+	/** `PATH` (wrapper bin first) plus the wrapper's own file locations. */
+	env: Record<string, string>;
+	/** One line per `git` invocation: that call's arguments, space-joined, in order. */
+	calls(): Promise<string[]>;
+	cleanup(): Promise<void>;
+}
+
+/**
+ * A `git` stand-in that appends its argv to a log, then `exec`s the real binary.
+ *
+ * Transparent by construction: the real git is resolved from `PATH` *before* the
+ * wrapper's directory is prepended, so the wrapper cannot find itself and no
+ * path is hardcoded (the devcontainer may put a shim first - that shim is what
+ * gets recorded and executed). `exec "$REAL_GIT" "$@"` replaces the shell, so
+ * exit status, stdout and stderr are git's own and nothing is buffered; argv is
+ * forwarded verbatim, so a call with no arguments logs an empty line rather
+ * than failing. The passthrough is asserted too (the branch is really deleted),
+ * which is what catches a wrapper that dead-ends.
+ */
+async function recordGit(): Promise<GitRecorder> {
+	const realGit = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+	if (!path.isAbsolute(realGit)) throw new Error(`could not resolve git from PATH, got ${JSON.stringify(realGit)}`);
+
+	const dir = await mkdtemp(path.join(tmpdir(), "record-git-"));
+	const bin = path.join(dir, "bin");
+	const log = path.join(dir, "argv.log");
+	await mkdir(bin);
+
+	const wrapper = path.join(bin, "git");
+	await writeFile(
+		wrapper,
+		`#!/bin/sh
+printf '%s\\n' "$*" >> "$GIT_ARGV_LOG"
+exec "$REAL_GIT" "$@"
+`,
+	);
+	await chmod(wrapper, 0o755);
+
+	return {
+		env: {
+			// Only `git` is shadowed: `bash`, `awk`, `sort` and `gh` still resolve normally.
+			PATH: `${bin}:${process.env.PATH ?? ""}`,
+			GIT_ARGV_LOG: log,
+			REAL_GIT: realGit,
+		},
+		calls: async () => {
+			if (!existsSync(log)) return [];
+			return (await readFile(log, "utf8")).split("\n").filter((line) => line !== "");
+		},
+		cleanup: async () => {
+			await rm(dir, { recursive: true, force: true });
+		},
+	};
+}
+
+const ROOT_DISCOVERY = "rev-parse --path-format=absolute --git-common-dir";
+
+/**
+ * The main root the recipes resolve, from the same cwd and command they use.
+ * Deliberately not a hardcoded path: the assertion has to move with git's own
+ * answer, or it would pin this workspace's layout instead of the contract.
+ */
+function resolvedRoot(repo: { gitIn(dir: string, ...args: string[]): string }, cwd: string): string {
+	return path.dirname(repo.gitIn(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir").trim());
+}
+
+/**
+ * Assert the resolved-root contract: the first call discovers the root (it has
+ * no `-C` by design, there is nothing to point at yet), and every call after it
+ * is rooted at exactly that checkout. Skipping the discovery call keeps the rule
+ * "after resolution everything is rooted" rather than "every line contains -C",
+ * which is false for the line that does the resolving.
+ */
+function assertRooted(calls: string[], root: string): string[] {
+	assert.ok(calls.length > 0, "the block must have called git at all");
+	assert.equal(calls[0], ROOT_DISCOVERY, "the first call is the root discovery and takes no -C");
+	const afterResolution = calls.slice(1);
+	assert.ok(afterResolution.length > 0, "the block must still call git once the root is known");
+	for (const call of afterResolution) {
+		assert.ok(
+			call.startsWith(`-C ${root} `),
+			`every call after the root discovery must carry -C ${root}, got: ${call}`,
+		);
+	}
+	return afterResolution;
+}
+
+test("remove recipe: branch cleanup deletes the branch from the main root, not the cwd", async () => {
+	// Run from a *linked worktree* on purpose: bare git works there too, which is
+	// exactly why the -C contract needs a non-behavioural seam (see the section
+	// comment above). The recorder is the seam; the deletion is the proof that the
+	// wrapper passed through rather than swallowing the call.
+	const repo = await scratchRepo();
+	let recorder: GitRecorder | undefined;
+	const slug = "task-branch-cleanup";
+	try {
+		const linked = path.join(repo.root, "linked-cwd");
+		repo.git("worktree", "add", "-q", linked, "-b", "probe", "origin/dev");
+
+		// The branch `Remove[1]` force-deletes must be *unmerged*: the recipe uses
+		// `branch -D` deliberately (a squash merge leaves the branch unmerged as
+		// far as git is concerned), so a merged fixture would not exercise it.
+		repo.git("checkout", "-q", "-b", slug, "origin/dev");
+		writeFileSync(path.join(repo.main, "unmerged.txt"), "not merged\n");
+		repo.git("add", "unmerged.txt");
+		repo.git("commit", "-q", "-m", `feat: unmerged work on ${slug}`);
+		const tip = repo.git("rev-parse", "--short", "HEAD").trim();
+		repo.git("checkout", "-q", "dev");
+		assert.throws(
+			() => repo.git("merge-base", "--is-ancestor", slug, "dev"),
+			"fixture: the branch must not be merged, so -D is the path under test",
+		);
+		assert.equal(repo.git("branch", "--list", slug).trim().length > 0, true, "fixture: the branch exists");
+
+		recorder = await recordGit();
+		const result = runScript(retarget(recipe("Remove", 1), { SLUG: slug }), {
+			cwd: linked,
+			env: recorder.env,
+		});
+
+		// The wrapper passed through: git's own exit status, the branch is gone, and
+		// the message git printed is the one the reader sees - nothing is swallowed
+		// or retold by the wrapper.
+		assert.equal(result.status, 0, `branch cleanup failed:\n${result.stderr}`);
+		assert.equal(repo.git("branch", "--list", slug).trim(), "", "the branch must really be deleted");
+		assert.match(
+			result.stdout,
+			new RegExp(`Deleted branch ${slug} \\(was ${tip}\\)`),
+			`git's own stdout must reach the caller:\n${result.stdout}`,
+		);
+		assert.equal(result.stderr, "", "a transparent wrapper must not add stderr of its own");
+
+		const root = resolvedRoot(repo, linked);
+		assert.equal(root, repo.main, `fixture: the resolved root must be the main checkout, got ${root}`);
+		const afterResolution = assertRooted(await recorder.calls(), root);
+		assert.deepEqual(
+			afterResolution,
+			[`-C ${root} branch -D ${slug}`],
+			"the force delete must be the one call made after resolving the root",
+		);
+	} finally {
+		await recorder?.cleanup();
+		await repo.cleanup();
+	}
+});
+
+test("remove recipe: every end-state check runs at the resolved main root", async () => {
+	// Same complaint as above, three calls wide: `worktree list`, `prune -n` and
+	// `branch --list` all read state shared by every worktree, so running them
+	// from the reader's cwd looks identical - and is a different checkout.
+	const repo = await scratchRepo();
+	let recorder: GitRecorder | undefined;
+	const slug = "task-end-state";
+	try {
+		const linked = path.join(repo.root, "linked-cwd");
+		repo.git("worktree", "add", "-q", linked, "-b", "probe", "origin/dev");
+
+		recorder = await recordGit();
+		const result = runScript(retarget(recipe("Remove", 3), { SLUG: slug }), {
+			cwd: linked,
+			env: recorder.env,
+		});
+		assert.equal(result.status, 0, `end-state check failed:\n${result.stderr}`);
+		// git's listing is what the reader is asked to inspect, so it has to be
+		// git's own output, not something the wrapper consumed.
+		assert.ok(
+			result.stdout.includes(repo.main) && result.stdout.includes(linked),
+			`the worktree listing must reach the caller:\n${result.stdout}`,
+		);
+
+		const root = resolvedRoot(repo, linked);
+		assert.equal(root, repo.main, `fixture: the resolved root must be the main checkout, got ${root}`);
+		const afterResolution = assertRooted(await recorder.calls(), root);
+		assert.deepEqual(
+			afterResolution,
+			[`-C ${root} worktree list`, `-C ${root} worktree prune -n`, `-C ${root} branch --list ${slug}`],
+			"all three end-state checks must run at the resolved root",
+		);
+	} finally {
+		await recorder?.cleanup();
 		await repo.cleanup();
 	}
 });
