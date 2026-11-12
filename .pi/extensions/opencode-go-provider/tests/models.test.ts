@@ -201,7 +201,100 @@ test("reads pricing from the payload's cost.text block", () => {
   assert.equal(haiku.cost.text.input.cache.write, 0.125);
 
   const transformed = transformApiModel(haiku);
-  assert.deepEqual(transformed.cost, { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 });
+  assert.deepEqual(transformed.cost, {
+    input: 0.1,
+    output: 0.5,
+    cacheRead: 0.01,
+    cacheWrite: 0.125,
+    tiers: [{ inputTokensAbove: 100000, input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0.625 }],
+  });
+});
+
+test("maps the payload's context-tiered overrides onto pi's cost tiers", () => {
+  // Both override arrays are keyed by the same `when.context.gt`, so they are one
+  // tier: pi's ModelCostTier carries all four rates, and only the highest matching
+  // threshold applies to the whole request.
+  const tiers = transformApiModel(live("claude-haiku-5-5")).cost.tiers;
+
+  assert.deepEqual(tiers, [
+    { inputTokensAbove: 100000, input: 0.5, output: 2.5, cacheRead: 0.05, cacheWrite: 0.625 },
+  ]);
+});
+
+test("omits tiers entirely when the payload has no overrides", () => {
+  const deepseek = transformApiModel(live("deepseek-v4.1-flash"));
+
+  assert.equal(deepseek.cost.tiers, undefined);
+  assert.equal("tiers" in deepseek.cost, false);
+});
+
+test("fills a rate a tier does not list from the base price", () => {
+  const synthetic = transformApiModel({
+    id: "synthetic-input-only-tier",
+    cost: {
+      text: {
+        input: { price: 1, cache: { read: 0.1, write: 1.25 }, overrides: [{ when: { context: { gt: 50000 } }, price: 2 }] },
+        output: { price: 3 },
+      },
+    },
+  });
+
+  assert.deepEqual(synthetic.cost.tiers, [
+    { inputTokensAbove: 50000, input: 2, output: 3, cacheRead: 0.1, cacheWrite: 1.25 },
+  ]);
+});
+
+test("keeps thresholds from both override arrays as separate tiers, ascending", () => {
+  const synthetic = transformApiModel({
+    id: "synthetic-two-tiers",
+    cost: {
+      text: {
+        input: { price: 1, overrides: [{ when: { context: { gt: 200000 } }, price: 4 }] },
+        output: { price: 3, overrides: [{ when: { context: { gt: 100000 } }, price: 6 }] },
+      },
+    },
+  });
+
+  assert.deepEqual(synthetic.cost.tiers, [
+    { inputTokensAbove: 100000, input: 1, output: 6, cacheRead: 0, cacheWrite: 0 },
+    { inputTokensAbove: 200000, input: 4, output: 3, cacheRead: 0, cacheWrite: 0 },
+  ]);
+});
+
+test("ignores an override whose threshold is not a number", () => {
+  for (const when of [undefined, {}, { context: {} }, { context: { gt: "100000" } }, { tokens: { gt: 1 } }]) {
+    const synthetic = transformApiModel({
+      id: "x",
+      cost: { text: { input: { price: 1, overrides: [{ when, price: 2 }] }, output: { price: 3 } } },
+    });
+
+    assert.equal(synthetic.cost.tiers, undefined, JSON.stringify(when));
+  }
+});
+
+test("keeps the base rate for an override whose price is not a number", () => {
+  const synthetic = transformApiModel({
+    id: "x",
+    cost: {
+      text: {
+        input: { price: 1, overrides: [{ when: { context: { gt: 1000 } }, price: "cheap", cache: { read: -1 } }] },
+        output: { price: 3 },
+      },
+    },
+  });
+
+  assert.deepEqual(synthetic.cost.tiers, [
+    { inputTokensAbove: 1000, input: 1, output: 3, cacheRead: 0, cacheWrite: 0 },
+  ]);
+});
+
+test("treats a non-array overrides block as no tiers", () => {
+  const synthetic = transformApiModel({
+    id: "x",
+    cost: { text: { input: { price: 1, overrides: { gt: 1 } }, output: { price: 3, overrides: "nope" } } },
+  });
+
+  assert.equal(synthetic.cost.tiers, undefined);
 });
 
 test("accepts MIME image modalities as image input and drops non-image ones", () => {
@@ -383,6 +476,23 @@ test("lets live cost win per field only when the API reports it", () => {
   const [merged] = mergeWithEmbedded([liveModel], [curated]);
 
   assert.deepEqual(merged.cost, { input: 0.15, output: 0.6, cacheRead: 0.003, cacheWrite: 0.125 });
+});
+
+test("prefers live tiers, and falls back to curated ones when the API reports none", () => {
+  const tier = (input: number) => [
+    { inputTokensAbove: 100000, input, output: input * 5, cacheRead: input / 10, cacheWrite: input * 1.25 },
+  ];
+  const liveTiered = mergeWithEmbedded(
+    [model({ id: "m", cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, tiers: tier(2) } })],
+    [model({ id: "m", cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, tiers: tier(9) } })],
+  )[0];
+  const curatedOnly = mergeWithEmbedded(
+    [model({ id: "m", cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 } })],
+    [model({ id: "m", cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0, tiers: tier(9) } })],
+  )[0];
+
+  assert.equal(liveTiered.cost.tiers?.[0]?.input, 2);
+  assert.equal(curatedOnly.cost.tiers?.[0]?.input, 9);
 });
 
 test("prefers the live context window, then curation, then the 131072 default", () => {
@@ -615,6 +725,19 @@ test("keeps cached cost and context window when the curated entry differs", () =
 });
 
 // ─── buildModels ──────────────────────────────────────────────────────────────
+
+test("keeps tiers through a cost patch, and lets the patch replace them", () => {
+  const tiers = [{ inputTokensAbove: 100000, input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 }];
+  const replacement = [{ inputTokensAbove: 250000, input: 4, output: 20, cacheRead: 0.4, cacheWrite: 5 }];
+  const base = [model({ id: "m", cost: { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25, tiers } })];
+
+  const [patched] = buildModels(base, [], { m: { cost: { output: 6 } } });
+  const [replaced] = buildModels(base, [], { m: { cost: { tiers: replacement } } });
+
+  assert.equal(patched.cost.output, 6);
+  assert.deepEqual(patched.cost.tiers, tiers);
+  assert.deepEqual(replaced.cost.tiers, replacement);
+});
 
 test("applies a patch to a base model, merging cost and compat and dropping a stale thinking format", () => {
   const base = [

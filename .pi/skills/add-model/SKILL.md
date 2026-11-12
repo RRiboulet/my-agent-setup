@@ -47,6 +47,8 @@ Ask the user for (or look up from the live API / pi-ai bundled data):
   `thinkingLevelMap` entirely so pi falls back to its default level set.
 - **input** — `["text"]` and/or `"image"`.
 - **cost** — `input/output/cacheRead/cacheWrite` per 1M tokens (0 for free).
+  A model the API prices per context tier needs `tiers` as well; see "Cost
+  tiers" below.
 - **contextWindow** and **maxTokens**.
 - **compat** — at minimum `supportsStore: false`,
   `supportsDeveloperRole: false`, `supportsStrictMode: true`,
@@ -114,6 +116,38 @@ Omit `thinkingLevelMap` for toggle/budget-only reasoning models.
   `thinkingLevelMap` from `capabilities.reasoning` automatically when an
   `effort` list is present. No manual edit needed if the API advertises it;
   the only gap is offline/cached stale data.
+
+## Cost tiers
+
+Some models are priced per context tier: the first 100K tokens of a request cost
+one rate and everything past it another. pi models this as
+`cost.tiers`, and `calculateCost` applies the **highest** tier whose
+`inputTokensAbove` the request's total input exceeds, to the whole request:
+
+```json
+"cost": {
+  "input": 0.1, "output": 0.5, "cacheRead": 0.01, "cacheWrite": 0.125,
+  "tiers": [
+    { "inputTokensAbove": 100000, "input": 0.5, "output": 2.5,
+      "cacheRead": 0.05, "cacheWrite": 0.625 }
+  ]
+}
+```
+
+All four rates are required in a tier, because all four apply once it matches.
+Tiers are shared across input and output, so a payload that lists its tiers as
+two parallel arrays (`cost.text.input.overrides` and
+`cost.text.output.overrides`, each keyed by `when.context.gt`) is mapped onto one
+tier per threshold by `transformApiModel` — normally nothing to curate by hand.
+A rate an override does not list keeps the base price.
+
+Two things are ignored on purpose: `cost.multipliers` (peak-hour pricing) has no
+pi counterpart at all, and an override conditioned on anything other than
+`when.context.gt` cannot be expressed as a tier.
+
+`cost` is one of the fields the stale path serves from the cache, so a tier edit
+in `models.json` needs the cache deleted (see "After editing") before it shows
+up offline.
 
 ## After editing
 
