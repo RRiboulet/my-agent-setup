@@ -133,39 +133,21 @@ be set with `PI_REVIEW_TRIAGE_JUDGE_PROVIDER` / `PI_REVIEW_TRIAGE_JUDGE_MODEL`,
 `.env` beside this file is read for `OPENROUTER_API_KEY` so a key that never
 reached `auth.json` still works.
 
-```json
-{
-  "enabled": true,
-  "tool": true,
-  "judge": { "provider": "openrouter", "model": "typesafe/jev-1.13", "timeoutMs": 8000 },
-  "candidates": [
-    { "provider": "opencode-go", "model": "mimo-v2.6-flash", "tier": "low", "cost": 0.14,
-      "description": "Fast and cheap. A quick second read for obvious mistakes.",
-      "notFor": "Anything subtle, or a change with real blast radius." },
-    { "provider": "opencode-go", "model": "glm-5.3-flash", "tier": "medium", "cost": 0.15,
-      "description": "Strong general coder at low cost. A full correctness and edge-case pass.",
-      "notFor": "Hostile review of subtle or security-sensitive changes." },
-    { "provider": "opencode-go", "model": "glm-5.3", "tier": "high", "cost": 1.4,
-      "description": "The strongest reasoner here. A hostile, exhaustive or security-focused review.",
-      "notFor": "Routine changes a flash model already covers well." }
-  ],
-  "thinkingLadder": {
-    "low": ["low", "medium", "high"],
-    "medium": ["medium", "high", "max"],
-    "high": ["high", "max"]
-  },
-  "policy": {
-    "skipThreshold": 0.9,
-    "mandatoryReview": false,
-    "minimumProfile": "medium:high",
-    "fallbackProfile": "high:max"
-  },
-  "reverseChoice": true,
-  "stateChars": 12000,
-  "taskBaselineRef": "dev",
-  "redaction": { "paths": ["**/*.pem"], "patterns": ["AKIA[0-9A-Z]{16}"], "mask": "[redacted]" }
-}
-```
+This repository ships a starting policy as `review-triage.example.json` beside
+this file — copy it to `~/.pi/agent/review-triage.json` (or
+`$PI_CODING_AGENT_DIR/review-triage.json` in a container) and edit it there. The
+copy in `~/.pi/agent` is the one read at run time; nothing keeps the two in step,
+so treat this file as a template, not as the live policy.
+
+`.pi/extensions/subagent/test/review-triage.test.ts` loads it and fails if a
+candidate's provider leaves `opencode-go`, if the judge stops being
+`openrouter`/`typesafe/jev-1.13`, if a stated `cost` disagrees with the
+opencode-go catalogue, or if a band has no candidate. What it cannot check is
+whether this machine has credentials for a provider: `generateCatalog` filters
+candidates by what the session can run, which silently drops a band whose
+provider is unauthenticated, and an agent reading `candidates` directly (as
+`AGENTS.md` tells it to) is not filtered at all — that is the failure that
+prompted the file, and it stays a human check.
 
 - **`enabled`** turns the whole extension off; a disabled run reports that
   nothing was judged rather than inventing a verdict.

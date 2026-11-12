@@ -14,7 +14,7 @@
 #
 # Persistent (pi-agent-config volume, ~/.pi): the ssh key pair and the
 # ~/.pi/ssh/config template, plus voice.json in this container's pi agent dir
-# (~/.pi/agent-my-agent-setup, seeded once from the shared ~/.pi/agent — see
+# ($PI_CODING_AGENT_DIR, seeded once from the shared ~/.pi/agent — see
 # postCreate.sh).
 # Container-local, wiped on rebuild: ~/.ssh/config and known_hosts.
 #
