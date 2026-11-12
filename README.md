@@ -116,7 +116,20 @@ Both environments therefore keep the working tree as the single source:
 
 Removing the git entry matters: installing the local path *next to* it leaves two
 entries pointing at different paths (the checkout and the clone), which is the
-conflict again.
+conflict again. Note what the local entry actually stores: `pi` rewrites it to a
+path relative to the agent dir (`normalizePackageSourceForSettings`), e.g.
+`../../my-agent-setup` for `~/my-agent-setup`. It therefore encodes *both*
+locations, and moving either the checkout or `~/.pi/agent` makes it resolve to
+nothing — silently, because a missing local source is skipped, not reported. Re-run
+`pi install <path>` after either moves.
+
+In the devcontainer, that seeded dir is the container's own: credentials
+(`auth.json`), `voice.json`, `review-triage.json`, `models.json` and the model and
+tool defaults are copied on first creation and then owned there. Rotate a key or
+change a default *in the container*, not in the shared `~/.pi/agent` — the shared
+copy no longer reaches it. Sessions move with it, so history from before the
+split stays in the shared dir and does not appear in `--continue` here. `gh` is
+unaffected: `GH_CONFIG_DIR` still points at the shared volume.
 
 ## Contents
 

@@ -48,7 +48,21 @@ Fixed:
   makes pi read project-local `.pi/` at all, so without it the package removal
   would leave an agent with no extensions rather than a visible failure. Seeding
   only writes files that are missing, so a rebuild keeps whatever was configured
-  in the container. The host had the same duplication, from the same `git:`
+  in the container; the theme is the one exception and is re-pinned to
+  `kokomi-theme` on every run, as it always was. Two things the first version got
+  wrong, found in review: the volume was chowned *after* the first write into it,
+  so a genuinely fresh, root-owned first-run volume aborted postCreate with
+  `mkdir: cannot create directory '/home/vscode/.pi/themes': Permission denied`
+  before reaching the chown that fixes it — the same trap the script's own
+  `GH_CONFIG_DIR` comment already documented, and reproducible with a throwaway
+  volume and an image whose `vscode` is not remapped to the host uid; and
+  `trust.json` was written in place behind a write-once guard, so an interrupted
+  run could leave a 0-byte file that pi then refuses to parse and that the guard
+  never repairs. The chown now runs before anything writes into the volume, and
+  settings and trust are written through temp files with a non-empty check, with
+  a stderr warning when a corrupt or empty shared `settings.json` forces the
+  minimal fallback instead of silently dropping provider, model and tool defaults.
+  The host had the same duplication, from the same `git:`
   install: running `pi` anywhere in the checkout loaded the clone *and* the
   working tree, so the fix there is the install rule —
   `pi remove git:github.com/RRiboulet/my-agent-setup` followed by
