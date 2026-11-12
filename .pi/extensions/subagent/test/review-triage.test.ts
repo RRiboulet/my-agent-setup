@@ -16,7 +16,7 @@
 // Everything is pure or mocked: no network, no git, no tmux.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
@@ -2385,10 +2385,14 @@ test("command: positional and flag forms both resolve the target", () => {
 test("the shipped review-triage policy routes every candidate through opencode-go", () => {
 	// The bug this pins, found by running a review: the config that reached
 	// ~/.pi/agent listed `deepseek-v4.1-flash` and `glm-5.3-flash` under provider
-	// "opencode", which has no credential on this machine. Nothing complained at
-	// load time — routing only failed once a review was launched, with
-	// `Error: No API key found for opencode.` The judge is the one model allowed
-	// outside opencode-go: it is a decision model (openrouter), not a reviewer.
+	// "opencode", which has no credential on this machine. `generateCatalog`
+	// filters candidates by what the session can run, so a *plan* could not name
+	// them — but an agent reads `candidates` directly to pick the reviewer
+	// (AGENTS.md), and that is what failed, with
+	// `Error: No API key found for opencode.` The bands simply lost their
+	// candidates, with one `notes:` line and no mention of the provider.
+	// What a repo test can honestly pin is the name and the numbers; it cannot
+	// know which providers a given machine authenticates.
 	const REPO_ROOT = resolve(new URL("../../../..", import.meta.url).pathname);
 	const shipped = join(REPO_ROOT, ".pi/extensions/review-triage/review-triage.example.json");
 	const config = loadConfig({ path: shipped, env: {}, warn: () => {} });
@@ -2403,10 +2407,45 @@ test("the shipped review-triage policy routes every candidate through opencode-g
 	}
 	assert.equal(config.judge.provider, "openrouter", "the judge stays on openrouter");
 	assert.equal(config.judge.model, "typesafe/jev-1.13");
+	// A stated cost overrides the catalogue in what Jev is shown and in the plan,
+	// so a hand-typed number that drifts is a silent 2x error in the routing
+	// decision. Found in review: 0.3 for deepseek-v4.1-flash, catalogue 0.15.
+	const catalogue = JSON.parse(
+		readFileSync(join(REPO_ROOT, ".pi/extensions/opencode-go-provider/models.json"), "utf8"),
+	) as unknown;
+	const catalogueCost = (id: string): number | undefined => {
+		const seen = new Set<unknown>();
+		const walk = (node: unknown): number | undefined => {
+			if (node === null || typeof node !== "object" || seen.has(node)) return undefined;
+			seen.add(node);
+			const record = node as Record<string, unknown>;
+			if (record.id === id) {
+				const cost = record.cost as { input?: unknown } | undefined;
+				return typeof cost?.input === "number" ? cost.input : undefined;
+			}
+			for (const value of Object.values(record)) {
+				const found = walk(value);
+				if (found !== undefined) return found;
+			}
+			return undefined;
+		};
+		return walk(catalogue);
+	};
+	for (const candidate of config.candidates) {
+		if (candidate.cost === 0) continue;
+		const expected = catalogueCost(candidate.model);
+		assert.notEqual(expected, undefined, `${candidate.model} is not in the opencode-go catalogue`);
+		assert.equal(
+			candidate.cost,
+			expected,
+			`${candidate.model} states ${candidate.cost} per million input tokens; the catalogue says ${expected}`,
+		);
+	}
+
 	for (const tier of ["low", "medium", "high"] as const) {
 		assert.ok(
 			config.candidates.some((candidate) => candidate.tier === tier),
-			`no candidate in the ${tier} band, so every ${tier}:* profile would silently drop out of the catalog`,
+			`no candidate in the ${tier} band, so that band's profiles are not offered at all`,
 		);
 	}
 });

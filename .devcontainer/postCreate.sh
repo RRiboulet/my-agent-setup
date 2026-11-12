@@ -33,10 +33,10 @@ cp "$REPO/.devcontainer/shell/tmux.conf" /home/vscode/.tmux.conf
 # every write below as vscode then fails EACCES under `set -e` — aborting
 # postCreate *before* the chown that would have fixed it. Measured, not reasoned:
 # with a fresh volume and an image whose `vscode` is uid 1000 (i.e. no devcontainer
-# CLI uid remap), the first version of this block died at
-# `mkdir: cannot create directory '<$PROJECT_AGENT_DIR>': Permission denied` — the
-# same window one line earlier, at `…/.pi/agent/themes`, existed before this
-# branch. The reordering closes both.
+# CLI uid remap), the first version of this block died creating the per-container
+# dir: `mkdir: cannot create directory '…': Permission denied`. The same window
+# one line earlier, at `…/.pi/agent/themes`, existed before this branch; the
+# reordering closes both.
 #
 # The devcontainer CLI normally rebuilds the image with `vscode` remapped to the
 # host uid, which also fixes the ownership of /home/vscode — but that is a property

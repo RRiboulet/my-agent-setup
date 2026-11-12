@@ -16,22 +16,44 @@ Added:
 
 Fixed:
 
-- **The review-triage policy named a provider with no credential, so a review
-  could nominate a model it could not run.** `~/.pi/agent/review-triage.json`
-  listed `deepseek-v4.1-flash` and `glm-5.3-flash` under `opencode`; only
-  `opencode-go` and `openrouter` are authenticated here, and nothing validated a
-  candidate at load time — the mismatch surfaced only once a review was actually
-  launched, as `Error: No API key found for opencode.` The repository now ships
-  the policy it runs, `.pi/extensions/review-triage/review-triage.example.json`
-  (copy it to `~/.pi/agent/review-triage.json`, or
-  `$PI_CODING_AGENT_DIR/review-triage.json` in a container), with every candidate
-  on `opencode-go` and the judge — a decision model, not a reviewer — as the sole
-  `openrouter` entry. `.pi/extensions/subagent/test/review-triage.test.ts` loads
-  that file through the extension's own `loadConfig` and fails if a candidate
-  moves to another provider, or if a capability band loses every candidate (which
-  would silently drop the band's profiles from the catalog). The extension README
-  no longer carries a second copy of the policy: it points at the shipped file and
-  keeps the per-field reference.
+- **The review-triage policy named a provider with no credential.** The config at
+  `~/.pi/agent/review-triage.json` listed `deepseek-v4.1-flash` and
+  `glm-5.3-flash` under `opencode`; only `opencode-go` and `openrouter` are
+  authenticated here. The two consumers behave differently, which is worth
+  stating exactly: `generateCatalog` filters candidates against what the session
+  can run, so it did not *fail* — the medium and high bands quietly lost their
+  candidates and the plan carried one `no available <band>-band model; its
+  profiles are not offered` note that never names the provider; but `AGENTS.md`
+  tells the agent to read `candidates` directly to choose the reviewer, and that
+  path is not filtered at all. That is the one that failed, as
+  `Error: No API key found for opencode.`, when the model this config named was
+  handed to a review sub-agent.
+
+  The repository now ships a starting policy as
+  `.pi/extensions/review-triage/review-triage.example.json` (copy it to
+  `~/.pi/agent/review-triage.json`, or `$PI_CODING_AGENT_DIR/review-triage.json`
+  in a container, and edit that copy — nothing keeps the two in step). Every
+  candidate is on `opencode-go`; the judge — a decision model, not a reviewer — is
+  the sole `openrouter` entry. `.pi/extensions/subagent/test/review-triage.test.ts`
+  loads that file through the extension's own `loadConfig` and fails if a
+  candidate's provider leaves `opencode-go`, if the judge changes, if a stated
+  `cost` disagrees with the opencode-go catalogue (`deepseek-v4.1-flash` was
+  shipped at 0.3 against a catalogue 0.15 — a stated cost overrides the catalogue
+  in what Jev reads, so that is a silent 2× error in the routing decision, and it
+  is pinned now), or if a band has no candidate at all. What no repo test can pin
+  is whether this machine holds credentials for a provider; that stays a human
+  check, and the extension README says so.
+
+  Two band changes ride along, both from the machine policy this file was taken
+  from rather than from the provider fix, and both now visible instead of
+  implied: the **high** band is `glm-5.3-flash` (0.15), where the README block
+  this replaces had `glm-5.3` (1.4) and explicitly said `glm-5.3-flash` was
+  `notFor` hostile review — restore `glm-5.3` to `high` if the cheaper high band
+  was not intended; and the **low** band resolves to `beam-free` because the
+  catalogue picks the first listed candidate, so listing order is routing.
+  `deepseek-v4.1-flash` also sets `medium: null` in its thinking map, so
+  `medium:medium` is pruned at run time — a band can keep a candidate and still
+  lose a rung.
 
 - **`pi` could not start in this repository's own checkout — on the host or in
   its devcontainer.** The checkout is itself a pi package (`package.json` →

@@ -133,16 +133,21 @@ be set with `PI_REVIEW_TRIAGE_JUDGE_PROVIDER` / `PI_REVIEW_TRIAGE_JUDGE_MODEL`,
 `.env` beside this file is read for `OPENROUTER_API_KEY` so a key that never
 reached `auth.json` still works.
 
-This repository ships the policy it actually runs as
-`review-triage.example.json` beside this file — copy it to
-`~/.pi/agent/review-triage.json` (or `$PI_CODING_AGENT_DIR/review-triage.json` in
-a container). The shipped file is covered by
-`.pi/extensions/subagent/test/review-triage.test.ts`, which pins the rule that
-matters: every review
-candidate must name a provider the machine actually authenticates —
-`opencode-go` here — and the judge is the only model on another provider
-(`openrouter`). A candidate on an unauthenticated provider is not caught until
-a review is launched, where it fails with "No API key found for <provider>".
+This repository ships a starting policy as `review-triage.example.json` beside
+this file — copy it to `~/.pi/agent/review-triage.json` (or
+`$PI_CODING_AGENT_DIR/review-triage.json` in a container) and edit it there. The
+copy in `~/.pi/agent` is the one read at run time; nothing keeps the two in step,
+so treat this file as a template, not as the live policy.
+
+`.pi/extensions/subagent/test/review-triage.test.ts` loads it and fails if a
+candidate's provider leaves `opencode-go`, if the judge stops being
+`openrouter`/`typesafe/jev-1.13`, if a stated `cost` disagrees with the
+opencode-go catalogue, or if a band has no candidate. What it cannot check is
+whether this machine has credentials for a provider: `generateCatalog` filters
+candidates by what the session can run, which silently drops a band whose
+provider is unauthenticated, and an agent reading `candidates` directly (as
+`AGENTS.md` tells it to) is not filtered at all — that is the failure that
+prompted the file, and it stays a human check.
 
 - **`enabled`** turns the whole extension off; a disabled run reports that
   nothing was judged rather than inventing a verdict.
