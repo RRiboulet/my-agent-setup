@@ -33,6 +33,42 @@ Fixed:
   untrusted cwd still gets the fallback, and a delegated project gets a copy that
   exists rather than a launch that defers and might inherit nothing. Found while
   running subagents in parallel worktrees on the `lol-dataset` scaffold.
+- **A tiered-price model was reported at its cheapest rate however much context
+  the request used.** `claude-haiku-5-5` is priced per context tier — 0.1 / 0.5
+  per 1M input/output up to 100K input tokens, then 0.5 / 2.5 above it, with
+  cache read/write at 0.05 / 0.625 — and the payload says so under
+  `cost.text.input.overrides` and `cost.text.output.overrides`. `transformApiModel`
+  read only the flat `price`, so a 1M-context session past 100K tokens was
+  reported at a fifth of its real cost. #117 pinned that on purpose (the test
+  `reads pricing from the payload's cost.text block` asserted the flattened
+  cost), which is why flipping it is an explicit decision rather than a bug fix.
+  Display only, not billing: pi computes these numbers locally from the
+  registered model.
+
+  The overrides now map onto pi's `cost.tiers`, which `calculateCost` already
+  consumes, taking the highest tier whose `inputTokensAbove` the request's total
+  input exceeds. The mapping is 1:1 because the payload lists input and output
+  tiers as two parallel arrays keyed by the same `when.context.gt`, and a tier
+  needs all four rates: each array contributes its own two, and a rate an
+  override does not list keeps the base price rather than becoming zero. Measured
+  against pi-ai's own `calculateCost` with the real transform and the recorded
+  fixture, 150K input tokens plus 1K output now reports $0.0775 where the flat
+  read reported $0.0155; at 50K input the two agree, so the tier only engages
+  where it should. `cost.multipliers` (peak-hour pricing) stays ignored on
+  purpose: pi has no counterpart to map it to, and the decision is now written
+  down in `add-model` next to the tier documentation instead of living in a code
+  comment.
+
+  Tiers survive the rest of the pipeline: `mergeWithEmbedded` prefers live tiers
+  and falls back to curated ones, `patch.json` carries them through an unrelated
+  cost override and can replace them, and a tierless model's `cost` keeps exactly
+  its previous shape — the key is absent, not `undefined` or `[]`. `cost` remains
+  one of the fields the stale path serves from the cache, so a tier edited in
+  `models.json` still needs the cache deleted before it shows up offline, which
+  `add-model` now says explicitly. The cache format marker goes to 2 for this,
+  because a cache written before it has no `tiers` to serve and would keep
+  reporting the flat rate — the same replay the marker exists to stop.
+
 - **An upgraded provider kept replaying the previous transform's model routing
   from cache.** The model cache
   (`$PI_CODING_AGENT_DIR/cache/opencode-go-models.json`) was a bare array with
@@ -47,15 +83,16 @@ Fixed:
   replaces the code and keeps the cache, and `postCreate.sh` deliberately copies
   no cache.
 
-  The file now carries `{ "format": 1, "models": [...] }`. A cache without the
-  marker is not upgraded in place but ignored — a bare array is precisely the
-  case whose contents cannot be attributed — so an upgrade costs one cold start:
-  the stale path falls back to the curated `models.json`, and live-only models
-  return with the first revalidation. Bumping `CACHE_FORMAT_VERSION` is the
-  discipline for any future change to what the pipeline writes; the writer and the
-  reader share the constant, and a test writes through `cacheModels` and reads
-  back through `loadStaleModels`, because a bump that moves one and not the other
-  would freeze the model list at the curated entries forever.
+  The file now carries a `format` marker, and a cache missing it or carrying a
+  different one is not upgraded in place but ignored — a cache whose contents
+  cannot be attributed is precisely the case in hand. An upgrade therefore costs
+  one cold start: the stale path falls back to the curated `models.json`, and
+  live-only models return with the first revalidation. Bumping
+  `CACHE_FORMAT_VERSION` is the discipline for any future change to what the
+  pipeline writes; the writer and the reader share the constant, and a test
+  writes through `cacheModels` and reads back through `loadStaleModels`, because
+  a bump that moves one and not the other would freeze the model list at the
+  curated entries forever.
 
   The stale path also refreshes the fields curation owns — `name`, `api`,
   `baseUrl`, `input`, `maxTokens`, `reasoning`, `thinkingLevelMap`, and `compat`
