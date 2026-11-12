@@ -18,7 +18,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 
 import {
@@ -2380,4 +2380,33 @@ test("command: positional and flag forms both resolve the target", () => {
 	assert.equal(parseTriageArgs('--summary "fix the parser" --note "changes a format"').summary, "fix the parser");
 	assert.deepEqual(parseTriageArgs('--summary "x" --note "on-disk format"').notes, ["on-disk format"]);
 	assert.deepEqual(resolveTarget(parseTriageArgs("--ref deadbeef")), { kind: "commit", ref: "deadbeef" });
+});
+
+test("the shipped review-triage policy routes every candidate through opencode-go", () => {
+	// The bug this pins, found by running a review: the config that reached
+	// ~/.pi/agent listed `deepseek-v4.1-flash` and `glm-5.3-flash` under provider
+	// "opencode", which has no credential on this machine. Nothing complained at
+	// load time — routing only failed once a review was launched, with
+	// `Error: No API key found for opencode.` The judge is the one model allowed
+	// outside opencode-go: it is a decision model (openrouter), not a reviewer.
+	const REPO_ROOT = resolve(new URL("../../../..", import.meta.url).pathname);
+	const shipped = join(REPO_ROOT, ".pi/extensions/review-triage/review-triage.example.json");
+	const config = loadConfig({ path: shipped, env: {}, warn: () => {} });
+
+	assert.ok(config.candidates.length > 0, "the shipped policy must name candidates");
+	for (const candidate of config.candidates) {
+		assert.equal(
+			candidate.provider,
+			"opencode-go",
+			`${candidate.model} must be reached through opencode-go, the provider this machine authenticates`,
+		);
+	}
+	assert.equal(config.judge.provider, "openrouter", "the judge stays on openrouter");
+	assert.equal(config.judge.model, "typesafe/jev-1.13");
+	for (const tier of ["low", "medium", "high"] as const) {
+		assert.ok(
+			config.candidates.some((candidate) => candidate.tier === tier),
+			`no candidate in the ${tier} band, so every ${tier}:* profile would silently drop out of the catalog`,
+		);
+	}
 });

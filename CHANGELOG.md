@@ -16,6 +16,23 @@ Added:
 
 Fixed:
 
+- **The review-triage policy named a provider with no credential, so a review
+  could nominate a model it could not run.** `~/.pi/agent/review-triage.json`
+  listed `deepseek-v4.1-flash` and `glm-5.3-flash` under `opencode`; only
+  `opencode-go` and `openrouter` are authenticated here, and nothing validated a
+  candidate at load time — the mismatch surfaced only once a review was actually
+  launched, as `Error: No API key found for opencode.` The repository now ships
+  the policy it runs, `.pi/extensions/review-triage/review-triage.example.json`
+  (copy it to `~/.pi/agent/review-triage.json`, or
+  `$PI_CODING_AGENT_DIR/review-triage.json` in a container), with every candidate
+  on `opencode-go` and the judge — a decision model, not a reviewer — as the sole
+  `openrouter` entry. `.pi/extensions/subagent/test/review-triage.test.ts` loads
+  that file through the extension's own `loadConfig` and fails if a candidate
+  moves to another provider, or if a capability band loses every candidate (which
+  would silently drop the band's profiles from the catalog). The extension README
+  no longer carries a second copy of the policy: it points at the shipped file and
+  keeps the per-field reference.
+
 - **`pi` could not start in this repository's own checkout — on the host or in
   its devcontainer.** The checkout is itself a pi package (`package.json` →
   `pi.extensions` / `pi.skills`), and in both places it was *also* installed as

@@ -133,39 +133,16 @@ be set with `PI_REVIEW_TRIAGE_JUDGE_PROVIDER` / `PI_REVIEW_TRIAGE_JUDGE_MODEL`,
 `.env` beside this file is read for `OPENROUTER_API_KEY` so a key that never
 reached `auth.json` still works.
 
-```json
-{
-  "enabled": true,
-  "tool": true,
-  "judge": { "provider": "openrouter", "model": "typesafe/jev-1.13", "timeoutMs": 8000 },
-  "candidates": [
-    { "provider": "opencode-go", "model": "mimo-v2.6-flash", "tier": "low", "cost": 0.14,
-      "description": "Fast and cheap. A quick second read for obvious mistakes.",
-      "notFor": "Anything subtle, or a change with real blast radius." },
-    { "provider": "opencode-go", "model": "glm-5.3-flash", "tier": "medium", "cost": 0.15,
-      "description": "Strong general coder at low cost. A full correctness and edge-case pass.",
-      "notFor": "Hostile review of subtle or security-sensitive changes." },
-    { "provider": "opencode-go", "model": "glm-5.3", "tier": "high", "cost": 1.4,
-      "description": "The strongest reasoner here. A hostile, exhaustive or security-focused review.",
-      "notFor": "Routine changes a flash model already covers well." }
-  ],
-  "thinkingLadder": {
-    "low": ["low", "medium", "high"],
-    "medium": ["medium", "high", "max"],
-    "high": ["high", "max"]
-  },
-  "policy": {
-    "skipThreshold": 0.9,
-    "mandatoryReview": false,
-    "minimumProfile": "medium:high",
-    "fallbackProfile": "high:max"
-  },
-  "reverseChoice": true,
-  "stateChars": 12000,
-  "taskBaselineRef": "dev",
-  "redaction": { "paths": ["**/*.pem"], "patterns": ["AKIA[0-9A-Z]{16}"], "mask": "[redacted]" }
-}
-```
+This repository ships the policy it actually runs as
+`review-triage.example.json` beside this file — copy it to
+`~/.pi/agent/review-triage.json` (or `$PI_CODING_AGENT_DIR/review-triage.json` in
+a container). The shipped file is covered by
+`.pi/extensions/subagent/test/review-triage.test.ts`, which pins the rule that
+matters: every review
+candidate must name a provider the machine actually authenticates —
+`opencode-go` here — and the judge is the only model on another provider
+(`openrouter`). A candidate on an unauthenticated provider is not caught until
+a review is launched, where it fails with "No API key found for <provider>".
 
 - **`enabled`** turns the whole extension off; a disabled run reports that
   nothing was judged rather than inventing a verdict.

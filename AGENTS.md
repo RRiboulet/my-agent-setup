@@ -278,6 +278,12 @@ hand-pick a model outside that list: if a lens needs a model the config lacks,
 add it to the config first. Which model sits in which capability band is a human
 judgement, not the agent's.
 
+Every candidate must name a provider this machine actually authenticates —
+`opencode-go` here; the judge is the only model on another provider
+(`openrouter`). The repository ships that policy as
+`.pi/extensions/review-triage/review-triage.example.json`, and a test fails if a
+candidate drifts back to an unauthenticated provider.
+
 A `show-me-your-work` trail does not get its own reviewer. If a review is
 commissioned, hand the trail to that one reviewer alongside the diff.
 
