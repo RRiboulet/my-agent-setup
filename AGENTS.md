@@ -178,6 +178,14 @@ Adding a new extension or skill means adding it to the `pi` manifest in
 discovery will not glob, so an unlisted extension installs nowhere.
 `test/package-manifest.test.ts` fails if the manifest and the tree disagree.
 
+Install this repo where you run `pi` from it **as a local path**
+(`pi install /path/to/my-agent-setup`), never as
+`git:github.com/RRiboulet/my-agent-setup`: project discovery and an installed
+package both find `.pi/extensions`, so the git form loads every extension twice
+and pi aborts startup on the duplicate tools. The devcontainer already runs its
+own package-free agent dir for this reason. Details and the symptom are in the
+README section "One copy of the extensions, never two".
+
 Linked worktrees for independent tasks live under `.worktrees/` at the repo root (see `.pi/skills/worktree/`); that directory is gitignored and shared refs mean branch names must be unique across worktrees.
 
 You can consult pi for reference — the installed `@earendil-works/pi-coding-agent`

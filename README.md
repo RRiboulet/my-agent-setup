@@ -85,6 +85,52 @@ Project-local extensions only load **after you grant project trust**, so on a
 fresh machine pi asks on first start; until then the extensions are silently
 inactive. Installed packages are loaded regardless of project trust.
 
+### One copy of the extensions, never two
+
+Pi discovers extensions from the project (`.pi/extensions`, `.pi/skills`) *and*
+from every installed package — and this package's resources are exactly those two
+directories. So a checkout of this repo that *also* has the package installed
+loads each extension twice, and pi treats a duplicate tool registration as a load
+error, not a warning:
+
+```
+Error: Failed to load extension "…/agent/git/github.com/RRiboulet/my-agent-setup/.pi/extensions/goal.ts":
+  Tool "get_goal" conflicts with /workspace/.pi/extensions/goal.ts
+… one line per duplicated tool and flag …
+Hint: Start without extensions using "pi -ne".
+```
+
+The TUI then exits 1 instead of starting. `pi --version` and `pi --list-models`
+print the same lines and carry on, so a quick check looks healthy; and the
+extensions that register no tool or flag (`/answer`, `/btw`, `/continue`,
+`/review`, `/session-breakdown`, repo-explorer, `/voice`) load twice in silence.
+Skills collide the same way, but as a first-one-wins collision diagnostic, so
+they never raise the error by themselves.
+
+Both environments therefore keep the working tree as the single source:
+
+| Where | Setup |
+|---|---|
+| a host that works in this checkout | `pi remove git:github.com/RRiboulet/my-agent-setup`, then `pi install /path/to/my-agent-setup` — the **local path**, not the git source. It resolves to the same files project discovery already found, so pi dedupes instead of conflicting, and there is no clone that can fall behind the checkout |
+| this repo's devcontainer | installs no package at all: `PI_CODING_AGENT_DIR` (`.devcontainer/devcontainer.json`) gives the container its own agent dir inside the shared `pi-agent-config` volume, seeded once by `postCreate.sh` from the shared one. The shared dir keeps the `git:` install for the *other* projects that mount that volume, which have no `.pi/` of their own |
+
+Removing the git entry matters: installing the local path *next to* it leaves two
+entries pointing at different paths (the checkout and the clone), which is the
+conflict again. Note what the local entry actually stores: `pi` rewrites it to a
+path relative to the agent dir (`normalizePackageSourceForSettings`), e.g.
+`../../my-agent-setup` for `~/my-agent-setup`. It therefore encodes *both*
+locations, and moving either the checkout or `~/.pi/agent` makes it resolve to
+nothing — silently, because a missing local source is skipped, not reported. Re-run
+`pi install <path>` after either moves.
+
+In the devcontainer, that seeded dir is the container's own: credentials
+(`auth.json`), `voice.json`, `review-triage.json`, `models.json` and the model and
+tool defaults are copied on first creation and then owned there. Rotate a key or
+change a default *in the container*, not in the shared `~/.pi/agent` — the shared
+copy no longer reaches it. Sessions move with it, so history from before the
+split stays in the shared dir and does not appear in `--continue` here. `gh` is
+unaffected: `GH_CONFIG_DIR` still points at the shared volume.
+
 ## Contents
 
 | Path | What it is |

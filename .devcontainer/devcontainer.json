@@ -5,7 +5,20 @@
     "workspaceFolder": "/workspace",
     "containerEnv": {
         "PI_TRUE_COLOR": "1",
-        "COLORTERM": "truecolor"
+        "COLORTERM": "truecolor",
+        // This devcontainer runs its own pi agent dir, inside the shared
+        // pi-agent-config volume. The shared dir (~/.pi/agent) declares the
+        // personal install of git:github.com/RRiboulet/my-agent-setup, and
+        // /workspace *is* that package: pi then loads every extension in
+        // .pi/extensions twice — once project-local, once from the package
+        // clone — and aborts startup with
+        //   Tool "todo" conflicts with /workspace/.pi/extensions/todos.ts
+        // (skills collide the same way, silently, first-one-wins). The
+        // per-project dir holds no package list, so only the working tree
+        // loads; postCreate.sh seeds it once from the shared dir (model
+        // choices, credentials, trust), and the shared dir keeps serving the
+        // other projects that mount this volume.
+        "PI_CODING_AGENT_DIR": "/home/vscode/.pi/agent-my-agent-setup"
     },
     "postCreateCommand": "bash /workspace/.devcontainer/postCreate.sh && bash /workspace/.devcontainer/restore-post-rebuild.sh",
     // Declared explicitly, not left to the base image's auto-mapped defaults.

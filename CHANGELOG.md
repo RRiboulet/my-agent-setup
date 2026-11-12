@@ -16,6 +16,69 @@ Added:
 
 Fixed:
 
+- **`pi` could not start in this repository's own checkout — on the host or in
+  its devcontainer.** The checkout is itself a pi package (`package.json` →
+  `pi.extensions` / `pi.skills`), and in both places it was *also* installed as
+  `git:github.com/RRiboulet/my-agent-setup` — on the host in `~/.pi/agent`, in the
+  container in the shared `pi-agent-config` volume. Pi discovers resources from
+  the project *and* from every installed package, so every extension was loaded
+  twice — `.pi/extensions/…` from the project scope and
+  `…/git/github.com/RRiboulet/my-agent-setup/.pi/extensions/…` from the package —
+  and its duplicate detector reports that as a load error, not a diagnostic: one
+  `Tool "todo" conflicts with /workspace/.pi/extensions/todos.ts`
+  per duplicated tool and flag (`get_goal`, `create_goal`, `update_goal`,
+  `web_search`, `triage_change`, `todo`, `subagent`, `--attach-subagent`), then
+  the TUI exited 1 with nothing but `Hint: Start without extensions using "pi
+  -ne".` Non-interactive invocations hid it (`pi --version` and
+  `pi --list-models` print the same errors and carry on), and the extensions that
+  register no tool or flag — `/answer`, `/btw`, `/continue`, `/review`,
+  `/session-breakdown`, repo-explorer, `/voice` — loaded twice in silence.
+  Skills collided the same way, but as a first-one-wins collision diagnostic, so
+  they never raised the error and only made the packaged copies dead weight.
+  Deleting the package from the volume was not an option: `pi-agent-config` is
+  shared with the `lol-dataset` devcontainer, which has no `.pi/` of its own and
+  needs it. This container now runs its own agent dir inside that volume
+  (`PI_CODING_AGENT_DIR=/home/vscode/.pi/agent-my-agent-setup` in
+  `devcontainer.json`), so no package is installed here and the working tree is
+  the only source of extensions and skills. `postCreate.sh` seeds the dir once
+  from the shared one: `settings.json` with `.packages` and
+  `.extensionChangelogVersions` removed (provider, model, thinking level and tool
+  defaults survive; the package list does not), `auth.json`, `voice.json`,
+  `review-triage.json`, and a `trust.json` entry for `/workspace` — trust is what
+  makes pi read project-local `.pi/` at all, so without it the package removal
+  would leave an agent with no extensions rather than a visible failure. Seeding
+  only writes files that are missing, so a rebuild keeps whatever was configured
+  in the container; the theme is the one exception and is re-pinned to
+  `kokomi-theme` on every run, as it always was. Two things the first version got
+  wrong, found in review: the volume was chowned *after* the first write into it,
+  so a genuinely fresh, root-owned first-run volume aborted postCreate with
+  `mkdir: cannot create directory '/home/vscode/.pi/themes': Permission denied`
+  before reaching the chown that fixes it — the same trap the script's own
+  `GH_CONFIG_DIR` comment already documented, and reproducible with a throwaway
+  volume and an image whose `vscode` is not remapped to the host uid; and
+  `trust.json` was written in place behind a write-once guard, so an interrupted
+  run could leave a 0-byte file that pi then refuses to parse and that the guard
+  never repairs. The chown now runs before anything writes into the volume, and
+  settings and trust are written through temp files with a non-empty check, with
+  a stderr warning when a corrupt or empty shared `settings.json` forces the
+  minimal fallback instead of silently dropping provider, model and tool defaults.
+  The host had the same duplication, from the same `git:`
+  install: running `pi` anywhere in the checkout loaded the clone *and* the
+  working tree, so the fix there is the install rule —
+  `pi remove git:github.com/RRiboulet/my-agent-setup` followed by
+  `pi install /path/to/my-agent-setup`, the local path, which resolves to the
+  same files project discovery already found and therefore dedupes instead of
+  conflicting (and leaves no clone to fall behind the checkout; the old one is
+  deleted by `pi remove`). Both rules are in the README under "One copy of the
+  extensions, never two", and `AGENTS.md` says to install by local path so an
+  agent does not reintroduce the git form. Verified on the host as well: pi in
+  the checkout lists 21 skills and 13 extensions once with a clean stderr, and
+  pi outside the checkout still loads all of them from the checkout. On the
+  recreated container: pi starts, 21 skills and 13 extensions listed once with no
+  diagnostics, `pi list` reports "No packages installed", and the shared
+  `~/.pi/agent` still declares the package for the other projects that mount the
+  volume.
+
 - **`devc up|rebuild|stop|doctor <unknown>` used to carry on with an empty
   workspace folder.** `find_project` dies with "no project named", but that
   `die` ran inside `$( … )` in *argument* position, where a failed command
