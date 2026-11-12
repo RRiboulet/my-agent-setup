@@ -13,7 +13,9 @@
 # adds with `extra_hosts: host.docker.internal:host-gateway`.
 #
 # Persistent (pi-agent-config volume, ~/.pi): the ssh key pair and the
-# ~/.pi/ssh/config template, plus ~/.pi/agent/voice.json.
+# ~/.pi/ssh/config template, plus voice.json in this container's pi agent dir
+# (~/.pi/agent-my-agent-setup, seeded once from the shared ~/.pi/agent — see
+# postCreate.sh).
 # Container-local, wiped on rebuild: ~/.ssh/config and known_hosts.
 #
 # Idempotent — safe to run any time.

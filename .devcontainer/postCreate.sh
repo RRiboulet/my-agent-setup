@@ -2,7 +2,12 @@
 set -euo pipefail
 
 REPO=/workspace
+# The shared, machine-wide pi agent dir, on the pi-agent-config volume. Other
+# projects that mount this volume use it directly; this container does not — see
+# PI_CODING_AGENT_DIR in devcontainer.json for why (the personal install of this
+# very package would load every extension twice).
 AGENT_DIR=/home/vscode/.pi/agent
+PROJECT_AGENT_DIR="${PI_CODING_AGENT_DIR:-$AGENT_DIR}"
 
 # The Dockerfile sets GH_CONFIG_DIR as an image ENV, but a container built from an
 # older image does not have it. Default it here to the same path so a bare
@@ -23,13 +28,49 @@ cp "$REPO/.devcontainer/shell/p10k.zsh" /home/vscode/.p10k.zsh
 cp "$REPO/.devcontainer/shell/tmux.conf" /home/vscode/.tmux.conf
 
 # --- pi configuration ---
-mkdir -p "$AGENT_DIR/themes"
-cp "$REPO/.devcontainer/pi/themes/kokomi-theme.json" "$AGENT_DIR/themes/kokomi-theme.json"
+# Seed the per-project agent dir from the shared one, once. Only files that are
+# missing are written, so a rebuild never overwrites a setting made in here; and
+# settings.json is seeded *without* .packages, which is the whole point of the
+# split (the shared dir's package list names this repo, and /workspace already
+# provides its extensions and skills directly).
+if [ "$PROJECT_AGENT_DIR" != "$AGENT_DIR" ]; then
+  mkdir -p "$PROJECT_AGENT_DIR"
+  if [ ! -f "$PROJECT_AGENT_DIR/settings.json" ] && [ -f "$AGENT_DIR/settings.json" ] \
+    && command -v jq >/dev/null 2>&1; then
+    if jq 'del(.packages, .extensionChangelogVersions)' "$AGENT_DIR/settings.json" \
+      > "$PROJECT_AGENT_DIR/settings.json.tmp"; then
+      mv "$PROJECT_AGENT_DIR/settings.json.tmp" "$PROJECT_AGENT_DIR/settings.json"
+    else
+      rm -f "$PROJECT_AGENT_DIR/settings.json.tmp"
+      echo '{"theme": "kokomi-theme"}' > "$PROJECT_AGENT_DIR/settings.json"
+    fi
+  fi
+  # Credentials and per-user extension config. Copied, never overwritten: from
+  # here on this container owns them (re-run `pi auth login` / edit the file in
+  # here), while the shared copies keep serving the other projects. voice.json
+  # and review-triage.json are the two polished per-machine configs the
+  # extensions read out of the agent dir.
+  for name in auth.json voice.json review-triage.json; do
+    if [ ! -f "$PROJECT_AGENT_DIR/$name" ] && [ -f "$AGENT_DIR/$name" ]; then
+      cp "$AGENT_DIR/$name" "$PROJECT_AGENT_DIR/$name"
+    fi
+  done
+  # Project trust is what makes pi read /workspace/.pi/{settings.json,
+  # extensions,skills} at all. Without an entry here the container starts
+  # untrusted, and since the package is gone that means **no** extensions or
+  # skills: a silent empty agent rather than a broken one.
+  if [ ! -f "$PROJECT_AGENT_DIR/trust.json" ]; then
+    printf '{\n  "%s": true\n}\n' "$REPO" > "$PROJECT_AGENT_DIR/trust.json"
+  fi
+fi
+
+mkdir -p "$PROJECT_AGENT_DIR/themes"
+cp "$REPO/.devcontainer/pi/themes/kokomi-theme.json" "$PROJECT_AGENT_DIR/themes/kokomi-theme.json"
 
 # Select the theme WITHOUT clobbering the rest of the user's settings: the
 # previous version wrote settings.json wholesale, which silently discarded
 # anything else configured on the machine.
-SETTINGS="$AGENT_DIR/settings.json"
+SETTINGS="$PROJECT_AGENT_DIR/settings.json"
 if [ -f "$SETTINGS" ] && command -v jq >/dev/null 2>&1; then
   jq --arg t kokomi-theme '.theme = $t' "$SETTINGS" > "$SETTINGS.tmp" \
     && mv "$SETTINGS.tmp" "$SETTINGS" \
