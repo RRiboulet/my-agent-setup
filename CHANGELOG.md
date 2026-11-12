@@ -71,6 +71,32 @@ Fixed:
   `deepseek-v4.1-flash` also sets `medium: null` in its thinking map, so
   `medium:medium` is pruned at run time — a band can keep a candidate and still
   lose a rung.
+- **The triage dossier could ask the judge to decide on a change it had not been
+  shown, and the one argument meant to fix that threw.** Two independent caps ate
+  the evidence. The git collector captured at most 8,000 characters of the
+  combined diff (`evidence.ts`), so on a 22,847-character branch diff the last
+  four files — including both new test files and the new config the change was
+  about — were absent, not truncated; the dossier then spent its patch budget
+  (half of `stateChars`, 6,000 characters by default) strictly in priority order,
+  so the first files took everything and the rest were recorded `omitted` with no
+  patch at all. Meanwhile `context`, the documented channel for evidence git
+  cannot see, failed with `((intermediate value) ?? []).map is not a function`
+  whenever a caller wrote a single string where the collector expected a list —
+  `acceptanceCriteria: "done when the suite is green"` is the natural way to
+  write that field, and it cost the run its whole context. The capture cap is now
+  256,000 characters and is documented as a memory guard rather than a relevance
+  budget, so the per-file budget is the only thing deciding what the judge reads;
+  that budget first reserves a 200-character floor for every file with a patch
+  (header plus first hunk) and only then spends the remainder in priority order,
+  releasing unused floors back to the queue, and cuts a truncated patch at a line
+  boundary instead of mid-line; and the harness collector accepts one string or a
+  list of strings for `acceptanceCriteria`, `toolResults` and `unresolvedIssues`,
+  with anything else still recorded as a limitation. Tests pin the floor
+  (`[200,200,200]` where the old code produced `[600,0,0]`), the priority
+  remainder, the released floor, the line-boundary cut, and the string-or-list
+  forms that used to throw. The default budget itself (`stateChars` 12,000) is
+  unchanged here: this fixes which evidence survives the budget, not how large it
+  is.
 
 - **`pi` could not start in this repository's own checkout — on the host or in
   its devcontainer.** The checkout is itself a pi package (`package.json` →

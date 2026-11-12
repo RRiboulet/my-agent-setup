@@ -129,7 +129,7 @@ export interface CollectOptions {
 	target: TriageTarget;
 	cwd?: string;
 	signal?: AbortSignal;
-	/** Cap on the serialised patch carried into the state. */
+	/** Cap on the raw patch text captured from git, before any per-file budgeting. */
 	patchChars?: number;
 	/**
 	 * Existence probe for snapshot-stability markers, by absolute path.
@@ -139,7 +139,7 @@ export interface CollectOptions {
 	fsExists?: (path: string) => boolean;
 }
 
-const DEFAULT_PATCH_CHARS = 8_000;
+const DEFAULT_PATCH_CAPTURE_CHARS = 256_000;
 
 /**
  * Fixed git options. `diff.noprefix=false` keeps the `a/`/`b/` prefixes the
@@ -668,10 +668,20 @@ export async function collectEvidence(exec: GitExec, options: CollectOptions): P
 	const added = numEntries.reduce((sum, entry) => sum + entry.added, 0);
 	const removed = numEntries.reduce((sum, entry) => sum + entry.removed, 0);
 	const patchText = patch.code === 0 ? patch.stdout : "";
-	const patchCap = options.patchChars ?? DEFAULT_PATCH_CHARS;
+	// A *capture* cap, not a relevance budget. It exists so one pathological diff
+	// cannot be buffered whole, and it is deliberately far above what the dossier
+	// will keep: the dossier's patch budget decides what reaches the judge, per
+	// file, and it cannot decide anything about a section this cut off. At 8000
+	// characters a 23k-character branch diff lost its last four files — including
+	// the new test files — before the per-file budget ever saw them, so the judge
+	// was asked to judge a change it had not been shown.
+	const patchCap = options.patchChars ?? DEFAULT_PATCH_CAPTURE_CHARS;
 	const truncated = patchText.length > patchCap;
 	if (truncated) {
-		limitations.push({ text: `the patch excerpt was truncated at ${patchCap} characters`, blocksSkip: true });
+		limitations.push({
+			text: `the patch capture was truncated at ${patchCap} characters (a memory guard, not the dossier budget); files past it carry counts but no patch`,
+			blocksSkip: true,
+		});
 	}
 
 	// `git show` suppresses a merge commit's diff by default, so an empty

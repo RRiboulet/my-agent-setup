@@ -53,6 +53,27 @@ function text(value: unknown): string | undefined {
 }
 
 /**
+ * Adapt a caller field that may be written either as one string or as a list of
+ * strings, and say nothing about anything else (the caller reports that).
+ *
+ * The tool's `context` argument is hand-written JSON, and every field where one
+ * value is as natural as a list was documented as a string while the collector
+ * typed it as an array and called `.map` on it: `acceptanceCriteria: "done when
+ * the suite is green"` threw `((intermediate value) ?? []).map is not a
+ * function`, which reached the caller as a failed tool call rather than as
+ * evidence. Both spellings mean the same thing, so both are accepted, and
+ * anything else stays a gap the caller records.
+ */
+function textList(value: unknown): string[] | undefined {
+	if (typeof value === "string") {
+		const single = text(value);
+		return single === undefined ? [] : [single];
+	}
+	if (Array.isArray(value)) return value;
+	return undefined;
+}
+
+/**
  * Longest caller-supplied text carried per field. Caller strings are unbounded,
  * and one enormous entry can otherwise crowd the dossier's budget and evict the
  * caller's own other evidence. This is a safety valve, not a design limit.
@@ -413,16 +434,16 @@ export interface HarnessEditRecord {
 export interface HarnessContextInput {
 	/** What the change is trying to achieve. */
 	objective?: string;
-	/** How the caller will know it is done. */
-	acceptanceCriteria?: readonly string[];
+	/** How the caller will know it is done. A single string is accepted too. */
+	acceptanceCriteria?: readonly string[] | string;
 	/** Which task this is, e.g. a todo id. */
 	identity?: string;
 	/** Edits the harness itself recorded — see the coverage limitation. */
 	recordedEdits?: readonly HarnessEditRecord[];
-	/** Recorded tool output that is context, not an artifact or a check. */
-	toolResults?: readonly string[];
-	/** What the author knows is still broken or unfinished. */
-	unresolvedIssues?: readonly string[];
+	/** Recorded tool output that is context, not an artifact or a check. A single string is accepted too. */
+	toolResults?: readonly string[] | string;
+	/** What the author knows is still broken or unfinished. A single string is accepted too. */
+	unresolvedIssues?: readonly string[] | string;
 }
 
 export interface HarnessContext {
@@ -468,10 +489,23 @@ export function collectHarnessContext(input: HarnessContextInput): HarnessContex
 	const { read, truncated } = textReader();
 	const objective = read(input?.objective);
 	const identity = read(input?.identity);
-	const acceptance = (input?.acceptanceCriteria ?? [])
+	const rawAcceptance = textList(input?.acceptanceCriteria);
+	const acceptance = (rawAcceptance ?? [])
 		.map((criterion) => read(criterion))
 		.filter((criterion): criterion is string => criterion !== undefined);
+	if (input?.acceptanceCriteria !== undefined && rawAcceptance === undefined) {
+		items.push(
+			limitation(
+				"harness",
+				"the session record",
+				"the acceptance criteria were neither a string nor a list; they were not read",
+				"missing",
+			),
+		);
+	}
 
+	// Not textList: an edit record is an object, so a bare string here is a
+	// malformed record rather than one edit, and stays a recorded gap.
 	const edits = input?.recordedEdits;
 	if (edits !== undefined && !Array.isArray(edits)) {
 		// A non-list would iterate as characters or throw on .map; the same
@@ -525,9 +559,9 @@ export function collectHarnessContext(input: HarnessContextInput): HarnessContex
 		);
 	}
 
-	const toolResults = input?.toolResults;
+	const toolResults = textList(input?.toolResults);
 	let supplementary: string[] = [];
-	if (toolResults !== undefined && !Array.isArray(toolResults)) {
+	if (input?.toolResults !== undefined && toolResults === undefined) {
 		items.push(
 			limitation(
 				"harness",
@@ -542,8 +576,8 @@ export function collectHarnessContext(input: HarnessContextInput): HarnessContex
 			.filter((result): result is string => result !== undefined);
 	}
 
-	const issues = input?.unresolvedIssues;
-	if (issues !== undefined && !Array.isArray(issues)) {
+	const issues = textList(input?.unresolvedIssues);
+	if (input?.unresolvedIssues !== undefined && issues === undefined) {
 		items.push(
 			limitation(
 				"harness",
