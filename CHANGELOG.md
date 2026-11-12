@@ -392,6 +392,16 @@ Fixed:
 
 Maintenance:
 
+- **The per-container pi agent dir is now written down once.** The previous entry
+  introduced `PI_CODING_AGENT_DIR=/home/vscode/.pi/agent-my-agent-setup` and then
+  repeated the literal in `.devcontainer/restore-post-rebuild.sh` and
+  `voice-container.md`, with the mechanism's prose in five files — copies stay
+  correct only until one of them is edited. `devcontainer.json` owns the value,
+  the README section owns the explanation, and everything else refers to
+  `$PI_CODING_AGENT_DIR`. `test/devcontainer-agent-dir.test.ts` fails if the
+  literal reappears anywhere else, or if the two files that used to restate the
+  rationale stop pointing at the README section instead.
+
 - **The `opencode-go` model pipeline is now covered by tests.**
   `transformApiModel`, `mergeWithEmbedded`, `loadStaleModels` and
   `buildModels` had none — the suite exercised formatting, glyphs,

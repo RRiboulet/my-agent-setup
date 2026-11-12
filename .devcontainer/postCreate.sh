@@ -3,9 +3,8 @@ set -euo pipefail
 
 REPO=/workspace
 # The shared, machine-wide pi agent dir, on the pi-agent-config volume. Other
-# projects that mount this volume use it directly; this container does not — see
-# PI_CODING_AGENT_DIR in devcontainer.json for why (the personal install of this
-# very package would load every extension twice).
+# projects that mount this volume use it directly; this container uses the dir in
+# PI_CODING_AGENT_DIR instead (README, "One copy of the extensions, never two").
 AGENT_DIR=/home/vscode/.pi/agent
 PROJECT_AGENT_DIR="${PI_CODING_AGENT_DIR:-$AGENT_DIR}"
 
@@ -35,9 +34,9 @@ cp "$REPO/.devcontainer/shell/tmux.conf" /home/vscode/.tmux.conf
 # postCreate *before* the chown that would have fixed it. Measured, not reasoned:
 # with a fresh volume and an image whose `vscode` is uid 1000 (i.e. no devcontainer
 # CLI uid remap), the first version of this block died at
-# `mkdir: cannot create directory '/home/vscode/.pi/agent-my-agent-setup':
-# Permission denied` — the same window one line earlier, at `…/.pi/agent/themes`,
-# existed before this branch. The reordering closes both.
+# `mkdir: cannot create directory '<$PROJECT_AGENT_DIR>': Permission denied` — the
+# same window one line earlier, at `…/.pi/agent/themes`, existed before this
+# branch. The reordering closes both.
 #
 # The devcontainer CLI normally rebuilds the image with `vscode` remapped to the
 # host uid, which also fixes the ownership of /home/vscode — but that is a property
@@ -50,11 +49,10 @@ sudo chown -R vscode:vscode /home/vscode/.pi "$REPO"
 
 # --- pi configuration ---
 # Seed the per-project agent dir from the shared one, once. Only files that are
-# missing are written, so a rebuild never overwrites a setting made in here; and
-# settings.json is seeded *without* .packages, which is the whole point of the
-# split (the shared dir's package list names this repo, and /workspace already
-# provides its extensions and skills directly). The theme is the one exception:
-# it is re-pinned to kokomi-theme on every run, as it always was.
+# missing are written, so a rebuild never overwrites a setting made in here; the
+# theme is the one exception and is re-pinned to kokomi-theme on every run, as it
+# always was. settings.json is seeded *without* .packages — that is the point of
+# the split, see README, "One copy of the extensions, never two".
 if [ "$PROJECT_AGENT_DIR" != "$AGENT_DIR" ]; then
   mkdir -p "$PROJECT_AGENT_DIR"
   if [ ! -f "$PROJECT_AGENT_DIR/settings.json" ] && [ -f "$AGENT_DIR/settings.json" ] \
