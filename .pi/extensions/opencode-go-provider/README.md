@@ -213,6 +213,23 @@ Add to your pi configuration for automatic loading:
 }
 ```
 
+### Model cache
+
+The model list is served stale-first from
+`$PI_CODING_AGENT_DIR/cache/opencode-go-models.json` (`~/.pi/agent/cache/…` by
+default), then revalidated against the live `/v1/models` endpoint in the
+background. The file carries a `format` marker and is discarded when the marker
+does not match the installed version, so upgrading this extension costs one cold
+start — the curated `models.json` list, with live-only models returning on the
+first successful revalidation — rather than replaying the previous version's
+routing for as long as the API stays unreachable.
+
+On the stale path, the fields `models.json` owns (`name`, `api`, `baseUrl`,
+`input`, `maxTokens`, `reasoning`, `thinkingLevelMap`, and `compat` when the
+curated entry defines one) are refreshed from it, so editing those needs no cache
+delete. `cost` and `contextWindow` are served from the cache, so to change either
+of those offline, remove the file.
+
 ## License
 
 MIT
