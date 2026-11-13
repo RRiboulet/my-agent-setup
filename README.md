@@ -123,6 +123,26 @@ locations, and moving either the checkout or `~/.pi/agent` makes it resolve to
 nothing — silently, because a missing local source is skipped, not reported. Re-run
 `pi install <path>` after either moves.
 
+**A linked worktree is the same trap one level down, and the local-path entry
+does not cover it.** The entry dedupes against project discovery only because
+both name files in the same checkout. A child process rooted in
+`.worktrees/<slug>` discovers *that tree's* `.pi/extensions` as its project
+extension, while the package still resolves to the main checkout's copy — two
+different files registering the same tools and the same `--attach-subagent`
+flag, so pi exits 1 with one `Tool "…" conflicts with
+…/.worktrees/<slug>/.pi/extensions/…` line per extension. This is not the bug the
+subagent launcher fixed: it reproduces with no `--extension` at all, and there
+is no *selective* way to suppress the package copy for one run. `PI_PACKAGE_DIR`
+overrides pi's own install path, not the installed extensions;
+`--no-extensions` (`-ne`) does drop package discovery, but it also disables the
+built-in extensions and every extension not named with `-e`, so it is a lossy
+workaround rather than a dedupe. The launcher therefore cannot fix it. The
+devcontainer is immune for the same reason
+as above — its agent dir installs no package. On a host that installs this repo
+as a package, do not run subagents rooted in this repo's worktrees: uninstall the
+package there, or launch with `cwd` = the main checkout and `cd` into the tree
+inside each command, which keeps the child's discovery pointed at one copy.
+
 In the devcontainer, that seeded dir is the container's own: credentials
 (`auth.json`), `voice.json`, `review-triage.json`, `models.json` and the model and
 tool defaults are copied on first creation and then owned there. Rotate a key or
