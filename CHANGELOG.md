@@ -4,6 +4,23 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Maintenance:
+
+- **`README.md` now carries an "Upgrading to v1.12.0" block, and it says to
+  delete a stale web-search provider rather than replace it.** Both v1.12.0
+  changes needed an action and were reachable only from the startup error, the
+  skill's provider notes or the changelog entry: install this repo by local path
+  rather than `git:`, and drop `--provider opencode-go` /
+  `PI_WEB_SEARCH_PROVIDER=opencode-go`. The block states the second as *delete*,
+  because Brave is already the first choice when a key resolves and OpenRouter is
+  the native default otherwise — the changelog told a reader to add an
+  `openrouter` credential, which is needed only on a machine that has neither.
+  Verified on this machine's agent dir, which keeps `defaultProvider:
+  "opencode-go"` in `settings.json` and a `brave` credential in `auth.json`:
+  `pickProvider(undefined, settings, auth)` resolves `brave`, and an explicit
+  `opencode-go` throws the documented `Unknown provider` error. Docs only; no
+  provider precedence changed.
+
 ## v1.12.0 — 2026-11-13
 
 Added:
