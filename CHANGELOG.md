@@ -33,6 +33,50 @@ Fixed:
   untrusted cwd still gets the fallback, and a delegated project gets a copy that
   exists rather than a launch that defers and might inherit nothing. Found while
   running subagents in parallel worktrees on the `lol-dataset` scaffold.
+- **An upgraded provider kept replaying the previous transform's model routing
+  from cache.** The model cache
+  (`$PI_CODING_AGENT_DIR/cache/opencode-go-models.json`) was a bare array with
+  nothing in it saying which transform wrote it, and `loadStaleModels` served it
+  wholesale — after #120 it refreshed only `reasoning` and `thinkingLevelMap`.
+  So a cache written before #117 kept `claude-haiku-5-5` on
+  `openai-completions` / `zen/go/v1` with four zero costs, text-only input and
+  `maxTokens: 0` until the first *successful* revalidation rewrote the file:
+  seconds with a healthy API, indefinitely offline — which is exactly when the
+  stale path is the one in use. A container makes it worse than a host, because
+  the cache lives in the agent dir on the `pi-agent-config` volume: a rebuild
+  replaces the code and keeps the cache, and `postCreate.sh` deliberately copies
+  no cache.
+
+  The file now carries `{ "format": 1, "models": [...] }`. A cache without the
+  marker is not upgraded in place but ignored — a bare array is precisely the
+  case whose contents cannot be attributed — so an upgrade costs one cold start:
+  the stale path falls back to the curated `models.json`, and live-only models
+  return with the first revalidation. Bumping `CACHE_FORMAT_VERSION` is the
+  discipline for any future change to what the pipeline writes; the writer and the
+  reader share the constant, and a test writes through `cacheModels` and reads
+  back through `loadStaleModels`, because a bump that moves one and not the other
+  would freeze the model list at the curated entries forever.
+
+  The stale path also refreshes the fields curation owns — `name`, `api`,
+  `baseUrl`, `input`, `maxTokens`, `reasoning`, `thinkingLevelMap`, and `compat`
+  when the curated entry defines one — since those are `models.json` data rather
+  than something the cache observed, which is the argument #120 made for
+  `reasoning` alone. `cost` and `contextWindow` stay cached deliberately: those
+  are the two fields `mergeWithEmbedded` gives to the live payload first, so a
+  cached value that disagrees with `models.json` is a live observation rather
+  than stale curation. A live-only entry still cannot be corrected this way,
+  because curation
+  has nothing to correct it with, so the marker rather than the field refresh is
+  what fixes the recorded case. Verified against the real module and the real
+  catalogue rather than the fixture: a hand-written pre-#117 cache no longer
+  serves `claude-haiku-5-5`, while a current-format cache holding
+  `qwen3.8-flash` on `openai-completions` / `zen/go/v1` and text-only input comes
+  back with its curated endpoint, `input: ["text", "image"]`, name and
+  `maxTokens`. The provider README documents the cache and the marker, and
+  `add-model`'s "After editing" step now says which edits still need the file
+  deleted (`cost`, `contextWindow`) and which no longer do, using
+  `$PI_CODING_AGENT_DIR` rather than the hard-coded host path.
+
 - **The review-triage policy named a provider with no credential.** The config at
   `~/.pi/agent/review-triage.json` listed `deepseek-v4.1-flash` and
   `glm-5.3-flash` under `opencode`; only `opencode-go` and `openrouter` are

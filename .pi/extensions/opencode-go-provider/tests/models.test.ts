@@ -8,7 +8,7 @@
  * exactly what the network feeds it.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -20,8 +20,15 @@ import livePayload from "./fixtures/live-models-2026-11-10.json" with { type: "j
 // real ~/.pi/agent cache.
 const agentDir = mkdtempSync(path.join(tmpdir(), "opencode-go-models-test-"));
 process.env.PI_CODING_AGENT_DIR = agentDir;
-const { buildModels, loadStaleModels, mergeWithEmbedded, transformApiModel, transformApiModels } =
-  await import("../index.ts");
+const {
+  CACHE_FORMAT_VERSION,
+  buildModels,
+  cacheModels,
+  loadStaleModels,
+  mergeWithEmbedded,
+  transformApiModel,
+  transformApiModels,
+} = await import("../index.ts");
 
 const CACHE_DIR = path.join(agentDir, "cache");
 const CACHE_PATH = path.join(CACHE_DIR, "opencode-go-models.json");
@@ -48,9 +55,19 @@ function model(over: Partial<JsonModel> & { id: string }): JsonModel {
   };
 }
 
-function writeCache(models: JsonModel[]): void {
+function writeRawCache(value: unknown): void {
   mkdirSync(CACHE_DIR, { recursive: true });
-  writeFileSync(CACHE_PATH, JSON.stringify(models));
+  writeFileSync(CACHE_PATH, JSON.stringify(value));
+}
+
+/** A cache in the format the provider writes today. */
+function writeCache(models: JsonModel[]): void {
+  writeRawCache({ format: CACHE_FORMAT_VERSION, models });
+}
+
+/** A cache written before the format marker existed: a bare array. */
+function writeLegacyCache(models: JsonModel[]): void {
+  writeRawCache(models);
 }
 
 function clearCache(): void {
@@ -425,14 +442,16 @@ test("returns the curated list when there is no cache", () => {
 });
 
 test("appends curated models missing from the cache", () => {
-  const cached = model({ id: "cached", name: "Cached" });
+  const cached = model({ id: "cached", cost: { input: 9, output: 9, cacheRead: 9, cacheWrite: 9 } });
   writeCache([cached]);
   const curated = [model({ id: "cached", name: "Curated" }), model({ id: "new", name: "New" })];
 
   const result = loadStaleModels(curated);
 
   assert.deepEqual(result.map((m) => m.id), ["cached", "new"]);
-  assert.equal(result[0].name, "Cached");
+  // The cached entry is served rather than replaced, and its cost is the proof:
+  // cost is the one field the stale path never refreshes from curation.
+  assert.deepEqual(result[0].cost, { input: 9, output: 9, cacheRead: 9, cacheWrite: 9 });
 });
 
 test("refreshes cached reasoning and thinking levels from the curated entry", () => {
@@ -452,6 +471,133 @@ test("drops a cached thinking-level map the curated entry no longer has", () => 
   const [stale] = loadStaleModels(curated);
 
   assert.equal(stale.thinkingLevelMap, undefined);
+});
+
+test("ignores a cache written before the format marker existed", () => {
+  // The recorded case: a cache from the pre-#117 transform holds a live-only
+  // model on the old endpoint with four zero costs. Nothing in a bare array says
+  // which transform wrote it, so it cannot be served as if it were current.
+  writeLegacyCache([
+    model({
+      id: "live-only",
+      name: "Live Only",
+      api: "openai-completions",
+      baseUrl: "https://stale.test/v1",
+      input: ["text"],
+    }),
+  ]);
+
+  const result = loadStaleModels([model({ id: "curated" })]);
+
+  assert.deepEqual(result.map((m) => m.id), ["curated"]);
+});
+
+test("reads a cache written in the current format", () => {
+  writeCache([model({ id: "cached", name: "Cached" })]);
+  const curated = [model({ id: "cached", name: "Curated" }), model({ id: "new" })];
+
+  assert.deepEqual(loadStaleModels(curated).map((m) => m.id), ["cached", "new"]);
+});
+
+test("ignores a cache written in another format", () => {
+  writeRawCache({ format: CACHE_FORMAT_VERSION + 1, models: [model({ id: "cached" })] });
+
+  const result = loadStaleModels([model({ id: "curated" })]);
+
+  assert.deepEqual(result.map((m) => m.id), ["curated"]);
+});
+
+test("ignores a cache that is JSON but not a cache file", () => {
+  for (const junk of [null, 42, "models", [], { models: [] }, { format: "1", models: [] }]) {
+    writeRawCache(junk);
+
+    const result = loadStaleModels([model({ id: "curated" })]);
+
+    assert.deepEqual(result.map((m) => m.id), ["curated"], JSON.stringify(junk));
+  }
+});
+
+test("writes a cache its own stale path can read", () => {
+  // The writer and the reader are the only two things that know the file's
+  // shape, and a format bump that changes one but not the other would freeze
+  // the model list at the curated entries forever. Reading the file back, not
+  // just round-tripping through the module, is what catches the subtler version:
+  // renaming the envelope on both sides without bumping the format, which leaves
+  // every cache written by the previous release unloadable while the marker
+  // claims it is current.
+  const models = [model({ id: "cached" })];
+  cacheModels(models);
+
+  assert.deepEqual(JSON.parse(readFileSync(CACHE_PATH, "utf8")), {
+    format: CACHE_FORMAT_VERSION,
+    models,
+  });
+  assert.deepEqual(loadStaleModels([]).map((m) => m.id), ["cached"]);
+});
+
+test("refreshes the curated endpoint, name, modalities and limits on the stale path", () => {
+  writeCache([
+    model({
+      id: "m",
+      name: "Cached Name",
+      api: "openai-completions",
+      baseUrl: "https://opencode.ai/zen/go/v1",
+      input: ["text"],
+      maxTokens: 0,
+      compat: { maxTokensField: "max_completion_tokens" },
+    }),
+  ]);
+  const curated = [
+    model({
+      id: "m",
+      name: "Curated Name",
+      api: "anthropic-messages",
+      baseUrl: "https://opencode.ai/inference/go/anthropic",
+      input: ["text", "image"],
+      maxTokens: 128000,
+      compat: { maxTokensField: "max_tokens" },
+      cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+      contextWindow: 1000000,
+    }),
+  ];
+
+  const [stale] = loadStaleModels(curated);
+
+  assert.equal(stale.name, "Curated Name");
+  assert.equal(stale.api, "anthropic-messages");
+  assert.equal(stale.baseUrl, "https://opencode.ai/inference/go/anthropic");
+  assert.deepEqual(stale.input, ["text", "image"]);
+  assert.equal(stale.maxTokens, 128000);
+  assert.deepEqual(stale.compat, { maxTokensField: "max_tokens" });
+  // Cost and contextWindow stay cached deliberately: they are the two fields
+  // mergeWithEmbedded gives to the live payload first, so a cache that disagrees
+  // with models.json there is holding a live observation, not stale curation.
+  assert.deepEqual(stale.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+  assert.equal(stale.contextWindow, 131072);
+});
+
+test("keeps a cached compat block when curation has none", () => {
+  // Not "live-derived": the live transform never writes compat, so on a curated
+  // id a cached block can only have come from an earlier models.json — which is
+  // exactly why dropping it is not propagated here, and why removing compat from
+  // models.json needs the cache deleted (add-model says so).
+  writeCache([model({ id: "m", compat: { maxTokensField: "max_tokens" } })]);
+
+  const [stale] = loadStaleModels([model({ id: "m" })]);
+
+  assert.deepEqual(stale.compat, { maxTokensField: "max_tokens" });
+});
+
+test("leaves a live-only cached entry alone, since curation has nothing to correct it with", () => {
+  writeCache([
+    model({ id: "live-only", api: "openai-completions", baseUrl: "https://stale.test/v1", input: ["text"] }),
+  ]);
+
+  const [stale] = loadStaleModels([]);
+
+  assert.equal(stale.api, "openai-completions");
+  assert.equal(stale.baseUrl, "https://stale.test/v1");
+  assert.deepEqual(stale.input, ["text"]);
 });
 
 test("keeps cached cost and context window when the curated entry differs", () => {

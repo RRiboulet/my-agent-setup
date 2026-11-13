@@ -182,6 +182,34 @@ const CACHE_PATH = path.join(CACHE_DIR, `${PROVIDER_ID}-models.json`);
 const LIVE_FETCH_TIMEOUT_MS = 8000;
 
 /**
+ * Shape marker for the on-disk model cache.
+ *
+ * The cache is a snapshot of one transform's output, and nothing inside it said
+ * which transform that was. So after an upgrade the stale path kept serving the
+ * older routing until the first *successful* revalidation rewrote the file — a
+ * matter of seconds with a healthy API, and indefinitely offline, which is
+ * exactly when the stale path is in use. The recorded case: a cache written
+ * before #117 held `claude-haiku-5-5` on `openai-completions` / `zen/go/v1`
+ * with four zero costs and text-only input.
+ *
+ * Bump this whenever the pipeline starts writing a field group it did not write
+ * before. Bumping costs one cold start per upgrade: the stale path falls back to
+ * the curated `models.json`, and live-only models return with the first
+ * revalidation. That is the trade, and it is deliberately in this direction —
+ * a stale entry that looks current is worse than a missing one.
+ *
+ * Version 1 is the first versioned format. Before it the file was a bare array,
+ * which is therefore unrecognised on purpose: it cannot be upgraded in place,
+ * because the whole problem is that its contents cannot be attributed.
+ */
+export const CACHE_FORMAT_VERSION = 1;
+
+interface ModelCacheFile {
+  format: number;
+  models: JsonModel[];
+}
+
+/**
  * Resolve the API type and base URL from the live payload's `api` block. Each
  * model advertises exactly one endpoint today — `chat-completions` for the
  * OpenAI-compatible models, `messages` for the Anthropic ones — and
@@ -315,19 +343,30 @@ async function fetchLiveModels(apiKey: string, signal?: AbortSignal): Promise<Js
   }
 }
 
+function isModelCacheFile(data: unknown): data is ModelCacheFile {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return false;
+  const candidate = data as { format?: unknown; models?: unknown };
+  return typeof candidate.format === "number" && Array.isArray(candidate.models);
+}
+
 function loadCachedModels(): JsonModel[] | null {
+  let data: unknown;
   try {
-    const data = JSON.parse(fs.readFileSync(CACHE_PATH, "utf8"));
-    return Array.isArray(data) ? data : null;
+    data = JSON.parse(fs.readFileSync(CACHE_PATH, "utf8"));
   } catch {
     return null;
   }
+  if (!isModelCacheFile(data)) return null;
+  return data.format === CACHE_FORMAT_VERSION ? data.models : null;
 }
 
-function cacheModels(models: JsonModel[]): void {
+/** Exported for tests: the writer and the reader are the only two things that
+ *  know the file's shape, so a format bump has to move both. */
+export function cacheModels(models: JsonModel[]): void {
   try {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
-    fs.writeFileSync(CACHE_PATH, JSON.stringify(models, null, 2) + "\n");
+    const file: ModelCacheFile = { format: CACHE_FORMAT_VERSION, models };
+    fs.writeFileSync(CACHE_PATH, JSON.stringify(file, null, 2) + "\n");
   } catch {
     // Cache write failure is non-fatal
   }
@@ -440,14 +479,35 @@ export function loadStaleModels(embeddedModels: JsonModel[]): JsonModel[] {
       continue;
     }
 
-    // Refresh what curation owns. `reasoning` and `thinkingLevelMap` are the
-    // fields a models.json edit is meant to change, and a failed revalidation
-    // used to keep serving the values captured when the cache was written.
-    // Cost, contextWindow and the rest stay cached deliberately: refreshing
-    // those from the embedded list is the shape that got the earlier
-    // revalidation change reverted.
+    // Refresh everything the curated entry owns, with one deliberate divergence
+    // from mergeWithEmbedded: an entry that defines no thinkingLevelMap drops the
+    // cached one instead of falling back to it. The merge rule is "curated, else
+    // live", which offline would keep serving the map a curation edit just
+    // removed; #120 chose the strict rule so a level that no longer works stops
+    // being offered. `compat` keeps the merge's fallback because the live
+    // transform never writes compat, so a cached block on a curated id is always
+    // earlier curation and only a removal is affected.
+    //
+    // Cost and contextWindow stay cached deliberately: they are the two fields
+    // mergeWithEmbedded gives to the live payload first, so a cached value that
+    // disagrees with models.json is a live observation rather than stale
+    // curation, and overwriting it offline would invent a price.
+    cachedModel.name = em.name;
+    // `??`: a curated entry without an endpoint lets the cached one stand, which
+    // is what mergeWithEmbedded's spread does with an absent key.
+    cachedModel.api = em.api ?? cachedModel.api;
+    cachedModel.baseUrl = em.baseUrl ?? cachedModel.baseUrl;
+    cachedModel.input = em.input;
+    cachedModel.maxTokens = em.maxTokens;
     cachedModel.reasoning = em.reasoning;
+    // Unconditional, unlike compat: curation dropping a map must stop offering
+    // levels that no longer work, and the cached map is the stale copy here.
     cachedModel.thinkingLevelMap = em.thinkingLevelMap;
+    // `compat` only when curation defines one. The merge falls back to the live
+    // block, and a cached block on a curated id is always earlier curation, so
+    // keeping it is the same "curated, else cached" rule — at the cost of a
+    // removed block lingering until the cache is deleted.
+    if (em.compat !== undefined) cachedModel.compat = em.compat;
   }
   return cached;
 }
