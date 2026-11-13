@@ -40,7 +40,7 @@
 // process rather than asynchronously inside the child.
 
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { CURRENT_SESSION_VERSION } from "@earendil-works/pi-coding-agent";
@@ -68,7 +68,11 @@ export interface ChildLaunchSpec {
 	sessionId?: string;
 	tmuxSession: string;
 	trusted: boolean;
-	extensionPath: string;
+	/**
+	 * The `--extension` argument, or `undefined` to let the child's own discovery
+	 * load this extension. See `resolveChildExtensionPath`.
+	 */
+	extensionPath?: string;
 	promptPath: string;
 }
 
@@ -129,8 +133,10 @@ export function buildChildPiArgs(spec: ChildLaunchSpec): string[] {
 		"--name",
 		spec.tmuxSession,
 		spec.trusted ? "--approve" : "--no-approve",
-		"--extension",
-		spec.extensionPath,
+		// Absent when the child's project has delegated its extension tree to an
+		// installed package: naming the excluded copy would load a second build of
+		// this extension and pi refuses to start. See `resolveChildExtensionPath`.
+		...(spec.extensionPath === undefined ? [] : ["--extension", spec.extensionPath]),
 		`@${spec.promptPath}`,
 	];
 }
@@ -143,41 +149,136 @@ export function usesSessionFile(mode: LaunchMode): boolean {
 /** Where a checkout of this repo keeps this extension, relative to its root. */
 const CHILD_EXTENSION_RELATIVE_PATH = path.join(".pi", "extensions", "subagent", "index.ts");
 
+/** Where a project states which of its own resources to load, relative to its root. */
+const PROJECT_SETTINGS_RELATIVE_PATH = path.join(".pi", "settings.json");
+
+/** This extension as a settings pattern names it: relative to `.pi/`, `/`-separated. */
+const CHILD_EXTENSION_SETTING_PATH = "extensions/subagent/index.ts";
+
+/** Settings glob to RegExp: `**` crosses separators, `*` and `?` stay inside one segment. */
+function settingsGlobMatches(pattern: string, relativePath: string): boolean {
+	const glob = pattern.split(path.sep === "\\" ? "\\" : "/").join("/");
+	let source = "^";
+	for (let index = 0; index < glob.length; index += 1) {
+		const char = glob[index];
+		if (char === "*") {
+			if (glob[index + 1] === "*") {
+				index += 1;
+				if (glob[index + 1] === "/") {
+					index += 1;
+					source += "(?:.*/)?";
+				} else {
+					source += ".*";
+				}
+			} else {
+				source += "[^/]*";
+			}
+		} else if (char === "?") {
+			source += "[^/]";
+		} else if ("\\^$.|+()[]{}".includes(char)) {
+			source += `\\${char}`;
+		} else {
+			source += char;
+		}
+	}
+	return new RegExp(`${source}$`).test(relativePath);
+}
+
+/** The `extensions` entries from `<root>/.pi/settings.json`, or none. */
+function projectExtensionSettings(root: string): string[] {
+	let text: string;
+	try {
+		text = readFileSync(path.join(root, PROJECT_SETTINGS_RELATIVE_PATH), "utf8");
+	} catch {
+		// No project settings, or one this process may not read: "no opinion". Pi
+		// diagnoses an unreadable settings file itself; a launch must not fail on a
+		// guess about what it meant.
+		return [];
+	}
+	try {
+		const parsed = JSON.parse(text) as { extensions?: unknown };
+		if (!Array.isArray(parsed.extensions)) return [];
+		return parsed.extensions.filter((entry): entry is string => typeof entry === "string");
+	} catch {
+		return [];
+	}
+}
+
 /**
- * The `--extension` argument for a child launched with `cwd`.
+ * Does this project exclude its own copy of this extension from discovery?
  *
- * A child whose cwd is another checkout of this repo has its own copy of this
- * extension, and pi discovers it there as that project's extension without
- * being asked: a linked worktree under `.worktrees/` is exactly that case, and
- * running a subagent in one is the documented way to work a branch (see
- * `.pi/skills/worktree/SKILL.md`). Handing the child this checkout's path as
- * well loads one file under two paths, and pi refuses to start:
+ * The project `extensions` array narrows discovery with `!glob`, `-path` and `+path`
+ * (docs/settings.md#resources), and its paths resolve from `.pi/`. Only exclusions
+ * matter here: a project that lists its extension tree plainly still has it
+ * discovered, which is the case `resolveChildExtensionPath` already handles.
+ */
+function excludesOwnExtensionTree(root: string): boolean {
+	let excluded = false;
+	for (const entry of projectExtensionSettings(root)) {
+		if (entry.startsWith("!")) {
+			if (settingsGlobMatches(entry.slice(1), CHILD_EXTENSION_SETTING_PATH)) excluded = true;
+		} else if (entry.startsWith("-")) {
+			if (entry.slice(1).split(path.sep === "\\" ? "\\" : "/").join("/") === CHILD_EXTENSION_SETTING_PATH) excluded = true;
+		} else if (entry.startsWith("+")) {
+			// An exact re-inclusion after a broad exclusion.
+			if (entry.slice(1).split(path.sep === "\\" ? "\\" : "/").join("/") === CHILD_EXTENSION_SETTING_PATH) excluded = false;
+		}
+	}
+	return excluded;
+}
+
+/**
+ * The `--extension` argument for a child launched with `cwd`, or `undefined` to let
+ * the child's own configuration decide.
  *
- *   Failed to load extension "<child>/.pi/extensions/subagent/index.ts":
- *   Flag "--attach-subagent" conflicts with <this checkout>/index.ts
+ * Two shapes of project exist, and a child has to be started differently in each:
  *
- * So the child's copy wins when its tree has one: the child runs that branch's
- * tooling, so it should load that branch's extension.
+ * 1. **The project carries this extension in its own tree** — this repository, and a
+ *    linked worktree under `.worktrees/`, which is the documented way to work a
+ *    branch (see `.pi/skills/worktree/SKILL.md`). Pi discovers
+ *    `<cwd>/.pi/extensions/subagent/index.ts` there without being asked, so naming
+ *    it explicitly makes the two one path and it loads once.
  *
- * `trusted` gates that, and is not optional. An explicit `--extension` loads
- * regardless of project trust *and* regardless of `--no-extensions`, while
- * discovery is trust-gated - so pointing the flag at an untrusted tree would
- * execute code from a directory this process just refused to trust, which the
- * flag never did before it started naming the child's copy. An untrusted cwd
- * gets no discovery either, so there is no duplicate to avoid and the fallback
+ * 2. **The project delegated its extension tree to an installed package**, by
+ *    excluding its own copy in `.pi/settings.json`:
+ *
+ *        { "extensions": ["!extensions/**"] }
+ *
+ *    There the child's discovery loads the package's copy, exactly as this
+ *    process's own discovery did — and naming the excluded local copy as well loads
+ *    two builds of one extension, which pi refuses to start on:
+ *
+ *        Failed to load extension "<package>/.../subagent/index.ts":
+ *        Flag "--attach-subagent" conflicts with
+ *        <cwd>/.pi/extensions/subagent/index.ts
+ *
+ *    Measured in a project configured that way: every launch died before the child
+ *    drew a frame, so the tool reported "Child Pi exited before reporting a result"
+ *    with nothing about extensions. Hence `undefined` here: the caller omits
+ *    `--extension`, and the child inherits whatever configuration this process is
+ *    already running under. It may therefore run a different build of this
+ *    extension; the result/interrupt protocol tolerates that by design (see the
+ *    attach-flag notes at the top of `index.ts`).
+ *
+ * `trusted` gates the first shape, and is not optional. An explicit `--extension`
+ * loads regardless of project trust *and* regardless of `--no-extensions`, while
+ * discovery is trust-gated — so pointing the flag at an untrusted tree would
+ * execute code from a directory this process just refused to trust. An untrusted
+ * cwd gets no discovery either, so there is no duplicate to avoid and the fallback
  * is correct as well as safe.
  *
  * `fallback` is this process's own path, used whenever the child's tree is
- * untrusted or has no copy - a plain directory, another project, or a branch
- * predating this file. The flag stays explicit in every case, so a launch does
- * not depend on the child's discovery settings.
+ * untrusted or has no copy — a plain directory, another project, or a branch
+ * predating this file.
  */
-export function resolveChildExtensionPath(cwd: string, fallback: string, trusted: boolean): string {
+export function resolveChildExtensionPath(cwd: string, fallback: string, trusted: boolean): string | undefined {
 	if (!trusted) return fallback;
-	// Absolute, because a relative candidate would resolve against the CHILD's
-	// cwd at launch time, naming a different file.
-	const candidate = path.join(path.resolve(cwd), CHILD_EXTENSION_RELATIVE_PATH);
-	return existsSync(candidate) ? candidate : fallback;
+	// Absolute, because a relative candidate would resolve against the CHILD's cwd at
+	// launch time, naming a different file.
+	const root = path.resolve(cwd);
+	const candidate = path.join(root, CHILD_EXTENSION_RELATIVE_PATH);
+	if (!existsSync(candidate)) return fallback;
+	return excludesOwnExtensionTree(root) ? undefined : candidate;
 }
 
 /** The v3 header pi writes for a new session. */

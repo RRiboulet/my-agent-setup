@@ -16,6 +16,22 @@ Added:
 
 Fixed:
 
+- **A subagent could not start in a project that delegates its extensions to an
+  installed package.** The child was launched with `--extension <cwd>/.pi/extensions/
+  subagent/index.ts` *and* with discovery enabled, so a project that excludes its own
+  tree — `"extensions": ["!extensions/**"]`, the rule this devcontainer uses — loaded
+  the package's copy and the excluded copy at once, and pi refused to start on the
+  duplicate `--attach-subagent` flag. The tool reported it as "Child Pi exited before
+  reporting a result", with nothing about extensions, so it read as a failed task
+  rather than a failed launch, and it failed identically in a worktree and in the
+  main checkout. `resolveChildExtensionPath` now reads the child project's
+  `.pi/settings.json` and returns no path when that project excludes its own copy
+  (`!glob` and `-path`, honouring a `+path` re-inclusion), which lets the child
+  inherit the configuration the parent is already running under; `buildChildPiArgs`
+  then omits `--extension` instead of naming it. Both project shapes stay covered: a
+  worktree carrying its own copy still gets that copy named, a delegated project gets
+  none, and an untrusted cwd still gets the fallback. Found while running three
+  subagents in parallel worktrees on the `lol-dataset` scaffold.
 - **The review-triage policy named a provider with no credential.** The config at
   `~/.pi/agent/review-triage.json` listed `deepseek-v4.1-flash` and
   `glm-5.3-flash` under `opencode`; only `opencode-go` and `openrouter` are
