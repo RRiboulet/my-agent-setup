@@ -8,11 +8,23 @@ Added:
 
 - **A test harness for `bin/devc`** (`devc.test.ts`), which had none: it runs
   the real script against a throwaway project with `docker`, `devcontainer` and
-  `tmux` stubbed on PATH. All six tests fail against the previous script, which
-  is the point — none of these bugs is reachable from the dry run, so the
-  artefacts they assert on are the ones that were wrong: exit status, the stamp
-  file, the argv the CLI actually received, and whether the lock was held at the
-  moment `up` ran.
+  `tmux` stubbed on PATH. Every test it shipped with fails against the previous
+  script, which is the point — none of these bugs is reachable from the dry run,
+  so the artefacts they assert on are the ones that were wrong: exit status, the
+  stamp file, the argv the CLI actually received, and whether the lock was held
+  at the moment `up` ran.
+
+- **`/explore` marks a branch's changed files in red, and the folders that
+  contain them.** `git.changedFiles(branch)` diffs the branch against
+  `@{upstream}` when set, else `origin/<branch>`; a local branch with no remote
+  counterpart is diffed from the merge base with `origin/dev`, `dev`,
+  `origin/main` or `main`, whichever exists first, and a remote-tracking branch
+  is not diffed at all — browsing `origin/main` does not paint the whole tree
+  red. Uncommitted changes are added for the checked-out branch only, paths come
+  from NUL-delimited `git diff --name-only -z`, and a failed diff warns through
+  the UI instead of blanking the browser. Folders inherit the colour from any
+  changed path below them, and a changed row keeps its label when selected
+  instead of being repainted with the selection accent.
 
 Fixed:
 
@@ -544,7 +556,8 @@ Maintenance:
   `voice-container.md`, with the mechanism's prose in five files — copies stay
   correct only until one of them is edited. `devcontainer.json` owns the value,
   the README section owns the explanation, and everything else refers to
-  `$PI_CODING_AGENT_DIR`. `test/devcontainer-agent-dir.test.ts` fails if the
+  `$PI_CODING_AGENT_DIR`. `.pi/extensions/subagent/test/devcontainer-agent-dir.test.ts`
+  fails if the
   literal reappears anywhere else, or if the two files that used to restate the
   rationale stop pointing at the README section instead.
 
@@ -561,9 +574,10 @@ Maintenance:
   payload shape got wrong were pinned as characterization tests named after
   their fix, so correcting them was an explicit change and not a quietly
   rewritten expectation — which is what the live-payload fix above did for the
-  three transform cases; the stale-cache one still characterizes its open
-  todo. `buildModels` is exported for the tests; nothing else in the provider
-  changed.
+  three transform cases, and what the stale-cache case has since become: #120
+  made the stale path refresh curated reasoning instead of serving it, so that
+  expectation is now the plain statement of the behaviour. `buildModels` is
+  exported for the tests; nothing else in the provider changed.
 
 - **Upgrading native web search: OpenRouter is the native default again, and
   the removed `opencode-go` values are now rejected.** Add an `openrouter`
