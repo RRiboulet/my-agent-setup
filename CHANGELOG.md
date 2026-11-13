@@ -4,6 +4,36 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Fixed:
+
+- **opencode-go charged a payload's bounded or `gte` context tier as a permanent
+  one, and could crash on a hand-corrupted model cache.** `transformApiModel`
+  checked that a price override carried nothing besides `when.context`, but not
+  what was inside it: a band of `{ gt, lte }` had its lower bound mapped to an
+  open-ended `inputTokensAbove` tier, so the upper band's rate was charged to
+  every request above the threshold, and `gte: N` was mapped to `N` even though
+  pi-ai's `calculateCost` matches with a strict `>`, so a request of exactly `N`
+  tokens paid the flat rate. The recorded payload uses only open-ended `gt`, so
+  neither was reachable from a live fetch; a band is now accepted only as exactly
+  `{ gt }`, and `gte` is dropped rather than mapped (a faithful mapping needs
+  `N - 1`, not the `N + 1` the finding suggested, and no payload uses `gte`), so
+  a `gte`-only override keeps the base rate. Separately, `loadCachedModels`
+  validated the cache envelope but not its elements, so a current-format
+  `{"format":2,"models":[null]}` threw `Cannot read properties of null (reading
+  'id')` out of extension init, `["oops"]` was registered with no id or name,
+  and an object carrying only an `id` was registered with `cost: undefined`,
+  which throws from pi-ai's `calculateCost` on the first request; one bad element
+  now fails the read, and the curated list is served for that cold start as it
+  already was for every other unrecognised cache shape. The element check covers
+  the pricing block (four finite rates, and tiers when present) rather than the
+  id alone, because that is the field downstream dereferences without a
+  fallback; a garbled rate is the silent half, pricing the session `NaN`. The
+  tests also pin the bounds the first pass left open — an empty or non-string
+  id, a missing or non-numeric rate, malformed tiers — and the override-array
+  guard now proves the fixture still has overrides to rewrite. Every new case
+  fails against the previous code; the provider suite passes 93/93 (`cd
+  .pi/extensions/opencode-go-provider && node --test`).
+
 Maintenance:
 
 - **`README.md` now carries an "Upgrading to v1.12.0" block, and it says to

@@ -264,6 +264,21 @@ function nonNegativeNumber(value: unknown): number | undefined {
 }
 
 /**
+ * True only for a `when.context` band that is exactly `{ gt }`.
+ *
+ * `Object.keys(when)` sees only `context`; it cannot tell an open-ended band
+ * from a bounded one, so the shape has to be checked here. A `gte`, an empty
+ * block, a non-object or an extra bound such as `lte` all describe a price
+ * rule a pi tier cannot express (see costTiers) and must be skipped, not
+ * partially mapped.
+ */
+function isOpenEndedContextBand(context: unknown): context is { gt: unknown } {
+  if (typeof context !== "object" || context === null || Array.isArray(context)) return false;
+  const keys = Object.keys(context);
+  return keys.length === 1 && keys[0] === "gt";
+}
+
+/**
  * The payload prices some models per context tier: `cost.text.input.overrides`
  * and `cost.text.output.overrides` are parallel arrays whose entries carry the
  * same `when.context.gt` threshold. pi models the same thing as `cost.tiers`,
@@ -277,6 +292,21 @@ function nonNegativeNumber(value: unknown): number | undefined {
  * permanent price, which is the same silent mispricing this function exists to
  * remove. A threshold or price that is not a usable number skips the override
  * too, so a malformed payload cannot cache NaN or a negative rate.
+ *
+ * Inside a `when.context` the same rule applies one level down: only exactly
+ * `{ gt }` is accepted, because a pi tier has no upper bound. A bounded band
+ * (`{ gt, lte }`) would otherwise be flattened into "above gt" and charged to
+ * every request past the threshold, which is the mispricing above again.
+ *
+ * `gte` is dropped rather than mapped. pi's `calculateCost` matches a tier with
+ * a strict `>`, so `gte: N` would have to become `inputTokensAbove: N - 1` to
+ * mean "from N tokens up" — the obvious `N` is one token short, and the todo
+ * that recorded this suggested `N + 1`, which narrows the tier instead. No
+ * recorded payload uses `gte` at all (the 2026-11-10 fixture is `gt` only), so
+ * an unobserved second band shape is not worth that arithmetic: a `gte`-only
+ * override keeps the base rate. `.pi/skills/add-model/` should say so
+ * explicitly; its current "anything other than `when.context.gt`" wording is
+ * true but does not mention `gte` or a bounded band, both of which it owns.
  *
  * One rate differs from what opencode itself would bill: a tier whose override
  * lists no cache rate inherits the base cache rate here, where their runtime
@@ -304,9 +334,11 @@ function costTiers(text: any, base: Omit<CostTier, "inputTokensAbove">): CostTie
       // Exactly one condition, and it is the context band. Anything else is not
       // expressible as a tier; see the note above.
       if (!Object.keys(when).every((key) => key === "context")) continue;
-      // `gt` and `gte` both mark where the band starts.
-      const context = when.context;
-      const threshold = nonNegativeNumber(context?.gt) ?? nonNegativeNumber(context?.gte);
+      // ... and a band is accepted only in the one shape a tier expresses:
+      // open-ended at `gt`. A bounded band would become a permanent tier.
+      const context: unknown = (when as { context?: unknown }).context;
+      if (!isOpenEndedContextBand(context)) continue;
+      const threshold = nonNegativeNumber(context.gt);
       if (threshold === undefined) continue;
       apply(tierAt(threshold), override);
     }
@@ -449,6 +481,43 @@ function isModelCacheFile(data: unknown): data is ModelCacheFile {
   return typeof candidate.format === "number" && Array.isArray(candidate.models);
 }
 
+/**
+ * One cache element: an object with a non-empty string id and a pricing block
+ * pi can dereference.
+ *
+ * An id alone is not enough. `loadStaleModels` serves a live-only cached model
+ * as-is, so an element carrying only an `id` is registered with `cost:
+ * undefined`, and pi-ai's `calculateCost` throws on `model.cost.tiers` the first
+ * time the model is used; a garbled rate that is still an object silently prices
+ * the session NaN. Both are the same hand-edited-file class as a `null` element,
+ * which used to throw out of extension init. The other fields (`name`, `api`,
+ * `input`, `contextWindow` …) are display or have a downstream fallback and do
+ * not crash, so they are left to the merge rather than spending checks on them.
+ */
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
+function isCachedCostTier(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const tier = value as Record<string, unknown>;
+  return [tier.inputTokensAbove, tier.input, tier.output, tier.cacheRead, tier.cacheWrite].every(isFiniteNumber);
+}
+
+function isCachedCost(value: unknown): boolean {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const cost = value as Record<string, unknown>;
+  if (![cost.input, cost.output, cost.cacheRead, cost.cacheWrite].every(isFiniteNumber)) return false;
+  if (cost.tiers === undefined) return true;
+  return Array.isArray(cost.tiers) && cost.tiers.every(isCachedCostTier);
+}
+
+function isCachedModel(value: unknown): value is JsonModel {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const candidate = value as { id?: unknown; cost?: unknown };
+  return typeof candidate.id === "string" && candidate.id.length > 0 && isCachedCost(candidate.cost);
+}
+
 function loadCachedModels(): JsonModel[] | null {
   let data: unknown;
   try {
@@ -457,7 +526,22 @@ function loadCachedModels(): JsonModel[] | null {
     return null;
   }
   if (!isModelCacheFile(data)) return null;
-  return data.format === CACHE_FORMAT_VERSION ? data.models : null;
+  if (data.format !== CACHE_FORMAT_VERSION) return null;
+  // The elements are validated too, not just the envelope. The cache is a file
+  // anything can rewrite (cacheModels never writes a bad element), and one bad
+  // element used to be fatal or invisible rather than harmless: a `null` threw
+  // `Cannot read properties of null (reading 'id')` out of extension init, a
+  // string was registered with no id or name (its `api` fell back to a default,
+  // which is why that field is not the tell), and an object with only an `id`
+  // registered `cost: undefined` and threw from pi-ai on first use. A bad element
+  // fails the whole read rather than being dropped one at a time, matching what
+  // every other unrecognised cache shape already does here — fall back to the
+  // curated list for one cold start, and let the next successful revalidation
+  // rewrite the file. That also needs no warning sink: pi's TUI never shows
+  // console.warn, so a warning here would be invisible exactly when the cache is
+  // the only source (offline).
+  if (!data.models.every(isCachedModel)) return null;
+  return data.models;
 }
 
 /** Exported for tests: the writer and the reader are the only two things that
