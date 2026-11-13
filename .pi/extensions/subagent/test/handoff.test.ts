@@ -143,6 +143,61 @@ test("a child's own copy of the extension wins over this checkout's", async () =
 	}
 });
 
+test("a project that excludes its own extensions gets no --extension, because discovery already decided", async () => {
+	const dir = await mkdtemp(path.join(tmpdir(), "handoff-delegated-"));
+	const settings = (value: unknown): Promise<void> =>
+		writeFile(path.join(dir, ".pi", "settings.json"), typeof value === "string" ? value : JSON.stringify(value), "utf8");
+	const copy = path.join(dir, ".pi", "extensions", "subagent", "index.ts");
+	try {
+		await mkdir(path.dirname(copy), { recursive: true });
+		await writeFile(copy, "// the project's own copy, excluded from discovery\n", "utf8");
+
+		// The measured failure: a project that delegates its extension tree to an
+		// installed package. Discovery loads the package's copy, so naming this one
+		// loads two builds of one extension and pi exits on the duplicate flag.
+		await settings({ extensions: ["!extensions/**"] });
+		assert.equal(resolveChildExtensionPath(dir, "/ext/index.ts", true), undefined);
+		assert.equal(buildChildPiArgs(specFor({ extensionPath: resolveChildExtensionPath(dir, "/ext/index.ts", true) })).includes("--extension"), false);
+
+		// The exclusion does not have to be the whole tree.
+		await settings({ extensions: ["!**/subagent/index.ts"] });
+		assert.equal(resolveChildExtensionPath(dir, "/ext/index.ts", true), undefined);
+		await settings({ extensions: ["-extensions/subagent/index.ts"] });
+		assert.equal(resolveChildExtensionPath(dir, "/ext/index.ts", true), undefined);
+
+		// ... and an exact re-inclusion after a broad exclusion is not an exclusion.
+		await settings({ extensions: ["!extensions/**", "+extensions/subagent/index.ts"] });
+		assert.equal(resolveChildExtensionPath(dir, "/ext/index.ts", true), copy);
+
+		// A project that lists extensions but excludes something else keeps its copy.
+		await settings({ extensions: ["extensions/answer.ts", "!extensions/legacy.ts"] });
+		assert.equal(resolveChildExtensionPath(dir, "/ext/index.ts", true), copy);
+
+		// A settings file this cannot parse is "no opinion", not a failed launch: pi
+		// diagnoses it itself, and the child still needs a working extension.
+		await settings("{ not json");
+		assert.equal(resolveChildExtensionPath(dir, "/ext/index.ts", true), copy);
+
+		// Untrusted still wins over everything above (see the previous test).
+		await settings({ extensions: ["!extensions/**"] });
+		assert.equal(resolveChildExtensionPath(dir, "/ext/index.ts", false), "/ext/index.ts");
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+});
+
+test("a child with no extension path keeps its session, trust and prompt arguments", () => {
+	const args = buildChildPiArgs(specFor({ extensionPath: undefined, trusted: true }));
+	assert.equal(flagValue(args, "--extension"), undefined);
+	assert.equal(args.filter((arg) => arg === "--extension").length, 0);
+	assert.equal(flagValue(args, "--session-id"), "run-123");
+	assert.equal(args.includes("--approve"), true);
+	assert.equal(args.at(-1), "@/run/task.md");
+	// With a path, the flag is still emitted exactly once.
+	const withPath = buildChildPiArgs(specFor({ extensionPath: "/ext/index.ts" }));
+	assert.deepEqual(withPath.slice(withPath.indexOf("--extension"), withPath.indexOf("--extension") + 2), ["--extension", "/ext/index.ts"]);
+});
+
 test("the session header is v3 and records the parent session", () => {
 	const header = buildSessionHeader({ id: "abc", cwd: "/w", parentSession: "/p.jsonl" });
 	assert.equal(header.type, "session");
