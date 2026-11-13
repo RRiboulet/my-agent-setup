@@ -68,11 +68,7 @@ export interface ChildLaunchSpec {
 	sessionId?: string;
 	tmuxSession: string;
 	trusted: boolean;
-	/**
-	 * The `--extension` argument, or `undefined` to let the child's own discovery
-	 * load this extension. See `resolveChildExtensionPath`.
-	 */
-	extensionPath?: string;
+	extensionPath: string;
 	promptPath: string;
 }
 
@@ -133,10 +129,8 @@ export function buildChildPiArgs(spec: ChildLaunchSpec): string[] {
 		"--name",
 		spec.tmuxSession,
 		spec.trusted ? "--approve" : "--no-approve",
-		// Absent when the child's project has delegated its extension tree to an
-		// installed package: naming the excluded copy would load a second build of
-		// this extension and pi refuses to start. See `resolveChildExtensionPath`.
-		...(spec.extensionPath === undefined ? [] : ["--extension", spec.extensionPath]),
+		"--extension",
+		spec.extensionPath,
 		`@${spec.promptPath}`,
 	];
 }
@@ -254,11 +248,15 @@ function excludesOwnExtensionTree(root: string): boolean {
  *
  *    Measured in a project configured that way: every launch died before the child
  *    drew a frame, so the tool reported "Child Pi exited before reporting a result"
- *    with nothing about extensions. Hence `undefined` here: the caller omits
- *    `--extension`, and the child inherits whatever configuration this process is
- *    already running under. It may therefore run a different build of this
- *    extension; the result/interrupt protocol tolerates that by design (see the
- *    attach-flag notes at the top of `index.ts`).
+ *    with nothing about extensions.
+ *
+ *    So the excluded copy is never named. What is named instead is `fallback` — the
+ *    copy *this* process is running, which in that shape is the package's. Naming
+ *    the file discovery already loads is not a duplicate (pi keys on the resolved
+ *    path), and it keeps the launch independent of the child's discovery settings:
+ *    a child that inherits nothing still gets the extension. Deferring entirely —
+ *    passing no `--extension` — would trade a loud pi startup error for a child
+ *    that silently runs with no subagent extension at all.
  *
  * `trusted` gates the first shape, and is not optional. An explicit `--extension`
  * loads regardless of project trust *and* regardless of `--no-extensions`, while
@@ -271,14 +269,16 @@ function excludesOwnExtensionTree(root: string): boolean {
  * untrusted or has no copy — a plain directory, another project, or a branch
  * predating this file.
  */
-export function resolveChildExtensionPath(cwd: string, fallback: string, trusted: boolean): string | undefined {
+export function resolveChildExtensionPath(cwd: string, fallback: string, trusted: boolean): string {
 	if (!trusted) return fallback;
 	// Absolute, because a relative candidate would resolve against the CHILD's cwd at
 	// launch time, naming a different file.
 	const root = path.resolve(cwd);
 	const candidate = path.join(root, CHILD_EXTENSION_RELATIVE_PATH);
 	if (!existsSync(candidate)) return fallback;
-	return excludesOwnExtensionTree(root) ? undefined : candidate;
+	// The project's own copy is excluded from its discovery: naming it here would load
+	// it next to the copy discovery does find. Name the running copy instead.
+	return excludesOwnExtensionTree(root) ? fallback : candidate;
 }
 
 /** The v3 header pi writes for a new session. */

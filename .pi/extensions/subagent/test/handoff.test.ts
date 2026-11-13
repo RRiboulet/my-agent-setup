@@ -143,7 +143,7 @@ test("a child's own copy of the extension wins over this checkout's", async () =
 	}
 });
 
-test("a project that excludes its own extensions gets no --extension, because discovery already decided", async () => {
+test("a project that excludes its own extensions is named this process's copy, never the excluded one", async () => {
 	const dir = await mkdtemp(path.join(tmpdir(), "handoff-delegated-"));
 	const settings = (value: unknown): Promise<void> =>
 		writeFile(path.join(dir, ".pi", "settings.json"), typeof value === "string" ? value : JSON.stringify(value), "utf8");
@@ -153,17 +153,21 @@ test("a project that excludes its own extensions gets no --extension, because di
 		await writeFile(copy, "// the project's own copy, excluded from discovery\n", "utf8");
 
 		// The measured failure: a project that delegates its extension tree to an
-		// installed package. Discovery loads the package's copy, so naming this one
-		// loads two builds of one extension and pi exits on the duplicate flag.
+		// installed package. Discovery loads the package's copy, so naming the
+		// excluded local copy loads two builds of one extension and pi exits on the
+		// duplicate flag; the running copy is named instead.
 		await settings({ extensions: ["!extensions/**"] });
-		assert.equal(resolveChildExtensionPath(dir, "/ext/index.ts", true), undefined);
-		assert.equal(buildChildPiArgs(specFor({ extensionPath: resolveChildExtensionPath(dir, "/ext/index.ts", true) })).includes("--extension"), false);
+		assert.equal(resolveChildExtensionPath(dir, "/ext/index.ts", true), "/ext/index.ts");
+		// The argv names the running copy, and names it once.
+		const args = buildChildPiArgs(specFor({ extensionPath: resolveChildExtensionPath(dir, "/ext/index.ts", true) }));
+		assert.deepEqual(args.filter((arg) => arg === "--extension").length, 1);
+		assert.equal(args[args.indexOf("--extension") + 1], "/ext/index.ts");
 
 		// The exclusion does not have to be the whole tree.
 		await settings({ extensions: ["!**/subagent/index.ts"] });
-		assert.equal(resolveChildExtensionPath(dir, "/ext/index.ts", true), undefined);
+		assert.equal(resolveChildExtensionPath(dir, "/ext/index.ts", true), "/ext/index.ts");
 		await settings({ extensions: ["-extensions/subagent/index.ts"] });
-		assert.equal(resolveChildExtensionPath(dir, "/ext/index.ts", true), undefined);
+		assert.equal(resolveChildExtensionPath(dir, "/ext/index.ts", true), "/ext/index.ts");
 
 		// ... and an exact re-inclusion after a broad exclusion is not an exclusion.
 		await settings({ extensions: ["!extensions/**", "+extensions/subagent/index.ts"] });
@@ -186,16 +190,16 @@ test("a project that excludes its own extensions gets no --extension, because di
 	}
 });
 
-test("a child with no extension path keeps its session, trust and prompt arguments", () => {
-	const args = buildChildPiArgs(specFor({ extensionPath: undefined, trusted: true }));
-	assert.equal(flagValue(args, "--extension"), undefined);
-	assert.equal(args.filter((arg) => arg === "--extension").length, 0);
-	assert.equal(flagValue(args, "--session-id"), "run-123");
-	assert.equal(args.includes("--approve"), true);
-	assert.equal(args.at(-1), "@/run/task.md");
-	// With a path, the flag is still emitted exactly once.
-	const withPath = buildChildPiArgs(specFor({ extensionPath: "/ext/index.ts" }));
-	assert.deepEqual(withPath.slice(withPath.indexOf("--extension"), withPath.indexOf("--extension") + 2), ["--extension", "/ext/index.ts"]);
+test("every child argv names exactly one extension", () => {
+	for (const trusted of [true, false]) {
+		const args = buildChildPiArgs(specFor({ extensionPath: "/ext/index.ts", trusted }));
+		assert.equal(args.filter((arg) => arg === "--extension").length, 1);
+		assert.equal(flagValue(args, "--extension"), "/ext/index.ts");
+		// The rest of the launch is unaffected by where the path came from.
+		assert.equal(flagValue(args, "--session-id"), "run-123");
+		assert.equal(args.includes(trusted ? "--approve" : "--no-approve"), true);
+		assert.equal(args.at(-1), "@/run/task.md");
+	}
 });
 
 test("the session header is v3 and records the parent session", () => {

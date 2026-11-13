@@ -25,13 +25,14 @@ Fixed:
   reporting a result", with nothing about extensions, so it read as a failed task
   rather than a failed launch, and it failed identically in a worktree and in the
   main checkout. `resolveChildExtensionPath` now reads the child project's
-  `.pi/settings.json` and returns no path when that project excludes its own copy
-  (`!glob` and `-path`, honouring a `+path` re-inclusion), which lets the child
-  inherit the configuration the parent is already running under; `buildChildPiArgs`
-  then omits `--extension` instead of naming it. Both project shapes stay covered: a
-  worktree carrying its own copy still gets that copy named, a delegated project gets
-  none, and an untrusted cwd still gets the fallback. Found while running three
-  subagents in parallel worktrees on the `lol-dataset` scaffold.
+  `.pi/settings.json` and, when that project excludes its own copy (`!glob` or
+  `-path`, honouring a `+path` re-inclusion), names the copy *this* process is already
+  running instead of the excluded one — which in that shape is the package's, and is
+  the same file discovery loads, so pi sees one resolved path. Both project shapes
+  stay covered: a worktree carrying its own copy still gets that copy named, an
+  untrusted cwd still gets the fallback, and a delegated project gets a copy that
+  exists rather than a launch that defers and might inherit nothing. Found while
+  running subagents in parallel worktrees on the `lol-dataset` scaffold.
 - **The review-triage policy named a provider with no credential.** The config at
   `~/.pi/agent/review-triage.json` listed `deepseek-v4.1-flash` and
   `glm-5.3-flash` under `opencode`; only `opencode-go` and `openrouter` are
