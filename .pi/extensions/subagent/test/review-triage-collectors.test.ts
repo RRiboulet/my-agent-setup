@@ -312,17 +312,50 @@ test("harness: a non-list edit record is a loud limitation, not a silent drop", 
 	assert.match((context.items[0] as LimitationItem).text, /not a list/u);
 });
 
-test("harness: a non-list tool result is a loud limitation, not a throw", () => {
-	const context = collectHarnessContext({ toolResults: "npm test" as never });
+test("harness: a single tool result is accepted as one string, not iterated into characters", () => {
+	// The tool schema documents these fields as hand-written JSON, where one value
+	// is as natural as a list. Before this, a bare string reached `.map` and the
+	// whole `context` argument failed with a TypeError instead of carrying
+	// evidence — the caller saw a broken tool call, not a limitation.
+	const context = collectHarnessContext({ toolResults: "npm test: 42 passed" });
+	assert.deepEqual(context.supplementary, ["npm test: 42 passed"]);
+	assert.deepEqual(context.items, [], "one string is a value, not a malformed list");
+});
+
+test("harness: a tool result that is neither a string nor a list is a loud limitation", () => {
+	const context = collectHarnessContext({ toolResults: 123 as never });
 	assert.equal(context.items.length, 1);
-	assert.match((context.items[0] as LimitationItem).text, /not a list/u);
+	assert.match((context.items[0] as LimitationItem).text, /neither a string nor a list/u);
 	assert.deepEqual(context.supplementary, []);
 });
 
-test("harness: a non-list unresolved issue is one limitation, not per-character garbage", () => {
-	const context = collectHarnessContext({ unresolvedIssues: "the Windows path is untested" as never });
+test("harness: a single unresolved issue is one limitation", () => {
+	const context = collectHarnessContext({ unresolvedIssues: "the Windows path is untested" });
 	assert.equal(context.items.length, 1, "a string is not iterated into characters");
-	assert.match((context.items[0] as LimitationItem).text, /not a list/u);
+	const item = context.items[0] as LimitationItem;
+	assert.equal(item.text, "the Windows path is untested");
+	assert.equal(item.trust, "self-reported");
+});
+
+test("harness: an unresolved issue that is neither a string nor a list is a loud limitation", () => {
+	const context = collectHarnessContext({ unresolvedIssues: { note: "x" } as never });
+	assert.equal(context.items.length, 1);
+	assert.match((context.items[0] as LimitationItem).text, /neither a string nor a list/u);
+});
+
+test("harness: one acceptance criterion may be a string", () => {
+	// Found by a real tool call: `acceptanceCriteria: "done when the suite is
+	// green"` threw `((intermediate value) ?? []).map is not a function`, which
+	// surfaced as a failed call and silently cost the run its context.
+	const context = collectHarnessContext({ acceptanceCriteria: "done when the suite is green" });
+	assert.deepEqual(context.task.acceptance, ["done when the suite is green"]);
+	assert.deepEqual(context.items, []);
+});
+
+test("harness: acceptance criteria that are neither a string nor a list are recorded", () => {
+	const context = collectHarnessContext({ acceptanceCriteria: 42 as never });
+	assert.deepEqual(context.task.acceptance, []);
+	assert.match((context.items[0] as LimitationItem).text, /neither a string nor a list/u);
 });
 
 // ---------------------------------------------------------------------------

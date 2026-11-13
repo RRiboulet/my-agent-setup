@@ -502,7 +502,7 @@ function registerTriageTool(pi: ExtensionAPI) {
 			context: Type.Optional(
 				Type.String({
 					description:
-						"Optional JSON for evidence git cannot see: { artifacts: [{ path, before?, after?, added?, removed?, status? }], validations: [{ check, outcome?, provenance?, ranAt?, snapshot?, detail? }], harness: { objective?, acceptanceCriteria?, identity?, recordedEdits?, toolResults?, unresolvedIssues? } }. Validation results are consumed, never run; an unrecognised outcome becomes 'unknown', never 'passed'.",
+						"Optional JSON for evidence git cannot see: { artifacts: [{ path, before?, after?, added?, removed?, status? }], validations: [{ check, outcome?, provenance?, ranAt?, snapshot?, detail? }], harness: { objective?, acceptanceCriteria?, identity?, recordedEdits?, toolResults?, unresolvedIssues? } }. Every text field takes one string, except `harness.acceptanceCriteria`, `toolResults` and `unresolvedIssues`, which also take a list of strings; `artifacts[].before`/`after` are whole file snapshots the diff is computed from. Validation results are consumed, never run; an unrecognised outcome becomes 'unknown', never 'passed'.",
 				}),
 			),
 		}),
