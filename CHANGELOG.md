@@ -61,9 +61,11 @@ Fixed:
   `baseUrl`, `input`, `maxTokens`, `reasoning`, `thinkingLevelMap`, and `compat`
   when the curated entry defines one — since those are `models.json` data rather
   than something the cache observed, which is the argument #120 made for
-  `reasoning` alone. `cost` and `contextWindow` stay cached deliberately:
-  refreshing those from the embedded list is what got the earlier change reverted
-  (#97). A live-only entry still cannot be corrected this way, because curation
+  `reasoning` alone. `cost` and `contextWindow` stay cached deliberately: those
+  are the two fields `mergeWithEmbedded` gives to the live payload first, so a
+  cached value that disagrees with `models.json` is a live observation rather
+  than stale curation. A live-only entry still cannot be corrected this way,
+  because curation
   has nothing to correct it with, so the marker rather than the field refresh is
   what fixes the recorded case. Verified against the real module and the real
   catalogue rather than the fixture: a hand-written pre-#117 cache no longer

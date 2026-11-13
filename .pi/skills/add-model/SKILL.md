@@ -118,10 +118,11 @@ Omit `thinkingLevelMap` for toggle/budget-only reasoning models.
 ## After editing
 
 1. Clear the stale cache if you changed a field it serves. `api`, `baseUrl`,
-   `input`, `name`, `maxTokens`, `reasoning`, `thinkingLevelMap` and `compat` are
-   refreshed from `models.json` on the stale (offline) path, so those edits need
-   no delete. `cost` and `contextWindow` are served from the cache, so either of
-   those does:
+   `input`, `name`, `maxTokens`, `reasoning` and `thinkingLevelMap` are refreshed
+   from `models.json` on the stale (offline) path, plus `compat` when the entry
+   defines one, so those edits need no delete — but *removing* `compat`, `api` or
+   `baseUrl` from an entry does, because the cached copy stays. `cost` and
+   `contextWindow` are served from the cache, so either of those needs it too:
    ```bash
    rm -f "${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/cache/opencode-go-models.json"
    ```
