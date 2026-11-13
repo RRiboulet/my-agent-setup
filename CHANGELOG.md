@@ -232,6 +232,47 @@ Maintenance:
   `opencode-go` throws the documented `Unknown provider` error. Docs only; no
   provider precedence changed.
 
+- **`/explore`'s changed-files colouring now has tests, and writing them found
+  a bug in it that this change does not fix.** `git.changedFiles`,
+  `FileBrowser.changedFiles`/`changedDirs` and the handler wiring shipped in
+  v1.12.0 with no coverage: `grep changedFiles` in the repo-explorer tests found
+  nothing, and every branch had a plausible wrong answer. The new tests pin the
+  four behaviours the v1.12.0 bullet claims. The configured upstream winning
+  over `origin/<branch>` (and the fallback when it is unset) — with the two refs
+  holding disjoint commits, so an implementation that diffed both and unioned
+  the results is caught rather than passing. A remote-tracking
+  ref never being diffed — in both shapes that matter, because the guards are
+  two: the early return is what stops a symref-`HEAD`-at-`origin/main` browse
+  from collecting the local working tree, and removing it *and* the
+  `!branch.startsWith("refs/remotes/")` guard is what would let the merge-base
+  fallback paint the whole tree. Uncommitted changes reaching the checked-out
+  branch only. The merge-base candidate order `origin/dev` → `dev` →
+  `origin/main` → `main`, asserted through the argv git actually received, not
+  just the resulting paths, and a non-ASCII path pinned from `-z` output (without
+  it git shell-quotes the name, so dropping the flag cannot pass). The browser
+  painting a changed file and every folder above it with
+  `theme.fg("error", …)`, leaving unaffected rows plain and a selected changed
+  row still red *without* being repainted in the selection colour — assertions
+  that were checked against those mutations, not just written — and the handler
+  turning a failed diff into
+  one `warning:` notify plus an empty set that still opens the browser with the
+  file list intact. The failed diff is a real git failure (`mktree --missing`
+  fabricates a tree that cannot be read), not a shim. Mutation-checked as the
+  todo asked: dropping the remote-tracking guard turns two tests red, dropping
+  `headBranch === branch` turns the uncommitted-changes test red; both restored,
+  the production diff is empty. `.pi/extensions/subagent/test/README.md`'s
+  coverage table gains the new coverage in the three repo-explorer rows, since
+  it is what AGENTS.md points at for "what is and is not covered".
+
+  The bug they found: the flow passes full refnames (`choice.refname`), but
+  `upstreamOf` asks git for `refs/heads/<branch>@{upstream}`, and git accepts
+  only `<branchname>@{upstream}` — it exits 128 with "no such branch". So the
+  "`@{upstream}` when set" half never engages for the names the browser
+  actually passes, and a branch whose configured upstream is not
+  `origin/<branch>` is diffed against the wrong ref. Left unfixed because this
+  change is tests-only; the one-line repair is to query `${short}@{upstream}`,
+  which `upstreamOf` already computes. The test exercises the short-name form
+  that does reach the code today.
 Changed:
 
 - **Devcontainers are independent: no container mounts the shared
