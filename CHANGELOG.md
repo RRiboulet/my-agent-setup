@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.12.0 — 2026-11-13
+
 Added:
 
 - **A test harness for `bin/devc`** (`devc.test.ts`), which had none: it runs
