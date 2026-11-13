@@ -32,14 +32,25 @@ extensions and skills. A worktree outside the repo (e.g. in `/tmp`) is a
 different project and may not load them in headless mode.
 
 Before creating the first one, make sure the ignore entry exists (idempotent).
+The guard resolves the **main** checkout root first: this section is the first
+thing an agent reads, and the guard runs before Create's main-checkout refusal,
+so it is routinely run from inside a linked worktree - where a relative
+`.gitignore` is that worktree's own ignored copy, not the file the branch will
+commit. It fails loudly rather than falling back to the cwd when the root cannot
+be resolved (`dirname ""` is `.`, which would silently edit an unrelated file).
 The guard uses `-F` because the pattern is a literal path and `-x` so a longer
 line does not count as the entry; the newline is added first because appending
 to a file without a trailing newline would glue the entry onto its last line
 (verified: `node_modules` became `node_modules.worktrees/`):
 
 ```bash
-[ -s .gitignore ] && [ -n "$(tail -c 1 .gitignore)" ] && printf '\n' >> .gitignore
-grep -qxF '.worktrees/' .gitignore 2>/dev/null || printf '.worktrees/\n' >> .gitignore
+GIT_COMMON="$(git rev-parse --path-format=absolute --git-common-dir)" && [ -n "$GIT_COMMON" ] || {
+  echo "cannot resolve the main checkout root: git rev-parse --git-common-dir failed (run this inside the repository)" >&2
+  exit 1
+}
+MAIN="$(dirname "$GIT_COMMON")"
+[ -s "$MAIN/.gitignore" ] && [ -n "$(tail -c 1 "$MAIN/.gitignore")" ] && printf '\n' >> "$MAIN/.gitignore"
+grep -qxF '.worktrees/' "$MAIN/.gitignore" 2>/dev/null || printf '.worktrees/\n' >> "$MAIN/.gitignore"
 ```
 
 Either `.worktrees` or `.worktrees/` ignores the directory; the slash form is
@@ -50,11 +61,13 @@ If `.gitignore` changed, commit that change on a feature branch off `dev`
 request workflow.
 
 Every recipe below resolves the **main** checkout root with
-`git rev-parse --path-format=absolute --git-common-dir`, then appends
-`.worktrees/<slug>`. That works from anywhere, including from inside a linked
-worktree - where `--show-toplevel` would return the worktree you are standing
-in and silently nest the path. The one thing that still must not happen is a
-`git worktree remove` issued from inside the tree being removed.
+`git rev-parse --path-format=absolute --git-common-dir` before touching a path,
+then appends `.worktrees/<slug>`; the ignore guard above resolves that same
+root, but appends the directory pattern rather than a slug. That works from
+anywhere, including from inside a linked worktree - where `--show-toplevel`
+would return the worktree you are standing in and silently nest the path. The
+one thing that still must not happen is a `git worktree remove` issued from
+inside the tree being removed.
 
 ## Safety rules (read first)
 
@@ -105,8 +118,12 @@ MAIN="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
 
 # Base hygiene (AGENTS.md: check your base before you commit). The new branch is
 # cut from BASE, not from this checkout's HEAD - which may legitimately be `main`,
-# behind `dev` - so measure BASE. A stale local `dev` is the mistake this catches;
-# an unmerged feature branch as BASE fails on purpose (see AGENTS.md).
+# behind `dev` - so measure BASE. Two checks, because a wrong base looks like two
+# different things: BASE behind origin/dev (a stale local `dev`) fails the
+# ancestor check; BASE *ahead* of origin/dev with its own unmerged commits passes
+# it, and only the log check below sees it. AGENTS.md asks for both for that
+# reason. An unmerged base is refused on purpose; `BASE_STACKED=1` is the
+# deliberate way to stack on one.
 git fetch origin
 # Accept a local ref or the remote shorthand (`BASE=dev` when only origin/dev
 # exists), and fail loudly when there is nothing to compare against.
@@ -121,6 +138,23 @@ git rev-parse --verify --quiet "origin/dev^{commit}" >/dev/null || {
   echo "no origin/dev to compare against (run 'git fetch origin')" >&2; exit 1; }
 git merge-base --is-ancestor origin/dev "$BASE" || {
   echo "$BASE does not descend from origin/dev; rebase it or base on origin/dev" >&2; exit 1; }
+# Second half of the check: ancestry cannot see commits BASE carries beyond
+# origin/dev, so a feature branch that already contains origin/dev passes above
+# while stacking the new branch on work nobody has merged.
+FOREIGN="$(git log --oneline "origin/dev..$BASE")"
+if [ -n "$FOREIGN" ]; then
+  COUNT="$(printf '%s\n' "$FOREIGN" | wc -l)"
+  if [ -n "${BASE_STACKED:-}" ]; then
+    # stderr, not stdout: the recipe's own later output would swallow a warning
+    # printed into the stream the caller is reading for the worktree path.
+    echo "warning: stacking on $BASE, which carries $COUNT commit(s) not in origin/dev (BASE_STACKED is set)" >&2
+  else
+    echo "$BASE carries $COUNT commit(s) that origin/dev does not have:" >&2
+    printf '%s\n' "$FOREIGN" >&2
+    echo "refusing to cut a new branch from an unmerged base: rebase $BASE onto origin/dev (or cut from origin/dev), or set BASE_STACKED=1 to stack on $BASE deliberately" >&2
+    exit 1
+  fi
+fi
 
 WT="$R/.worktrees/$SLUG"
 mkdir -p "$(dirname "$WT")"
@@ -151,6 +185,11 @@ Notes:
   shared and applies cleanly in the worktree) or commit them to a temp branch.
 - `git worktree add path dev` fails with "already used by worktree" when `dev`
   is checked out in the main tree; base on `origin/dev` instead.
+- An unmerged feature branch as `BASE` is **refused**, not silently stacked on:
+  the block checks `git log origin/dev.."$BASE"` as well as ancestry, and exits
+  non-zero listing the commits it carries. `BASE_STACKED=1` is the deliberate
+  opt-in for the legitimate stacked case - it proceeds and warns on stderr, so
+  the stack is visible in the output instead of implied by it.
 
 After creating, copy project settings (gitignored, so absent from the new tree)
 and link pi's packages if you will run tests:
@@ -255,7 +294,11 @@ trusted, so within this repo the launcher hands it that path explicitly rather
 than the main checkout's. That is also why the two must not be mixed - the
 failure is in the note below. A `cwd` outside this repo's trusted tree keeps the
 launcher's own copy instead, because an explicit extension path is loaded even
-for a project pi would refuse to trust.
+for a project pi would refuse to trust. The one precondition is that this repo
+is not *also* installed as a pi package on that host: pi would discover that
+package as well, it is the main checkout's copy rather than the worktree's, and
+no launcher rule can dedupe two different files. The note below has the symptom
+and the remedy.
 
 Use an absolute path for `cwd`, never a relative one. One worktree per
 subagent: the same branch cannot be checked out twice, and two subagents in one
@@ -279,6 +322,28 @@ same file the child would discover. This repo's launcher resolves the child's
 copy, so the recipe above works. On a checkout without that fix, launch with
 `cwd` = the repository root and `cd` into the worktree inside each command
 instead, which keeps the child's discovery pointed at the main checkout.
+
+**The package copy is the one case that fix cannot cover.** If this repo is also
+installed as a package on that host (the README's local-path install, or a
+`git:` one), the child discovers the package too, and the package is the *main
+checkout's* copy — a different file from the worktree's, because the worktree's
+copy only becomes discoverable once `cwd` moves into the tree. The child then
+exits 1 with one line per extension, e.g.
+
+```
+Tool "get_goal" conflicts with /path/to/repo/.worktrees/task-name/.pi/extensions/goal.ts
+Flag "--attach-subagent" conflicts with /path/to/repo/.worktrees/task-name/.pi/extensions/subagent/index.ts
+```
+
+That ordering is the tell: the **package** path is the one being refused, so the
+conflict is not the launcher's flag but the two copies in the child's own
+discovery. It reproduces with no `--extension` at all, and there is no
+selective way to suppress it: `--no-extensions` (`-ne`) drops package discovery
+along with the built-in extensions and every extension not named with `-e`, so it
+is a lossy workaround, not a dedupe. There is no launcher fix to wait for.
+On such a host, uninstall the package before working in this repo's worktrees, or
+launch with `cwd` = the repository root and `cd` into the worktree inside each
+command; a package-free agent dir (what this devcontainer uses) is immune.
 
 ## Review
 
@@ -331,22 +396,73 @@ git worktree unlock "$WT"
 
 ## Remove
 
+The three blocks that destroy or check something - the removal, the branch
+cleanup and the end-state check - each set `set -euo pipefail` themselves, and
+that is deliberate: a refused removal is a *stop*, not a warning. Worth saying
+for a reader pasting one of these blocks into a larger script: errexit stays on
+for the rest of that script, so a later command that merely returns non-zero (a
+`grep` that finds nothing, a false `[ ... ]`) will now abort it. The
+alternative, chaining `|| exit 1` after every command, reads worse and gets
+dropped in editing, which is exactly how the removal block came to exit 0 after
+git had refused it: `git worktree remove` exits 128 on a dirty tree, the tree
+survives, `git worktree list` still lists it - and the trailing `|| true` on the
+`rmdir` underneath turned all of that into success. An agent reads exit 0 as
+"removed" and moves on with the branch still checked out.
+
+Each of those blocks also resolves the main checkout itself and fails loudly
+instead of guessing. With a deleted cwd - or outside a checkout entirely -
+`git rev-parse --path-format=absolute --git-common-dir` exits 128 and prints
+**nothing** (verified), so there is no root left to build `$WT` from: `dirname
+""` hands you `.`, and the removal then runs against `./.worktrees/<slug>` - or
+against `/.worktrees/<slug>` if `$R` itself stays empty - instead of the tree you
+named. So the resolution is an explicit guard, not an assumption that a failure
+leaves the old value or `""` behind. It is repeated per block because these
+recipes are copied one at a time and nothing carries over between calls.
+
 Stop any tmux sessions rooted in the tree first (by path, not by name), then
-remove. The sweep is tab-separated rather than space-split, because a pane path
-or session name containing a space makes `$2` match nothing - or the wrong
-session (both verified):
+remove. Three details in the sweep are load-bearing, each verified by breaking
+it:
+
+- **Tab-separated, not space-split**: a pane path or session name containing a
+  space makes `$2` match nothing - or the wrong session.
+- **The path goes in the environment, never `awk -v`**: `-v` interprets C-style
+  escapes in its value, so a worktree path containing a backslash arrives as a
+  different string, matches no pane, and leaks the session - so the removal on
+  the next line takes the tree from under a live shell. `ENVIRON` passes it
+  verbatim.
+- **Deduplicated before the kill loop**: `list-panes -a` prints one row per
+  *pane*, so a multi-pane session appears once per pane and every kill after the
+  first fails with "can't find session".
+
+Only the sweep is tolerated, and only because its first stage is a listing that
+fails whenever no tmux server is running, which is the normal case for a fresh
+container: with `pipefail` that status would otherwise abort a clean removal.
+Nothing after it - the removal above all - has an escape hatch.
 
 ```bash
-R="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"; SLUG="task-name"; WT="$R/.worktrees/$SLUG"
-SOCKET="${PI_TMUX_SOCKET_DIR:-${TMPDIR:-/tmp}/pi-tmux-sockets}/pi.sock"
-tmux -S "$SOCKET" list-panes -a -F "#{session_name}"$'\t'"#{pane_current_path}" 2>/dev/null |
-  awk -F'\t' -v wt="$WT" '$2==wt || index($2, wt "/")==1 {print $1}' |
-  while IFS= read -r s; do tmux -S "$SOCKET" kill-session -t "$s"; done
+set -euo pipefail
 
-git worktree remove "$WT"     # refuses if dirty - that refusal is the review prompt
+# Resolve the main checkout from the common git dir. Fails loudly instead of
+# leaving $R empty, which would point $WT at `/.worktrees/<slug>`.
+COMMON="$(git rev-parse --path-format=absolute --git-common-dir)" || {
+  echo "cannot resolve the main checkout: run from a live checkout" >&2; exit 1; }
+: "${COMMON:?cannot resolve the main checkout: run from a live checkout}"
+R="$(dirname "$COMMON")"
+
+SLUG="task-name"; : "${SLUG:?SLUG must be set}"; WT="$R/.worktrees/$SLUG"
+SOCKET="${PI_TMUX_SOCKET_DIR:-${TMPDIR:-/tmp}/pi-tmux-sockets}/pi.sock"
+
+# No tmux server is the normal case: tolerate the sweep, never the removal.
+tmux -S "$SOCKET" list-panes -a -F "#{session_name}"$'\t'"#{pane_current_path}" 2>/dev/null |
+  WT="$WT" awk -F'\t' '$2==ENVIRON["WT"] || index($2, ENVIRON["WT"] "/")==1 {print $1}' |
+  sort -u |
+  while IFS= read -r s; do tmux -S "$SOCKET" kill-session -t "$s"; done || true
+
+# No `|| true` on the removal: a refusal must be this block's exit status.
+git -C "$R" worktree remove "$WT"   # refuses if dirty - that refusal is the review prompt
 # Only once you have read `git -C "$WT" status` and accepted the loss:
-#   git worktree remove -f "$WT"
-rmdir -p "$(dirname "$WT")" 2>/dev/null || true
+#   git -C "$R" worktree remove -f "$WT"
+rmdir -p "$(dirname "$WT")" 2>/dev/null || true   # ignored only now that removal succeeded
 ```
 
 Branch cleanup comes *after* the worktree is gone - git refuses to delete a
@@ -356,9 +472,14 @@ is concerned, so `git branch -d` fails after a normal pull request here. Verify
 the PR merged first, then force-delete:
 
 ```bash
-SLUG="task-name"
+set -euo pipefail
+COMMON="$(git rev-parse --path-format=absolute --git-common-dir)" || {
+  echo "cannot resolve the main checkout: run from a live checkout" >&2; exit 1; }
+: "${COMMON:?cannot resolve the main checkout: run from a live checkout}"
+R="$(dirname "$COMMON")"
+SLUG="task-name"; : "${SLUG:?SLUG must be set}"
 # gh pr view "$SLUG" --json state,mergedAt   # confirm merged
-git branch -D "$SLUG"     # only after the worktree is removed and the PR is merged
+git -C "$R" branch -D "$SLUG"   # only after the worktree is removed and the PR is merged
 ```
 
 Clean up administrative metadata for worktrees whose directories were deleted
@@ -370,13 +491,21 @@ git worktree prune
 ```
 
 End-state check after removal (`SLUG` is set here because `git branch --list ""`
-prints nothing and exits 0 - an unset variable would make the check vacuous):
+prints nothing and exits 0 - an unset variable would make the check vacuous). The
+root is resolved here too: from a deleted cwd every bare `git` call fails 128
+with "Unable to read current working directory" and says nothing about what to
+do, which reads like an ordinary failure of the removal rather than a bad cwd.
 
 ```bash
-SLUG="task-name"
-git worktree list                 # only the main worktree expected
-git worktree prune -n             # must print nothing
-git branch --list "$SLUG"         # must print nothing
+set -euo pipefail
+COMMON="$(git rev-parse --path-format=absolute --git-common-dir)" || {
+  echo "cannot resolve the main checkout: run from a live checkout" >&2; exit 1; }
+: "${COMMON:?cannot resolve the main checkout: run from a live checkout}"
+R="$(dirname "$COMMON")"
+SLUG="task-name"; : "${SLUG:?SLUG must be set}"
+git -C "$R" worktree list          # only the main worktree expected
+git -C "$R" worktree prune -n      # must print nothing
+git -C "$R" branch --list "$SLUG"  # must print nothing
 ```
 
 Move a worktree instead of removing/recreating it:
@@ -386,6 +515,64 @@ R="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"; SLUG=
 mkdir -p "$R/.worktrees/$(dirname "$NEW_SLUG")"   # move does not create parents (verified)
 git worktree move "$R/.worktrees/$SLUG" "$R/.worktrees/$NEW_SLUG"
 ```
+
+## Repair
+
+When the main checkout - or the whole repository root - is moved (a remounted
+`/workspace`, a relocated clone), the pointers between it and its worktrees go
+stale, and the symptoms read like damage rather than bookkeeping:
+
+- `git worktree list` shows a linked tree at a path that no longer exists, or
+  marks it `prunable`.
+- `git -C <worktree> status` fails with exit 128, because the tree's `.git` file
+  still names the old main checkout.
+- `git worktree prune -n` prints `Removing worktrees/<slug>: gitdir file points
+  to non-existent location`.
+
+`git worktree repair` rewrites those pointers, and the argument decides what it
+can reach. A **bare** `git worktree repair` only repairs the worktrees it can
+find, which means it handles a main checkout that moved while the trees stayed
+where they were - it fixes each tree's `.git` file. It does **nothing** for a
+moved repository root, where the recorded worktree paths are stale too
+(verified: exits 0, prints nothing, trees still unusable). Pass each tree's
+*current* path instead:
+
+```bash
+set -euo pipefail
+COMMON="$(git rev-parse --path-format=absolute --git-common-dir)" || {
+  echo "cannot resolve the main checkout: run from a live checkout" >&2; exit 1; }
+: "${COMMON:?cannot resolve the main checkout: run from a live checkout}"
+R="$(dirname "$COMMON")"; SLUG="task-name"; WT="$R/.worktrees/$SLUG"   # where it is NOW
+
+git -C "$R" worktree list                 # diagnose: a dead path, or `prunable`
+git -C "$R" worktree repair "$WT"         # re-points the admin entry at "$WT"
+git -C "$R" worktree list                 # "$WT" must now be listed at that path
+git -C "$WT" rev-parse --abbrev-ref HEAD  # and git must work in the tree again
+```
+
+Verify with those last two commands rather than trusting the exit status:
+`repair` exits 0 even when it prints a line beginning `fatal:`, and even when it
+repairs nothing at all (both verified).
+
+Do **not** run `git worktree prune` first, not even to "clean up" the stale
+entry. It does not tolerate that entry, it deletes it - silently, so `-n` is the
+only way to see what it will remove - and the entry is the pointer `repair`
+needs: after a prune in this state, `git worktree repair "$WT"` fails with
+`unable to locate repository; .git file does not reference a repository` and
+the tree stays unusable (verified). Prune is for a tree whose directory is gone
+for good; repair is for one that is somewhere else.
+
+A **copied** worktree directory is not repairable into a second worktree. The
+two copies share one administrative entry, so `git worktree repair <copy>` does
+not add the copy beside the original - it re-points that single entry, and
+`git worktree list` then names the copy while the original is left unlisted but
+still usable (verified). Copy the whole repository and repair that, or create a
+fresh worktree; to relocate one worktree on purpose, use `git worktree move`
+above.
+
+Repair rewrites administrative files. It is not a replacement for `remove` when
+the tree should be gone, and it cannot bring back a worktree whose directory no
+longer exists.
 
 ## Parallel subagents
 

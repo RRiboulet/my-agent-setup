@@ -11,7 +11,7 @@
 // where this file happens to live on disk.
 //
 // It also covers the vendored script itself (`search.mjs`): provider resolution,
-// the Go endpoint, the session headers and the temperature rule. The script
+// the direct Anthropic endpoint and the temperature rule. The script
 // exports `__test__` and guards its `main()`, so importing it here does not run
 // a search.
 
@@ -38,7 +38,6 @@ const {
 	defaultModelId,
 	defaultBaseUrl,
 	supportsTemperature,
-	opencodeGoHeaders,
 	buildAnthropicHeaders,
 	buildAnthropicRequest,
 	resolveApiKey,
@@ -89,7 +88,7 @@ async function withEnvVarsAsync(
 test("the extension leaves provider choice to the script when nothing is set", () => {
 	// Deliberately NOT a concrete provider: forcing one here would make the
 	// script's settings.defaultProvider/auth.json resolution unreachable and
-	// break a machine whose only credential is not opencode-go.
+	// break a machine whose only credential is not openrouter.
 	assert.equal(resolveProvider(undefined), undefined);
 });
 
@@ -115,37 +114,75 @@ test("no model is sent unless explicitly requested, so the script default applie
 // --- the script itself: provider resolution, endpoint and request shape ---
 
 test("normalizeProvider matches exact provider ids before substrings", () => {
-	assert.equal(normalizeProvider("opencode-go"), "opencode-go");
-	assert.equal(normalizeProvider("opencode"), "opencode-go");
 	assert.equal(normalizeProvider("openrouter"), "openrouter");
 	assert.equal(normalizeProvider("openai"), "openai-codex");
 	assert.equal(normalizeProvider("anthropic"), "anthropic");
 	assert.equal(normalizeProvider("claude-haiku-5-5"), "anthropic");
+	// Removed providers must not be captured by a substring or alias.
+	assert.equal(normalizeProvider("opencode-go"), undefined);
+	assert.equal(normalizeProvider("opencode"), undefined);
+	// Composite ids for the removed provider must not fall through to the plan
+	// whose model name they contain (`claude` -> direct Anthropic here).
+	assert.equal(normalizeProvider("opencode-go/claude-haiku-5-5"), undefined);
+	assert.equal(normalizeProvider("opencode/anthropic/claude-haiku-5-5"), undefined);
 	assert.equal(normalizeProvider("nope"), undefined);
 });
 
-test("pickProvider follows flag > env > settings > auth, preferring opencode-go", () => {
-	const opencode = { type: "api_key", key: "a" };
+test("pickProvider follows flag > env > settings > auth, preferring openrouter", () => {
 	const openrouter = { type: "api_key", key: "b" };
-	withEnvVars({ OPENCODE_API_KEY: undefined, PI_WEB_SEARCH_PROVIDER: undefined, BRAVE_API_KEY: undefined }, () => {
-		assert.equal(pickProvider(undefined, {}, { "opencode-go": opencode, openrouter }), "opencode-go");
+	withEnvVars({ PI_WEB_SEARCH_PROVIDER: undefined, BRAVE_API_KEY: undefined }, () => {
 		assert.equal(pickProvider(undefined, {}, { openrouter }), "openrouter");
 		assert.equal(pickProvider("anthropic", { defaultProvider: "openrouter" }, { openrouter }), "anthropic");
 		assert.equal(pickProvider(undefined, { defaultProvider: "openai-codex" }, { openrouter }), "openai-codex");
 	});
-	withEnvVars({ PI_WEB_SEARCH_PROVIDER: "anthropic", OPENCODE_API_KEY: undefined, BRAVE_API_KEY: undefined }, () => {
+	withEnvVars({ PI_WEB_SEARCH_PROVIDER: "anthropic", BRAVE_API_KEY: undefined }, () => {
 		assert.equal(pickProvider(undefined, { defaultProvider: "openrouter" }, { openrouter }), "anthropic");
 	});
-	withEnvVars({ PI_WEB_SEARCH_PROVIDER: undefined, OPENCODE_API_KEY: "env-key", BRAVE_API_KEY: undefined }, () => {
-		assert.equal(pickProvider(undefined, {}, { openrouter }), "opencode-go");
+});
+
+test("an opencode-go credential alone no longer satisfies the native chain", () => {
+	withEnvVars({ PI_WEB_SEARCH_PROVIDER: undefined, BRAVE_API_KEY: undefined }, () => {
+		assert.throws(
+			() => pickProvider(undefined, {}, { "opencode-go": { type: "api_key", key: "a" } }),
+			/Could not determine a native web-search provider/,
+		);
+	});
+});
+
+test("the no-native-credential error names the file and the fix", () => {
+	withEnvVars({ PI_WEB_SEARCH_PROVIDER: undefined, BRAVE_API_KEY: undefined }, () => {
+		assert.throws(
+			() => pickNativeProvider({}, {}, "/tmp/agent/auth.json"),
+			(err) => {
+				assert.match(
+					err.message,
+					/no openrouter, openai-codex or anthropic credential is configured in \/tmp\/agent\/auth\.json/,
+				);
+				assert.match(err.message, /Add an `openrouter` entry to \/tmp\/agent\/auth\.json/);
+				assert.match(err.message, /--provider openrouter\|openai-codex\|anthropic/);
+				return true;
+			},
+		);
+	});
+});
+
+test("the native chain prefers openrouter, then openai-codex, then anthropic", () => {
+	const cred = { type: "api_key", key: "k" };
+	withEnvVars({ PI_WEB_SEARCH_PROVIDER: undefined, BRAVE_API_KEY: undefined }, () => {
+		assert.equal(
+			pickNativeProvider({}, { openrouter: cred, "openai-codex": cred, anthropic: cred }),
+			"openrouter",
+		);
+		assert.equal(pickNativeProvider({}, { "openai-codex": cred, anthropic: cred }), "openai-codex");
+		assert.equal(pickNativeProvider({}, { anthropic: cred }), "anthropic");
 	});
 });
 
 test("pickProvider rejects an unrecognized provider instead of silently falling through", () => {
-	withEnvVars({ OPENCODE_API_KEY: undefined, PI_WEB_SEARCH_PROVIDER: undefined, BRAVE_API_KEY: undefined }, () => {
+	withEnvVars({ PI_WEB_SEARCH_PROVIDER: undefined, BRAVE_API_KEY: undefined }, () => {
 		assert.throws(() => pickProvider("opnrouter", {}, { openrouter: { type: "api_key", key: "b" } }), /Unknown provider/);
 	});
-	withEnvVars({ PI_WEB_SEARCH_PROVIDER: "opnrouter", OPENCODE_API_KEY: undefined, BRAVE_API_KEY: undefined }, () => {
+	withEnvVars({ PI_WEB_SEARCH_PROVIDER: "opnrouter", BRAVE_API_KEY: undefined }, () => {
 		assert.throws(() => pickProvider(undefined, {}, {}), /PI_WEB_SEARCH_PROVIDER/);
 	});
 });
@@ -154,7 +191,7 @@ test("pickProvider rejects an unrecognized provider instead of silently falling 
 
 test("brave is accepted explicitly and auto-selected when a key resolves", () => {
 	withEnvVars(
-		{ BRAVE_API_KEY: undefined, PI_WEB_SEARCH_PROVIDER: undefined, OPENCODE_API_KEY: undefined },
+		{ BRAVE_API_KEY: undefined, PI_WEB_SEARCH_PROVIDER: undefined },
 		() => {
 			assert.equal(normalizeProvider("brave"), "brave");
 			assert.equal(normalizeProvider("brave-search"), "brave");
@@ -227,7 +264,7 @@ test("a simulated 429 falls back to the native chain with the reason in one line
 			{
 				auth: {
 					brave: { type: "str", key: "brave-key" },
-					"opencode-go": { type: "api_key", key: "native-key" },
+					openrouter: { type: "api_key", key: "native-key" },
 				},
 				settings: {},
 				authPath: "/nonexistent/auth.json",
@@ -235,8 +272,8 @@ test("a simulated 429 falls back to the native chain with the reason in one line
 				runNative: async (provider) => ({ model: "native-model", text: `native:${provider}` }),
 			},
 		);
-		assert.equal(out.provider, "opencode-go");
-		assert.equal(out.text, "Brave unavailable (HTTP 429); fell back to native search.\n\nnative:opencode-go");
+		assert.equal(out.provider, "openrouter");
+		assert.equal(out.text, "Brave unavailable (HTTP 429); fell back to native search.\n\nnative:openrouter");
 	});
 });
 
@@ -245,13 +282,39 @@ test("an explicit brave request with no key falls back with a one-line note", as
 		const out = await runSearch(
 			{ query: "q", purpose: "p", timeoutMs: 1000, provider: "brave" },
 			{
-				auth: { "opencode-go": { type: "api_key", key: "native-key" } },
+				auth: { openrouter: { type: "api_key", key: "native-key" } },
 				settings: {},
 				authPath: "/nonexistent/auth.json",
 				runNative: async (provider) => ({ model: "native-model", text: `native:${provider}` }),
 			},
 		);
-		assert.equal(out.text, "Brave unavailable (no API key); fell back to native search.\n\nnative:opencode-go");
+		assert.equal(out.text, "Brave unavailable (no API key); fell back to native search.\n\nnative:openrouter");
+	});
+});
+
+test("a Brave failure with no native credential fails with both reasons", async () => {
+	await withEnvVarsAsync({ BRAVE_API_KEY: undefined }, async () => {
+		await assert.rejects(
+			runSearch(
+				{ query: "q", purpose: "p", timeoutMs: 1000 },
+				{
+					auth: { brave: { type: "str", key: "brave-key" } },
+					settings: {},
+					authPath: "/tmp/agent/auth.json",
+					fetchImpl: async () => ({ ok: false, status: 429, json: async () => ({}) }),
+					runNative: async () => {
+						throw new Error("native must not run without a credential");
+					},
+				},
+			),
+			(err) => {
+				assert.match(err.message, /Brave unavailable \(HTTP 429\)/);
+				assert.match(err.message, /the native fallback cannot run/);
+				assert.match(err.message, /no openrouter, openai-codex or anthropic credential/);
+				assert.match(err.message, /\/tmp\/agent\/auth\.json/);
+				return true;
+			},
+		);
 	});
 });
 
@@ -292,86 +355,52 @@ test("the extension no longer carries any Brave quota machinery", () => {
 	}
 });
 
-test("the Go plan's search model, endpoint and temperature rule are pinned", () => {
-	assert.equal(defaultModelId("opencode-go"), "claude-haiku-5-5");
-	assert.equal(defaultBaseUrl("opencode-go"), "https://opencode.ai/zen/go");
+test("the direct Anthropic search model, endpoint and temperature rule are pinned", () => {
+	assert.equal(defaultModelId("anthropic"), "claude-haiku-5-5");
+	assert.equal(defaultModelId("openrouter"), "openai/gpt-4o-mini:online");
+	assert.equal(defaultBaseUrl("anthropic"), "https://api.anthropic.com");
+	assert.equal(defaultBaseUrl("openrouter"), "https://openrouter.ai/api/v1");
 	assert.equal(supportsTemperature("claude-haiku-5-5"), false);
 	assert.equal(supportsTemperature("claude-haiku-4-5"), true);
 });
 
-test("opencodeGoHeaders sends the two session headers the Go API requires", () => {
-	const headers = opencodeGoHeaders();
-	assert.match(headers["x-opencode-session"], /^[0-9a-f-]{36}$/);
-	assert.equal(headers["x-opencode-client"], "pi-native-web-search");
-});
-
-test("the Go request carries the session headers and omits temperature", () => {
+test("the Anthropic request carries the auth header and omits temperature", () => {
 	const { endpoint, headers, body } = buildAnthropicRequest({
 		model: "claude-haiku-5-5",
 		apiKey: "test-key",
 		query: "q",
 		purpose: "p",
-		baseUrl: defaultBaseUrl("opencode-go"),
-		extraHeaders: opencodeGoHeaders(),
-		omitTemperature: true,
+		baseUrl: defaultBaseUrl("anthropic"),
 	});
-	assert.equal(endpoint, "https://opencode.ai/zen/go/v1/messages");
-	assert.equal(headers["x-opencode-client"], "pi-native-web-search");
-	assert.match(headers["x-opencode-session"], /^[0-9a-f-]{36}$/);
+	assert.equal(endpoint, "https://api.anthropic.com/v1/messages");
 	assert.equal(headers["x-api-key"], "test-key");
 	assert.equal(body.model, "claude-haiku-5-5");
 	assert.equal("temperature" in body, false);
 	assert.equal(body.tools[0].type, "web_search_20260318");
 });
 
-test("temperature is omitted for the whole Go path and kept for the direct default", () => {
-	const goBody = (model) =>
-		buildAnthropicRequest({
-			model,
-			apiKey: "k",
-			query: "q",
-			purpose: "p",
-			baseUrl: defaultBaseUrl("opencode-go"),
-			omitTemperature: true,
-		}).body;
-	// The search model and a non-search Go model alike: the endpoint rejected
-	// temperature for the search model, so omitting it for all of them is safe.
-	assert.equal("temperature" in goBody("claude-haiku-5-5"), false);
-	assert.equal("temperature" in goBody("qwen3.8-max"), false);
-
-	const directDefault = buildAnthropicRequest({ model: "claude-haiku-4-5", apiKey: "k", query: "q", purpose: "p" }).body;
-	assert.equal(directDefault.temperature, 0);
-	// A model known to reject temperature omits it on the direct API too.
-	const directNew = buildAnthropicRequest({ model: "claude-haiku-5-5", apiKey: "k", query: "q", purpose: "p" }).body;
-	assert.equal("temperature" in directNew, false);
+test("temperature is kept for a model that supports it and omitted for the search model", () => {
+	const supported = buildAnthropicRequest({ model: "claude-haiku-4-5", apiKey: "k", query: "q", purpose: "p" }).body;
+	assert.equal(supported.temperature, 0);
+	const searchModel = buildAnthropicRequest({ model: "claude-haiku-5-5", apiKey: "k", query: "q", purpose: "p" }).body;
+	assert.equal("temperature" in searchModel, false);
 });
 
-test("provider headers cannot clobber authentication", () => {
-	const evil = { "x-api-key": "evil", authorization: "Bearer evil" };
-	assert.equal(buildAnthropicHeaders("real-key", evil)["x-api-key"], "real-key");
-	assert.equal(buildAnthropicHeaders("sk-ant-oat-real", evil).authorization, "Bearer sk-ant-oat-real");
+test("Anthropic headers choose API-key or OAuth authentication", () => {
+	const apiKey = buildAnthropicHeaders("real-key");
+	assert.equal(apiKey["x-api-key"], "real-key");
+	assert.equal("authorization" in apiKey, false);
+
+	const oauth = buildAnthropicHeaders("sk-ant-oat-real");
+	assert.equal(oauth.authorization, "Bearer sk-ant-oat-real");
+	assert.equal("x-api-key" in oauth, false);
 });
 
-test("the API key resolves from auth.json before OPENCODE_API_KEY", async () => {
-	const saved = process.env.OPENCODE_API_KEY;
-	process.env.OPENCODE_API_KEY = "env-key";
-	try {
-		assert.equal((await resolveApiKey("opencode-go", {}, "/nonexistent/auth.json", {})).apiKey, "env-key");
-		assert.equal(
-			(
-				await resolveApiKey(
-					"opencode-go",
-					{ "opencode-go": { type: "api_key", key: "auth-key" } },
-					"/nonexistent/auth.json",
-					{},
-				)
-			).apiKey,
-			"auth-key",
-		);
-	} finally {
-		if (saved === undefined) delete process.env.OPENCODE_API_KEY;
-		else process.env.OPENCODE_API_KEY = saved;
-	}
+test("the OpenRouter API key resolves from auth.json", async () => {
+	assert.equal(
+		(await resolveApiKey("openrouter", { openrouter: { type: "api_key", key: "auth-key" } }, "/nonexistent/auth.json", {})).apiKey,
+		"auth-key",
+	);
 });
 
 test("the script still runs when invoked through a symlink", () => {

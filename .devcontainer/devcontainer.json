@@ -5,7 +5,14 @@
     "workspaceFolder": "/workspace",
     "containerEnv": {
         "PI_TRUE_COLOR": "1",
-        "COLORTERM": "truecolor"
+        "COLORTERM": "truecolor",
+        // This container runs its own pi agent dir (on the shared pi-agent-config
+        // volume, seeded once by postCreate.sh) so no pi package is installed here
+        // and the checkout's .pi/ is the only source of extensions and skills.
+        // Why, and what that costs: README, "One copy of the extensions, never two".
+        // postCreate.sh reads this variable for the project dir; the shared agent
+        // dir and GH_CONFIG_DIR stay literals below it.
+        "PI_CODING_AGENT_DIR": "/home/vscode/.pi/agent-my-agent-setup"
     },
     "postCreateCommand": "bash /workspace/.devcontainer/postCreate.sh && bash /workspace/.devcontainer/restore-post-rebuild.sh",
     // Declared explicitly, not left to the base image's auto-mapped defaults.

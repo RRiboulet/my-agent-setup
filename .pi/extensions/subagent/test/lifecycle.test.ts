@@ -439,6 +439,43 @@ async function writeChildSession(
 	return file;
 }
 
+/**
+ * A failed run must stop the watcher, not keep polling tmux every 500ms.
+ *
+ * Counts pane probes only: a failed run still reaps its tmux session (one
+ * kill-session, which may land after this snapshot), and that is not a poll.
+ */
+async function assertWatcherStopped(h: Harness): Promise<void> {
+	const probes = () =>
+		h.execCalls.filter((call) => call.args.includes("capture-pane") || call.args.includes("display-message")).length;
+	const settled = probes();
+	await new Promise((resolve) => setTimeout(resolve, 1_200));
+	assert.equal(probes(), settled, "the watcher must stop with the run instead of polling forever");
+}
+
+/**
+ * Write a `result.json` this parent cannot use and assert it fails the run.
+ *
+ * The file protocol crosses extension versions — a child may run another
+ * branch's build, via trusted-copy resolution — so a shape the parent does not
+ * understand is expected rather than a hypothetical. It must end the run with a
+ * visible error, once: before, `finalizeRun` threw inside the watch tick, the
+ * error was logged, the tick rescheduled, and the run stayed `running` forever
+ * while its result was never consumed.
+ *
+ * The invalid read is tolerated for MAX_TRANSIENT_RESULT_FAILURES ticks, so this
+ * waits rather than assuming the first tick fails it. Only the canonical
+ * unparseable-JSON test asserts the watcher stops afterwards; the property is the
+ * same for every shape, and re-proving it in each case costs seconds.
+ */
+async function assertUnusableResultFailsRun(h: Harness, raw: string, expected: RegExp): Promise<void> {
+	const run = (await h.call("subagent", { task: "unusable result" })).details as unknown as RunRecord;
+	await writeFile(run.resultPath, raw, "utf8");
+	const failed = await waitForRunStatus(h, "failed", "an unusable result.json must fail the run, not stall it");
+	assert.match(failed.error ?? "", expected);
+	assert.ok((failed.error ?? "").includes(run.resultPath), "the failure names the file a human must inspect");
+}
+
 async function withHarness<T>(
 	options: HarnessOptions | undefined,
 	fn: (harness: Harness, agentDir: string) => Promise<T>,
@@ -615,14 +652,141 @@ test("a dead pane without a result fails the run with capture guidance", async (
 	});
 });
 
-test("an unreadable result file does not finalize the run", async () => {
+test("an unparseable result file fails the run instead of stalling it", async () => {
 	await withHarness(undefined, async (h) => {
-		await h.call("subagent", { task: "corrupt result" });
-		const run = (await h.readRuns())[0];
-		await writeFile(run.resultPath, "{not json", "utf8");
-		await new Promise((resolve) => setTimeout(resolve, 1_500));
-		assert.equal((await h.readRuns())[0].status, "running", "a parse failure must not be read as completion");
+		await assertUnusableResultFailsRun(h, "{not json", /not valid JSON/);
+		// The canonical no-watchdog-loop assertion: the other shapes below share it.
+		await assertWatcherStopped(h);
 	});
+});
+
+test("a result caught mid-write is retried, and the finished one still finalizes", async () => {
+	// A child from another build may publish result.json non-atomically, so a read
+	// can land inside the write. Failing on the first bad read would kill that
+	// child and throw away the finished file one tick later; the count is what
+	// tells "caught in flight" from "will never parse".
+	await withHarness(undefined, async (h) => {
+		const run = (await h.call("subagent", { task: "partial result" })).details as unknown as RunRecord;
+		await writeFile(run.resultPath, '{"version": 1, "status": "completed", "outp', "utf8");
+		// Two ticks have already read the partial file and not failed the run.
+		await waitFor(() => h.execCalls.filter((call) => call.args.includes("capture-pane")).length >= 2);
+		assert.equal((await h.readRuns())[0].status, "running", "an unusable read is retried, not fatal on sight");
+		await h.writeResult(run, { version: 1, status: "completed", output: "the answer", finishedAt: Date.now() });
+		const completed = await waitForRunStatus(h, "completed", "a complete result still wins after a bad read");
+		assert.equal(completed.output, "the answer");
+	});
+});
+
+test("a complete result from a newer protocol version still finalizes", async () => {
+	// The shape is the gate, not the version: rejecting on version equality would
+	// throw away an answer this parent can read perfectly well.
+	await withHarness(undefined, async (h) => {
+		const run = (await h.call("subagent", { task: "newer protocol" })).details as unknown as RunRecord;
+		const raw = JSON.stringify({ version: 2, status: "completed", output: "from a newer build", finishedAt: Date.now() });
+		await writeFile(run.resultPath, raw, "utf8");
+		const completed = await waitForRunStatus(h, "completed", "a compatible shape from version 2 must still finalize");
+		assert.equal(completed.output, "from a newer build");
+	});
+});
+
+test("a newer protocol version with the wrong shape is reported as likely skew", async () => {
+	await withHarness(undefined, async (h) => {
+		const raw = JSON.stringify({ version: 2, status: "completed", finishedAt: Date.now() });
+		await assertUnusableResultFailsRun(h, raw, /protocol version 2.*different build of this extension/);
+	});
+});
+
+test("a result without its output fails the run instead of throwing in the watcher", async () => {
+	await withHarness(undefined, async (h) => {
+		const raw = JSON.stringify({ version: 1, status: "completed", finishedAt: Date.now() });
+		await assertUnusableResultFailsRun(h, raw, /output is missing or is not a string/);
+	});
+});
+
+test("a result with an unknown status fails the run instead of mislabelling it", async () => {
+	await withHarness(undefined, async (h) => {
+		const raw = JSON.stringify({ version: 1, status: "done", output: "hello", finishedAt: Date.now() });
+		await assertUnusableResultFailsRun(h, raw, /not "completed" or "failed"/);
+	});
+});
+
+test("an unreadable result path fails the run instead of polling a directory forever", async () => {
+	await withHarness(undefined, async (h) => {
+		const run = (await h.call("subagent", { task: "unreadable result" })).details as unknown as RunRecord;
+		// A directory where the file should be: the read fails with EISDIR, which
+		// (unlike ENOENT) will not fix itself on the next tick.
+		await mkdir(run.resultPath);
+		const failed = await waitForRunStatus(h, "failed", "an unreadable result path must fail the run");
+		assert.match(failed.error ?? "", /could not be read/);
+	});
+});
+
+test("a non-string optional field fails the run instead of reaching finalizeRun", async () => {
+	// `error` is trimmed and the rest are copied into runs.json through `??`, so a
+	// wrong type here is either a throw in the watch tick or wrong persisted data.
+	await withHarness(undefined, async (h) => {
+		const raw = JSON.stringify({ version: 1, status: "failed", output: "x", error: 42, finishedAt: Date.now() });
+		await assertUnusableResultFailsRun(h, raw, /error is not a string/);
+	});
+});
+
+test("a result without a usable finishedAt fails the run", async () => {
+	await withHarness(undefined, async (h) => {
+		const raw = JSON.stringify({ version: 1, status: "completed", output: "x" });
+		await assertUnusableResultFailsRun(h, raw, /finishedAt is missing or is not a finite number/);
+	});
+});
+
+test("an unusable result from a child that already died reports both facts", async () => {
+	// finalizeMissingChild has its own unusable-result branch: the child exited AND
+	// its result cannot be read. Saying only one of those would hide the other.
+	let harness: Harness | undefined;
+	await withHarness(
+		{
+			paneDead: true,
+			afterPaneDeadProbe: async () => {
+				// The hook gets no arguments; the harness is captured above, and is set
+				// before the launch that makes this probe possible.
+				assert.ok(harness, "the harness must exist before the probe fires");
+				const run = (await harness.readRuns())[0];
+				await writeFile(run.resultPath, "{half", "utf8");
+			},
+		},
+		async (h) => {
+			harness = h;
+			await h.call("subagent", { task: "dies with a bad result" });
+			const failed = await waitForRunStatus(h, "failed", "a dead child with an unreadable result must fail");
+			assert.match(failed.error ?? "", /exited before reporting a result/);
+			assert.match(failed.error ?? "", /is unusable: result is not valid JSON/);
+		},
+	);
+});
+
+test("a cancel that lands while the watcher is settling it is not overwritten", async () => {
+	// The tick that decides the run is dead awaits a tmux probe, and subagent_cancel
+	// can land inside that await. Without the terminal guard in markRunFailed the
+	// cancelled run is flipped back to failed and announced a second time.
+	let harness: Harness | undefined;
+	let runId: string | undefined;
+	await withHarness(
+		{
+			paneDead: true,
+			afterPaneDeadProbe: async () => {
+				assert.ok(harness && runId, "the run must exist before the probe fires");
+				await harness.call("subagent_cancel", { id: runId });
+			},
+		},
+		async (h) => {
+			harness = h;
+			const run = (await h.call("subagent", { task: "cancelled mid-settle" })).details as unknown as RunRecord;
+			runId = run.id;
+			await waitForRunStatus(h, "cancelled", "the cancel must win");
+			await new Promise((resolve) => setTimeout(resolve, 900));
+			const settled = (await h.readRuns())[0];
+			assert.equal(settled.status, "cancelled", "the watcher must not overwrite a cancel with a failure");
+			assert.equal(settled.error, undefined);
+		},
+	);
 });
 
 test("subagent_cancel kills the tmux session and is idempotent once terminal", async () => {

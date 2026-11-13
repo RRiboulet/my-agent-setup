@@ -85,6 +85,72 @@ Project-local extensions only load **after you grant project trust**, so on a
 fresh machine pi asks on first start; until then the extensions are silently
 inactive. Installed packages are loaded regardless of project trust.
 
+### One copy of the extensions, never two
+
+Pi discovers extensions from the project (`.pi/extensions`, `.pi/skills`) *and*
+from every installed package — and this package's resources are exactly those two
+directories. So a checkout of this repo that *also* has the package installed
+loads each extension twice, and pi treats a duplicate tool registration as a load
+error, not a warning:
+
+```
+Error: Failed to load extension "…/agent/git/github.com/RRiboulet/my-agent-setup/.pi/extensions/goal.ts":
+  Tool "get_goal" conflicts with /workspace/.pi/extensions/goal.ts
+… one line per duplicated tool and flag …
+Hint: Start without extensions using "pi -ne".
+```
+
+The TUI then exits 1 instead of starting. `pi --version` and `pi --list-models`
+print the same lines and carry on, so a quick check looks healthy; and the
+extensions that register no tool or flag (`/answer`, `/btw`, `/continue`,
+`/review`, `/session-breakdown`, repo-explorer, `/voice`) load twice in silence.
+Skills collide the same way, but as a first-one-wins collision diagnostic, so
+they never raise the error by themselves.
+
+Both environments therefore keep the working tree as the single source:
+
+| Where | Setup |
+|---|---|
+| a host that works in this checkout | `pi remove git:github.com/RRiboulet/my-agent-setup`, then `pi install /path/to/my-agent-setup` — the **local path**, not the git source. It resolves to the same files project discovery already found, so pi dedupes instead of conflicting, and there is no clone that can fall behind the checkout |
+| this repo's devcontainer | installs no package at all: `PI_CODING_AGENT_DIR` (`.devcontainer/devcontainer.json`) gives the container its own agent dir inside the shared `pi-agent-config` volume, seeded once by `postCreate.sh` from the shared one. The shared dir keeps the `git:` install for the *other* projects that mount that volume, which have no `.pi/` of their own |
+
+Removing the git entry matters: installing the local path *next to* it leaves two
+entries pointing at different paths (the checkout and the clone), which is the
+conflict again. Note what the local entry actually stores: `pi` rewrites it to a
+path relative to the agent dir (`normalizePackageSourceForSettings`), e.g.
+`../../my-agent-setup` for `~/my-agent-setup`. It therefore encodes *both*
+locations, and moving either the checkout or `~/.pi/agent` makes it resolve to
+nothing — silently, because a missing local source is skipped, not reported. Re-run
+`pi install <path>` after either moves.
+
+**A linked worktree is the same trap one level down, and the local-path entry
+does not cover it.** The entry dedupes against project discovery only because
+both name files in the same checkout. A child process rooted in
+`.worktrees/<slug>` discovers *that tree's* `.pi/extensions` as its project
+extension, while the package still resolves to the main checkout's copy — two
+different files registering the same tools and the same `--attach-subagent`
+flag, so pi exits 1 with one `Tool "…" conflicts with
+…/.worktrees/<slug>/.pi/extensions/…` line per extension. This is not the bug the
+subagent launcher fixed: it reproduces with no `--extension` at all, and there
+is no *selective* way to suppress the package copy for one run. `PI_PACKAGE_DIR`
+overrides pi's own install path, not the installed extensions;
+`--no-extensions` (`-ne`) does drop package discovery, but it also disables the
+built-in extensions and every extension not named with `-e`, so it is a lossy
+workaround rather than a dedupe. The launcher therefore cannot fix it. The
+devcontainer is immune for the same reason
+as above — its agent dir installs no package. On a host that installs this repo
+as a package, do not run subagents rooted in this repo's worktrees: uninstall the
+package there, or launch with `cwd` = the main checkout and `cd` into the tree
+inside each command, which keeps the child's discovery pointed at one copy.
+
+In the devcontainer, that seeded dir is the container's own: credentials
+(`auth.json`), `voice.json`, `review-triage.json`, `models.json` and the model and
+tool defaults are copied on first creation and then owned there. Rotate a key or
+change a default *in the container*, not in the shared `~/.pi/agent` — the shared
+copy no longer reaches it. Sessions move with it, so history from before the
+split stays in the shared dir and does not appear in `--continue` here. `gh` is
+unaffected: `GH_CONFIG_DIR` still points at the shared volume.
+
 ## Contents
 
 | Path | What it is |
@@ -99,11 +165,11 @@ inactive. Installed packages are loaded regardless of project trust.
 | `.pi/extensions/session-breakdown.ts` | `/session-breakdown`: sessions, messages, tokens and cost per day over 7/30/90, model breakdown, contributions-style calendar. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with four local patches — see below |
 | `.pi/extensions/native-web-search.ts` | Native web search tool — **ours**, not upstream: it registers the `web_search` tool. Ships with `.pi/skills/native-web-search/`, which *is* vendored |
 | `.pi/extensions/repo-explorer/` | `/explore`: browse a branch's file tree with a directory-by-directory fuzzy filter and print a file into the transcript, or quick-open `/explore <path> [branch]` / `<branch>:<path>` to skip the menus. Read-only git resolved against the session cwd; the process runner, branch menu, browser, transcript renderer, display sanitizer and argument grammar are separate internals. **Ours** |
-| `.pi/extensions/review-triage/` | `triage_change` tool and `/triage`: measure a finished change from its git diff, ask a calibrated decision model (Jev, via `ctx.modelRegistry.classify()`) whether it needs an adversarial and/or complexity review, how hard each should push and which allowed model should run it, and return a depth-runged, fallback-chained plan for the `subagent` tool. Policy (judge model, candidates, thresholds, chains) lives in `~/.pi/agent/review-triage.json`; the verdict is appended to the session for audit. **Ours** |
+| `.pi/extensions/review-triage/` | `triage_change` tool and `/triage`: measure a finished change from its git diff, ask a calibrated decision model (Jev, via `ctx.modelRegistry.classify()`) whether it needs an adversarial and/or complexity review, how hard each should push and which allowed model should run it, and return a depth-runged, fallback-chained plan for the `subagent` tool. Policy (judge model, candidates, thresholds, chains) lives in `~/.pi/agent/review-triage.json` — this repo ships it as `review-triage.example.json` beside the extension, with every candidate on `opencode-go` and only the judge on another provider; the verdict is appended to the session for audit. **Ours** |
 | `.pi/extensions/voice/` | `/voice`: dictation with the phone as microphone — start `termux-microphone-record` over ssh, fetch the m4a, transcribe it through an OpenAI-compatible `/audio/transcriptions` endpoint, and paste the transcript at the cursor (or submit it with `autoSubmit`). `/voice cancel` aborts; `alt+r` (and `ctrl+shift+r` on a Kitty terminal) toggle the same cycle. **Ours** |
 | `.pi/extensions/btw/` | `/btw`: opens a panel and asks for the question (submit it empty to reopen a running panel), then answers in-process from the exact conversation prefix, so the provider prompt cache is reused; the streaming answer is shown in its own tmux popup, rendered by pi-tui's own `Markdown` component in pi's own theme — the panel draws the answer with the renderer and the colours the transcript draws an assistant message with. Neither the question nor the answer enters the transcript. Escape returns to pi while the answer keeps running; a new question replaces the panel. **Ours** |
 | `.pi/extensions/opencode-go-provider/` | An `opencode-go` provider for `/model`: fast GLM, Kimi, MiniMax, Qwen, DeepSeek and Grok models via opencode.ai's Go API, with the correct wire protocol per model (Anthropic, OpenAI Completions, Responses) and a per-account usage-budget widget below the editor. **Vendored** from [monotykamary/pi-opencode-go-provider](https://github.com/monotykamary/pi-opencode-go-provider) (MIT), byte-identical to upstream — see below |
-| `.pi/skills/native-web-search/` | Script + docs for the above. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/native-web-search/`, with local provider patches: OpenRouter support, an `opencode-go` default through the Go API's Anthropic-compatible endpoint, unknown-provider rejection, and a test seam (`__test__` + direct-invocation guard). The two must travel together |
+| `.pi/skills/native-web-search/` | Script + docs for the above. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/native-web-search/`, with local provider patches: OpenRouter support, unknown-provider rejection, and a test seam (`__test__` + direct-invocation guard). The two must travel together |
 | `.pi/skills/commit/` | Conventional Commits subjects, and the branch-per-change rule from `AGENTS.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/commit/SKILL.md`, with two local adaptations |
 | `.pi/skills/in-your-own-words/` | Plays the goal, done-when, scope and risky assumptions back before non-trivial work; asks only about decisions, never facts. Part of the coding skill stack below |
 | `.pi/skills/blast-radius/` | Finds what a change can break beyond its diff, names the one fact it is safe because of, and proves it by running real code |
@@ -190,7 +256,7 @@ limitation.
 - **Node 24+** — the tests execute TypeScript directly, with no build step
 - **tmux** — the subagent extension creates one tmux session per run, and the `tmux` skill drives interactive CLIs on a separate private socket
 - **A phone with Termux + Termux:API** for `/voice` — setup is in `.pi/extensions/voice/README.md`
-- An `opencode-go` key for web search — in `~/.pi/agent/auth.json` under `opencode-go`, or via `OPENCODE_API_KEY`. The `web_search` tool and the native-web-search skill both default to this provider. An OpenRouter key is only needed for `pi-session.sh`, which launches a model through OpenRouter.
+- An OpenRouter key for web search — in `~/.pi/agent/auth.json` under `openrouter`. The `web_search` tool and the native-web-search skill default to it (Brave when a Brave key is configured). The same key is used by `pi-session.sh`, which launches a model through OpenRouter. An `opencode-go` key is for the `/model` provider only; the Go plan's Anthropic models do not carry native web search.
 
 The `.devcontainer/` provides all of these.
 

@@ -61,6 +61,11 @@ export interface JsonModel {
   api?: Api;
   baseUrl?: string;
   reasoning: boolean;
+  // Set by transformApiModel when the live payload explicitly reports
+  // `capabilities.reasoning.supported: false`. A payload that is merely silent
+  // leaves it absent, so mergeWithEmbedded can tell "no reasoning" from "no
+  // information". Stripped before a model is cached or registered.
+  reasoningDenied?: boolean;
   thinkingLevelMap?: ThinkingLevelMapValue;
   input: ("text" | "image")[];
   cost: {
@@ -68,12 +73,28 @@ export interface JsonModel {
     output: number;
     cacheRead: number;
     cacheWrite: number;
+    tiers?: CostTier[];
   };
   // null between transformApiModel and mergeWithEmbedded: the live /v1/models
   // API omits context data; null = "API silent, prefer curated/default".
   contextWindow: number | null;
   maxTokens: number;
   compat?: Record<string, unknown>;
+}
+
+/**
+ * pi's request-wide pricing tier (`model.cost.tiers`): once a request's total
+ * input exceeds `inputTokensAbove`, these four rates replace the base ones for
+ * the whole request (pi-ai's `calculateCost` takes the highest matching
+ * threshold). All four are required, so a rate the payload's override does not
+ * list keeps the base price rather than going to zero.
+ */
+export interface CostTier {
+  inputTokensAbove: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
 }
 
 interface PatchEntry {
@@ -88,6 +109,7 @@ interface PatchEntry {
     output?: number;
     cacheRead?: number;
     cacheWrite?: number;
+    tiers?: CostTier[];
   };
   contextWindow?: number;
   maxTokens?: number;
@@ -111,11 +133,14 @@ function applyPatch(model: JsonModel, patch: PatchEntry): JsonModel {
   if (patch.maxTokens !== undefined) result.maxTokens = patch.maxTokens;
 
   if (patch.cost) {
+    // `tiers: []` in a patch clears the model's tiers; an absent key keeps them.
+    const tiers = patch.cost.tiers ?? result.cost.tiers;
     result.cost = {
       input: patch.cost.input ?? result.cost.input,
       output: patch.cost.output ?? result.cost.output,
       cacheRead: patch.cost.cacheRead ?? result.cost.cacheRead,
       cacheWrite: patch.cost.cacheWrite ?? result.cost.cacheWrite,
+      ...(tiers && tiers.length > 0 ? { tiers } : {}),
     };
   }
   if (patch.compat) {
@@ -132,8 +157,8 @@ function applyPatch(model: JsonModel, patch: PatchEntry): JsonModel {
   return result;
 }
 
-/** Full pipeline: base models → patch → custom → result */
-function buildModels(base: JsonModel[], custom: JsonModel[], patch: PatchData): JsonModel[] {
+/** Full pipeline: base models → patch → custom → result. Exported for tests. */
+export function buildModels(base: JsonModel[], custom: JsonModel[], patch: PatchData): JsonModel[] {
   const modelMap = new Map<string, JsonModel>();
 
   // Seed with the base list plus grace-period deprecated models so patch.json
@@ -176,20 +201,164 @@ const CACHE_DIR = path.join(getAgentDir(), "cache");
 const CACHE_PATH = path.join(CACHE_DIR, `${PROVIDER_ID}-models.json`);
 const LIVE_FETCH_TIMEOUT_MS = 8000;
 
-/** Map models.dev provider.npm to pi API type and base URL. */
-const NPM_TO_API: Record<string, { api: Api; baseUrl: string }> = {
-  "@ai-sdk/anthropic": { api: "anthropic-messages", baseUrl: "https://opencode.ai/zen/go" },
-};
-const DEFAULT_API: { api: Api; baseUrl: string } = { api: "openai-completions", baseUrl: "https://opencode.ai/zen/go/v1" };
+/**
+ * Shape marker for the on-disk model cache.
+ *
+ * The cache is a snapshot of one transform's output, and nothing inside it said
+ * which transform that was. So after an upgrade the stale path kept serving the
+ * older routing until the first *successful* revalidation rewrote the file — a
+ * matter of seconds with a healthy API, and indefinitely offline, which is
+ * exactly when the stale path is in use. The recorded case: a cache written
+ * before #117 held `claude-haiku-5-5` on `openai-completions` / `zen/go/v1`
+ * with four zero costs and text-only input.
+ *
+ * Bump this whenever the pipeline starts writing a field group it did not write
+ * before. Bumping costs one cold start per upgrade: the stale path falls back to
+ * the curated `models.json`, and live-only models return with the first
+ * revalidation. That is the trade, and it is deliberately in this direction —
+ * a stale entry that looks current is worse than a missing one.
+ *
+ * Version 1 was the first versioned format; before it the file was a bare array,
+ * which is therefore unrecognised on purpose: it cannot be upgraded in place,
+ * because the whole problem is that its contents cannot be attributed. Version 2
+ * added `cost.tiers` — a version-1 cache has no tiers to serve, so it is dropped
+ * like any other mismatch.
+ */
+export const CACHE_FORMAT_VERSION = 2;
+
+interface ModelCacheFile {
+  format: number;
+  models: JsonModel[];
+}
+
+/**
+ * Resolve the API type and base URL from the live payload's `api` block. Each
+ * model advertises exactly one endpoint today — `chat-completions` for the
+ * OpenAI-compatible models, `messages` for the Anthropic ones — and
+ * `chat-completions` wins if a model ever offers both.
+ *
+ * The advertised `messages` URL is the base its own Anthropic SDK appends
+ * `/v1/messages` to, and pi's client appends the same, so a trailing `/v1` is
+ * stripped: keeping it requests `/v1/v1/messages`, which 404s (verified
+ * against the live endpoint on 2026-11-10).
+ */
+function resolveEndpoint(apiBlock: any): { api: Api; baseUrl: string } | undefined {
+  // The payload is untrusted input: a non-string or blank base_url must fall
+  // back to the default rather than register — and cache — a bogus URL that
+  // the SDK then throws on for every request.
+  const chatUrl = apiBlock?.["chat-completions"]?.base_url;
+  if (typeof chatUrl === "string" && chatUrl.trim()) {
+    return { api: "openai-completions", baseUrl: chatUrl.trim() };
+  }
+  const messagesUrl = apiBlock?.messages?.base_url;
+  if (typeof messagesUrl === "string" && messagesUrl.trim()) {
+    return { api: "anthropic-messages", baseUrl: messagesUrl.trim().replace(/\/v1\/?$/i, "") };
+  }
+  return undefined;
+}
+const DEFAULT_API: { api: Api; baseUrl: string } = { api: "openai-completions", baseUrl: BASE_URL };
+
+/** A finite, non-negative number, or undefined. The payload is untrusted input. */
+function nonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/**
+ * The payload prices some models per context tier: `cost.text.input.overrides`
+ * and `cost.text.output.overrides` are parallel arrays whose entries carry the
+ * same `when.context.gt` threshold. pi models the same thing as `cost.tiers`,
+ * where the highest matching threshold applies its rates to the whole request, so
+ * the two arrays collapse onto one tier per threshold.
+ *
+ * Two payload semantics are deliberately not mapped. `cost.multipliers` (peak
+ * hour pricing) has no pi counterpart at all, and an override conditioned on
+ * anything besides `when.context` is skipped rather than partially mapped: a
+ * `service_tier`, region or time window would otherwise be promoted into a
+ * permanent price, which is the same silent mispricing this function exists to
+ * remove. A threshold or price that is not a usable number skips the override
+ * too, so a malformed payload cannot cache NaN or a negative rate.
+ *
+ * One rate differs from what opencode itself would bill: a tier whose override
+ * lists no cache rate inherits the base cache rate here, where their runtime
+ * treats an unlisted rate as 0. pi's tier requires all four rates, so the choice
+ * is base-inherit or zero, and inheriting does not claim that caching has become
+ * free.
+ */
+function costTiers(text: any, base: Omit<CostTier, "inputTokensAbove">): CostTier[] | undefined {
+  const tiers = new Map<number, CostTier>();
+  const tierAt = (threshold: number): CostTier => {
+    let tier = tiers.get(threshold);
+    if (!tier) {
+      tier = { inputTokensAbove: threshold, ...base };
+      tiers.set(threshold, tier);
+    }
+    return tier;
+  };
+
+  const eachOverride = (block: any, apply: (tier: CostTier, override: any) => void): void => {
+    const overrides: unknown[] = Array.isArray(block?.overrides) ? block.overrides : [];
+    for (const override of overrides) {
+      if (typeof override !== "object" || override === null) continue;
+      const when = (override as any).when;
+      if (typeof when !== "object" || when === null) continue;
+      // Exactly one condition, and it is the context band. Anything else is not
+      // expressible as a tier; see the note above.
+      if (!Object.keys(when).every((key) => key === "context")) continue;
+      // `gt` and `gte` both mark where the band starts.
+      const context = when.context;
+      const threshold = nonNegativeNumber(context?.gt) ?? nonNegativeNumber(context?.gte);
+      if (threshold === undefined) continue;
+      apply(tierAt(threshold), override);
+    }
+  };
+
+  eachOverride(text?.input, (tier, override) => {
+    tier.input = nonNegativeNumber(override.price) ?? tier.input;
+    tier.cacheRead = nonNegativeNumber(override.cache?.read) ?? tier.cacheRead;
+    tier.cacheWrite = nonNegativeNumber(override.cache?.write) ?? tier.cacheWrite;
+  });
+  eachOverride(text?.output, (tier, override) => {
+    tier.output = nonNegativeNumber(override.price) ?? tier.output;
+  });
+
+  if (tiers.size === 0) return undefined;
+  return [...tiers.values()].sort((a, b) => a.inputTokensAbove - b.inputTokensAbove);
+}
+
+/**
+ * Pricing as the payload reports it: flat per-1M rates under `cost.text.*`,
+ * optional cache rates that only some models carry, and the context-tiered
+ * `overrides` folded into pi's `cost.tiers`. The block is left off entirely when
+ * the model has no overrides, so a tierless model keeps exactly the shape it had
+ * before it existed.
+ */
+function transformedCost(text: any): JsonModel["cost"] {
+  const cost: JsonModel["cost"] = {
+    input: text?.input?.price ?? 0,
+    output: text?.output?.price ?? 0,
+    cacheRead: text?.input?.cache?.read ?? 0,
+    cacheWrite: text?.input?.cache?.write ?? 0,
+  };
+  const tiers = costTiers(text, cost);
+  if (tiers) cost.tiers = tiers;
+  return cost;
+}
 
 /** Transform a model from the opencode-go /v1/models API. Returns minimal data. */
 export function transformApiModel(apiModel: any): JsonModel {
-  const npm = apiModel.provider?.npm;
-  const { api, baseUrl } = (npm && NPM_TO_API[npm]) || DEFAULT_API;
-  const rawInput = apiModel.modalities?.input || ["text"];
-  // Pi Model type only supports "text" and "image"
-  const input: ("text" | "image")[] = rawInput.filter((m: string) => m === "text" || m === "image") as ("text" | "image")[];
-  if (!input.includes("text")) input.unshift("text");
+  const advertised = resolveEndpoint(apiModel.api);
+  const api = advertised?.api ?? DEFAULT_API.api;
+  const baseUrl = advertised?.baseUrl ?? DEFAULT_API.baseUrl;
+
+  // Pi's Model type only knows "text" and "image", while the API lists
+  // concrete MIME types ("image/jpeg", "image/png", "application/pdf", ...).
+  // Keep any image/* modality, drop the rest, and always offer text.
+  const rawInput: unknown = apiModel.modalities?.input;
+  const modalities: unknown[] = Array.isArray(rawInput) ? rawInput : [];
+  const supportsImage = modalities.some(
+    (m) => typeof m === "string" && (m === "image" || m.startsWith("image/")),
+  );
+  const input: ("text" | "image")[] = supportsImage ? ["text", "image"] : ["text"];
 
   // Derive reasoning support from the live API's capabilities block (the
   // /v1/models endpoint exposes reasoning under capabilities.reasoning, not
@@ -205,6 +374,9 @@ export function transformApiModel(apiModel: any): JsonModel {
     (Array.isArray(effortLevels) && effortLevels.length > 0 ? true : undefined) ??
     apiModel.reasoning ??
     false;
+  // Only an explicit denial may beat curation; an absent capabilities block
+  // means the API said nothing and must not be read as "no reasoning".
+  const reasoningDenied = reasoningCap?.supported === false;
   const thinkingLevelMap =
     reasoningSupported && Array.isArray(effortLevels) && effortLevels.length > 0
       ? {
@@ -222,7 +394,7 @@ export function transformApiModel(apiModel: any): JsonModel {
         }
       : undefined;
 
-  return {
+  const transformed: JsonModel = {
     id: apiModel.id,
     name: apiModel.name || apiModel.id,
     api,
@@ -230,20 +402,28 @@ export function transformApiModel(apiModel: any): JsonModel {
     reasoning: Boolean(reasoningSupported),
     thinkingLevelMap,
     input,
-    cost: {
-      input: apiModel.cost?.input || 0,
-      output: apiModel.cost?.output || 0,
-      cacheRead: apiModel.cost?.cache_read || 0,
-      cacheWrite: apiModel.cost?.cache_write || 0,
-    },
-    // The live /v1/models endpoint exposes only {id, object, created, owned_by}
-    // — no `limit`, no `context_length`. A literal `|| 131072` here used to make
-    // every "API silent" model truthy 131072, which then clobbered the curated
-    // 1M/262K values in mergeWithEmbedded via the `||` truthy check. Use `null`
-    // so the embedded curated value is preferred when the API is silent.
+    cost: transformedCost(apiModel.cost?.text),
+    // `limit` is present in today's payload, but the null contract stays: a
+    // payload without it must not masquerade as a real 131072 and shadow the
+    // curated value in mergeWithEmbedded's nullish chain.
     contextWindow: apiModel.limit?.context || apiModel.context_length || null,
     maxTokens: apiModel.limit?.output || 0,
   };
+  if (reasoningDenied) transformed.reasoningDenied = true;
+  return transformed;
+}
+
+export function transformApiModels(apiModels: any[]): JsonModel[] {
+  const models: JsonModel[] = [];
+  for (const apiModel of apiModels) {
+    try {
+      models.push(transformApiModel(apiModel));
+    } catch {
+      // A single malformed entry must not discard the whole refresh; the
+      // surrounding try/catch used to turn it into "no live models at all".
+    }
+  }
+  return models;
 }
 
 async function fetchLiveModels(apiKey: string, signal?: AbortSignal): Promise<JsonModel[] | null> {
@@ -256,25 +436,37 @@ async function fetchLiveModels(apiKey: string, signal?: AbortSignal): Promise<Js
     const data = await response.json();
     const apiModels = Array.isArray(data) ? data : (data.data || []);
     if (!Array.isArray(apiModels) || apiModels.length === 0) return null;
-    return apiModels.map(transformApiModel);
+    const models = transformApiModels(apiModels);
+    return models.length > 0 ? models : null;
   } catch {
     return null;
   }
+}
+
+function isModelCacheFile(data: unknown): data is ModelCacheFile {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return false;
+  const candidate = data as { format?: unknown; models?: unknown };
+  return typeof candidate.format === "number" && Array.isArray(candidate.models);
 }
 
 function loadCachedModels(): JsonModel[] | null {
+  let data: unknown;
   try {
-    const data = JSON.parse(fs.readFileSync(CACHE_PATH, "utf8"));
-    return Array.isArray(data) ? data : null;
+    data = JSON.parse(fs.readFileSync(CACHE_PATH, "utf8"));
   } catch {
     return null;
   }
+  if (!isModelCacheFile(data)) return null;
+  return data.format === CACHE_FORMAT_VERSION ? data.models : null;
 }
 
-function cacheModels(models: JsonModel[]): void {
+/** Exported for tests: the writer and the reader are the only two things that
+ *  know the file's shape, so a format bump has to move both. */
+export function cacheModels(models: JsonModel[]): void {
   try {
     fs.mkdirSync(CACHE_DIR, { recursive: true });
-    fs.writeFileSync(CACHE_PATH, JSON.stringify(models, null, 2) + "\n");
+    const file: ModelCacheFile = { format: CACHE_FORMAT_VERSION, models };
+    fs.writeFileSync(CACHE_PATH, JSON.stringify(file, null, 2) + "\n");
   } catch {
     // Cache write failure is non-fatal
   }
@@ -292,8 +484,19 @@ export function mergeWithEmbedded(liveModels: JsonModel[], embeddedModels: JsonM
       // live cost when the API reports it (non-zero); fall back to embedded when
       // the API is silent (0) so curated cacheRead/cacheWrite isn't clobbered and
       // providers whose /models endpoint exposes no pricing keep their curated
-      // cost. Curation (reasoning/input/compat/name) still wins via ...embedded.
-      result.push({
+      // cost. Curation (input/compat/name) still wins via ...embedded.
+      //
+      // Reasoning is curated too, with one exception: a payload that explicitly
+      // reports `supported: false` demotes the model, because a capability lost
+      // upstream must stop offering levels that no longer work. A payload that
+      // merely omits the block leaves `reasoningDenied` unset, so silence can
+      // never disable a curated model.
+      const demoted = liveModel.reasoningDenied === true;
+      // Tiers follow the same rule as the four flat rates: the live payload is
+      // authoritative when it reports any, and curation fills the gap when it
+      // does not.
+      const tiers = liveModel.cost.tiers ?? embedded.cost.tiers;
+      const merged: JsonModel = {
         ...liveModel,
         ...embedded,
         cost: {
@@ -301,6 +504,7 @@ export function mergeWithEmbedded(liveModels: JsonModel[], embeddedModels: JsonM
           output: liveModel.cost.output || embedded.cost.output,
           cacheRead: liveModel.cost.cacheRead || embedded.cost.cacheRead,
           cacheWrite: liveModel.cost.cacheWrite || embedded.cost.cacheWrite,
+          ...(tiers && tiers.length > 0 ? { tiers } : {}),
         },
         // Nullish coalesce: if the live API was silent (liveModel.contextWindow
         // is null), fall through to the curated embedded value. The final
@@ -309,16 +513,24 @@ export function mergeWithEmbedded(liveModels: JsonModel[], embeddedModels: JsonM
         // bug — it treated the API's 131072-fallback as authoritative and
         // shadowed curated 1M/262K context windows.
         contextWindow: liveModel.contextWindow ?? embedded.contextWindow ?? 131072,
+        reasoning: demoted ? false : embedded.reasoning,
         // Prefer the live-derived thinking-level map only when the curated
         // entry has none, so manual curation still wins for curated models.
-        thinkingLevelMap: embedded.thinkingLevelMap ?? liveModel.thinkingLevelMap,
-      });
+        // A demoted model advertises no levels at all.
+        thinkingLevelMap: demoted ? undefined : (embedded.thinkingLevelMap ?? liveModel.thinkingLevelMap),
+      };
+      // transformApiModel's live-only marker must not reach the cache or the
+      // registered model.
+      delete merged.reasoningDenied;
+      result.push(merged);
     } else {
       // API-only model (no curated embedded counterpart). The Live API is silent
       // on contextWindow for all current opencode-go models, so liveModel.contextWindow
       // is null. Apply the safe default here so downstream consumers (e.g. pi core's
       // formatTokenCount → count.toString()) don't crash on null.
-      result.push({ ...liveModel, contextWindow: liveModel.contextWindow ?? 131072 });
+      const merged: JsonModel = { ...liveModel, contextWindow: liveModel.contextWindow ?? 131072 };
+      delete merged.reasoningDenied;
+      result.push(merged);
     }
   }
   // Append any embedded models that the live API didn't return
@@ -363,12 +575,44 @@ export function loadStaleModels(embeddedModels: JsonModel[]): JsonModel[] {
   const cached = loadCachedModels();
   if (!cached || cached.length === 0) return embeddedModels;
 
-  // Merge embedded models that are missing from cache (newly added models)
   const cachedMap = new Map(cached.map(m => [m.id, m]));
   for (const em of embeddedModels) {
-    if (!cachedMap.has(em.id)) {
+    const cachedModel = cachedMap.get(em.id);
+    // A model the cache predates: serve the curated entry.
+    if (!cachedModel) {
       cached.push(em);
+      continue;
     }
+
+    // Refresh everything the curated entry owns, with one deliberate divergence
+    // from mergeWithEmbedded: an entry that defines no thinkingLevelMap drops the
+    // cached one instead of falling back to it. The merge rule is "curated, else
+    // live", which offline would keep serving the map a curation edit just
+    // removed; #120 chose the strict rule so a level that no longer works stops
+    // being offered. `compat` keeps the merge's fallback because the live
+    // transform never writes compat, so a cached block on a curated id is always
+    // earlier curation and only a removal is affected.
+    //
+    // Cost and contextWindow stay cached deliberately: they are the two fields
+    // mergeWithEmbedded gives to the live payload first, so a cached value that
+    // disagrees with models.json is a live observation rather than stale
+    // curation, and overwriting it offline would invent a price.
+    cachedModel.name = em.name;
+    // `??`: a curated entry without an endpoint lets the cached one stand, which
+    // is what mergeWithEmbedded's spread does with an absent key.
+    cachedModel.api = em.api ?? cachedModel.api;
+    cachedModel.baseUrl = em.baseUrl ?? cachedModel.baseUrl;
+    cachedModel.input = em.input;
+    cachedModel.maxTokens = em.maxTokens;
+    cachedModel.reasoning = em.reasoning;
+    // Unconditional, unlike compat: curation dropping a map must stop offering
+    // levels that no longer work, and the cached map is the stale copy here.
+    cachedModel.thinkingLevelMap = em.thinkingLevelMap;
+    // `compat` only when curation defines one. The merge falls back to the live
+    // block, and a cached block on a curated id is always earlier curation, so
+    // keeping it is the same "curated, else cached" rule — at the cost of a
+    // removed block lingering until the cache is deleted.
+    if (em.compat !== undefined) cachedModel.compat = em.compat;
   }
   return cached;
 }

@@ -118,8 +118,14 @@ Host phone
 needed: the forward lands on the host's own port, so a plain TCP connection is
 the whole route.
 
-**5. `~/.pi/agent/voice.json`** — transcription config; `sshTarget` is
-already correct by default (`phone`). Example with OpenRouter:
+**5. `voice.json` in this container's pi agent dir** —
+`$PI_CODING_AGENT_DIR/voice.json`, where that variable is only set inside the
+container (`.devcontainer/devcontainer.json`'s `containerEnv`); in a shell
+without it, expand the path from that file instead of trusting the variable.
+Transcription config, `sshTarget` is already correct by default (`phone`).
+`postCreate.sh` seeds it from the shared `~/.pi/agent/voice.json` the first time
+the container is created, and never overwrites it afterwards — so edit it *here*,
+not in the shared dir, if this container needs its own. Example with OpenRouter:
 
 ```json
 {

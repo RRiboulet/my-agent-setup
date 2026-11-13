@@ -66,7 +66,12 @@ sleep 60; tail -5 /tmp/devc-aa.log; devc ls
 ```
 
 `devc` takes a per-project `flock`, so a second invocation waits instead of
-racing the first.
+racing the first. The lock covers the build-time half of a run — the probe, the
+config-hash stamp, the uid check, and `devc rebuild` — and is released before an
+interactive session attaches, so it does not protect a shell that is already
+running inside the container: `devc rebuild` on a project you are attached to
+replaces the container under that session. Holding it for the life of every
+session instead is what deadlocked the project for every other run.
 
 ## Running a server
 
@@ -109,7 +114,7 @@ nothing here; do not "fix" a missing port by publishing `0.0.0.0`.
 | build fails with "additional privileges requested: … fs.read" | `docker compose build` needs the feature Dockerfile inlined | declare `features` explicitly in `devcontainer.json` (auto-mapped defaults take the broken path on CLI 0.90 + Docker 29) |
 | Postgres unreachable | `devc analytics-agent -- bash -lc 'exec 3<>/dev/tcp/postgres/5432'` | it is a compose service, not `localhost`; `devc doctor` for state |
 | `ssh phone` fails (voice) | `devc my-agent-setup -- bash -lc 'exec 3<>/dev/tcp/host.docker.internal/8022'` | the phone's `ssh -N -R 0.0.0.0:8022:localhost:8022` is down; see `.devcontainer/voice-container.md` |
-| pi looks different inside a tmux panel (256 colours, blended tool/thinking sections) | `devc <name> -- bash -lc 'echo PI_TRUE_COLOR=$PI_TRUE_COLOR COLORTERM=$COLORTERM'` | the container or tmux is not advertising truecolor; rebuild after a config change, and make sure `~/.tmux.conf` has `set -as terminal-features ",*:RGB"` plus `setenv -g COLORTERM truecolor` |
+| pi looks different inside a tmux panel (256 colours, blended tool/thinking sections) | `devc <name> -- bash -lc 'echo PI_TRUE_COLOR=$PI_TRUE_COLOR COLORTERM=$COLORTERM'` | those variables are missing because tmux does not forward `COLORTERM`: `~/.tmux.conf` has to supply them (`setenv -g COLORTERM truecolor`, `setenv -g PI_TRUE_COLOR 1`). `set -as terminal-features ",*:RGB"` is not the fix for this — it tells tmux what the *outer* terminal can render and changes no inner environment (measured: `TERM` and `tput colors` are identical with or without it). Rebuild after a config change to re-copy `~/.tmux.conf`, and remember a long-lived server does **not** re-read it: `setenv -g` reaches only panes created afterwards, so existing panels keep the old environment until the server is restarted (see the `tmux` skill for what that kills) |
 | container exists but is the old config | `devc doctor` | `devc rebuild <name>` |
 
 ## Host and project facts (this VM)

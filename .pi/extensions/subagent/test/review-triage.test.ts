@@ -16,9 +16,9 @@
 // Everything is pure or mocked: no network, no git, no tmux.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { test } from "node:test";
 
 import {
@@ -2244,6 +2244,36 @@ test("compose: fail-open routes through policy and is marked as a fallback", () 
 	assert.ok(plan.verdict.includes("judge unavailable"));
 });
 
+test("compose: a judge failure publishes its kind, message and measured latency", () => {
+	const plan = failOpenPlan({
+		config: config(),
+		candidates: CANDIDATES,
+		available: AVAILABLE,
+		catalog: catalog(),
+		gates: gates(),
+		evidence: EVIDENCE,
+		summary: "x",
+		context: PLAN_CONTEXT,
+		reason: "Provider is not configured: openrouter",
+		kind: "error",
+		message: "Provider is not configured: openrouter",
+		latencyMs: 3,
+	});
+	assert.deepEqual(plan.judgeFailure, {
+		kind: "error",
+		message: "Provider is not configured: openrouter",
+	});
+	assert.equal(plan.latencyMs, 3, "the measured latency, not the 0 placeholder");
+	const text = formatPlan(plan);
+	assert.match(text, /Judge failed \(error\) in 3 ms: Provider is not configured: openrouter/);
+});
+
+test("compose: a successful judgment carries no failure and keeps its latency", () => {
+	const plan = compose();
+	assert.equal(plan.judgeFailure, undefined);
+	assert.equal(formatPlan(plan).includes("Judge failed"), false);
+});
+
 test("compose: a disabled extension says so instead of judging", () => {
 	const plan = disabledPlan(EVIDENCE, config().policy);
 	assert.equal(plan.verdict, "disabled (review-triage is off)");
@@ -2350,4 +2380,72 @@ test("command: positional and flag forms both resolve the target", () => {
 	assert.equal(parseTriageArgs('--summary "fix the parser" --note "changes a format"').summary, "fix the parser");
 	assert.deepEqual(parseTriageArgs('--summary "x" --note "on-disk format"').notes, ["on-disk format"]);
 	assert.deepEqual(resolveTarget(parseTriageArgs("--ref deadbeef")), { kind: "commit", ref: "deadbeef" });
+});
+
+test("the shipped review-triage policy routes every candidate through opencode-go", () => {
+	// The bug this pins, found by running a review: the config that reached
+	// ~/.pi/agent listed `deepseek-v4.1-flash` and `glm-5.3-flash` under provider
+	// "opencode", which has no credential on this machine. `generateCatalog`
+	// filters candidates by what the session can run, so a *plan* could not name
+	// them — but an agent reads `candidates` directly to pick the reviewer
+	// (AGENTS.md), and that is what failed, with
+	// `Error: No API key found for opencode.` The bands simply lost their
+	// candidates, with one `notes:` line and no mention of the provider.
+	// What a repo test can honestly pin is the name and the numbers; it cannot
+	// know which providers a given machine authenticates.
+	const REPO_ROOT = resolve(new URL("../../../..", import.meta.url).pathname);
+	const shipped = join(REPO_ROOT, ".pi/extensions/review-triage/review-triage.example.json");
+	const config = loadConfig({ path: shipped, env: {}, warn: () => {} });
+
+	assert.ok(config.candidates.length > 0, "the shipped policy must name candidates");
+	for (const candidate of config.candidates) {
+		assert.equal(
+			candidate.provider,
+			"opencode-go",
+			`${candidate.model} must be reached through opencode-go, the provider this machine authenticates`,
+		);
+	}
+	assert.equal(config.judge.provider, "openrouter", "the judge stays on openrouter");
+	assert.equal(config.judge.model, "typesafe/jev-1.13");
+	// A stated cost overrides the catalogue in what Jev is shown and in the plan,
+	// so a hand-typed number that drifts is a silent 2x error in the routing
+	// decision. Found in review: 0.3 for deepseek-v4.1-flash, catalogue 0.15.
+	const catalogue = JSON.parse(
+		readFileSync(join(REPO_ROOT, ".pi/extensions/opencode-go-provider/models.json"), "utf8"),
+	) as unknown;
+	const catalogueCost = (id: string): number | undefined => {
+		const seen = new Set<unknown>();
+		const walk = (node: unknown): number | undefined => {
+			if (node === null || typeof node !== "object" || seen.has(node)) return undefined;
+			seen.add(node);
+			const record = node as Record<string, unknown>;
+			if (record.id === id) {
+				const cost = record.cost as { input?: unknown } | undefined;
+				return typeof cost?.input === "number" ? cost.input : undefined;
+			}
+			for (const value of Object.values(record)) {
+				const found = walk(value);
+				if (found !== undefined) return found;
+			}
+			return undefined;
+		};
+		return walk(catalogue);
+	};
+	for (const candidate of config.candidates) {
+		if (candidate.cost === 0) continue;
+		const expected = catalogueCost(candidate.model);
+		assert.notEqual(expected, undefined, `${candidate.model} is not in the opencode-go catalogue`);
+		assert.equal(
+			candidate.cost,
+			expected,
+			`${candidate.model} states ${candidate.cost} per million input tokens; the catalogue says ${expected}`,
+		);
+	}
+
+	for (const tier of ["low", "medium", "high"] as const) {
+		assert.ok(
+			config.candidates.some((candidate) => candidate.tier === tier),
+			`no candidate in the ${tier} band, so that band's profiles are not offered at all`,
+		);
+	}
 });

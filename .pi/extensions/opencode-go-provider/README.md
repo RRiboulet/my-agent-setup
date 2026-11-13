@@ -23,7 +23,9 @@ Run `bun run test:pi` for offline manifest, catalog, lifecycle and streaming che
 - **14+ Optimized AI Models** - DeepSeek, GLM, Kimi, MiMo, MiniMax, and Qwen
 - **Multi-API Support** — uses the correct API protocol per model (Anthropic, OpenAI Completions)
 - **Fast & Efficient** - Go-optimized endpoints for lower latency
-- **Cost Tracking** with per-model pricing for budget management
+- **Cost Tracking** with per-model pricing for budget management, including the
+  API's context-tiered rates (`cost.tiers`), so a session past the tier's
+  threshold is not still reported at the cheaper rate
 - **Reasoning Models** with thinking level maps for proper effort control
 - **Prompt-cache session affinity** — sends `x-opencode-session` and `x-opencode-client` so OpenCode Go can pin a session to the same cache node
 - **Usage widget** — shows how much of the OpenCode Go 5h / 7d / 30d budgets you have spent, below the editor (footer status line outside the TUI). Each account carries its own budgets, so when [pi-multiprovider](https://github.com/monotykamary/pi-multiprovider) 0.8.0+ pools several `opencode-go` accounts the widget bills the session's active one and repaints on every switch or resume.
@@ -90,7 +92,7 @@ pi
 | Hy4 preview | Completions | Text | 1.0M | 64K | $0.83 | $2.50 |
 | Kimi K2.7 Code | Completions | Text + Image | 262K | 262K | $0.95 | $4.00 |
 | Kimi K3 (2x usage) | Completions | Text + Image | 1.0M | 131K | $3.00 | $15.00 |
-| LongCat 2.5 Preview Free | Completions | Text + Image | 1.0M | 131K | — | — |
+| LongCat 2.5 Free | Completions | Text + Image | 1.0M | 256K | — | — |
 | LongCat-2.0 | Completions | Text | 1.0M | 131K | $0.30 | $1.20 |
 | MiMo V2.5 | Completions | Text + Image | 1.0M | 128K | $0.14 | $0.28 |
 | MiMo V2.5 Pro | Completions | Text | 1.0M | 128K | $0.43 | $0.87 |
@@ -212,6 +214,24 @@ Add to your pi configuration for automatic loading:
   ]
 }
 ```
+
+### Model cache
+
+The model list is served stale-first from
+`$PI_CODING_AGENT_DIR/cache/opencode-go-models.json` (`~/.pi/agent/cache/…` by
+default), then revalidated against the live `/v1/models` endpoint in the
+background. The file carries a `format` marker and is discarded when the marker
+does not match the installed version, so upgrading this extension costs one cold
+start — the curated `models.json` list, with live-only models returning on the
+first successful revalidation — rather than replaying the previous version's
+routing for as long as the API stays unreachable.
+
+On the stale path, the fields `models.json` owns (`name`, `api`, `baseUrl`,
+`input`, `maxTokens`, `reasoning`, `thinkingLevelMap`, and `compat` when the
+curated entry defines one) are refreshed from it, so editing those needs no cache
+delete — removing `compat`, `api` or `baseUrl` from an entry is the exception,
+since the cached copy stays. `cost` and `contextWindow` are served from the cache,
+so to change either of those offline, remove the file.
 
 ## License
 
