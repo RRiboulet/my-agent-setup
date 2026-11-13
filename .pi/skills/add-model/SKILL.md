@@ -186,7 +186,10 @@ appears exactly once and the deprecation never happens. `tests/models.test.ts`
 pins both that and the date.
 
 Establish that the id is dead before deprecating it. Asking the endpoint
-directly separates the three ways an id can vanish from the list:
+directly separates the three ways an id can vanish from the list. Probe the
+model's own advertised `base_url` when the live payload gives one — some models
+advertise `inference/go/openai/v1` rather than the curated default below, and the
+two gateways need not answer alike:
 
 ```bash
 curl -sS -H "Authorization: Bearer $OPENCODE_API_KEY" -H 'User-Agent: pi/1.0' \
