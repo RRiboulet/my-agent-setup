@@ -73,12 +73,28 @@ export interface JsonModel {
     output: number;
     cacheRead: number;
     cacheWrite: number;
+    tiers?: CostTier[];
   };
   // null between transformApiModel and mergeWithEmbedded: the live /v1/models
   // API omits context data; null = "API silent, prefer curated/default".
   contextWindow: number | null;
   maxTokens: number;
   compat?: Record<string, unknown>;
+}
+
+/**
+ * pi's request-wide pricing tier (`model.cost.tiers`): once a request's total
+ * input exceeds `inputTokensAbove`, these four rates replace the base ones for
+ * the whole request (pi-ai's `calculateCost` takes the highest matching
+ * threshold). All four are required, so a rate the payload's override does not
+ * list keeps the base price rather than going to zero.
+ */
+export interface CostTier {
+  inputTokensAbove: number;
+  input: number;
+  output: number;
+  cacheRead: number;
+  cacheWrite: number;
 }
 
 interface PatchEntry {
@@ -93,6 +109,7 @@ interface PatchEntry {
     output?: number;
     cacheRead?: number;
     cacheWrite?: number;
+    tiers?: CostTier[];
   };
   contextWindow?: number;
   maxTokens?: number;
@@ -116,11 +133,14 @@ function applyPatch(model: JsonModel, patch: PatchEntry): JsonModel {
   if (patch.maxTokens !== undefined) result.maxTokens = patch.maxTokens;
 
   if (patch.cost) {
+    // `tiers: []` in a patch clears the model's tiers; an absent key keeps them.
+    const tiers = patch.cost.tiers ?? result.cost.tiers;
     result.cost = {
       input: patch.cost.input ?? result.cost.input,
       output: patch.cost.output ?? result.cost.output,
       cacheRead: patch.cost.cacheRead ?? result.cost.cacheRead,
       cacheWrite: patch.cost.cacheWrite ?? result.cost.cacheWrite,
+      ...(tiers && tiers.length > 0 ? { tiers } : {}),
     };
   }
   if (patch.compat) {
@@ -198,11 +218,13 @@ const LIVE_FETCH_TIMEOUT_MS = 8000;
  * revalidation. That is the trade, and it is deliberately in this direction —
  * a stale entry that looks current is worse than a missing one.
  *
- * Version 1 is the first versioned format. Before it the file was a bare array,
+ * Version 1 was the first versioned format; before it the file was a bare array,
  * which is therefore unrecognised on purpose: it cannot be upgraded in place,
- * because the whole problem is that its contents cannot be attributed.
+ * because the whole problem is that its contents cannot be attributed. Version 2
+ * added `cost.tiers` — a version-1 cache has no tiers to serve, so it is dropped
+ * like any other mismatch.
  */
-export const CACHE_FORMAT_VERSION = 1;
+export const CACHE_FORMAT_VERSION = 2;
 
 interface ModelCacheFile {
   format: number;
@@ -235,6 +257,92 @@ function resolveEndpoint(apiBlock: any): { api: Api; baseUrl: string } | undefin
   return undefined;
 }
 const DEFAULT_API: { api: Api; baseUrl: string } = { api: "openai-completions", baseUrl: BASE_URL };
+
+/** A finite, non-negative number, or undefined. The payload is untrusted input. */
+function nonNegativeNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+}
+
+/**
+ * The payload prices some models per context tier: `cost.text.input.overrides`
+ * and `cost.text.output.overrides` are parallel arrays whose entries carry the
+ * same `when.context.gt` threshold. pi models the same thing as `cost.tiers`,
+ * where the highest matching threshold applies its rates to the whole request, so
+ * the two arrays collapse onto one tier per threshold.
+ *
+ * Two payload semantics are deliberately not mapped. `cost.multipliers` (peak
+ * hour pricing) has no pi counterpart at all, and an override conditioned on
+ * anything besides `when.context` is skipped rather than partially mapped: a
+ * `service_tier`, region or time window would otherwise be promoted into a
+ * permanent price, which is the same silent mispricing this function exists to
+ * remove. A threshold or price that is not a usable number skips the override
+ * too, so a malformed payload cannot cache NaN or a negative rate.
+ *
+ * One rate differs from what opencode itself would bill: a tier whose override
+ * lists no cache rate inherits the base cache rate here, where their runtime
+ * treats an unlisted rate as 0. pi's tier requires all four rates, so the choice
+ * is base-inherit or zero, and inheriting does not claim that caching has become
+ * free.
+ */
+function costTiers(text: any, base: Omit<CostTier, "inputTokensAbove">): CostTier[] | undefined {
+  const tiers = new Map<number, CostTier>();
+  const tierAt = (threshold: number): CostTier => {
+    let tier = tiers.get(threshold);
+    if (!tier) {
+      tier = { inputTokensAbove: threshold, ...base };
+      tiers.set(threshold, tier);
+    }
+    return tier;
+  };
+
+  const eachOverride = (block: any, apply: (tier: CostTier, override: any) => void): void => {
+    const overrides: unknown[] = Array.isArray(block?.overrides) ? block.overrides : [];
+    for (const override of overrides) {
+      if (typeof override !== "object" || override === null) continue;
+      const when = (override as any).when;
+      if (typeof when !== "object" || when === null) continue;
+      // Exactly one condition, and it is the context band. Anything else is not
+      // expressible as a tier; see the note above.
+      if (!Object.keys(when).every((key) => key === "context")) continue;
+      // `gt` and `gte` both mark where the band starts.
+      const context = when.context;
+      const threshold = nonNegativeNumber(context?.gt) ?? nonNegativeNumber(context?.gte);
+      if (threshold === undefined) continue;
+      apply(tierAt(threshold), override);
+    }
+  };
+
+  eachOverride(text?.input, (tier, override) => {
+    tier.input = nonNegativeNumber(override.price) ?? tier.input;
+    tier.cacheRead = nonNegativeNumber(override.cache?.read) ?? tier.cacheRead;
+    tier.cacheWrite = nonNegativeNumber(override.cache?.write) ?? tier.cacheWrite;
+  });
+  eachOverride(text?.output, (tier, override) => {
+    tier.output = nonNegativeNumber(override.price) ?? tier.output;
+  });
+
+  if (tiers.size === 0) return undefined;
+  return [...tiers.values()].sort((a, b) => a.inputTokensAbove - b.inputTokensAbove);
+}
+
+/**
+ * Pricing as the payload reports it: flat per-1M rates under `cost.text.*`,
+ * optional cache rates that only some models carry, and the context-tiered
+ * `overrides` folded into pi's `cost.tiers`. The block is left off entirely when
+ * the model has no overrides, so a tierless model keeps exactly the shape it had
+ * before it existed.
+ */
+function transformedCost(text: any): JsonModel["cost"] {
+  const cost: JsonModel["cost"] = {
+    input: text?.input?.price ?? 0,
+    output: text?.output?.price ?? 0,
+    cacheRead: text?.input?.cache?.read ?? 0,
+    cacheWrite: text?.input?.cache?.write ?? 0,
+  };
+  const tiers = costTiers(text, cost);
+  if (tiers) cost.tiers = tiers;
+  return cost;
+}
 
 /** Transform a model from the opencode-go /v1/models API. Returns minimal data. */
 export function transformApiModel(apiModel: any): JsonModel {
@@ -294,15 +402,7 @@ export function transformApiModel(apiModel: any): JsonModel {
     reasoning: Boolean(reasoningSupported),
     thinkingLevelMap,
     input,
-    // Pricing lives under cost.text.*; cache prices are optional (only some
-    // models report them). Context-tiered `overrides` and peak-hour
-    // `multipliers` are present in the payload and ignored on purpose.
-    cost: {
-      input: apiModel.cost?.text?.input?.price ?? 0,
-      output: apiModel.cost?.text?.output?.price ?? 0,
-      cacheRead: apiModel.cost?.text?.input?.cache?.read ?? 0,
-      cacheWrite: apiModel.cost?.text?.input?.cache?.write ?? 0,
-    },
+    cost: transformedCost(apiModel.cost?.text),
     // `limit` is present in today's payload, but the null contract stays: a
     // payload without it must not masquerade as a real 131072 and shadow the
     // curated value in mergeWithEmbedded's nullish chain.
@@ -392,6 +492,10 @@ export function mergeWithEmbedded(liveModels: JsonModel[], embeddedModels: JsonM
       // merely omits the block leaves `reasoningDenied` unset, so silence can
       // never disable a curated model.
       const demoted = liveModel.reasoningDenied === true;
+      // Tiers follow the same rule as the four flat rates: the live payload is
+      // authoritative when it reports any, and curation fills the gap when it
+      // does not.
+      const tiers = liveModel.cost.tiers ?? embedded.cost.tiers;
       const merged: JsonModel = {
         ...liveModel,
         ...embedded,
@@ -400,6 +504,7 @@ export function mergeWithEmbedded(liveModels: JsonModel[], embeddedModels: JsonM
           output: liveModel.cost.output || embedded.cost.output,
           cacheRead: liveModel.cost.cacheRead || embedded.cost.cacheRead,
           cacheWrite: liveModel.cost.cacheWrite || embedded.cost.cacheWrite,
+          ...(tiers && tiers.length > 0 ? { tiers } : {}),
         },
         // Nullish coalesce: if the live API was silent (liveModel.contextWindow
         // is null), fall through to the curated embedded value. The final

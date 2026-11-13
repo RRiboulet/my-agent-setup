@@ -23,7 +23,9 @@ Run `bun run test:pi` for offline manifest, catalog, lifecycle and streaming che
 - **14+ Optimized AI Models** - DeepSeek, GLM, Kimi, MiMo, MiniMax, and Qwen
 - **Multi-API Support** — uses the correct API protocol per model (Anthropic, OpenAI Completions)
 - **Fast & Efficient** - Go-optimized endpoints for lower latency
-- **Cost Tracking** with per-model pricing for budget management
+- **Cost Tracking** with per-model pricing for budget management, including the
+  API's context-tiered rates (`cost.tiers`), so a session past the tier's
+  threshold is not still reported at the cheaper rate
 - **Reasoning Models** with thinking level maps for proper effort control
 - **Prompt-cache session affinity** — sends `x-opencode-session` and `x-opencode-client` so OpenCode Go can pin a session to the same cache node
 - **Usage widget** — shows how much of the OpenCode Go 5h / 7d / 30d budgets you have spent, below the editor (footer status line outside the TUI). Each account carries its own budgets, so when [pi-multiprovider](https://github.com/monotykamary/pi-multiprovider) 0.8.0+ pools several `opencode-go` accounts the widget bills the session's active one and repaints on every switch or resume.
