@@ -325,7 +325,7 @@ test("harness: a single tool result is accepted as one string, not iterated into
 test("harness: a tool result that is neither a string nor a list is a loud limitation", () => {
 	const context = collectHarnessContext({ toolResults: 123 as never });
 	assert.equal(context.items.length, 1);
-	assert.match((context.items[0] as LimitationItem).text, /not a list/u);
+	assert.match((context.items[0] as LimitationItem).text, /neither a string nor a list/u);
 	assert.deepEqual(context.supplementary, []);
 });
 
@@ -340,7 +340,7 @@ test("harness: a single unresolved issue is one limitation", () => {
 test("harness: an unresolved issue that is neither a string nor a list is a loud limitation", () => {
 	const context = collectHarnessContext({ unresolvedIssues: { note: "x" } as never });
 	assert.equal(context.items.length, 1);
-	assert.match((context.items[0] as LimitationItem).text, /not a list/u);
+	assert.match((context.items[0] as LimitationItem).text, /neither a string nor a list/u);
 });
 
 test("harness: one acceptance criterion may be a string", () => {

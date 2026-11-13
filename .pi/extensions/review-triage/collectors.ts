@@ -508,8 +508,8 @@ export function collectHarnessContext(input: HarnessContextInput): HarnessContex
 	// malformed record rather than one edit, and stays a recorded gap.
 	const edits = input?.recordedEdits;
 	if (edits !== undefined && !Array.isArray(edits)) {
-		// A non-list would iterate as characters or throw on .map; the same
-		// guard pattern covers the other two harness lists below.
+		// A non-list would iterate as characters or throw on .map; the other two
+		// harness lists go through `textList`, so a single string is read there.
 		items.push(
 			limitation(
 				"harness",
@@ -566,7 +566,7 @@ export function collectHarnessContext(input: HarnessContextInput): HarnessContex
 			limitation(
 				"harness",
 				"the session record",
-				"the recorded tool results were not a list; they were not read",
+				"the recorded tool results were neither a string nor a list; they were not read",
 				"missing",
 				),
 		);
@@ -582,7 +582,7 @@ export function collectHarnessContext(input: HarnessContextInput): HarnessContex
 			limitation(
 				"harness",
 				"the change's author",
-				"the unresolved issues were not a list; they were not read",
+				"the unresolved issues were neither a string nor a list; they were not read",
 				"missing",
 				),
 		);
