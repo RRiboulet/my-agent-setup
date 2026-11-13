@@ -133,6 +133,7 @@ function applyPatch(model: JsonModel, patch: PatchEntry): JsonModel {
   if (patch.maxTokens !== undefined) result.maxTokens = patch.maxTokens;
 
   if (patch.cost) {
+    // `tiers: []` in a patch clears the model's tiers; an absent key keeps them.
     const tiers = patch.cost.tiers ?? result.cost.tiers;
     result.cost = {
       input: patch.cost.input ?? result.cost.input,
@@ -269,11 +270,19 @@ function nonNegativeNumber(value: unknown): number | undefined {
  * where the highest matching threshold applies its rates to the whole request, so
  * the two arrays collapse onto one tier per threshold.
  *
- * Two payload features stay ignored deliberately. `cost.multipliers` (peak-hour
- * pricing) has no pi counterpart at all, and an override conditioned on anything
- * other than `when.context.gt` cannot be expressed as a tier. An override whose
- * threshold or price is not a usable number is skipped rather than cached as NaN
- * or a negative rate.
+ * Two payload semantics are deliberately not mapped. `cost.multipliers` (peak
+ * hour pricing) has no pi counterpart at all, and an override conditioned on
+ * anything besides `when.context` is skipped rather than partially mapped: a
+ * `service_tier`, region or time window would otherwise be promoted into a
+ * permanent price, which is the same silent mispricing this function exists to
+ * remove. A threshold or price that is not a usable number skips the override
+ * too, so a malformed payload cannot cache NaN or a negative rate.
+ *
+ * One rate differs from what opencode itself would bill: a tier whose override
+ * lists no cache rate inherits the base cache rate here, where their runtime
+ * treats an unlisted rate as 0. pi's tier requires all four rates, so the choice
+ * is base-inherit or zero, and inheriting does not claim that caching has become
+ * free.
  */
 function costTiers(text: any, base: Omit<CostTier, "inputTokensAbove">): CostTier[] | undefined {
   const tiers = new Map<number, CostTier>();
@@ -290,7 +299,14 @@ function costTiers(text: any, base: Omit<CostTier, "inputTokensAbove">): CostTie
     const overrides: unknown[] = Array.isArray(block?.overrides) ? block.overrides : [];
     for (const override of overrides) {
       if (typeof override !== "object" || override === null) continue;
-      const threshold = nonNegativeNumber((override as any).when?.context?.gt);
+      const when = (override as any).when;
+      if (typeof when !== "object" || when === null) continue;
+      // Exactly one condition, and it is the context band. Anything else is not
+      // expressible as a tier; see the note above.
+      if (!Object.keys(when).every((key) => key === "context")) continue;
+      // `gt` and `gte` both mark where the band starts.
+      const context = when.context;
+      const threshold = nonNegativeNumber(context?.gt) ?? nonNegativeNumber(context?.gte);
       if (threshold === undefined) continue;
       apply(tierAt(threshold), override);
     }

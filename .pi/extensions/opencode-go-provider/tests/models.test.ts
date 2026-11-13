@@ -272,6 +272,47 @@ test("ignores an override whose threshold is not a number", () => {
   }
 });
 
+test("skips an override conditioned on anything besides the context band", () => {
+  // Mapping the context half of a conditional price would promote it to a
+  // permanent price: the payload may also condition on a service tier, a region
+  // or a time window, none of which pi's tier can express.
+  const overrides = [
+    { when: { context: { gt: 100000 } }, price: 9 },
+    { when: { context: { gt: 100000 }, service_tier: "priority" }, price: 2 },
+    { when: { region: { in: ["eu"] } }, price: 2 },
+  ];
+
+  for (const override of overrides.slice(1)) {
+    const synthetic = transformApiModel({
+      id: "x",
+      cost: { text: { input: { price: 1, overrides: [override] }, output: { price: 3 } } },
+    });
+
+    assert.equal(synthetic.cost.tiers, undefined, JSON.stringify(override.when));
+  }
+
+  const mapped = transformApiModel({
+    id: "x",
+    cost: { text: { input: { price: 1, overrides: [overrides[0]] }, output: { price: 3 } } },
+  });
+  assert.equal(mapped.cost.tiers?.[0]?.input, 9);
+});
+
+test("maps a gte threshold like gt", () => {
+  const synthetic = transformApiModel({
+    id: "x",
+    cost: {
+      text: {
+        input: { price: 1, overrides: [{ when: { context: { gte: 50000 } }, price: 2 }] },
+        output: { price: 3 },
+      },
+    },
+  });
+
+  assert.equal(synthetic.cost.tiers?.[0]?.inputTokensAbove, 50000);
+  assert.equal(synthetic.cost.tiers?.[0]?.input, 2);
+});
+
 test("keeps the base rate for an override whose price is not a number", () => {
   const synthetic = transformApiModel({
     id: "x",
