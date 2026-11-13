@@ -783,6 +783,15 @@ test("no model is both curated and deprecated", async () => {
     Object.keys(deprecated).filter((id) => curatedIds.has(id)),
     [],
   );
+  // The code iterates Object.values and keys off `entry.id`, not the JSON key, so
+  // a key that disagrees with its entry's id serves a phantom model while the key
+  // check above stays green.
+  assert.deepEqual(
+    Object.entries(deprecated)
+      .filter(([key, entry]) => (entry as { id?: unknown }).id !== key)
+      .map(([key]) => key),
+    [],
+  );
 });
 
 test("every deprecated model carries a parseable deprecation date", async () => {

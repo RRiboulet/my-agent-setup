@@ -26,7 +26,8 @@ the live API. That is why editing `models.json` is the most reliable fix.
 
 Because a curated entry outranks the payload, it is a claim that keeps winning
 when the model is later re-priced or re-pointed — so it is right for the things
-the payload has no field for (`compat`, a name, a thinking map for a model whose
+the payload has no field for (`compat`, a display name where the payload's is
+unusable, a thinking map for a model whose
 `effort` list is ambiguous or missing) and wrong as a copy of data the transform
 already derives.
 
@@ -185,7 +186,7 @@ appears exactly once and the deprecation never happens. `tests/models.test.ts`
 pins both that and the date.
 
 Establish that the id is dead before deprecating it. Asking the endpoint
-directly separates the two ways an id can vanish from the list:
+directly separates the three ways an id can vanish from the list:
 
 ```bash
 curl -sS -H "Authorization: Bearer $OPENCODE_API_KEY" -H 'User-Agent: pi/1.0' \
@@ -197,15 +198,18 @@ curl -sS -H "Authorization: Bearer $OPENCODE_API_KEY" -H 'User-Agent: pi/1.0' \
 
 - `400 "Upstream request failed: Model is unavailable."` — the id no longer
   resolves. Deprecate it.
+- `410 "ModelDeprecated: Model <id> has been deprecated. Use <successor> instead."`
+  — deprecated upstream, and it names the replacement. Deprecate it and look at
+  the successor rather than guessing one.
 - `403 "Model access is disabled."` — the model exists and this account has it
   switched off in the console. Leave the entry alone.
 - `400 MissingSessionID` — the probe is missing `x-opencode-session`, which the
   provider sends on every request.
 
-Absence from `/zen/go/v1/models` proves nothing on its own: that endpoint is a
-plan-scoped subset (6 ids for this account, against 20 from the wider
-catalogue), and models can be disabled per model in the console, so most of
-`models.json` is legitimately missing from both.
+Absence from `/zen/go/v1/models` proves nothing on its own: what that endpoint
+returns depends on the credential (6 ids for this account, a wider catalogue
+unauthenticated, so do not quote a count), and models can be switched off per
+model in the console, so most of `models.json` is legitimately missing from both.
 
 ## After editing
 

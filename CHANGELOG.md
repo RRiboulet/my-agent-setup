@@ -119,16 +119,25 @@ Fixed:
   `canonical_id` `meituan/longcat-2.5`, released 2026-11-02), so the preview id
   was selectable and the GA id existed only while the live fetch had succeeded.
 
-  Absence from the model list was not evidence enough to act on: both opencode-go
-  endpoints are plan-scoped subsets, and 26 of the 30 curated ids are simply
-  switched off per model in this account's console. Asking the endpoint for the
-  model separates the cases, which is what the decision rests on —
-  `longcat-2.0` answers `403 "Model access is disabled."` (it exists, this account
-  has it off), `longcat-2.5-preview-free` answers
-  `400 "Upstream request failed: Model is unavailable."` (the id resolves to
-  nothing upstream), and `longcat-2.5-free` answers 200. The probe needs
+  Absence from the model list was not evidence enough to act on: what that
+  endpoint returns depends on the credential (6 ids for this account, a wider
+  catalogue unauthenticated) and models can be switched off per model in the
+  console. Asking the endpoint for the model separates the cases, which is what
+  the decision rests on — `longcat-2.0` answers `403 "Model access is
+  disabled."` (it exists, this account has it off), `longcat-2.5-preview-free`
+  answers `400 "Upstream request failed: Model is unavailable."` (the id resolves
+  to nothing upstream), and `longcat-2.5-free` answers 200. The probe needs
   `x-opencode-session` like every other request, which the extension already
   sends and a bare `curl` does not.
+
+  The same probe then found that the drift is wider than this one id, so it is
+  recorded here rather than fixed quietly: of the other curated ids missing from
+  the list, `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp`, `space-bunny`
+  and `grok-4.6` answer `400 Model is unavailable`, while `mimo-v2.5`,
+  `mimo-v2.5-pro` and `minimax-m2.7` answer `410 ModelDeprecated` naming the
+  successor to use instead. Those seven cannot complete a request and want the
+  same move `longcat-2.5-preview-free` gets; the rest are disabled in the console
+  and answer `403` (spot-checked on `qwen3.8-flash`).
 
   The preview id therefore moves to `deprecated-models.json` stamped with today's
   `deprecatedAt`: it keeps being served for the 14-day grace period, so a saved
