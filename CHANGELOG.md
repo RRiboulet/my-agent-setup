@@ -749,6 +749,28 @@ Maintenance:
   They were written before the code and are committed after it, so the reasoning
   survives the pull-request bodies it was first stated in.
 
+- **The "one copy of the extensions, never two" rule now covers linked
+  worktrees, and the `worktree` skill's subagent note names the one failure the
+  launcher cannot fix.** The local-path install dedupes against project
+  discovery only because both name files in the same checkout. A child rooted in
+  `.worktrees/<slug>` discovers *that tree's* copy while the package still
+  resolves to the main checkout's, so pi exits 1 with one `Tool "…" conflicts`
+  line per extension. Verified by running the real child argv in tmux: it
+  reproduces with no `--extension` at all, so the launcher's flag is not the
+  cause and nothing it can pass removes it selectively — `PI_PACKAGE_DIR`
+  overrides pi's own install path, not the installed extensions;
+  `--no-extensions` drops package discovery but also the built-ins and every
+  extension not named with `-e`; and `--no-approve` would only make the child run
+  the main checkout's code. It does *not* reproduce in the two
+  shapes #103 was written for: this repo's worktree with a package-free agent
+  dir, and a separate project using the package. The parent already carries the
+  dead child's pane in the failure it reports, so the missing piece was the rule,
+  not the diagnostic. The remedy is host configuration — a package-free agent
+  dir, as this devcontainer uses, or uninstalling the package on a host that
+  works in this repo's worktrees. The reproduction matrix and commands are in
+  `docs/specs/2026-11-13-subagent-rooted-in-a-worktree.md`, and a static test in
+  `worktree-skill.test.ts` pins the new sentence against a silent revert.
+
 ## v1.11.0 — 2026-11-09
 
 Added:

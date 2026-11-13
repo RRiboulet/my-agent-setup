@@ -277,6 +277,23 @@ test("worktree skill: names the extension conflict a worktree cwd used to cause"
 	);
 });
 
+test("worktree skill: names the package copy as the case the launcher cannot dedupe", () => {
+	// A child whose tree has its own copy is deduped by the launcher (#103). A host
+	// that also installs this repo as a package defeats that: pi discovers the
+	// package copy too, and that one is the main checkout's file. Verified by
+	// running the real child argv in tmux; see
+	// docs/specs/2026-11-13-subagent-rooted-in-a-worktree.md.
+	assert.ok(
+		SKILL.includes("The package copy is the one case that fix cannot cover."),
+		"must name the package copy as a second, unfixable conflict",
+	);
+	assert.ok(SKILL.includes('Tool "get_goal" conflicts with'), "must quote the per-extension conflict a reader sees");
+	assert.ok(
+		SKILL.includes("uninstall the package before working in this repo's worktrees"),
+		"must give the remedy a host can act on",
+	);
+});
+
 test("worktree skill: no recipe block carries a CR", () => {
 	// AGENTS.md: a CRLF shell file makes bash fail with `$'\r': command not
 	// found` while `git status` stays clean, so the recipes must stay LF-only.

@@ -294,7 +294,11 @@ trusted, so within this repo the launcher hands it that path explicitly rather
 than the main checkout's. That is also why the two must not be mixed - the
 failure is in the note below. A `cwd` outside this repo's trusted tree keeps the
 launcher's own copy instead, because an explicit extension path is loaded even
-for a project pi would refuse to trust.
+for a project pi would refuse to trust. The one precondition is that this repo
+is not *also* installed as a pi package on that host: pi would discover that
+package as well, it is the main checkout's copy rather than the worktree's, and
+no launcher rule can dedupe two different files. The note below has the symptom
+and the remedy.
 
 Use an absolute path for `cwd`, never a relative one. One worktree per
 subagent: the same branch cannot be checked out twice, and two subagents in one
@@ -318,6 +322,28 @@ same file the child would discover. This repo's launcher resolves the child's
 copy, so the recipe above works. On a checkout without that fix, launch with
 `cwd` = the repository root and `cd` into the worktree inside each command
 instead, which keeps the child's discovery pointed at the main checkout.
+
+**The package copy is the one case that fix cannot cover.** If this repo is also
+installed as a package on that host (the README's local-path install, or a
+`git:` one), the child discovers the package too, and the package is the *main
+checkout's* copy — a different file from the worktree's, because the worktree's
+copy only becomes discoverable once `cwd` moves into the tree. The child then
+exits 1 with one line per extension, e.g.
+
+```
+Tool "get_goal" conflicts with /path/to/repo/.worktrees/task-name/.pi/extensions/goal.ts
+Flag "--attach-subagent" conflicts with /path/to/repo/.worktrees/task-name/.pi/extensions/subagent/index.ts
+```
+
+That ordering is the tell: the **package** path is the one being refused, so the
+conflict is not the launcher's flag but the two copies in the child's own
+discovery. It reproduces with no `--extension` at all, and there is no
+selective way to suppress it: `--no-extensions` (`-ne`) drops package discovery
+along with the built-in extensions and every extension not named with `-e`, so it
+is a lossy workaround, not a dedupe. There is no launcher fix to wait for.
+On such a host, uninstall the package before working in this repo's worktrees, or
+launch with `cwd` = the repository root and `cd` into the worktree inside each
+command; a package-free agent dir (what this devcontainer uses) is immune.
 
 ## Review
 
