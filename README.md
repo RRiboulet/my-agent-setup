@@ -151,6 +151,31 @@ copy no longer reaches it. Sessions move with it, so history from before the
 split stays in the shared dir and does not appear in `--continue` here. `gh` is
 unaffected: `GH_CONFIG_DIR` still points at the shared volume.
 
+## Upgrading to v1.12.0
+
+Two changes need an action on an existing install. This block is replaced at each
+release, not accumulated — the reasoning stays in the `CHANGELOG.md` entry.
+
+**Install this repo by local path, not `git:`.** If `pi` here now exits 1 with
+`Tool "…" conflicts with …`, the package and this working tree are both providing
+the extensions; that is the trap above under "One copy of the extensions, never
+two", and the fix is to replace the package entry:
+
+```bash
+pi remove git:github.com/RRiboulet/my-agent-setup
+pi install /path/to/my-agent-setup
+```
+
+**Delete any `opencode-go` web-search provider.** The Go plan never actually
+searched — its models accept the `web_search` tool definition and answer from
+memory — so an explicit `--provider opencode-go` or
+`PI_WEB_SEARCH_PROVIDER=opencode-go` is now an error instead of a silent
+fallback behind another plan's budget. Remove the value rather than replace it:
+**Brave is the first choice whenever a Brave key resolves** (`BRAVE_API_KEY`,
+else a `brave`/`brave-search` entry in `auth.json`), OpenRouter is the native
+default when it does not, and the `opencode-go` credential itself still serves
+`/model`.
+
 ## Contents
 
 | Path | What it is |
