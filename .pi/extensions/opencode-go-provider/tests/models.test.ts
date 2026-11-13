@@ -9,6 +9,7 @@
  */
 import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -765,6 +766,49 @@ test("keeps cached cost and context window when the curated entry differs", () =
   assert.deepEqual(stale.cost, { input: 9, output: 9, cacheRead: 9, cacheWrite: 9 });
 });
 
+test("no model is both curated and deprecated", async () => {
+  // A half-finished move — the entry added to deprecated-models.json but not
+  // removed from models.json — is otherwise silent: withDeprecated keeps the base
+  // entry on an id conflict, so the model still appears exactly once and the
+  // deprecation simply never happens.
+  const curated = JSON.parse(
+    await readFile(new URL("../models.json", import.meta.url), "utf8"),
+  ) as { id: string }[];
+  const deprecated = JSON.parse(
+    await readFile(new URL("../deprecated-models.json", import.meta.url), "utf8"),
+  ) as Record<string, unknown>;
+  const curatedIds = new Set(curated.map((m) => m.id));
+
+  assert.deepEqual(
+    Object.keys(deprecated).filter((id) => curatedIds.has(id)),
+    [],
+  );
+  // The code iterates Object.values and keys off `entry.id`, not the JSON key, so
+  // a key that disagrees with its entry's id serves a phantom model while the key
+  // check above stays green.
+  assert.deepEqual(
+    Object.entries(deprecated)
+      .filter(([key, entry]) => (entry as { id?: unknown }).id !== key)
+      .map(([key]) => key),
+    [],
+  );
+});
+
+test("every deprecated model carries a parseable deprecation date", async () => {
+  // `activeDeprecatedModels` skips an entry whose `deprecatedAt` does not parse,
+  // so a missing or typo'd date silently removes the model today instead of after
+  // the 14-day grace it was meant to get.
+  const deprecated = JSON.parse(
+    await readFile(new URL("../deprecated-models.json", import.meta.url), "utf8"),
+  ) as Record<string, { deprecatedAt?: unknown }>;
+
+  const unparseable = Object.entries(deprecated)
+    .filter(([, entry]) => typeof entry.deprecatedAt !== "string" || Number.isNaN(Date.parse(entry.deprecatedAt)))
+    .map(([id]) => id);
+
+  assert.deepEqual(unparseable, []);
+});
+
 // ─── buildModels ──────────────────────────────────────────────────────────────
 
 test("keeps tiers through a cost patch, and lets the patch replace them", () => {
@@ -812,9 +856,12 @@ test("lets a custom model replace the base entry with the same id", () => {
 test("applies a patch to a custom model", () => {
   const custom = [model({ id: "c", name: "Custom" })];
 
-  const [patched] = buildModels([], custom, { c: { name: "Patched" } });
+  // By id, not [0]: buildModels also appends the grace-period deprecated models,
+  // so with an empty base the first entry is whichever deprecation happens to be
+  // inside its 14-day window — a result that depends on today's date.
+  const patched = buildModels([], custom, { c: { name: "Patched" } }).find((m) => m.id === "c");
 
-  assert.equal(patched.name, "Patched");
+  assert.equal(patched?.name, "Patched");
 });
 
 test("applies a patch to a custom model that also has a curated entry", () => {

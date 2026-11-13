@@ -113,6 +113,63 @@ Fixed:
   `add-model`'s "After editing" step now says which edits still need the file
   deleted (`cost`, `contextWindow`) and which no longer do, using
   `$PI_CODING_AGENT_DIR` rather than the hard-coded host path.
+- **The picker offered a longcat id that no longer exists and, offline, omitted
+  the one that does.** `models.json` carried `longcat-2.5-preview-free`
+  (1M / 131072) while the API serves `longcat-2.5-free` (1M / 262144, same
+  `canonical_id` `meituan/longcat-2.5`, released 2026-11-02), so the preview id
+  was selectable and the GA id existed only while the live fetch had succeeded.
+
+  Absence from the model list was not evidence enough to act on: what that
+  endpoint returns depends on the credential (6 ids for this account, a wider
+  catalogue unauthenticated) and models can be switched off per model in the
+  console. Asking the endpoint for the model separates the cases, which is what
+  the decision rests on — `longcat-2.0` answers `403 "Model access is
+  disabled."` (it exists, this account has it off), `longcat-2.5-preview-free`
+  answers `400 "Upstream request failed: Model is unavailable."` (the id resolves
+  to nothing upstream), and `longcat-2.5-free` answers 200. The probe needs
+  `x-opencode-session` like every other request, which the extension already
+  sends and a bare `curl` does not.
+
+  The same probe then found that the drift is wider than this one id, so it is
+  recorded here rather than fixed quietly: of the other curated ids missing from
+  the list, `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp`, `space-bunny`
+  and `grok-4.6` answer `400 Model is unavailable`, while `mimo-v2.5`,
+  `mimo-v2.5-pro` and `minimax-m2.7` answer `410 ModelDeprecated` naming the
+  successor to use instead. Those seven cannot complete a request and want the
+  same move `longcat-2.5-preview-free` gets; the rest are disabled in the console
+  and answer `403` (spot-checked on `qwen3.8-flash`).
+
+  The preview id therefore moves to `deprecated-models.json` stamped with today's
+  `deprecatedAt`: it keeps being served for the 14-day grace period, so a saved
+  model setting is not yanked mid-run, and is then evicted. `longcat-2.5-free` is
+  curated in its place — `openai-completions` on the advertised
+  `inference/go/openai/v1`, `1M / 262144`, toggle-only reasoning so no
+  `thinkingLevelMap` — because the offline half is the half that was missing.
+
+  `claude-haiku-5-5` stays live-only, and that is now a decision on record rather
+  than an omission. Since #117 the payload describes it completely
+  (`anthropic-messages` on `inference/go/anthropic`, 1M / 128K, image input,
+  effort `low…max`, tiered pricing), and none of the five curated
+  `anthropic-messages` entries carries a `compat` block, so a curated copy would
+  add no field — only pin `maxTokens` and `contextWindow` against later payload
+  corrections. `add-model` now says this as a rule: curate what the payload cannot
+  express, not what it already derives.
+
+  Two data tests came out of it. `no model is both curated and deprecated` pins
+  the half-finished move, which is otherwise silent — `withDeprecated` keeps the
+  curated entry on an id conflict, so the model still appears exactly once and
+  the deprecation never happens; `every deprecated model carries a parseable
+  deprecation date` pins the other silent failure, an entry with no usable date
+  being evicted immediately instead of after its grace period. One existing test
+  also had to change for a reason worth stating: `applies a patch to a custom
+  model` read `buildModels(...)[0]`, which is the first grace-period deprecated
+  entry whenever the base list is empty. It passed only because every deprecation
+  in the file had already expired, and adding one inside its window made it read
+  the wrong model; it now finds its model by id. `add-model` gains "Curate only
+  what the live API cannot say" and "Deprecating a model", and records that
+  `scripts/update-models.js` — the program that normally performs this move — is
+  not vendored into this tree, so the deprecation path has been running by hand or
+  not at all.
 
 - **The review-triage policy named a provider with no credential.** The config at
   `~/.pi/agent/review-triage.json` listed `deepseek-v4.1-flash` and
