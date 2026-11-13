@@ -22,6 +22,26 @@ comes from three sources, merged in this order:
 `thinkingLevelMap`, `input`, `compat`, etc., so a curated entry always beats
 the live API. That is why editing `models.json` is the most reliable fix.
 
+## Curate only what the live API cannot say
+
+Because a curated entry outranks the payload, it is a claim that keeps winning
+when the model is later re-priced or re-pointed — so it is right for the things
+the payload has no field for (`compat`, a name, a thinking map for a model whose
+`effort` list is ambiguous or missing) and wrong as a copy of data the transform
+already derives.
+
+The worked example is `claude-haiku-5-5`, which is live-only on purpose. Since
+#117 the payload says everything that matters about it — `anthropic-messages` on
+`inference/go/anthropic`, 1M context / 128K output, image input, effort
+`low…max`, and pricing with a `>100K` tier — and no curated `anthropic-messages`
+entry carries `compat`, so an entry would add no field at all while pinning
+`maxTokens` and `contextWindow` against later payload corrections. The trade is
+that a live-only model is absent offline.
+
+Curate when the payload is wrong or silent about something a request depends on,
+when the model is worth having offline, or when its live data has drifted once
+already.
+
 ## What the user must provide
 
 Ask the user for (or look up from the live API / pi-ai bundled data):
@@ -148,6 +168,44 @@ pi counterpart at all, and an override conditioned on anything other than
 `cost` is one of the fields the stale path serves from the cache, so a tier edit
 in `models.json` needs the cache deleted (see "After editing") before it shows
 up offline.
+
+## Deprecating a model
+
+When the API stops serving a model id, do not delete the entry: move it from
+`models.json` to `deprecated-models.json`, keyed by id and stamped with
+`deprecatedAt` (UTC ISO 8601). `activeDeprecatedModels()` keeps serving it for
+`DEPRECATED_MODEL_TTL_MS` (14 days), so a saved model setting or an in-flight
+session is not yanked mid-run, then evicts it; an entry whose date does not parse
+is evicted immediately instead.
+
+`scripts/update-models.js` is what normally performs the move, and it is not
+vendored into this tree, so here it is hand work. A half-finished move is silent:
+`withDeprecated` keeps the curated entry on an id conflict, so the model still
+appears exactly once and the deprecation never happens. `tests/models.test.ts`
+pins both that and the date.
+
+Establish that the id is dead before deprecating it. Asking the endpoint
+directly separates the two ways an id can vanish from the list:
+
+```bash
+curl -sS -H "Authorization: Bearer $OPENCODE_API_KEY" -H 'User-Agent: pi/1.0' \
+  -H 'Content-Type: application/json' -H "x-opencode-session: probe-$$" \
+  -H 'x-opencode-client: pi' \
+  -d '{"model":"<id>","messages":[{"role":"user","content":"Say ok"}],"max_tokens":8}' \
+  https://opencode.ai/zen/go/v1/chat/completions
+```
+
+- `400 "Upstream request failed: Model is unavailable."` — the id no longer
+  resolves. Deprecate it.
+- `403 "Model access is disabled."` — the model exists and this account has it
+  switched off in the console. Leave the entry alone.
+- `400 MissingSessionID` — the probe is missing `x-opencode-session`, which the
+  provider sends on every request.
+
+Absence from `/zen/go/v1/models` proves nothing on its own: that endpoint is a
+plan-scoped subset (6 ids for this account, against 20 from the wider
+catalogue), and models can be disabled per model in the console, so most of
+`models.json` is legitimately missing from both.
 
 ## After editing
 
