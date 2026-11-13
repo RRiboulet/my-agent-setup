@@ -227,8 +227,9 @@ routing for as long as the API stays unreachable.
 On the stale path, the fields `models.json` owns (`name`, `api`, `baseUrl`,
 `input`, `maxTokens`, `reasoning`, `thinkingLevelMap`, and `compat` when the
 curated entry defines one) are refreshed from it, so editing those needs no cache
-delete. `cost` and `contextWindow` are served from the cache, so to change either
-of those offline, remove the file.
+delete — removing `compat`, `api` or `baseUrl` from an entry is the exception,
+since the cached copy stays. `cost` and `contextWindow` are served from the cache,
+so to change either of those offline, remove the file.
 
 ## License
 

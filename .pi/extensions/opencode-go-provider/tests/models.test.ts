@@ -8,7 +8,7 @@
  * exactly what the network feeds it.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -520,12 +520,19 @@ test("ignores a cache that is JSON but not a cache file", () => {
 test("writes a cache its own stale path can read", () => {
   // The writer and the reader are the only two things that know the file's
   // shape, and a format bump that changes one but not the other would freeze
-  // the model list at the curated entries forever.
-  cacheModels([model({ id: "cached" })]);
+  // the model list at the curated entries forever. Reading the file back, not
+  // just round-tripping through the module, is what catches the subtler version:
+  // renaming the envelope on both sides without bumping the format, which leaves
+  // every cache written by the previous release unloadable while the marker
+  // claims it is current.
+  const models = [model({ id: "cached" })];
+  cacheModels(models);
 
-  const result = loadStaleModels([]);
-
-  assert.deepEqual(result.map((m) => m.id), ["cached"]);
+  assert.deepEqual(JSON.parse(readFileSync(CACHE_PATH, "utf8")), {
+    format: CACHE_FORMAT_VERSION,
+    models,
+  });
+  assert.deepEqual(loadStaleModels([]).map((m) => m.id), ["cached"]);
 });
 
 test("refreshes the curated endpoint, name, modalities and limits on the stale path", () => {
@@ -562,13 +569,18 @@ test("refreshes the curated endpoint, name, modalities and limits on the stale p
   assert.deepEqual(stale.input, ["text", "image"]);
   assert.equal(stale.maxTokens, 128000);
   assert.deepEqual(stale.compat, { maxTokensField: "max_tokens" });
-  // Cost and contextWindow stay cached deliberately: refreshing those from the
-  // embedded list is the shape that got the earlier change reverted (#97).
+  // Cost and contextWindow stay cached deliberately: they are the two fields
+  // mergeWithEmbedded gives to the live payload first, so a cache that disagrees
+  // with models.json there is holding a live observation, not stale curation.
   assert.deepEqual(stale.cost, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
   assert.equal(stale.contextWindow, 131072);
 });
 
-test("keeps a live-derived compat block when curation has none", () => {
+test("keeps a cached compat block when curation has none", () => {
+  // Not "live-derived": the live transform never writes compat, so on a curated
+  // id a cached block can only have come from an earlier models.json — which is
+  // exactly why dropping it is not propagated here, and why removing compat from
+  // models.json needs the cache deleted (add-model says so).
   writeCache([model({ id: "m", compat: { maxTokensField: "max_tokens" } })]);
 
   const [stale] = loadStaleModels([model({ id: "m" })]);

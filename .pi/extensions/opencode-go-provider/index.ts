@@ -479,14 +479,19 @@ export function loadStaleModels(embeddedModels: JsonModel[]): JsonModel[] {
       continue;
     }
 
-    // Refresh everything the curated entry owns, which is what
-    // mergeWithEmbedded already gives it: those fields are curation data, not
-    // something the cache observed. `reasoning` and `thinkingLevelMap` came
-    // first (#120), because a models.json edit is meant to change them; the
-    // endpoint and modalities belong here for the sharper reason that a stale
-    // `api`/`baseUrl` sends every request for the model to the wrong protocol.
-    // Cost and contextWindow stay cached deliberately: refreshing those from the
-    // embedded list is the shape that got the earlier change reverted (#97).
+    // Refresh everything the curated entry owns, with one deliberate divergence
+    // from mergeWithEmbedded: an entry that defines no thinkingLevelMap drops the
+    // cached one instead of falling back to it. The merge rule is "curated, else
+    // live", which offline would keep serving the map a curation edit just
+    // removed; #120 chose the strict rule so a level that no longer works stops
+    // being offered. `compat` keeps the merge's fallback because the live
+    // transform never writes compat, so a cached block on a curated id is always
+    // earlier curation and only a removal is affected.
+    //
+    // Cost and contextWindow stay cached deliberately: they are the two fields
+    // mergeWithEmbedded gives to the live payload first, so a cached value that
+    // disagrees with models.json is a live observation rather than stale
+    // curation, and overwriting it offline would invent a price.
     cachedModel.name = em.name;
     // `??`: a curated entry without an endpoint lets the cached one stand, which
     // is what mergeWithEmbedded's spread does with an absent key.
@@ -498,9 +503,10 @@ export function loadStaleModels(embeddedModels: JsonModel[]): JsonModel[] {
     // Unconditional, unlike compat: curation dropping a map must stop offering
     // levels that no longer work, and the cached map is the stale copy here.
     cachedModel.thinkingLevelMap = em.thinkingLevelMap;
-    // `compat` only when curation defines one, because mergeWithEmbedded falls
-    // back to the live block and an absent curated compat means "keep whatever
-    // the cache has".
+    // `compat` only when curation defines one. The merge falls back to the live
+    // block, and a cached block on a curated id is always earlier curation, so
+    // keeping it is the same "curated, else cached" rule — at the cost of a
+    // removed block lingering until the cache is deleted.
     if (em.compat !== undefined) cachedModel.compat = em.compat;
   }
   return cached;
