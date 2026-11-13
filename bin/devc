@@ -516,9 +516,18 @@ doctor() {
 	local d name dc compose
 	for d in "${checked[@]}"; do
 		name="$(basename "$d")"
-		dc="$d/.devcontainer/devcontainer.json"
+		# Membership is `has_devcontainer`, not "does the directory layout exist".
+		# Testing `$d/.devcontainer/devcontainer.json` here skipped every
+		# repo-root `.devcontainer.json` project — a shape `has_devcontainer`,
+		# `projects` and `cfg_hash` all handle — so doctor reported "nothing
+		# blocking" for a container it never examined.
+		has_devcontainer "$d" || continue
+		if [ -f "$d/.devcontainer/devcontainer.json" ]; then
+			dc="$d/.devcontainer/devcontainer.json"
+		else
+			dc="$d/.devcontainer.json"
+		fi
 		compose="$d/.devcontainer/docker-compose.yml"
-		[ -f "$dc" ] || continue
 		printf '\n%s%s%s %s\n' "$BOLD" "$name" "$RESET" "$d"
 
 		if grep -q 'docker-in-docker' "$dc" 2>/dev/null; then

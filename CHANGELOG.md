@@ -109,6 +109,27 @@ Fixed:
   new checks do not cost existing users a cold start. Every new case fails
   against the previous code; the provider suite passes 95/95 (`cd
   .pi/extensions/opencode-go-provider && node --test`).
+- **`devc doctor` now examines a repo-root `.devcontainer.json` project
+  instead of skipping it and reporting the run as clean.** `doctor()` built its
+  config path as `$d/.devcontainer/devcontainer.json` and did `[ -f "$dc" ] ||
+  continue`, so the root layout — which `has_devcontainer` accepts in every
+  membership test, `projects` lists and `cfg_hash` hashes since PR #124 — never
+  reached a single per-project check: no Docker-in-Docker warning, no uid
+  comparison, no stale-config report. The silence was the bug, because the run
+  then ended in "nothing blocking" for a container it had not examined.
+  Membership is now the existing `has_devcontainer` helper, with the config path
+  picked from whichever layout exists; the Dockerfile check stays guarded on
+  `.devcontainer/Dockerfile`, and so does the compose/ports check on
+  `.devcontainer/docker-compose.yml`, so both remain silent for a root-style
+  project that puts them at the repo root — a narrower gap than before, not
+  none. The stale check needed no change because `cfg_hash` already handles both
+  shapes. `devc.test.ts` gains the coverage it lacked for the root style:
+  `doctor proj` and `doctor` with no name both print the project's section and
+  its current line, and editing the root config then reports `stale`. A second
+  test pins the other half — the config path itself — by putting
+  Docker-in-Docker in the root file and requiring the privileged line, which a
+  membership-only fix would miss while the section around it printed. Both fail
+  against the previous script, which printed no section at all.
 
 Maintenance:
 
