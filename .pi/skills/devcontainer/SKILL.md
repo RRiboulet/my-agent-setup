@@ -122,13 +122,13 @@ nothing here; do not "fix" a missing port by publishing `0.0.0.0`.
 ## Host and project facts (this VM)
 
 - Ubuntu 24.04, aarch64, Docker 29.9.2, `@devcontainers/cli` 0.90.0, `devc` at
-  `/usr/local/bin/devc` (symlink into `my-agent-setup/bin`).
+  `~/bin/devc` (symlink into `my-agent-setup/bin`).
 - Containers run as uid 1001 (`ubuntu`), remapped by the CLI's
-  `updateRemoteUserUID`; all three projects build natively for arm64.
+  `updateRemoteUserUID`; all four projects build natively for arm64.
 - **pupkeep** (`~/pupkeep`): Node 24 + pi 1.5.0; server on 8787; `npm test`
-  inside is 275 tests. cloudflared is installed per architecture.
+  inside is 895 tests. cloudflared is installed per architecture.
 - **lol-dataset** (`~/lol-dataset`): the dataset tooling; its devcontainer uses
-  a private `pi-agent-lol-dataset` volume and excludes the vendored
+  a private `lol-dataset-pi-config` volume and excludes the vendored
   `.pi/extensions`/`.pi/skills` tree so only the image-baked package loads.
 - **Every project except my-agent-setup** bakes `my-agent-setup` at the tag in
   its `.devcontainer/pi-agent-setup.version` under
