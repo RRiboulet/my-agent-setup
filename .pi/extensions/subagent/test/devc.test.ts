@@ -635,6 +635,68 @@ test("devc doctor reports a stale container, and only once the config moved", ()
 	assert.match(stale.stdout, /stale      devcontainer config changed; devc up will recreate it/);
 });
 
+test("devc doctor reports a root-style .devcontainer.json project, current and stale", () => {
+	// `doctor` built its config path as `.devcontainer/devcontainer.json` and
+	// skipped the project when that file was missing. A repo-root
+	// `.devcontainer.json` is a project everywhere else — `has_devcontainer`
+	// accepts it, `projects` lists it, `find_project` resolves it and `cfg_hash`
+	// hashes it — so the skip meant doctor never examined it: no uid comparison,
+	// no stale report, and "nothing blocking" for a container it never looked at.
+	const sb = sandbox();
+	rmSync(path.join(sb.project, ".devcontainer"), { recursive: true, force: true });
+	const rootConfig = path.join(sb.project, ".devcontainer.json");
+	writeFileSync(rootConfig, '{"image":"alpine"}\n');
+
+	const up = devc(sb, ["up", "proj"]);
+	assert.equal(up.status, 0, `devc up must succeed for the root style; stderr: ${up.stderr}`);
+
+	const fresh = devc(sb, ["doctor", "proj"], { DEVC_TEST_CONTAINER: "1" });
+	assert.equal(fresh.status, 0, fresh.stderr);
+	assert.ok(
+		fresh.stdout.includes(`proj ${sb.project}`),
+		`doctor must print a section for the root-style project; stdout: ${fresh.stdout}`,
+	);
+	assert.match(fresh.stdout, /running    container uid \d+, host uid \d+/);
+	assert.doesNotMatch(fresh.stdout, /stale {6}/, "a container built from this config is not stale");
+
+	// `devc doctor` with no name iterates `projects()` instead of `find_project`;
+	// both paths reach the same per-project section, so pin both.
+	const all = devc(sb, ["doctor"], { DEVC_TEST_CONTAINER: "1" });
+	assert.equal(all.status, 0, all.stderr);
+	assert.ok(
+		all.stdout.includes(`proj ${sb.project}`),
+		`devc doctor must list the root-style project; stdout: ${all.stdout}`,
+	);
+
+	writeFileSync(rootConfig, '{"image":"ubuntu"}\n');
+	const stale = devc(sb, ["doctor", "proj"], { DEVC_TEST_CONTAINER: "1" });
+	assert.equal(stale.status, 0, stale.stderr);
+	assert.match(stale.stdout, /stale      devcontainer config changed; devc up will recreate it/);
+});
+
+test("devc doctor reads a root-style .devcontainer.json for its per-config checks", () => {
+	// Choosing `dc` from the layout is the half a membership-only fix leaves out:
+	// with `dc` still hard-coded to the directory form, the section prints and the
+	// uid/stale checks run, but every check that greps the config reads a file
+	// that does not exist and silently finds nothing. Docker-in-docker is the
+	// cheapest of those to observe, and this is the only test whose config the
+	// privileged check reads.
+	const sb = sandbox();
+	rmSync(path.join(sb.project, ".devcontainer"), { recursive: true, force: true });
+	const rootConfig = path.join(sb.project, ".devcontainer.json");
+	writeFileSync(rootConfig, '{"image":"alpine","features":{"docker-in-docker":{}}}\n');
+
+	assert.equal(devc(sb, ["up", "proj"]).status, 0);
+
+	const doctor = devc(sb, ["doctor", "proj"], { DEVC_TEST_CONTAINER: "1" });
+	assert.equal(doctor.status, 0, doctor.stderr);
+	assert.match(
+		doctor.stdout,
+		/privileged  Docker-in-Docker feature/,
+		`doctor must read the root config; stdout: ${doctor.stdout}`,
+	);
+});
+
 test("devc: a dry-run rebuild executes nothing and writes no stamp", () => {
 	// The stamp is the claim "this container was built from this config". A dry
 	// run writes none, or `devc doctor` reports a stale container as current.
