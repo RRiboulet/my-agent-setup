@@ -213,6 +213,7 @@ default when it does not, and the `opencode-go` credential itself still serves
 | `.pi/skills/native-web-search/` | Script + docs for the above. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/native-web-search/`, with local provider patches: OpenRouter support, unknown-provider rejection, and a test seam (`__test__` + direct-invocation guard). The two must travel together |
 | `.pi/skills/commit/` | Conventional Commits subjects, and the branch-per-change rule from `AGENTS.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/commit/SKILL.md`, with two local adaptations |
 | `.pi/skills/in-your-own-words/` | Plays the goal, done-when, scope and risky assumptions back before non-trivial work; asks only about decisions, never facts. Part of the coding skill stack below |
+| `.pi/skills/grilling/` | Interviews the user in rounds about a plan, decision or idea until every branch of the design tree is settled: ask the whole frontier, recommend an answer per question, find facts yourself with a `subagent`, leave the decisions to them. **Ported** from mattpocock/skills `skills/productivity/grilling`, with its user-invoked `grill-me` wrapper folded in rather than shipped as a second skill |
 | `.pi/skills/blast-radius/` | Finds what a change can break beyond its diff, names the one fact it is safe because of, and proves it by running real code |
 | `.pi/skills/tdd/` | Red-green-refactor at public seams, one vertical slice at a time, with the two-imagined-edits test and mocking rules |
 | `.pi/skills/diagnosing-bugs/` | Feedback loop first, then reproduce, minimise, rank hypotheses, instrument, and fix the root cause with a regression test |
@@ -224,6 +225,7 @@ default when it does not, and the `opencode-go` credential itself still serves
 | `.pi/skills/to-tickets/` | User-invoked `/skill:to-tickets`: splits a spec into tracer-bullet tickets with blocked-by edges |
 | `.pi/skills/implement/` | User-invoked `/skill:implement`: builds a spec or ticket end to end through the skills above |
 | `.pi/skills/handoff/` | User-invoked `/skill:handoff`: writes a handoff document a fresh session can continue from |
+| `.pi/skills/teach/` | User-invoked `/skill:teach`: teaches a topic across sessions in a stateful workspace of short cited HTML lessons, reference sheets, vetted resources, a glossary and ADR-style learning records. **Ported** from mattpocock/skills `skills/productivity/teach`, with the workspace kept out of any project checkout and the glossary format linked instead of orphaned |
 | `.pi/skills/devcontainer/` | Drive a project's devcontainer from a headless host: `devc` (`devcontainer up` + `exec`), the rule that an agent must never run the attaching form, long-build and long-server recipes, the volume/uid/port rules that prevent damage, and a symptom→fix table. **Ours** |
 | `.pi/skills/github/` | gh CLI usage: PRs, CI runs, `gh api`, structured JSON. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/github/SKILL.md`, with four local adaptations — this repo's `GH_CONFIG_DIR` auth setup, the AGENTS.md squash workflow, the token rule, and the credential-helper note |
 | `.pi/skills/librarian/` | Caches and refreshes remote git repos under the pi agent dir (`<agent dir>/cache/checkouts/<host>/<org>/<repo>`) with partial clones, so repeated references reuse a stable local checkout. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/librarian/`, with the cache root moved from `~/.cache/checkouts` to the persistent agent dir and the script invoked by skill-relative path |
@@ -240,11 +242,17 @@ default when it does not, and the `opencode-go` credential itself still serves
 The twelve skills from `in-your-own-words` to `handoff` were adapted from
 [RRiboulet/agent-coding-skills](https://github.com/RRiboulet/agent-coding-skills)
 and are now maintained here as ours: pi invocation syntax (`/skill:<name>` for
-the four user-invoked entry points), this repo's commit and worktree rules,
+the five user-invoked entry points), this repo's commit and worktree rules,
 `dev` as the review base, the gate read from `AGENTS.md`, and the handoff written
 under the persistent agent dir instead of `/tmp`. The stack adapts MIT material
 from mattpocock/skills and cursor/plugins `pstack`; their notices and the
 per-skill provenance are in [`licenses/NOTICE.md`](licenses/NOTICE.md).
+
+`grilling` and `teach` are ported from mattpocock/skills directly, and the notice
+records them separately. `grilling` joins the trigger list in `AGENTS.md` as the
+full design-tree interview — `in-your-own-words` remains the cheap default — and
+`teach` is the fifth user-invoked entry point, which builds a teaching workspace
+outside any project checkout.
 
 The review workflow is deliberately narrow:
 

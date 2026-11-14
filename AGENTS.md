@@ -203,6 +203,10 @@ than waiting to be told:
 
 - Trivial, unambiguous edit: make it, then check it. No ceremony.
 - Non-trivial or ambiguous request: `in-your-own-words` before building.
+- The user asks to be grilled, stress-tested or interviewed, or a request's
+  shape is undecided and a ten-line playback cannot carry its assumptions:
+  `grilling`. It is the full design-tree interview in rounds; the cheap playback
+  stays the default.
 - A change crossing a module, service, API, schema or config boundary:
   `blast-radius`.
 - A bug, failing test, CI failure, crash, flake or regression: `diagnosing-bugs`.
@@ -215,9 +219,20 @@ than waiting to be told:
   sessions.
 - Before saying work is done: `prove-it-works`.
 
-Only the user starts the four user-invoked entry points, which pi spells
+Only the user starts the five user-invoked entry points, which pi spells
 `/skill:<name>`: `/skill:to-spec`, `/skill:to-tickets`, `/skill:implement`,
-`/skill:handoff`. Suggest them when they fit; never start them yourself.
+`/skill:handoff`, `/skill:teach`. Suggest them when they fit; never start them
+yourself.
+
+`grilling` and `teach` are ported straight from
+[mattpocock/skills](https://github.com/mattpocock/skills) rather than through that
+stack, and `licenses/NOTICE.md` records them separately. `grilling` therefore
+sits in the trigger list above although it is not one of the twelve. It is
+model-invoked (so it is advertised by its description, and `/skill:grilling`
+still works). `teach` is user-invoked and stateful: it builds a
+teaching workspace outside any project checkout — never in this one — and the
+course is continued by starting a session in that directory and asking for the
+next lesson, or by `/skill:handoff` out of the session you are in.
 
 Three repo rules win over those skill bodies, and the skills say so in place:
 

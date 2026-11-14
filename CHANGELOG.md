@@ -6,6 +6,40 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
+- **`grilling` and `teach` are ported as ours from mattpocock/skills, in the shape
+  the coding stack already uses.** `grilling` is model-invoked and joins the
+  trigger list in `AGENTS.md`: the full design-tree interview, run in rounds —
+  ask the whole frontier, one recommended answer per question, facts found by the
+  agent (with a `subagent` when an environment can settle them) and decisions
+  left to the user — ending at an empty frontier and an explicit confirmation,
+  never at an edit, a commit or a review. It absorbs upstream's user-invoked
+  `grill-me` wrapper, whose whole body is "call `grilling`", because pi runs a
+  model-invoked skill as `/skill:<name>` too; the wrapper's prose (count rounds
+  not questions, there is no cap, split an over-long scope, hand the session to
+  `to-spec`) moved into the skill, and the boundary with `in-your-own-words`
+  (the cheap playback, still the default, which now names `grilling` where to
+  escalate) and `to-spec` (which deliberately does
+  not interview) is stated in place rather than left to the reader. `teach` is
+  the fifth user-invoked entry point: a stateful teaching workspace of numbered
+  HTML lessons, reference sheets, reusable `assets/`, a glossary, `RESOURCES.md`
+  and ADR-style learning records, continued by starting a session in that
+  directory. Two deviations matter. The workspace goes to a directory the user
+  names, or `<agent dir>/learning/<slug>` — never into a project checkout, where
+  upstream's "the directory `/teach` ran in" would litter every later diff with
+  course files. And `GLOSSARY-FORMAT.md` is linked from `SKILL.md`, because
+  upstream ships it orphaned
+  ([#559](https://github.com/mattpocock/skills/issues/559)) and the glossary it
+  describes is therefore never built. The quiz defect upstream measured — the
+  correct answer lands first however the instructions are worded
+  ([#335](https://github.com/mattpocock/skills/issues/335)) — is answered with a
+  component in `assets/` that shuffles at render time, not with wording alone,
+  and the gaps its own docs admit (nothing schedules review, no exit criteria,
+  no assessment step) are stated in "Honest limits" instead of being left for
+  the user to discover. Both are listed in the `pi` manifest and in
+  `licenses/NOTICE.md`, and `coding-skills.test.ts` now carries them as a
+  `PORTED` list so the name, description-length, invocation and relative-link
+  assertions apply to them too.
+
 - **`bin/pi-agent-dir` gives a host the devcontainer's agent-dir split, so a
   subagent rooted in this checkout's worktree starts instead of exiting 1 on
   duplicate tool registrations.** A linked worktree discovers *its own*
