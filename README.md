@@ -112,7 +112,8 @@ Both environments therefore keep the working tree as the single source:
 | Where | Setup |
 |---|---|
 | a host that works in this checkout | `pi remove git:github.com/RRiboulet/my-agent-setup`, then `pi install /path/to/my-agent-setup` — the **local path**, not the git source. It resolves to the same files project discovery already found, so pi dedupes instead of conflicting, and there is no clone that can fall behind the checkout |
-| this repo's devcontainer | installs no package at all: `PI_CODING_AGENT_DIR` (`.devcontainer/devcontainer.json`) gives the container its own agent dir inside the shared `pi-agent-config` volume, seeded once by `postCreate.sh` from the shared one. The shared dir keeps the `git:` install for the *other* projects that mount that volume, which have no `.pi/` of their own |
+| this repo's devcontainer | installs no package at all: `PI_CODING_AGENT_DIR` (`.devcontainer/devcontainer.json`) gives the container its own agent dir on a **private** volume, `my-agent-setup-pi-config`. There is no shared agent volume any more, and `postCreate.sh` starts a missing `settings.json` from the committed template `.devcontainer/pi/settings.json` (which deliberately has no `.packages`). Credentials come from the host environment, not from a copied `auth.json` |
+| every other project's devcontainer | the image bakes this repo at the tag in that project's `.devcontainer/pi-agent-setup.version`, then `postCreate` declares the baked `/opt/pi-packages/my-agent-setup` path in the container's own agent settings. No volume is shared between containers. The pin is visible as `PI_AGENT_SETUP_TAG`, the image label `org.rriboulet.pi-package`, and `/opt/pi-packages/my-agent-setup/.pi-agent-setup-tag`; each project's CI fails if its Dockerfile and version file disagree, and `postCreate` fails if the running image is older than the checkout's pin |
 | a host that works in this checkout **and in its worktrees** | `bin/pi-agent-dir` does the devcontainer's split on a host: it creates `~/.pi/agent-<main checkout name>` (a sibling of the shared agent dir, the layout `devcontainer.json` already declares), seeded from the shared settings with `.packages` removed, plus credentials and a `trust.json` entry for the checkout. `bin/pi-agent-dir --shell` adds one marker-delimited block to `~/.bashrc` with a `pi` function that selects that dir for any cwd inside the checkout or a worktree of it, and leaves every other project on the shared, package-installed dir |
 
 Removing the git entry matters: installing the local path *next to* it leaves two
@@ -159,13 +160,22 @@ than a broken one. `--check` reports exactly those three things and exits
 non-zero if a package would still conflict; `--print` resolves the path without
 writing anything.
 
-In the devcontainer, that seeded dir is the container's own: credentials
-(`auth.json`), `voice.json`, `review-triage.json`, `models.json` and the model and
-tool defaults are copied on first creation and then owned there. Rotate a key or
-change a default *in the container*, not in the shared `~/.pi/agent` — the shared
-copy no longer reaches it. Sessions move with it, so history from before the
-split stays in the shared dir and does not appear in `--continue` here. `gh` is
-unaffected: `GH_CONFIG_DIR` still points at the shared volume.
+In the devcontainer, that dir is the container's own and the volume is private:
+the model and tool defaults start from `.devcontainer/pi/settings.json`, and
+everything else is created in the container. Rotate a key or change a default *in
+the container*; no other container sees it. Sessions stay on the private volume,
+so history from before the split (on the old shared volume) does not appear in
+`--continue` here. `gh`'s non-secret config lives at `GH_CONFIG_DIR` on the private
+volume, while its token arrives as `GH_TOKEN` from the host environment.
+
+Credentials for every container come from one host-side file,
+`~/.config/devc/env` (mode 600, never committed): `devc` sources it before
+`devcontainer up`, and each `devcontainer.json` passes the variables in with
+`${localEnv:...}`. `OPENCODE_API_KEY`, `OPENROUTER_API_KEY`, `BRAVE_API_KEY`,
+`TYPESAFE_API_KEY` and `GH_TOKEN` are the current set; `PI_VOICE_API_KEY` reuses
+the OpenRouter key. Values therefore appear in `docker inspect` and in child
+process environments. That is the accepted trade-off: it keeps credentials
+shared without any cross-container mount or coupling.
 
 ## Upgrading to v1.12.0
 

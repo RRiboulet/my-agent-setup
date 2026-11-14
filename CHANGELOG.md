@@ -205,6 +205,47 @@ Maintenance:
   `opencode-go` throws the documented `Unknown provider` error. Docs only; no
   provider precedence changed.
 
+Changed:
+
+- **Devcontainers are independent: no container mounts the shared
+  `pi-agent-config` volume any more.** This repo's container keeps its existing
+  state on a new private volume, `pi-agent-my-agent-setup`, migrated from the
+  old one; both it and every other project stack now own their pi sessions,
+  trust and gh config. The shared volume's clone had silently frozen at `main`
+  (`eabebf4`) while `dev` moved on, which is the failure this removes: nothing
+  outside the checkout could report that the extensions were a release behind.
+
+- **This repo's own container still installs no package.** Its
+  `PI_CODING_AGENT_DIR` is unchanged, but the volume under it is private, and a
+  missing `settings.json` now starts from the committed
+  `.devcontainer/pi/settings.json` template instead of being seeded from the
+  shared `agent` dir. `postCreate.sh` also strips any `my-agent-setup` package
+  entry a migrated volume still carries, so the checkout's `.pi/` remains the
+  only source of extensions and skills (README, "One copy of the extensions,
+  never two").
+
+- **Other projects' images bake this repo, pinned to `v1.12.0`.** Each image
+  clones the tag to `/opt/pi-packages/my-agent-setup`, outside `$AGENT_DIR` so a
+  named volume cannot freeze the first container's copy, and exposes the pin as
+  `PI_AGENT_SETUP_TAG`, the `org.rriboulet.pi-package` label and
+  `/opt/pi-packages/my-agent-setup/.pi-agent-setup-tag`. Their `postCreate`
+  declares that baked path in the container's own agent settings and fails if a
+  stale image does not match the checkout's `.devcontainer/pi-agent-setup.version`.
+  The tag is deliberately `v1.12.0`: it predates the `devc` fixes and the
+  `grilling`/`teach` port, so those images start one release behind `dev` on
+  purpose, and the next release's bump brings them current.
+
+- **Credentials travel as environment variables, never as a copied `auth.json`
+  on a shared volume.** `OPENCODE_API_KEY`, `OPENROUTER_API_KEY`,
+  `BRAVE_API_KEY`, `TYPESAFE_API_KEY`, `PI_VOICE_API_KEY` and `GH_TOKEN` are
+  forwarded into every container from the host environment with
+  `${localEnv:...}`. `devc` sources `~/.config/devc/env` (mode 600, never
+  committed) before `devcontainer up`, so one host-side file can supply every
+  project while no container shares state with another. The values are visible
+  in `docker inspect` and in child-process environments; that is the deliberate
+  trade-off, and the alternative — a mount — is the coupling this change
+  removes.
+
 ## v1.12.0 — 2026-11-13
 
 Added:

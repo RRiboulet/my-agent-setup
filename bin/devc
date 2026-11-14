@@ -30,14 +30,32 @@
 #
 # Configuration: ~/.config/devc/roots holds one project root per line
 # (blank lines and #-comments ignored). It is seeded on first use.
+# ~/.config/devc/env, when present, is sourced before `devcontainer up` so the
+# containers inherit provider keys and GH_TOKEN from one host-side file. It is
+# read with allexport and never printed; keep it mode 600 and out of any repo.
 #
-# Environment: DEVC_DRY_RUN=1 prints the commands instead of running them.
+# Environment: DEVC_ENV_FILE overrides that file's path.
+#              DEVC_DRY_RUN=1 prints the commands instead of running them.
 
 set -euo pipefail
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/devc"
 ROOTS_FILE="$CONFIG_DIR/roots"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/devc"
+
+# Containers no longer share a volume for credentials, so the values have to be
+# in the environment of the process that runs `devcontainer up` (the
+# devcontainer.json files reference them through ${localEnv:...}). Sourcing here
+# makes that work for every project without repeating an env_file path in each
+# compose file. Missing file is fine: a container can still be built and opened,
+# it just has no provider credentials until the file exists.
+DEVC_ENV_FILE="${DEVC_ENV_FILE:-$CONFIG_DIR/env}"
+if [ -r "$DEVC_ENV_FILE" ]; then
+	set -a
+	# shellcheck disable=SC1090 # path is user configuration, not a fixed include
+	. "$DEVC_ENV_FILE"
+	set +a
+fi
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
 	BOLD=$'\033[1m' DIM=$'\033[2m' RED=$'\033[31m' YELLOW=$'\033[33m' RESET=$'\033[0m'

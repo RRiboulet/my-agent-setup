@@ -90,8 +90,10 @@ nothing here; do not "fix" a missing port by publishing `0.0.0.0`.
 ## Rules that prevent damage
 
 - Never run `docker compose down -v`, `docker system prune --volumes`, or
-  anything that removes a named volume. They hold pi sessions, provider auth,
-  the gh token and (analytics) the Olist database.
+  anything that removes a named volume. They hold each container's pi sessions,
+  gh config and (analytics) the Olist database. Provider keys and `GH_TOKEN`
+  are **not** in a volume; they arrive from the host environment through
+  `${localEnv:...}` and `~/.config/devc/env`.
 - Never run `devc` or `devcontainer` under `sudo`. Root skips the uid remap, and
   a project's `postCreate` then chowns the bind-mounted checkout to a uid the
   host user does not own.
@@ -123,8 +125,15 @@ nothing here; do not "fix" a missing port by publishing `0.0.0.0`.
   `/usr/local/bin/devc` (symlink into `my-agent-setup/bin`).
 - Containers run as uid 1001 (`ubuntu`), remapped by the CLI's
   `updateRemoteUserUID`; all three projects build natively for arm64.
-- **pupkeep** (`~/pupkeep`): Node 24 + pi 1.4.0; server on 8787; `npm test`
+- **pupkeep** (`~/pupkeep`): Node 24 + pi 1.5.0; server on 8787; `npm test`
   inside is 275 tests. cloudflared is installed per architecture.
+- **lol-dataset** (`~/lol-dataset`): the dataset tooling; its devcontainer uses
+  a private `pi-agent-lol-dataset` volume and excludes the vendored
+  `.pi/extensions`/`.pi/skills` tree so only the image-baked package loads.
+- **Every project except my-agent-setup** bakes `my-agent-setup` at the tag in
+  its `.devcontainer/pi-agent-setup.version` under
+  `/opt/pi-packages/my-agent-setup`. A stale image is a `devc rebuild`, not a
+  `postCreate` edit; `postCreate` refuses to run against the wrong tag.
 - **analytics-agent** (`~/analytics-agent`): Python + uv; PostgreSQL is the
   `postgres` compose service (`postgres:5432`, volume `analytics-postgres`), the
   MCP server publishes 8000. `DATABASE_URL` comes from `containerEnv`, so
