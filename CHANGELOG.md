@@ -4,6 +4,47 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Fixed:
+
+- **opencode-go charged a payload's bounded or `gte` context tier as a permanent
+  one, and could crash on a hand-corrupted model cache.** `transformApiModel`
+  checked that a price override carried nothing besides `when.context`, but not
+  what was inside it: a band of `{ gt, lte }` had its lower bound mapped to an
+  open-ended `inputTokensAbove` tier, so the upper band's rate was charged to
+  every request above the threshold, and `gte: N` was mapped to `N` even though
+  pi-ai's `calculateCost` matches with a strict `>`, so a request of exactly `N`
+  tokens paid the flat rate. The recorded payload uses only open-ended `gt`, so
+  neither was reachable from a live fetch; a band is now accepted only as exactly
+  `{ gt }`, and `gte` is dropped rather than mapped (a faithful mapping needs
+  `N - 1`, not the `N + 1` the finding suggested, and no payload uses `gte`), so
+  a `gte`-only override keeps the base rate. Separately, `loadCachedModels`
+  validated the cache envelope but not its elements, so a current-format
+  `{"format":2,"models":[null]}` threw `Cannot read properties of null (reading
+  'id')` out of extension init, `["oops"]` was registered with no id or name,
+  and an object carrying only an `id` was registered with `cost: undefined`,
+  which throws from pi-ai's `calculateCost` on the first request; one bad element
+  now fails the read, and the curated list is served for that cold start as it
+  already was for every other unrecognised cache shape. The element check covers
+  the id, the pricing block (four finite rates, and tiers when present), the
+  `input` array and `contextWindow`, which are the fields downstream dereferences
+  without a fallback: a garbled rate prices the session `NaN` silently, a missing
+  `input` throws from pi's read tool on `model.input.includes(...)`, and a
+  non-numeric `contextWindow` makes compaction's comparison false instead of
+  throwing, so it switches compaction off with no signal at all. Review also
+  found that the writer could produce what this reader rejects — `transformApiModel`
+  copied the flat `price` through unchecked where the tier path already used
+  `nonNegativeNumber` — so a payload reporting `"0.1"` was written into the cache
+  and then refused on every later start, with revalidation rewriting the same
+  element: a cache that never converges, and a `NaN` price in the live session
+  until the next cold start. Both flat and tier rates are guarded now. The tests
+  also pin the bounds the first pass left open — an empty or non-string id, a
+  missing or non-numeric rate, malformed tiers, a missing `input`, a string
+  `contextWindow` — and prove a realistic cache written from the recorded payload
+  plus the real catalogue is still read back whole (31 of 31 elements), so the
+  new checks do not cost existing users a cold start. Every new case fails
+  against the previous code; the provider suite passes 95/95 (`cd
+  .pi/extensions/opencode-go-provider && node --test`).
+
 Maintenance:
 
 - **`README.md` now carries an "Upgrading to v1.12.0" block, and it says to
