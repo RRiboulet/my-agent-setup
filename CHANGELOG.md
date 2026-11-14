@@ -4,6 +4,39 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Added:
+
+- **`bin/pi-agent-dir` gives a host the devcontainer's agent-dir split, so a
+  subagent rooted in this checkout's worktree starts instead of exiting 1 on
+  duplicate tool registrations.** A linked worktree discovers *its own*
+  `.pi/extensions`, while an installed package resolves to the main checkout's
+  copy; pi treats that as a load error, and there is no flag that suppresses only
+  the package copy (`-ne` also drops built-in extensions and every extension not
+  named with `-e`, and `--no-approve` starts but runs the main checkout's code
+  rather than the branch's). The script creates
+  `~/.pi/agent-<main checkout name>`, the sibling-of-`agent` layout
+  `devcontainer.json` already declares, seeded from the shared `settings.json`
+  with `.packages` and its `extensionChangelogVersions` bookkeeping removed,
+  copies credentials once, merges (never replaces) a `trust.json` entry for the
+  checkout, and, with `--shell`, appends one marker-delimited `pi` function to
+  `~/.bashrc` that selects that dir from anywhere inside the checkout or a
+  worktree. It resolves the main checkout through `--git-common-dir`, so a
+  worktree maps to the same dir instead of getting a fresh unseeded one;
+  `trust.json` matters because a
+  saved decision covers a directory or its parents, and without the entry the
+  package-free dir is a silently empty agent. Every write is
+  create-if-missing and every file lands through a temp file and a rename, so
+  re-running it cannot overwrite a project's own settings or a rotated key, and
+  `--check` reports the three things that would still conflict. Verified against
+  throwaway HOME and repo trees: the seeded settings have no `packages`, a
+  second run leaves hand-edited settings and credentials untouched, a linked
+  worktree and its main checkout resolve to one dir, the installed hook resolves
+  both to that dir and nothing outside any checkout, and the convention equals
+  the one `devcontainer.json` declares. Mutation-checked the same way — using
+  `--show-toplevel`, keeping `.packages`, or appending the hook unconditionally
+  each turns the suite red. The README section "One copy of the extensions,
+  never two" and `.pi/skills/worktree/` now name this as the host remedy.
+
 Fixed:
 
 - **The `add-model` skill no longer contradicts itself about `baseUrl`, and its

@@ -289,8 +289,12 @@ test("worktree skill: names the package copy as the case the launcher cannot ded
 	);
 	assert.ok(SKILL.includes('Tool "get_goal" conflicts with'), "must quote the per-extension conflict a reader sees");
 	assert.ok(
-		SKILL.includes("uninstall the package before working in this repo's worktrees"),
-		"must give the remedy a host can act on",
+		SKILL.includes("bin/pi-agent-dir"),
+		"must give the remedy a host can act on: the package-free agent dir, not only the package removal",
+	);
+	assert.ok(
+		SKILL.includes("runs the main checkout's extensions, not the branch's"),
+		"must say what the passive workaround costs, so it is not mistaken for the fix",
 	);
 });
 

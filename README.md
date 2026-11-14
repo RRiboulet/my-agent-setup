@@ -113,6 +113,7 @@ Both environments therefore keep the working tree as the single source:
 |---|---|
 | a host that works in this checkout | `pi remove git:github.com/RRiboulet/my-agent-setup`, then `pi install /path/to/my-agent-setup` — the **local path**, not the git source. It resolves to the same files project discovery already found, so pi dedupes instead of conflicting, and there is no clone that can fall behind the checkout |
 | this repo's devcontainer | installs no package at all: `PI_CODING_AGENT_DIR` (`.devcontainer/devcontainer.json`) gives the container its own agent dir inside the shared `pi-agent-config` volume, seeded once by `postCreate.sh` from the shared one. The shared dir keeps the `git:` install for the *other* projects that mount that volume, which have no `.pi/` of their own |
+| a host that works in this checkout **and in its worktrees** | `bin/pi-agent-dir` does the devcontainer's split on a host: it creates `~/.pi/agent-<main checkout name>` (a sibling of the shared agent dir, the layout `devcontainer.json` already declares), seeded from the shared settings with `.packages` removed, plus credentials and a `trust.json` entry for the checkout. `bin/pi-agent-dir --shell` adds one marker-delimited block to `~/.bashrc` with a `pi` function that selects that dir for any cwd inside the checkout or a worktree of it, and leaves every other project on the shared, package-installed dir |
 
 Removing the git entry matters: installing the local path *next to* it leaves two
 entries pointing at different paths (the checkout and the clone), which is the
@@ -139,9 +140,24 @@ built-in extensions and every extension not named with `-e`, so it is a lossy
 workaround rather than a dedupe. The launcher therefore cannot fix it. The
 devcontainer is immune for the same reason
 as above — its agent dir installs no package. On a host that installs this repo
-as a package, do not run subagents rooted in this repo's worktrees: uninstall the
-package there, or launch with `cwd` = the main checkout and `cd` into the tree
-inside each command, which keeps the child's discovery pointed at one copy.
+as a package, the remedy is `bin/pi-agent-dir` (below): the worktree's own copy
+is then the only one loaded, which is also the only variant that runs the
+*branch's* extension code. The two fallbacks are worse — uninstall the package
+there and every other project loses its extensions, or launch with `cwd` = the
+main checkout and `cd` into the tree inside each command, which starts but runs
+the main checkout's extensions, not the branch's.
+
+`bin/pi-agent-dir` writes only what is missing, so re-running it is safe: an
+existing `settings.json` is kept (it belongs to that project from then on, like
+the container's), credentials are copied once and never overwritten, and
+`trust.json` is merged rather than replaced so a second project does not evict
+the first. Trust matters more here than it looks: it is what makes pi read
+`<checkout>/.pi/` at all, and a saved decision applies to a directory or any of
+its parents, so the one entry covers `.worktrees/<slug>`. Without it the
+package-free dir is a *silently empty* agent — no extensions, no skills — rather
+than a broken one. `--check` reports exactly those three things and exits
+non-zero if a package would still conflict; `--print` resolves the path without
+writing anything.
 
 In the devcontainer, that seeded dir is the container's own: credentials
 (`auth.json`), `voice.json`, `review-triage.json`, `models.json` and the model and
