@@ -11,8 +11,8 @@ set -euo pipefail
 #   A. SKILL.md A: the cache root defaults under the pi agent dir
 #      (<agent dir>/cache/checkouts) instead of upstream's ~/.cache/checkouts,
 #      because on this devcontainer ~/.cache is container-local and discarded
-#      on rebuild, while the agent dir is the persistent pi-agent-config
-#      volume. LIBRARIAN_CACHE_ROOT still overrides.
+#      on rebuild, while the agent dir is on the container's private persistent
+#      pi volume. LIBRARIAN_CACHE_ROOT still overrides.
 #   C. this script only (SKILL.md C): a repository argument that fails to parse
 #      now exits 1 at once; upstream read parse_repo through process
 #      substitution, which swallows its non-zero exit, so a bad reference fell
