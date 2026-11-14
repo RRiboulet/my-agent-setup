@@ -6,6 +6,38 @@ Versions are git tags. This repository is not published to npm.
 
 Fixed:
 
+- **The `add-model` skill no longer contradicts itself about `baseUrl`, and its
+  merge rules now match `mergeWithEmbedded`.** It offered both `zen/go/v1` and
+  the payload's `inference/go/openai/v1` without saying which is canonical, and
+  it claimed "a curated entry always beats the live API" — false for `cost`
+  (live wins per field when non-zero), `contextWindow` (live → curated →
+  `131072`) and `reasoning` (curated, except an explicit live
+  `supported: false`, which demotes). The rewrite names `…/zen/go/v1` canonical
+  for `openai-completions` and `…/zen/go` for `anthropic-messages` — without the
+  trailing `/v1`, because pi's Anthropic client appends `/v1/messages`, so
+  keeping it requests `/v1/v1/messages` — calls the advertised
+  `inference/go/...` URLs aliases rather than the manual default (naming the
+  one deliberate curated alias, `longcat-2.5-free`, so an audit does not
+  "fix" it), replaces the claim with a per-field table, and adds the
+  `patch.json` caveats: a patch refines a `custom-models.json` entry as well as
+  a curated one, and a patch id in neither list is silently dropped. The
+  cost-tier section now opens with pi repricing the whole request at the
+  highest matching tier instead of reading as progressive billing, and states
+  which band shapes map: an open-ended `{ "gt": N }` does, while a `gte`
+  threshold and a bounded `{ "gt", "lte" }` band are skipped, as is a
+  condition outside the band. The
+  payload-is-untrusted note says the "malformed rate is skipped" rule covers
+  tier overrides only and that the four flat rates are parsed the same way
+  (both paths guard through `nonNegativeNumber`), and the
+  `cost.text.overrides` / `cost.multipliers` note is in the same pass. Verified by running the real
+  `transformApiModel`/`mergeWithEmbedded`/`buildModels` against a hand-written
+  payload: a non-string `base_url` falls back to `zen/go/v1`, a messages `…/v1`
+  is stripped, a live non-zero rate wins per field while a curated `cacheRead`
+  survives a live 0, a live `limit.context` beats a curated 1M, an explicit
+  `supported: false` drops `thinkingLevelMap`, a patch lands on a custom id and
+  a `ghost` id registers nothing, and `gt: 200000` becomes a tier while an
+  override carrying `service_tier` is skipped. Docs only; no provider behaviour
+  changed.
 - **opencode-go charged a payload's bounded or `gte` context tier as a permanent
   one, and could crash on a hand-corrupted model cache.** `transformApiModel`
   checked that a price override carried nothing besides `when.context`, but not
