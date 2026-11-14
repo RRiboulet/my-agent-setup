@@ -65,6 +65,19 @@ test("the per-container agent dir is spelled out in devcontainer.json only", () 
 	);
 });
 
+test("the devcontainer keeps a private pi volume and installs no package", () => {
+	const compose = read(".devcontainer/docker-compose.yml");
+	assert.match(compose, /name: my-agent-setup-pi-config/u);
+	assert.doesNotMatch(compose, /name: pi-agent-config/u);
+
+	const template = JSON.parse(read(".devcontainer/pi/settings.json")) as { packages?: unknown };
+	assert.equal(template.packages, undefined, "the committed settings template must not install a package");
+
+	// The template is what a fresh private volume starts from; it must exist and
+	// be valid JSON, because postCreate now fails rather than writing a 0-byte file.
+	assert.ok(Object.keys(template).length > 0);
+});
+
 test("the files that describe the split point at the README instead of restating it", () => {
 	const flat = (text: string) => text.replace(/\s+/gu, " ");
 	assert.match(

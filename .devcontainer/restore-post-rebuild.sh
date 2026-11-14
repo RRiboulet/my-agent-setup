@@ -12,10 +12,9 @@
 # the host's forwarded port through host.docker.internal — which docker-compose
 # adds with `extra_hosts: host.docker.internal:host-gateway`.
 #
-# Persistent (pi-agent-config volume, ~/.pi): the ssh key pair and the
-# ~/.pi/ssh/config template, plus voice.json in this container's pi agent dir
-# ($PI_CODING_AGENT_DIR, seeded once from the shared ~/.pi/agent — see
-# postCreate.sh).
+# Persistent (this container's private pi volume, ~/.pi): the ssh key pair and
+# the ~/.pi/ssh/config template, plus voice.json in this container's pi agent dir
+# ($PI_CODING_AGENT_DIR — see postCreate.sh).
 # Container-local, wiped on rebuild: ~/.ssh/config and known_hosts.
 #
 # Idempotent — safe to run any time.
@@ -23,8 +22,8 @@
 # Usage:  bash /workspace/.devcontainer/restore-post-rebuild.sh
 #
 # Run automatically on container creation by the devcontainer's
-# postCreateCommand. If the whole pi-config volume was wiped this script is not
-# enough (the key and the template are gone): redo the setup in
+# postCreateCommand. If the private pi volume was wiped this script is not enough
+# (the key and the template are gone): redo the setup in
 # .devcontainer/voice-container.md from scratch.
 
 PI=/home/vscode/.pi

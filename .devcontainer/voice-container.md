@@ -24,7 +24,7 @@ volume.
 
 | Where | What | Survives a rebuild? |
 |---|---|---|
-| pi-agent-config volume (`/home/vscode/.pi`) | ssh key pair `ssh/id_ed25519_phone{,.pub}`, ssh config template `ssh/config`, pi config incl. `agent/voice.json` | yes — the volume's whole purpose |
+| this container's private pi volume (`/home/vscode/.pi`) | ssh key pair `ssh/id_ed25519_phone{,.pub}`, ssh config template `ssh/config`, pi config incl. `$PI_CODING_AGENT_DIR/voice.json` | yes — the volume's whole purpose |
 | this repo (`/workspace`, bind mount) | the extension itself (`.pi/extensions/voice/`), this file, the restore script | yes — it is the host checkout |
 | container layer (everything else) | `~/.ssh/config` + `known_hosts` | no — wiped on rebuild, kept on restart |
 
@@ -122,16 +122,15 @@ the whole route.
 `$PI_CODING_AGENT_DIR/voice.json`, where that variable is only set inside the
 container (`.devcontainer/devcontainer.json`'s `containerEnv`); in a shell
 without it, expand the path from that file instead of trusting the variable.
-Transcription config, `sshTarget` is already correct by default (`phone`).
-`postCreate.sh` seeds it from the shared `~/.pi/agent/voice.json` the first time
-the container is created, and never overwrites it afterwards — so edit it *here*,
-not in the shared dir, if this container needs its own. Example with OpenRouter:
+Transcription config, `sshTarget` is already correct by default (`phone`). The
+file is container-local now (private volume), so edit it *here*; the API key is
+not written into it. `PI_VOICE_API_KEY` arrives from the host environment like
+the other credentials, so an OpenRouter example is:
 
 ```json
 {
   "baseUrl": "https://openrouter.ai/api/v1",
-  "model": "openai/whisper-large-v3",
-  "apiKey": "<your key>"
+  "model": "openai/whisper-large-v3"
 }
 ```
 
@@ -162,7 +161,7 @@ Two details of the script are load-bearing and easy to "fix" back into bugs:
   with "Permission denied". The devcontainer's `postCreateCommand` calls
   `bash` for the same reason.
 
-## If the pi-config volume is ever wiped
+## If the private pi volume is ever wiped
 
 The restore script cannot help here: the key pair and `voice.json` are gone
 with the volume. Redo first-time setup steps 1, 4 and 5, then re-test
