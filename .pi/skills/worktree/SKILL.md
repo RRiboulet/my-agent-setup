@@ -341,9 +341,13 @@ discovery. It reproduces with no `--extension` at all, and there is no
 selective way to suppress it: `--no-extensions` (`-ne`) drops package discovery
 along with the built-in extensions and every extension not named with `-e`, so it
 is a lossy workaround, not a dedupe. There is no launcher fix to wait for.
-On such a host, uninstall the package before working in this repo's worktrees, or
-launch with `cwd` = the repository root and `cd` into the worktree inside each
-command; a package-free agent dir (what this devcontainer uses) is immune.
+On such a host, `bin/pi-agent-dir` is the fix: it gives the checkout a
+package-free agent dir of its own (the devcontainer's split, on a host) and
+`--shell` adds a `pi` function that selects it from inside the checkout or any
+worktree, so the tree's own copy is the only one loaded. Failing that, either
+uninstall the package there (every unrelated project then loses its extensions)
+or launch with `cwd` = the repository root and `cd` into the worktree inside each
+command (starts, but runs the main checkout's extensions, not the branch's).
 
 ## Review
 
