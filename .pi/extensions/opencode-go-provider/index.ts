@@ -365,11 +365,17 @@ function costTiers(text: any, base: Omit<CostTier, "inputTokensAbove">): CostTie
  * before it existed.
  */
 function transformedCost(text: any): JsonModel["cost"] {
+  // The flat rates are guarded the same way the tier rates are, because the
+  // cache reader validates what the writer produces: a payload reporting
+  // `price: "0.1"` used to be written straight into the cache, which then
+  // refused the whole file on every later start while revalidation rewrote the
+  // same element — never converging. The guarded zero also keeps a string from
+  // reaching `calculateCost` as NaN in the live session.
   const cost: JsonModel["cost"] = {
-    input: text?.input?.price ?? 0,
-    output: text?.output?.price ?? 0,
-    cacheRead: text?.input?.cache?.read ?? 0,
-    cacheWrite: text?.input?.cache?.write ?? 0,
+    input: nonNegativeNumber(text?.input?.price) ?? 0,
+    output: nonNegativeNumber(text?.output?.price) ?? 0,
+    cacheRead: nonNegativeNumber(text?.input?.cache?.read) ?? 0,
+    cacheWrite: nonNegativeNumber(text?.input?.cache?.write) ?? 0,
   };
   const tiers = costTiers(text, cost);
   if (tiers) cost.tiers = tiers;
@@ -482,17 +488,24 @@ function isModelCacheFile(data: unknown): data is ModelCacheFile {
 }
 
 /**
- * One cache element: an object with a non-empty string id and a pricing block
- * pi can dereference.
+ * One cache element: an object with a non-empty string id, a pricing block, the
+ * modalities pi's read tool dereferences, and a context window compaction can do
+ * arithmetic with.
  *
  * An id alone is not enough. `loadStaleModels` serves a live-only cached model
  * as-is, so an element carrying only an `id` is registered with `cost:
- * undefined`, and pi-ai's `calculateCost` throws on `model.cost.tiers` the first
- * time the model is used; a garbled rate that is still an object silently prices
- * the session NaN. Both are the same hand-edited-file class as a `null` element,
- * which used to throw out of extension init. The other fields (`name`, `api`,
- * `input`, `contextWindow` …) are display or have a downstream fallback and do
- * not crash, so they are left to the merge rather than spending checks on them.
+ * undefined`, and pi-ai's `calculateCost` dereferences `model.cost.tiers` on
+ * first use; a garbled rate that is still an object silently prices the session
+ * NaN; a missing `input` makes pi's read tool throw on
+ * `model.input.includes(...)`; and a non-numeric `contextWindow` makes
+ * compaction's `contextTokens > contextWindow - reserveTokens` false instead of
+ * throwing, which turns compaction off without a signal. All four are the same
+ * hand-edited-file class as a `null` element, which used to throw out of
+ * extension init.
+ *
+ * The remaining fields (`name`, `api`, `reasoning`, `maxTokens`, `compat`) are
+ * left unchecked on purpose: registration falls back or Pi treats them as
+ * display data, so a bad value there is cosmetic rather than fatal.
  */
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
@@ -512,10 +525,22 @@ function isCachedCost(value: unknown): boolean {
   return Array.isArray(cost.tiers) && cost.tiers.every(isCachedCostTier);
 }
 
+function isCachedInput(value: unknown): value is ("text" | "image")[] {
+  return Array.isArray(value) && value.every((m) => m === "text" || m === "image");
+}
+
 function isCachedModel(value: unknown): value is JsonModel {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-  const candidate = value as { id?: unknown; cost?: unknown };
-  return typeof candidate.id === "string" && candidate.id.length > 0 && isCachedCost(candidate.cost);
+  const candidate = value as { id?: unknown; cost?: unknown; input?: unknown; contextWindow?: unknown };
+  return (
+    typeof candidate.id === "string" &&
+    candidate.id.length > 0 &&
+    isCachedCost(candidate.cost) &&
+    isCachedInput(candidate.input) &&
+    // `null` is the model's own "window unknown" and registration falls back to
+    // 131072 for it; anything else must be a real number for compaction.
+    (candidate.contextWindow === null || isFiniteNumber(candidate.contextWindow))
+  );
 }
 
 function loadCachedModels(): JsonModel[] | null {

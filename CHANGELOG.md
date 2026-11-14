@@ -25,13 +25,24 @@ Fixed:
   which throws from pi-ai's `calculateCost` on the first request; one bad element
   now fails the read, and the curated list is served for that cold start as it
   already was for every other unrecognised cache shape. The element check covers
-  the pricing block (four finite rates, and tiers when present) rather than the
-  id alone, because that is the field downstream dereferences without a
-  fallback; a garbled rate is the silent half, pricing the session `NaN`. The
-  tests also pin the bounds the first pass left open — an empty or non-string
-  id, a missing or non-numeric rate, malformed tiers — and the override-array
-  guard now proves the fixture still has overrides to rewrite. Every new case
-  fails against the previous code; the provider suite passes 93/93 (`cd
+  the id, the pricing block (four finite rates, and tiers when present), the
+  `input` array and `contextWindow`, which are the fields downstream dereferences
+  without a fallback: a garbled rate prices the session `NaN` silently, a missing
+  `input` throws from pi's read tool on `model.input.includes(...)`, and a
+  non-numeric `contextWindow` makes compaction's comparison false instead of
+  throwing, so it switches compaction off with no signal at all. Review also
+  found that the writer could produce what this reader rejects — `transformApiModel`
+  copied the flat `price` through unchecked where the tier path already used
+  `nonNegativeNumber` — so a payload reporting `"0.1"` was written into the cache
+  and then refused on every later start, with revalidation rewriting the same
+  element: a cache that never converges, and a `NaN` price in the live session
+  until the next cold start. Both flat and tier rates are guarded now. The tests
+  also pin the bounds the first pass left open — an empty or non-string id, a
+  missing or non-numeric rate, malformed tiers, a missing `input`, a string
+  `contextWindow` — and prove a realistic cache written from the recorded payload
+  plus the real catalogue is still read back whole (31 of 31 elements), so the
+  new checks do not cost existing users a cold start. Every new case fails
+  against the previous code; the provider suite passes 95/95 (`cd
   .pi/extensions/opencode-go-provider && node --test`).
 
 Maintenance:

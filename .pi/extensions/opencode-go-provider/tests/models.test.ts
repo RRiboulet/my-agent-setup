@@ -500,6 +500,25 @@ test("prefers chat-completions when a payload advertises both endpoints", () => 
   assert.equal(synthetic.baseUrl, "https://example.test/openai/v1");
 });
 
+test("caches only prices its own cache reader accepts", () => {
+  // `cacheModels` claimed never to write an element the reader rejects, but the
+  // flat rates were copied straight out of the payload: a payload reporting
+  // `"0.1"` put a string in the cache, whose reader then refused the file on
+  // every later start — and revalidation rewrites the same element, so it never
+  // converges. The guarded zero is also what stops a string reaching
+  // `calculateCost` as NaN in the live session.
+  const [live] = transformApiModels([
+    { id: "string-price", cost: { text: { input: { price: "0.1" }, output: { price: 0.5 } } } },
+  ]);
+
+  assert.equal(live.cost.input, 0);
+  assert.equal(live.cost.output, 0.5);
+
+  cacheModels(mergeWithEmbedded([live], []));
+
+  assert.deepEqual(loadStaleModels([]).map((m) => m.id), ["string-price"]);
+});
+
 // ─── mergeWithEmbedded ────────────────────────────────────────────────────────
 
 test("curation wins for reasoning, input, compat, name and maxTokens", () => {
@@ -847,6 +866,31 @@ test("leaves a live-only cached entry alone, since curation has nothing to corre
   assert.equal(stale.api, "openai-completions");
   assert.equal(stale.baseUrl, "https://stale.test/v1");
   assert.deepEqual(stale.input, ["text"]);
+});
+
+test("ignores a cache element pi would crash on or that disables compaction", () => {
+  // `input` is dereferenced without a guard by pi's read tool, and a non-numeric
+  // `contextWindow` makes the compaction comparison false instead of throwing —
+  // silently switching compaction off, which is worse than a crash.
+  const missingInput = { ...model({ id: "m" }) } as Record<string, unknown>;
+  delete missingInput.input;
+
+  const rejected: Record<string, unknown>[] = [
+    missingInput,
+    model({ id: "m", contextWindow: "131072" as unknown as number }),
+    model({ id: "m", input: ["text", "pdf"] as unknown as ("text" | "image")[] }),
+  ];
+
+  for (const element of rejected) {
+    writeCache([element as unknown as JsonModel]);
+
+    const result = loadStaleModels([model({ id: "curated" })]);
+
+    assert.deepEqual(result.map((m) => m.id), ["curated"], JSON.stringify(element));
+  }
+
+  writeCache([model({ id: "m" })]);
+  assert.deepEqual(loadStaleModels([]).map((m) => m.id), ["m"]);
 });
 
 test("keeps cached cost and context window when the curated entry differs", () => {
