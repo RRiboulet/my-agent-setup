@@ -131,6 +131,29 @@ Fixed:
   membership-only fix would miss while the section around it printed. Both fail
   against the previous script, which printed no section at all.
 
+- **`devc`'s config stamp is keyed
+- **`devc`'s config stamp is keyed on the resolved workspace path, so two
+  projects with the same basename no longer read each other's staleness.** The
+  stamp lived at `$STATE_DIR/$(basename "$dir").cfgsha`, so `~/a/web` and
+  `~/b/web` shared one file: whichever ran last owned it, and `ensure_up`'s
+  stale detection then compared against the *other* project's hash — either
+  recreating a current container or, when the sibling's last-written hash
+  happened to equal this project's config hash (both configs identical is the
+  easy way there), leaving a stale one alone with "already running".
+  `devc doctor`'s stale report read the same file, so it could flag a project
+  stale that was not, or reassure one that was. Same class as the shared-lock
+  bug, same fix: the path hash that `lock_file` already computed is factored
+  into a `workspace_key` helper, and every read and write of the stamp —
+  `ensure_up`'s write and read, `cmd_rebuild`'s write, `doctor`'s read — uses
+  it. Migration is safe by construction: the first run after the upgrade finds
+  no keyed stamp, `have` is empty, and `ensure_up` recreates only when `have`
+  is non-empty *and* differs, so nothing existing is destroyed; that run writes
+  the keyed stamp and detection is correct from then on. The cost is one
+  missed reconcile on each project's first run after upgrading. The new tests
+  fail against the pre-fix script, and mutation-checked both ways — reverting
+  every stamp site to the basename, or only `doctor`'s read, turns the
+  corresponding tests red.
+
 Maintenance:
 
 - **`README.md` now carries an "Upgrading to v1.12.0" block, and it says to
