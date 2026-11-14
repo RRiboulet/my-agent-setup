@@ -27,6 +27,7 @@ First read what the request depends on: earlier messages, the linked issue or sp
 - Every assumption is low risk and reversible: state them and proceed.
 - An assumption could change behavior, persisted data, security, a public interface, or scope: ask before building on it. One focused question per risky assumption, each with your recommended answer.
 - Never ask for a fact you can get by reading code, docs, or running a command. Facts are your job; decisions are the user's.
+- The request's shape is undecided and the risky assumptions will not fit in one line each: say so and load `grilling`, which is this playback grown into a full interview in rounds. This ten-line pass stays the default; grilling is for when it is not enough.
 - The request is really several tasks: say so and propose an order.
 
 The playback is the reference a review and `prove-it-works` check the result against, so keep it visible in the conversation or the spec.
