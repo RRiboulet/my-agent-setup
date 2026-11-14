@@ -304,9 +304,10 @@ function isOpenEndedContextBand(context: unknown): context is { gt: unknown } {
  * that recorded this suggested `N + 1`, which narrows the tier instead. No
  * recorded payload uses `gte` at all (the 2026-11-10 fixture is `gt` only), so
  * an unobserved second band shape is not worth that arithmetic: a `gte`-only
- * override keeps the base rate. `.pi/skills/add-model/` should say so
- * explicitly; its current "anything other than `when.context.gt`" wording is
- * true but does not mention `gte` or a bounded band, both of which it owns.
+ * override keeps the base rate. The user-facing wording lives in
+ * `.pi/skills/add-model/`, which the `add-model-skill-rewrite` branch owns; it
+ * is not edited here to keep the two changes from colliding, and it states which
+ * of the two band shapes is mapped today and which waits for this one.
  *
  * One rate differs from what opencode itself would bill: a tier whose override
  * lists no cache rate inherits the base cache rate here, where their runtime
