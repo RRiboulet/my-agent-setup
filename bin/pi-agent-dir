@@ -43,8 +43,8 @@
 # /workspace, so this script computes `agent-workspace` *inside* the container
 # while `PI_CODING_AGENT_DIR` there carries the project's name. That is intended
 # rather than drift: the script exists for hosts (the container installs no
-# package, so it needs no per-project dir of its own), and a host that names the
-# directory differently needs no configuring either, because the shell hook below
+# package, so it needs no script-created dir of its own), and a host that names
+# the directory differently needs no configuring either, because the hook below
 # derives the same name at call time. Resolving through `--git-common-dir`
 # rather than `--show-toplevel` is load-bearing: a worktree must map to its main
 # checkout's dir, or every worktree would get a fresh, unseeded one of its own.
@@ -71,7 +71,7 @@
 # Verification (the second line must print 0; `grep -c` exits 1 on no matches,
 # which is why the `|| true` is there):
 #
-#   D=$(bin/pi-agent-dir --print)          # e.g. ~/.pi/agent-<main checkout name>
+#   D=$(bin/pi-agent-dir --print)          # e.g. ~/.pi/agent-<main checkout directory name>
 #   (cd "$PWD/.worktrees/x" && PI_CODING_AGENT_DIR="$D" pi --list-models 2>&1 | grep -c 'conflicts with' || true)
 
 set -euo pipefail
