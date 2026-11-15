@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.13.0 — 2026-11-15
+
 Added:
 
 - **`grilling` and `teach` are ported as ours from mattpocock/skills, in the shape
