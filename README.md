@@ -112,7 +112,9 @@ Both environments therefore keep the working tree as the single source:
 | Where | Setup |
 |---|---|
 | a host that works in this checkout | `pi remove git:github.com/RRiboulet/my-agent-setup`, then `pi install /path/to/my-agent-setup` — the **local path**, not the git source. It resolves to the same files project discovery already found, so pi dedupes instead of conflicting, and there is no clone that can fall behind the checkout |
-| this repo's devcontainer | installs no package at all: `PI_CODING_AGENT_DIR` (`.devcontainer/devcontainer.json`) gives the container its own agent dir inside the shared `pi-agent-config` volume, seeded once by `postCreate.sh` from the shared one. The shared dir keeps the `git:` install for the *other* projects that mount that volume, which have no `.pi/` of their own |
+| this repo's devcontainer | installs no package at all: `PI_CODING_AGENT_DIR` (`.devcontainer/devcontainer.json`) gives the container its own agent dir on a **private** volume, `my-agent-setup-pi-config`. There is no shared agent volume any more, and `postCreate.sh` starts a missing `settings.json` from the committed template `.devcontainer/pi/settings.json` (which deliberately has no `.packages`). Credentials come from the host environment, not from a copied `auth.json` |
+| every other project's devcontainer | the image bakes this repo at the tag in that project's `.devcontainer/pi-agent-setup.version`, then `postCreate` declares the baked `/opt/pi-packages/my-agent-setup` path in the container's own agent settings. No volume is shared between containers. The pin is visible as `PI_AGENT_SETUP_TAG`, the image label `org.rriboulet.pi-package`, and `/opt/pi-packages/my-agent-setup/.pi-agent-setup-tag`; each project's CI fails if its Dockerfile and version file disagree, and `postCreate` fails if the running image is older than the checkout's pin |
+| a host that works in this checkout **and in its worktrees** | `bin/pi-agent-dir` does the devcontainer's split on a host: it creates `~/.pi/agent-<main checkout directory name>`, a sibling of the shared agent dir, seeded from the shared settings with `.packages` removed, plus credentials and a `trust.json` entry for the checkout. The *shape* is the one `devcontainer.json` declares; the *name* is the checkout directory's, not the project's, so the two differ wherever the directory is not named after the repo — this container mounts the repo at `/workspace`, where the script would compute `agent-workspace` while the container's own dir carries the project's name. That is intended: the script is for hosts, and a host whose directory has another name needs no configuring, because the hook derives the same name at call time. `bin/pi-agent-dir --shell` adds one marker-delimited block to `~/.bashrc` with a `pi` function that selects that dir for any cwd inside the checkout or a worktree of it, and leaves every other project on the shared, package-installed dir |
 
 Removing the git entry matters: installing the local path *next to* it leaves two
 entries pointing at different paths (the checkout and the clone), which is the
@@ -139,17 +141,41 @@ built-in extensions and every extension not named with `-e`, so it is a lossy
 workaround rather than a dedupe. The launcher therefore cannot fix it. The
 devcontainer is immune for the same reason
 as above — its agent dir installs no package. On a host that installs this repo
-as a package, do not run subagents rooted in this repo's worktrees: uninstall the
-package there, or launch with `cwd` = the main checkout and `cd` into the tree
-inside each command, which keeps the child's discovery pointed at one copy.
+as a package, the remedy is `bin/pi-agent-dir` (below): the worktree's own copy
+is then the only one loaded, which is also the only variant that runs the
+*branch's* extension code. The two fallbacks are worse — uninstall the package
+there and every other project loses its extensions, or launch with `cwd` = the
+main checkout and `cd` into the tree inside each command, which starts but runs
+the main checkout's extensions, not the branch's.
 
-In the devcontainer, that seeded dir is the container's own: credentials
-(`auth.json`), `voice.json`, `review-triage.json`, `models.json` and the model and
-tool defaults are copied on first creation and then owned there. Rotate a key or
-change a default *in the container*, not in the shared `~/.pi/agent` — the shared
-copy no longer reaches it. Sessions move with it, so history from before the
-split stays in the shared dir and does not appear in `--continue` here. `gh` is
-unaffected: `GH_CONFIG_DIR` still points at the shared volume.
+`bin/pi-agent-dir` writes only what is missing, so re-running it is safe: an
+existing `settings.json` is kept (it belongs to that project from then on, like
+the container's), credentials are copied once and never overwritten, and
+`trust.json` is merged rather than replaced so a second project does not evict
+the first. Trust matters more here than it looks: it is what makes pi read
+`<checkout>/.pi/` at all, and a saved decision applies to a directory or any of
+its parents, so the one entry covers `.worktrees/<slug>`. Without it the
+package-free dir is a *silently empty* agent — no extensions, no skills — rather
+than a broken one. `--check` reports exactly those three things and exits
+non-zero if a package would still conflict; `--print` resolves the path without
+writing anything.
+
+In the devcontainer, that dir is the container's own and the volume is private:
+the model and tool defaults start from `.devcontainer/pi/settings.json`, and
+everything else is created in the container. Rotate a key or change a default *in
+the container*; no other container sees it. Sessions stay on the private volume,
+so history from before the split (on the old shared volume) does not appear in
+`--continue` here. `gh`'s non-secret config lives at `GH_CONFIG_DIR` on the private
+volume, while its token arrives as `GH_TOKEN` from the host environment.
+
+Credentials for every container come from one host-side file,
+`~/.config/devc/env` (mode 600, never committed): `devc` sources it before
+`devcontainer up`, and each `devcontainer.json` passes the variables in with
+`${localEnv:...}`. `OPENCODE_API_KEY`, `OPENROUTER_API_KEY`, `BRAVE_API_KEY`,
+`TYPESAFE_API_KEY` and `GH_TOKEN` are the current set; `PI_VOICE_API_KEY` reuses
+the OpenRouter key. Values therefore appear in `docker inspect` and in child
+process environments. That is the accepted trade-off: it keeps credentials
+shared without any cross-container mount or coupling.
 
 ## Upgrading to v1.12.0
 
@@ -197,6 +223,7 @@ default when it does not, and the `opencode-go` credential itself still serves
 | `.pi/skills/native-web-search/` | Script + docs for the above. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/native-web-search/`, with local provider patches: OpenRouter support, unknown-provider rejection, and a test seam (`__test__` + direct-invocation guard). The two must travel together |
 | `.pi/skills/commit/` | Conventional Commits subjects, and the branch-per-change rule from `AGENTS.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/commit/SKILL.md`, with two local adaptations |
 | `.pi/skills/in-your-own-words/` | Plays the goal, done-when, scope and risky assumptions back before non-trivial work; asks only about decisions, never facts. Part of the coding skill stack below |
+| `.pi/skills/grilling/` | Interviews the user in rounds about a plan, decision or idea until every branch of the design tree is settled: ask the whole frontier, recommend an answer per question, find facts yourself with a `subagent`, leave the decisions to them. **Ported** from mattpocock/skills `skills/productivity/grilling`, with its user-invoked `grill-me` wrapper folded in rather than shipped as a second skill |
 | `.pi/skills/blast-radius/` | Finds what a change can break beyond its diff, names the one fact it is safe because of, and proves it by running real code |
 | `.pi/skills/tdd/` | Red-green-refactor at public seams, one vertical slice at a time, with the two-imagined-edits test and mocking rules |
 | `.pi/skills/diagnosing-bugs/` | Feedback loop first, then reproduce, minimise, rank hypotheses, instrument, and fix the root cause with a regression test |
@@ -208,6 +235,7 @@ default when it does not, and the `opencode-go` credential itself still serves
 | `.pi/skills/to-tickets/` | User-invoked `/skill:to-tickets`: splits a spec into tracer-bullet tickets with blocked-by edges |
 | `.pi/skills/implement/` | User-invoked `/skill:implement`: builds a spec or ticket end to end through the skills above |
 | `.pi/skills/handoff/` | User-invoked `/skill:handoff`: writes a handoff document a fresh session can continue from |
+| `.pi/skills/teach/` | User-invoked `/skill:teach`: teaches a topic across sessions in a stateful workspace of short cited HTML lessons, reference sheets, vetted resources, a glossary and ADR-style learning records. **Ported** from mattpocock/skills `skills/productivity/teach`, with the workspace kept out of any project checkout and the glossary format linked instead of orphaned |
 | `.pi/skills/devcontainer/` | Drive a project's devcontainer from a headless host: `devc` (`devcontainer up` + `exec`), the rule that an agent must never run the attaching form, long-build and long-server recipes, the volume/uid/port rules that prevent damage, and a symptom→fix table. **Ours** |
 | `.pi/skills/github/` | gh CLI usage: PRs, CI runs, `gh api`, structured JSON. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/github/SKILL.md`, with four local adaptations — this repo's `GH_CONFIG_DIR` auth setup, the AGENTS.md squash workflow, the token rule, and the credential-helper note |
 | `.pi/skills/librarian/` | Caches and refreshes remote git repos under the pi agent dir (`<agent dir>/cache/checkouts/<host>/<org>/<repo>`) with partial clones, so repeated references reuse a stable local checkout. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/librarian/`, with the cache root moved from `~/.cache/checkouts` to the persistent agent dir and the script invoked by skill-relative path |
@@ -224,11 +252,17 @@ default when it does not, and the `opencode-go` credential itself still serves
 The twelve skills from `in-your-own-words` to `handoff` were adapted from
 [RRiboulet/agent-coding-skills](https://github.com/RRiboulet/agent-coding-skills)
 and are now maintained here as ours: pi invocation syntax (`/skill:<name>` for
-the four user-invoked entry points), this repo's commit and worktree rules,
+the five user-invoked entry points), this repo's commit and worktree rules,
 `dev` as the review base, the gate read from `AGENTS.md`, and the handoff written
 under the persistent agent dir instead of `/tmp`. The stack adapts MIT material
 from mattpocock/skills and cursor/plugins `pstack`; their notices and the
 per-skill provenance are in [`licenses/NOTICE.md`](licenses/NOTICE.md).
+
+`grilling` and `teach` are ported from mattpocock/skills directly, and the notice
+records them separately. `grilling` joins the trigger list in `AGENTS.md` as the
+full design-tree interview — `in-your-own-words` remains the cheap default — and
+`teach` is the fifth user-invoked entry point, which builds a teaching workspace
+outside any project checkout.
 
 The review workflow is deliberately narrow:
 

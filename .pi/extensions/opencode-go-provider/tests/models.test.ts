@@ -41,6 +41,30 @@ function live(id: string) {
   return found;
 }
 
+/**
+ * The recorded payload entry with its context band replaced on every tiered
+ * override — the only field the band tests vary.
+ *
+ * A clone, because the imported JSON is shared by every test in this file, and
+ * typed loosely because the fixture's bands are literal `{ gt: 100000 }` and the
+ * point is to feed the transform shapes it may not have seen.
+ */
+function withContextBand(entry: unknown, band: Record<string, number>): any {
+  const clone: any = structuredClone(entry);
+  let rewritten = 0;
+  for (const block of [clone?.cost?.text?.input, clone?.cost?.text?.output]) {
+    for (const override of block?.overrides ?? []) {
+      override.when = { context: band };
+      rewritten += 1;
+    }
+  }
+  // The fixture is what makes these tests non-vacuous: if it ever loses its
+  // overrides arrays, the transform would return no tiers for the unmodified
+  // entry and the band assertions would pass without testing anything.
+  assert.ok(rewritten > 0, "the fixture entry must carry at least one override to rewrite");
+  return clone;
+}
+
 function model(over: Partial<JsonModel> & { id: string }): JsonModel {
   return {
     id: over.id,
@@ -299,21 +323,58 @@ test("skips an override conditioned on anything besides the context band", () =>
   assert.equal(mapped.cost.tiers?.[0]?.input, 9);
 });
 
-test("maps a gte threshold like gt", () => {
+test("skips a bounded context band instead of mapping its lower bound", () => {
+  // `{ gt, lte }` is a band, not a permanent price. Mapping its `gt` would
+  // charge the upper band's rate to every request above 100K, forever — the same
+  // silent promotion the service_tier guard exists to prevent. The fixture only
+  // ever carries open-ended `gt`, so this is the recorded payload with one extra
+  // bound on each override array.
+  const haiku = withContextBand(live("claude-haiku-5-5"), { gt: 100000, lte: 200000 });
+
+  assert.equal(transformApiModel(haiku).cost.tiers, undefined);
+});
+
+test("skips only the bounded overrides in a mixed array", () => {
+  // The band test above would also pass an implementation that threw the whole
+  // override array away as soon as one entry was bounded. Each entry is judged on
+  // its own, so the open-ended one keeps its rate.
   const synthetic = transformApiModel({
     id: "x",
     cost: {
       text: {
-        input: { price: 1, overrides: [{ when: { context: { gte: 50000 } }, price: 2 }] },
+        input: {
+          price: 1,
+          overrides: [
+            { when: { context: { gt: 100000, lte: 200000 } }, price: 9 },
+            { when: { context: { gt: 300000 } }, price: 4 },
+          ],
+        },
         output: { price: 3 },
       },
     },
   });
 
-  assert.equal(synthetic.cost.tiers?.[0]?.inputTokensAbove, 50000);
-  assert.equal(synthetic.cost.tiers?.[0]?.input, 2);
+  assert.deepEqual(
+    synthetic.cost.tiers?.map((tier) => [tier.inputTokensAbove, tier.input]),
+    [[300000, 4]],
+  );
 });
 
+test("drops a gte threshold instead of mapping it one token off", () => {
+  // pi's calculateCost applies a tier only when `inputTokens > inputTokensAbove`
+  // (strict, verified in pi-ai's dist/models.js), so `gte: N` would need
+  // `inputTokensAbove: N - 1` to mean "from N tokens up". No recorded payload
+  // uses gte, so the decision is to drop it rather than carry that arithmetic:
+  // the base rate applies, instead of a tier that is one token short (mapping N)
+  // or that narrows the band (mapping N + 1).
+  const haiku = withContextBand(live("claude-haiku-5-5"), { gte: 100000 });
+
+  const transformed = transformApiModel(haiku);
+
+  assert.equal(transformed.cost.tiers, undefined);
+  assert.equal(transformed.cost.input, 0.1, "the flat input rate still applies");
+  assert.equal(transformed.cost.output, 0.5, "the flat output rate still applies");
+});
 test("keeps the base rate for an override whose price is not a number", () => {
   const synthetic = transformApiModel({
     id: "x",
@@ -437,6 +498,25 @@ test("prefers chat-completions when a payload advertises both endpoints", () => 
 
   assert.equal(synthetic.api, "openai-completions");
   assert.equal(synthetic.baseUrl, "https://example.test/openai/v1");
+});
+
+test("caches only prices its own cache reader accepts", () => {
+  // `cacheModels` claimed never to write an element the reader rejects, but the
+  // flat rates were copied straight out of the payload: a payload reporting
+  // `"0.1"` put a string in the cache, whose reader then refused the file on
+  // every later start — and revalidation rewrites the same element, so it never
+  // converges. The guarded zero is also what stops a string reaching
+  // `calculateCost` as NaN in the live session.
+  const [live] = transformApiModels([
+    { id: "string-price", cost: { text: { input: { price: "0.1" }, output: { price: 0.5 } } } },
+  ]);
+
+  assert.equal(live.cost.input, 0);
+  assert.equal(live.cost.output, 0.5);
+
+  cacheModels(mergeWithEmbedded([live], []));
+
+  assert.deepEqual(loadStaleModels([]).map((m) => m.id), ["string-price"]);
 });
 
 // ─── mergeWithEmbedded ────────────────────────────────────────────────────────
@@ -659,6 +739,42 @@ test("ignores a cache written in another format", () => {
   assert.deepEqual(result.map((m) => m.id), ["curated"]);
 });
 
+test("ignores a current-format cache holding a corrupt element", () => {
+  // The envelope is valid and the format current; only an element is not a
+  // model. Every shape here is reachable by hand-editing — `cacheModels` never
+  // writes one — and each used to get past the loader: `null` threw `Cannot read
+  // properties of null (reading 'id')` from `loadStaleModels`, which is what
+  // extension init calls; `"oops"` was served with no id or name; and an object
+  // carrying only an `id` was served with `cost: undefined`, which throws from
+  // pi-ai's `calculateCost` on first use. A string rate is the silent half: it
+  // would price the session NaN instead of throwing. One bad element fails the
+  // whole read, like every other unrecognised cache shape, so the curated list is
+  // served for one cold start instead of one broken model being registered.
+  const curated = [model({ id: "curated" })];
+  const valid = model({ id: "cached" });
+
+  for (const models of [
+    [null],
+    ["oops"],
+    [valid, null],
+    [{ id: "ghost" }],
+    [{ ...valid, id: "" }],
+    [{ ...valid, id: 42 }],
+    [{ ...valid, cost: "free" }],
+    [{ ...valid, cost: { ...valid.cost, input: "0.15" } }],
+    [{ ...valid, cost: { ...valid.cost, tiers: {} } }],
+    [{ ...valid, cost: { ...valid.cost, tiers: [{ inputTokensAbove: 1, input: 1, output: 1, cacheRead: 1 }] } }],
+  ]) {
+    writeRawCache({ format: CACHE_FORMAT_VERSION, models });
+
+    assert.deepEqual(
+      loadStaleModels(curated).map((m) => m.id),
+      ["curated"],
+      JSON.stringify(models),
+    );
+  }
+});
+
 test("ignores a cache that is JSON but not a cache file", () => {
   for (const junk of [null, 42, "models", [], { models: [] }, { format: "1", models: [] }]) {
     writeRawCache(junk);
@@ -750,6 +866,31 @@ test("leaves a live-only cached entry alone, since curation has nothing to corre
   assert.equal(stale.api, "openai-completions");
   assert.equal(stale.baseUrl, "https://stale.test/v1");
   assert.deepEqual(stale.input, ["text"]);
+});
+
+test("ignores a cache element pi would crash on or that disables compaction", () => {
+  // `input` is dereferenced without a guard by pi's read tool, and a non-numeric
+  // `contextWindow` makes the compaction comparison false instead of throwing —
+  // silently switching compaction off, which is worse than a crash.
+  const missingInput = { ...model({ id: "m" }) } as Record<string, unknown>;
+  delete missingInput.input;
+
+  const rejected: Record<string, unknown>[] = [
+    missingInput,
+    model({ id: "m", contextWindow: "131072" as unknown as number }),
+    model({ id: "m", input: ["text", "pdf"] as unknown as ("text" | "image")[] }),
+  ];
+
+  for (const element of rejected) {
+    writeCache([element as unknown as JsonModel]);
+
+    const result = loadStaleModels([model({ id: "curated" })]);
+
+    assert.deepEqual(result.map((m) => m.id), ["curated"], JSON.stringify(element));
+  }
+
+  writeCache([model({ id: "m" })]);
+  assert.deepEqual(loadStaleModels([]).map((m) => m.id), ["m"]);
 });
 
 test("keeps cached cost and context window when the curated entry differs", () => {

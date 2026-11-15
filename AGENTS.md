@@ -69,24 +69,32 @@ yourself — `dev` is not a priority queue.
 
 Branches reach GitHub through `gh`, which is baked into the devcontainer image
 (`.devcontainer/Dockerfile`) rather than installed at runtime, so a rebuild does
-not silently drop it. The token lives in the `pi-agent-config` volume via
-`GH_CONFIG_DIR=/home/vscode/.pi/gh`, which is what makes one `gh auth login` last
-across rebuilds — `/home/vscode` itself is container-local and is discarded.
+not silently drop it. The token is **not** on a shared volume any more: it arrives
+as `GH_TOKEN` from the host environment, alongside the provider keys, and gh's
+non-secret config sits at `GH_CONFIG_DIR=/home/vscode/.pi/gh` on this container's
+private volume. That is what lets every container use the same credential without
+any cross-container mount.
 
-One-time setup, run by the human (it needs a browser):
+The host-side source is `~/.config/devc/env`, which `devc` sources (with
+allexport) before `devcontainer up`; each `devcontainer.json` forwards the values
+with `${localEnv:...}`. One-time setup, run by the human:
 
 ```bash
-gh auth login --hostname github.com --git-protocol https --web
+mkdir -p ~/.config/devc && chmod 700 ~/.config/devc
+printf 'GH_TOKEN=%s\n' "$(gh auth token)" >> ~/.config/devc/env
+chmod 600 ~/.config/devc/env
 ```
 
-That is the whole setup. `git push` then works with no credential in
-`.git/config`, because the Dockerfile registers gh as git's credential helper
-system-wide — deliberately, not via `gh auth setup-git`, which writes to
-`~/.gitconfig` on the container-local overlay and is discarded on rebuild. The
-token would survive that; the helper would not, and push would break silently.
+A `gh auth login` *inside* a container still works, but it writes only that
+container's private volume, so the next container starts unauthenticated. Prefer
+the host env file. `git push` then works with no credential in `.git/config`,
+because the Dockerfile registers gh as git's credential helper system-wide —
+deliberately, not via `gh auth setup-git`, which writes to `~/.gitconfig` on the
+container-local overlay and is discarded on rebuild. The token would survive
+that; the helper would not, and push would break silently.
 
-Check *where* the token lives before trusting a login: `gh auth status` prints the
-path, and that path decides whether it survives.
+Check *where* the token lives before trusting a login: `env | grep '^GH_TOKEN='`
+(never print the value) and `gh auth status`'s config path.
 
 ## The workflow
 
@@ -183,8 +191,18 @@ Install this repo where you run `pi` from it **as a local path**
 `git:github.com/RRiboulet/my-agent-setup`: project discovery and an installed
 package both find `.pi/extensions`, so the git form loads every extension twice
 and pi aborts startup on the duplicate tools. The devcontainer already runs its
-own package-free agent dir for this reason. Details and the symptom are in the
-README section "One copy of the extensions, never two".
+own package-free agent dir on a private volume for this reason. Details and the
+symptom are in the README section "One copy of the extensions, never two".
+
+Other projects on this host do the opposite, deliberately: their images bake
+this repo at a pinned tag under `/opt/pi-packages/my-agent-setup`, and their
+`postCreate` points the container's own agent settings at that path. The tag is
+recorded in that project's `.devcontainer/pi-agent-setup.version`, mirrored by
+the Dockerfile's `PI_AGENT_SETUP_TAG`, and exposed to the running container as
+`PI_AGENT_SETUP_TAG`, the image label `org.rriboulet.pi-package`, and
+`/opt/pi-packages/my-agent-setup/.pi-agent-setup-tag`. Each project owns the
+check that fails when its pin drifts; `my-agent-setup` itself never carries a
+package in its container.
 
 Linked worktrees for independent tasks live under `.worktrees/` at the repo root (see `.pi/skills/worktree/`); that directory is gitignored and shared refs mean branch names must be unique across worktrees.
 
@@ -203,6 +221,10 @@ than waiting to be told:
 
 - Trivial, unambiguous edit: make it, then check it. No ceremony.
 - Non-trivial or ambiguous request: `in-your-own-words` before building.
+- The user asks to be grilled, stress-tested or interviewed, or a request's
+  shape is undecided and a ten-line playback cannot carry its assumptions:
+  `grilling`. It is the full design-tree interview in rounds; the cheap playback
+  stays the default.
 - A change crossing a module, service, API, schema or config boundary:
   `blast-radius`.
 - A bug, failing test, CI failure, crash, flake or regression: `diagnosing-bugs`.
@@ -215,9 +237,20 @@ than waiting to be told:
   sessions.
 - Before saying work is done: `prove-it-works`.
 
-Only the user starts the four user-invoked entry points, which pi spells
+Only the user starts the five user-invoked entry points, which pi spells
 `/skill:<name>`: `/skill:to-spec`, `/skill:to-tickets`, `/skill:implement`,
-`/skill:handoff`. Suggest them when they fit; never start them yourself.
+`/skill:handoff`, `/skill:teach`. Suggest them when they fit; never start them
+yourself.
+
+`grilling` and `teach` are ported straight from
+[mattpocock/skills](https://github.com/mattpocock/skills) rather than through that
+stack, and `licenses/NOTICE.md` records them separately. `grilling` therefore
+sits in the trigger list above although it is not one of the twelve. It is
+model-invoked (so it is advertised by its description, and `/skill:grilling`
+still works). `teach` is user-invoked and stateful: it builds a
+teaching workspace outside any project checkout — never in this one — and the
+course is continued by starting a session in that directory and asking for the
+next lesson, or by `/skill:handoff` out of the session you are in.
 
 Three repo rules win over those skill bodies, and the skills say so in place:
 

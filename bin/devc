@@ -30,14 +30,32 @@
 #
 # Configuration: ~/.config/devc/roots holds one project root per line
 # (blank lines and #-comments ignored). It is seeded on first use.
+# ~/.config/devc/env, when present, is sourced before `devcontainer up` so the
+# containers inherit provider keys and GH_TOKEN from one host-side file. It is
+# read with allexport and never printed; keep it mode 600 and out of any repo.
 #
-# Environment: DEVC_DRY_RUN=1 prints the commands instead of running them.
+# Environment: DEVC_ENV_FILE overrides that file's path.
+#              DEVC_DRY_RUN=1 prints the commands instead of running them.
 
 set -euo pipefail
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/devc"
 ROOTS_FILE="$CONFIG_DIR/roots"
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/devc"
+
+# Containers no longer share a volume for credentials, so the values have to be
+# in the environment of the process that runs `devcontainer up` (the
+# devcontainer.json files reference them through ${localEnv:...}). Sourcing here
+# makes that work for every project without repeating an env_file path in each
+# compose file. Missing file is fine: a container can still be built and opened,
+# it just has no provider credentials until the file exists.
+DEVC_ENV_FILE="${DEVC_ENV_FILE:-$CONFIG_DIR/env}"
+if [ -r "$DEVC_ENV_FILE" ]; then
+	set -a
+	# shellcheck disable=SC1090 # path is user configuration, not a fixed include
+	. "$DEVC_ENV_FILE"
+	set +a
+fi
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
 	BOLD=$'\033[1m' DIM=$'\033[2m' RED=$'\033[31m' YELLOW=$'\033[33m' RESET=$'\033[0m'
@@ -177,6 +195,19 @@ container_id() {
 	docker ps -q --filter "label=devcontainer.local_folder=$1" | head -n1
 }
 
+# The per-project state files (the lock, the config stamp) are named after the
+# *resolved workspace path*, not the project's basename: two projects called
+# `web` under different roots (`~/a/web`, `~/b/web`) are different projects, and
+# a name keyed on the basename alone gives them one file between them —
+# whichever ran last owns it, and the other's checks then read its hash.
+# The basename is only there to make the file recognisable; the hash of the
+# whole path is what distinguishes two same-named projects.
+workspace_key() {
+	local dir="$1"
+	printf '%s-%s' "$(basename "$dir" | tr -c 'A-Za-z0-9._-' '_')" \
+		"$(printf '%s' "$dir" | sha256sum | cut -c1-16)"
+}
+
 # Everything that decides what the container *is*: the devcontainer config, the
 # compose file, the Dockerfile, the lifecycle scripts and the build context's
 # ignore file. `devcontainer up` on 0.90 does not recreate an existing container
@@ -256,13 +287,9 @@ is_running() {
 # pre-create it, hold it (a denial of service) or symlink it to redirect the
 # `exec 9>` write below.
 lock_file() {
-	local dir="$1" name key
-	# The basename is only there to make the file recognisable; the hash of the
-	# whole path is what distinguishes two same-named projects.
-	name="$(basename "$dir" | tr -c 'A-Za-z0-9._-' '_')"
-	key="$(printf '%s' "$dir" | sha256sum | cut -c1-16)"
+	local dir="$1"
 	mkdir -p -m 700 "$STATE_DIR/locks"
-	printf '%s/devc-%s-%s.lock\n' "$STATE_DIR/locks" "$name" "$key"
+	printf '%s/devc-%s.lock\n' "$STATE_DIR/locks" "$(workspace_key "$dir")"
 }
 
 lock_project() {
@@ -302,7 +329,12 @@ ensure_up() {
 		return 0
 	fi
 
-	local stamp="$STATE_DIR/$name.cfgsha" want have
+	# The stamp is keyed on the workspace path like the lock (see
+	# workspace_key), so a same-basename sibling's run cannot feed this
+	# project's staleness check its hash — that made devc either recreate a
+	# current container or, when the sibling's hash happened to equal this
+	# project's config hash, leave a stale one "already running".
+	local stamp="$STATE_DIR/$(workspace_key "$dir").cfgsha" want have
 	want="$(cfg_hash "$dir")"
 	have="$(cat "$stamp" 2>/dev/null || true)"
 
@@ -403,7 +435,7 @@ cmd_rebuild() {
 		return 0
 	fi
 	mkdir -p "$STATE_DIR"
-	cfg_hash "$dir" >"$STATE_DIR/$(basename "$dir").cfgsha"
+	cfg_hash "$dir" >"$STATE_DIR/$(workspace_key "$dir").cfgsha"
 }
 
 cmd_stop() {
@@ -516,9 +548,18 @@ doctor() {
 	local d name dc compose
 	for d in "${checked[@]}"; do
 		name="$(basename "$d")"
-		dc="$d/.devcontainer/devcontainer.json"
+		# Membership is `has_devcontainer`, not "does the directory layout exist".
+		# Testing `$d/.devcontainer/devcontainer.json` here skipped every
+		# repo-root `.devcontainer.json` project — a shape `has_devcontainer`,
+		# `projects` and `cfg_hash` all handle — so doctor reported "nothing
+		# blocking" for a container it never examined.
+		has_devcontainer "$d" || continue
+		if [ -f "$d/.devcontainer/devcontainer.json" ]; then
+			dc="$d/.devcontainer/devcontainer.json"
+		else
+			dc="$d/.devcontainer.json"
+		fi
 		compose="$d/.devcontainer/docker-compose.yml"
-		[ -f "$dc" ] || continue
 		printf '\n%s%s%s %s\n' "$BOLD" "$name" "$RESET" "$d"
 
 		if grep -q 'docker-in-docker' "$dc" 2>/dev/null; then
@@ -543,7 +584,11 @@ doctor() {
 			[ "$ccu" = "$hcu" ] || problems=$((problems + 1))
 			local want have
 			want="$(cfg_hash "$d")"
-			have="$(cat "$STATE_DIR/$name.cfgsha" 2>/dev/null || true)"
+			# Keyed like the writes above: reading the basename-named file here
+			# would have `doctor` judge this project's container by a
+			# same-basename sibling's hash — flagging a current one stale, or
+			# reassuring a stale one.
+			have="$(cat "$STATE_DIR/$(workspace_key "$d").cfgsha" 2>/dev/null || true)"
 			if [ -n "$have" ] && [ "$have" != "$want" ]; then
 				printf '  stale      devcontainer config changed; devc up will recreate it\n'
 			fi

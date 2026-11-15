@@ -67,6 +67,8 @@ let soloRoot = "";
 let emptyRoot = "";
 /** A nested tree with a second branch whose `src/a.ts` differs, for the quick-open handler tests. */
 let quickRoot = "";
+/** A repository whose `origin/feature` resolves as a commit but cannot be diffed (its tree is missing). */
+let brokenDiffRoot = "";
 
 before(async () => {
 	menuRoot = await initRepo("menu");
@@ -112,11 +114,36 @@ before(async () => {
 	gitIn(quickRoot, "add", "-A");
 	gitIn(quickRoot, "commit", "-q", "-m", "feature change");
 	gitIn(quickRoot, "checkout", "-q", "main");
+
+	// A diff that fails in real git, without a shim runner. `mktree --missing`
+	// fabricates a tree pointing at an object that does not exist; committing it
+	// gives `origin/feature` a tip that rev-parse resolves (the commit is real)
+	// but that any diff dies reading. `listFiles` still works, because it uses
+	// the local branch's own, intact tree — which is the shape the handler has to
+	// survive: the file list arrived, the changed-file set did not.
+	brokenDiffRoot = await initRepo("broken-diff");
+	await writeFile(path.join(brokenDiffRoot, "README.md"), "broken root\n");
+	gitIn(brokenDiffRoot, "add", "-A");
+	gitIn(brokenDiffRoot, "commit", "-q", "-m", "initial");
+	gitIn(brokenDiffRoot, "checkout", "-q", "-b", "feature");
+	await writeFile(path.join(brokenDiffRoot, "note.txt"), "feature note\n");
+	gitIn(brokenDiffRoot, "add", "-A");
+	gitIn(brokenDiffRoot, "commit", "-q", "-m", "feature change");
+	gitIn(brokenDiffRoot, "checkout", "-q", "main");
+	const brokenTree = execFileSync("git", ["mktree", "--missing"], {
+		cwd: brokenDiffRoot,
+		encoding: "utf8",
+		input: `040000 tree ${"deadbeef".repeat(5)}\tlost\n`,
+	}).trim();
+	const brokenCommit = gitIn(brokenDiffRoot, "commit-tree", brokenTree, "-m", "missing tree").trim();
+	gitIn(brokenDiffRoot, "update-ref", "refs/remotes/origin/feature", brokenCommit);
 });
 
 after(async () => {
 	await Promise.all(
-		[menuRoot, shadowRoot, soloRoot, emptyRoot, quickRoot].map((dir) => rm(dir, { recursive: true, force: true })),
+		[menuRoot, shadowRoot, soloRoot, emptyRoot, quickRoot, brokenDiffRoot].map((dir) =>
+			rm(dir, { recursive: true, force: true }),
+		),
 	);
 });
 
@@ -374,7 +401,7 @@ const uiTheme = { fg: (_color: string, text: string) => text, bold: (text: strin
  * is handed back so a test can render it and see the branch label and the file
  * list that reached it.
  */
-function makeCtx(cwd: string, overrides: Record<string, unknown> = {}) {
+function makeCtx(cwd: string, overrides: Record<string, unknown> = {}, browserTheme: unknown = uiTheme) {
 	const notes: string[] = [];
 	const menus: string[][] = [];
 	const browsers: { render(width: number): string[] }[] = [];
@@ -391,7 +418,7 @@ function makeCtx(cwd: string, overrides: Record<string, unknown> = {}) {
 				return answer;
 			},
 			custom: async (factory: (tui: unknown, theme: unknown, kb: unknown, done: (r: FileBrowserResult) => void) => unknown) => {
-				const component = (await factory({ requestRender: () => undefined }, uiTheme, getKeybindings(), () => undefined)) as {
+				const component = (await factory({ requestRender: () => undefined }, browserTheme, getKeybindings(), () => undefined)) as {
 					render(width: number): string[];
 				};
 				browsers.push(component);
@@ -473,6 +500,30 @@ test("/explore sanitizes a control-byte path in the error it reports", async () 
 	assert.equal(notes.length, 1);
 	assert.match(notes[0], /^error: repo-explorer: Not found in .*evil\^\[\[2J\.txt/);
 	assert.ok(!notes[0].includes("\u001b"), "no raw escape reaches the notification");
+});
+
+test("/explore warns once and opens the browser with nothing red when the diff fails", async () => {
+	// A failed diff must not blank the browser or escape as a thrown error: the
+	// file list already arrived, so the browse is still useful — it just has no
+	// changed rows. The tagging theme makes "nothing red" observable; the plain
+	// stub would render the same text either way.
+	const taggedTheme = {
+		fg: (color: string, text: string) => (color === "error" ? `<error>${text}</error>` : text),
+		bold: (text: string) => text,
+	} as never;
+	const { handler } = await loadExplore();
+	const { ctx, notes, browsers, answerWith } = makeCtx(brokenDiffRoot, {}, taggedTheme);
+	answerWith("feature");
+
+	await handler("", ctx);
+
+	assert.equal(browsers.length, 1, "the browser is opened despite the failed diff");
+	const view = browsers[0].render(80).join("\n");
+	assert.match(view, /Explore feature › \./, "the picked branch is still browsed");
+	assert.match(view, /note\.txt/, "the file list survives");
+	assert.ok(!view.includes("<error>"), "no row is painted from a changed-file set that failed to load");
+	assert.equal(notes.length, 1);
+	assert.match(notes[0], /^warning: repo-explorer: git diff failed for "refs\/heads\/feature"/);
 });
 
 // ---------------------------------------------------------------------------

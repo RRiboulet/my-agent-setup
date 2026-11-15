@@ -4,6 +4,236 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.13.0 — 2026-11-15
+
+Added:
+
+- **`grilling` and `teach` are ported as ours from mattpocock/skills, in the shape
+  the coding stack already uses.** `grilling` is model-invoked and joins the
+  trigger list in `AGENTS.md`: the full design-tree interview, run in rounds —
+  ask the whole frontier, one recommended answer per question, facts found by the
+  agent (with a `subagent` when an environment can settle them) and decisions
+  left to the user — ending at an empty frontier and an explicit confirmation,
+  never at an edit, a commit or a review. It absorbs upstream's user-invoked
+  `grill-me` wrapper, whose whole body is "call `grilling`", because pi runs a
+  model-invoked skill as `/skill:<name>` too; the wrapper's prose (count rounds
+  not questions, there is no cap, split an over-long scope, hand the session to
+  `to-spec`) moved into the skill, and the boundary with `in-your-own-words`
+  (the cheap playback, still the default, which now names `grilling` where to
+  escalate) and `to-spec` (which deliberately does
+  not interview) is stated in place rather than left to the reader. `teach` is
+  the fifth user-invoked entry point: a stateful teaching workspace of numbered
+  HTML lessons, reference sheets, reusable `assets/`, a glossary, `RESOURCES.md`
+  and ADR-style learning records, continued by starting a session in that
+  directory. Two deviations matter. The workspace goes to a directory the user
+  names, or `<agent dir>/learning/<slug>` — never into a project checkout, where
+  upstream's "the directory `/teach` ran in" would litter every later diff with
+  course files. And `GLOSSARY-FORMAT.md` is linked from `SKILL.md`, because
+  upstream ships it orphaned
+  ([#559](https://github.com/mattpocock/skills/issues/559)) and the glossary it
+  describes is therefore never built. The quiz defect upstream measured — the
+  correct answer lands first however the instructions are worded
+  ([#335](https://github.com/mattpocock/skills/issues/335)) — is answered with a
+  component in `assets/` that shuffles at render time, not with wording alone,
+  and the gaps its own docs admit (nothing schedules review, no exit criteria,
+  no assessment step) are stated in "Honest limits" instead of being left for
+  the user to discover. Both are listed in the `pi` manifest and in
+  `licenses/NOTICE.md`, and `coding-skills.test.ts` now carries them as a
+  `PORTED` list so the name, description-length, invocation and relative-link
+  assertions apply to them too.
+
+- **`bin/pi-agent-dir` gives a host the devcontainer's agent-dir split, so a
+  subagent rooted in this checkout's worktree starts instead of exiting 1 on
+  duplicate tool registrations.** A linked worktree discovers *its own*
+  `.pi/extensions`, while an installed package resolves to the main checkout's
+  copy; pi treats that as a load error, and there is no flag that suppresses only
+  the package copy (`-ne` also drops built-in extensions and every extension not
+  named with `-e`, and `--no-approve` starts but runs the main checkout's code
+  rather than the branch's). The script creates
+  `~/.pi/agent-<main checkout directory name>`, a sibling of the shared `agent`
+  dir — the *shape* `devcontainer.json` declares, though not the same name
+  source: the script reads the checkout's directory while the container reads the
+  project's (see the `Fixed:` bullet below on `pi-agent-dir.test.ts`). It is
+  seeded from the shared `settings.json` with `.packages` and its
+  `extensionChangelogVersions` bookkeeping removed,
+  copies credentials once, merges (never replaces) a `trust.json` entry for the
+  checkout, and, with `--shell`, appends one marker-delimited `pi` function to
+  `~/.bashrc` that selects that dir from anywhere inside the checkout or a
+  worktree. It resolves the main checkout through `--git-common-dir`, so a
+  worktree maps to the same dir instead of getting a fresh unseeded one;
+  `trust.json` matters because a
+  saved decision covers a directory or its parents, and without the entry the
+  package-free dir is a silently empty agent. Every write is
+  create-if-missing and every file lands through a temp file and a rename, so
+  re-running it cannot overwrite a project's own settings or a rotated key, and
+  `--check` reports the three things that would still conflict. Verified against
+  throwaway HOME and repo trees: the seeded settings have no `packages`, a
+  second run leaves hand-edited settings and credentials untouched, a linked
+  worktree and its main checkout resolve to one dir, the installed hook resolves
+  both to that dir and nothing outside any checkout, and the shape matches the
+  one `devcontainer.json` declares. Mutation-checked the same way — using
+  `--show-toplevel`, keeping `.packages`, or appending the hook unconditionally
+  each turns the suite red. The README section "One copy of the extensions,
+  never two" and `.pi/skills/worktree/` now name this as the host remedy.
+
+Fixed:
+
+- **The `add-model` skill no longer contradicts itself about `baseUrl`, and its
+  merge rules now match `mergeWithEmbedded`.** It offered both `zen/go/v1` and
+  the payload's `inference/go/openai/v1` without saying which is canonical, and
+  it claimed "a curated entry always beats the live API" — false for `cost`
+  (live wins per field when non-zero), `contextWindow` (live → curated →
+  `131072`) and `reasoning` (curated, except an explicit live
+  `supported: false`, which demotes). The rewrite names `…/zen/go/v1` canonical
+  for `openai-completions` and `…/zen/go` for `anthropic-messages` — without the
+  trailing `/v1`, because pi's Anthropic client appends `/v1/messages`, so
+  keeping it requests `/v1/v1/messages` — calls the advertised
+  `inference/go/...` URLs aliases rather than the manual default (naming the
+  one deliberate curated alias, `longcat-2.5-free`, so an audit does not
+  "fix" it), replaces the claim with a per-field table, and adds the
+  `patch.json` caveats: a patch refines a `custom-models.json` entry as well as
+  a curated one, and a patch id in neither list is silently dropped. The
+  cost-tier section now opens with pi repricing the whole request at the
+  highest matching tier instead of reading as progressive billing, and states
+  which band shapes map: an open-ended `{ "gt": N }` does, while a `gte`
+  threshold and a bounded `{ "gt", "lte" }` band are skipped, as is a
+  condition outside the band. The
+  payload-is-untrusted note says the "malformed rate is skipped" rule covers
+  tier overrides only and that the four flat rates are parsed the same way
+  (both paths guard through `nonNegativeNumber`), and the
+  `cost.text.overrides` / `cost.multipliers` note is in the same pass. Verified by running the real
+  `transformApiModel`/`mergeWithEmbedded`/`buildModels` against a hand-written
+  payload: a non-string `base_url` falls back to `zen/go/v1`, a messages `…/v1`
+  is stripped, a live non-zero rate wins per field while a curated `cacheRead`
+  survives a live 0, a live `limit.context` beats a curated 1M, an explicit
+  `supported: false` drops `thinkingLevelMap`, a patch lands on a custom id and
+  a `ghost` id registers nothing, and `gt: 200000` becomes a tier while an
+  override carrying `service_tier` is skipped. Docs only; no provider behaviour
+  changed.
+- **opencode-go charged a payload's bounded or `gte` context tier as a permanent
+  one, and could crash on a hand-corrupted model cache.** `transformApiModel`
+  checked that a price override carried nothing besides `when.context`, but not
+  what was inside it: a band of `{ gt, lte }` had its lower bound mapped to an
+  open-ended `inputTokensAbove` tier, so the upper band's rate was charged to
+  every request above the threshold, and `gte: N` was mapped to `N` even though
+  pi-ai's `calculateCost` matches with a strict `>`, so a request of exactly `N`
+  tokens paid the flat rate. The recorded payload uses only open-ended `gt`, so
+  neither was reachable from a live fetch; a band is now accepted only as exactly
+  `{ gt }`, and `gte` is dropped rather than mapped (a faithful mapping needs
+  `N - 1`, not the `N + 1` the finding suggested, and no payload uses `gte`), so
+  a `gte`-only override keeps the base rate. Separately, `loadCachedModels`
+  validated the cache envelope but not its elements, so a current-format
+  `{"format":2,"models":[null]}` threw `Cannot read properties of null (reading
+  'id')` out of extension init, `["oops"]` was registered with no id or name,
+  and an object carrying only an `id` was registered with `cost: undefined`,
+  which throws from pi-ai's `calculateCost` on the first request; one bad element
+  now fails the read, and the curated list is served for that cold start as it
+  already was for every other unrecognised cache shape. The element check covers
+  the id, the pricing block (four finite rates, and tiers when present), the
+  `input` array and `contextWindow`, which are the fields downstream dereferences
+  without a fallback: a garbled rate prices the session `NaN` silently, a missing
+  `input` throws from pi's read tool on `model.input.includes(...)`, and a
+  non-numeric `contextWindow` makes compaction's comparison false instead of
+  throwing, so it switches compaction off with no signal at all. Review also
+  found that the writer could produce what this reader rejects — `transformApiModel`
+  copied the flat `price` through unchecked where the tier path already used
+  `nonNegativeNumber` — so a payload reporting `"0.1"` was written into the cache
+  and then refused on every later start, with revalidation rewriting the same
+  element: a cache that never converges, and a `NaN` price in the live session
+  until the next cold start. Both flat and tier rates are guarded now. The tests
+  also pin the bounds the first pass left open — an empty or non-string id, a
+  missing or non-numeric rate, malformed tiers, a missing `input`, a string
+  `contextWindow` — and prove a realistic cache written from the recorded payload
+  plus the real catalogue is still read back whole (31 of 31 elements), so the
+  new checks do not cost existing users a cold start. Every new case fails
+  against the previous code; the provider suite passes 95/95 (`cd
+  .pi/extensions/opencode-go-provider && node --test`).
+- **`devc doctor` now examines a repo-root `.devcontainer.json` project
+  instead of skipping it and reporting the run as clean.** `doctor()` built its
+  config path as `$d/.devcontainer/devcontainer.json` and did `[ -f "$dc" ] ||
+  continue`, so the root layout — which `has_devcontainer` accepts in every
+  membership test, `projects` lists and `cfg_hash` hashes since PR #124 — never
+  reached a single per-project check: no Docker-in-Docker warning, no uid
+  comparison, no stale-config report. The silence was the bug, because the run
+  then ended in "nothing blocking" for a container it had not examined.
+  Membership is now the existing `has_devcontainer` helper, with the config path
+  picked from whichever layout exists; the Dockerfile check stays guarded on
+  `.devcontainer/Dockerfile`, and so does the compose/ports check on
+  `.devcontainer/docker-compose.yml`, so both remain silent for a root-style
+  project that puts them at the repo root — a narrower gap than before, not
+  none. The stale check needed no change because `cfg_hash` already handles both
+  shapes. `devc.test.ts` gains the coverage it lacked for the root style:
+  `doctor proj` and `doctor` with no name both print the project's section and
+  its current line, and editing the root config then reports `stale`. A second
+  test pins the other half — the config path itself — by putting
+  Docker-in-Docker in the root file and requiring the privileged line, which a
+  membership-only fix would miss while the section around it printed. Both fail
+  against the previous script, which printed no section at all.
+
+- **`devc`'s config stamp is keyed
+- **`devc`'s config stamp is keyed on the resolved workspace path, so two
+  projects with the same basename no longer read each other's staleness.** The
+  stamp lived at `$STATE_DIR/$(basename "$dir").cfgsha`, so `~/a/web` and
+  `~/b/web` shared one file: whichever ran last owned it, and `ensure_up`'s
+  stale detection then compared against the *other* project's hash — either
+  recreating a current container or, when the sibling's last-written hash
+  happened to equal this project's config hash (both configs identical is the
+  easy way there), leaving a stale one alone with "already running".
+  `devc doctor`'s stale report read the same file, so it could flag a project
+  stale that was not, or reassure one that was. Same class as the shared-lock
+  bug, same fix: the path hash that `lock_file` already computed is factored
+  into a `workspace_key` helper, and every read and write of the stamp —
+  `ensure_up`'s write and read, `cmd_rebuild`'s write, `doctor`'s read — uses
+  it. Migration is safe by construction: the first run after the upgrade finds
+  no keyed stamp, `have` is empty, and `ensure_up` recreates only when `have`
+  is non-empty *and* differs, so nothing existing is destroyed; that run writes
+  the keyed stamp and detection is correct from then on. The cost is one
+  missed reconcile on each project's first run after upgrading. The new tests
+  fail against the pre-fix script, and mutation-checked both ways — reverting
+  every stamp site to the basename, or only `doctor`'s read, turns the
+  corresponding tests red.
+
+- **`pi-agent-dir.test.ts` no longer fails wherever the checkout directory is not
+  named after the repo.** The test tied the host script's convention to the one
+  `.devcontainer/devcontainer.json` declares by comparing the declared directory
+  against `agent-` + `basename(REPO_ROOT)`. That is the *checkout* directory, not
+  the repo's identity, so it held only for a clone made into a directory named
+  after the repo: it was red on untouched `dev` inside this repo's own container,
+  which mounts the repo at `/workspace`, where the check computed
+  `agent-workspace` against the declared project name. The expected side now
+  comes from `package.json`'s `name` — the repo's declared identity, independent
+  of where it is cloned. That is not the same mechanism as the sibling guard's
+  volume literal, which is hard-coded, so a project rename now turns this test
+  red while that literal stays green: one stale name caught instead of none. And
+  renaming the declared directory still turns it red — checked by renaming it to
+  `agent-renamed-drift` and reading the failure, which names the expected value.
+  Both sides stay computed, so the "exactly one literal" guard is unaffected, and
+  the sandbox tests keep pinning the script's own rule
+  (`agent-<main checkout directory name>`) against a temp HOME. The naming prose is
+  now exact about the two sources instead of implying they are one convention:
+  the header comment in `bin/pi-agent-dir` and the README table row both say the
+  script names its dir after the main checkout's *directory* while the container
+  names its own after the *project*, so the two agree only for a directory named
+  after the repo — and that this is intended, since the container installs no
+  package and the shell hook derives the host name at call time.
+
+- **`/explore`'s changed-files colouring now diffs against a branch's configured
+  upstream.** `index.ts` passes `choice.refname` — a full `refs/heads/<name>` —
+  and `upstreamOf` built its probe as `${branch}@{upstream}`, which git rejects
+  with `fatal: no such branch` (exit 128), because `@{upstream}` is only accepted
+  after a *short* branch name. So the "`@{upstream}` wins" half never ran in
+  production. It usually fell through to the conventional `origin/<branch>` and
+  looked right, but a branch whose configured upstream is a differently named
+  ref and has no `origin/<branch>` — `branch.feature.merge` pointing at
+  `refs/heads/main`, say — fell through to the merge base with the integration
+  branch and painted the branch's whole history red. The probe now uses the
+  `short` name `upstreamOf` already computes. Pinned by a test that is red on the
+  old form and asserts the probe's argv as well as the resulting paths, because a
+  resolver that misses the probe and falls back can produce plausible paths
+  anyway; the fixture makes the two answers disjoint (the upstream sits one
+  commit past the merge base) and omits `origin/feature` so nothing rescues it.
+  Mutating `${short}` back to `${branch}` turns that one test red.
+
 Maintenance:
 
 - **`README.md` now carries an "Upgrading to v1.12.0" block, and it says to
@@ -20,6 +250,79 @@ Maintenance:
   `pickProvider(undefined, settings, auth)` resolves `brave`, and an explicit
   `opencode-go` throws the documented `Unknown provider` error. Docs only; no
   provider precedence changed.
+
+- **`/explore`'s changed-files colouring now has tests, and writing them found
+  a real bug in it, fixed in the `Fixed:` block above.** `git.changedFiles`,
+  `FileBrowser.changedFiles`/`changedDirs` and the handler wiring shipped in
+  v1.12.0 with no coverage: `grep changedFiles` in the repo-explorer tests found
+  nothing, and every branch had a plausible wrong answer. The new tests pin the
+  four behaviours the v1.12.0 bullet claims. The configured upstream winning
+  over `origin/<branch>` (and the fallback when it is unset) — with the two refs
+  holding disjoint commits, so an implementation that diffed both and unioned
+  the results is caught rather than passing. A remote-tracking
+  ref never being diffed — in both shapes that matter, because the guards are
+  two: the early return is what stops a symref-`HEAD`-at-`origin/main` browse
+  from collecting the local working tree, and removing it *and* the
+  `!branch.startsWith("refs/remotes/")` guard is what would let the merge-base
+  fallback paint the whole tree. Uncommitted changes reaching the checked-out
+  branch only. The merge-base candidate order `origin/dev` → `dev` →
+  `origin/main` → `main`, asserted through the argv git actually received, not
+  just the resulting paths, and a non-ASCII path pinned from `-z` output (without
+  it git shell-quotes the name, so dropping the flag cannot pass). The browser
+  painting a changed file and every folder above it with
+  `theme.fg("error", …)`, leaving unaffected rows plain and a selected changed
+  row still red *without* being repainted in the selection colour — assertions
+  that were checked against those mutations, not just written — and the handler
+  turning a failed diff into
+  one `warning:` notify plus an empty set that still opens the browser with the
+  file list intact. The failed diff is a real git failure (`mktree --missing`
+  fabricates a tree that cannot be read), not a shim. Mutation-checked as the
+  todo asked: dropping the remote-tracking guard turns two tests red, dropping
+  `headBranch === branch` turns the uncommitted-changes test red; both restored,
+  the production diff is empty. `.pi/extensions/subagent/test/README.md`'s
+  coverage table gains the new coverage in the three repo-explorer rows, since
+  it is what AGENTS.md points at for "what is and is not covered".
+
+Changed:
+
+- **Devcontainers are independent: no container mounts the shared
+  `pi-agent-config` volume any more.** This repo's container keeps its existing
+  state on a new private volume, `pi-agent-my-agent-setup`, migrated from the
+  old one; both it and every other project stack now own their pi sessions,
+  trust and gh config. The shared volume's clone had silently frozen at `main`
+  (`eabebf4`) while `dev` moved on, which is the failure this removes: nothing
+  outside the checkout could report that the extensions were a release behind.
+
+- **This repo's own container still installs no package.** Its
+  `PI_CODING_AGENT_DIR` is unchanged, but the volume under it is private, and a
+  missing `settings.json` now starts from the committed
+  `.devcontainer/pi/settings.json` template instead of being seeded from the
+  shared `agent` dir. `postCreate.sh` also strips any `my-agent-setup` package
+  entry a migrated volume still carries, so the checkout's `.pi/` remains the
+  only source of extensions and skills (README, "One copy of the extensions,
+  never two").
+
+- **Other projects' images bake this repo, pinned to `v1.12.0`.** Each image
+  clones the tag to `/opt/pi-packages/my-agent-setup`, outside `$AGENT_DIR` so a
+  named volume cannot freeze the first container's copy, and exposes the pin as
+  `PI_AGENT_SETUP_TAG`, the `org.rriboulet.pi-package` label and
+  `/opt/pi-packages/my-agent-setup/.pi-agent-setup-tag`. Their `postCreate`
+  declares that baked path in the container's own agent settings and fails if a
+  stale image does not match the checkout's `.devcontainer/pi-agent-setup.version`.
+  The tag is deliberately `v1.12.0`: it predates the `devc` fixes and the
+  `grilling`/`teach` port, so those images start one release behind `dev` on
+  purpose, and the next release's bump brings them current.
+
+- **Credentials travel as environment variables, never as a copied `auth.json`
+  on a shared volume.** `OPENCODE_API_KEY`, `OPENROUTER_API_KEY`,
+  `BRAVE_API_KEY`, `TYPESAFE_API_KEY`, `PI_VOICE_API_KEY` and `GH_TOKEN` are
+  forwarded into every container from the host environment with
+  `${localEnv:...}`. `devc` sources `~/.config/devc/env` (mode 600, never
+  committed) before `devcontainer up`, so one host-side file can supply every
+  project while no container shares state with another. The values are visible
+  in `docker inspect` and in child-process environments; that is the deliberate
+  trade-off, and the alternative — a mount — is the coupling this change
+  removes.
 
 ## v1.12.0 — 2026-11-13
 

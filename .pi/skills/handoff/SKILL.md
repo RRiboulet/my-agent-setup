@@ -18,9 +18,9 @@ This is the document, not the `subagent` tool's context-handoff modes
 
 Save it under the pi agent dir — `${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}/handoffs`
 — as `handoff-<YYYYMMDD-HHMM>-<slug>.md`, not in the workspace, unless the user
-names a location. In this devcontainer that directory is on the persistent
-`pi-agent-config` volume, whereas `/tmp` and `/home/vscode` are container-local
-and lost on rebuild.
+names a location. In this devcontainer that directory is on the container's
+private persistent pi volume, whereas `/tmp` and `/home/vscode` are
+container-local and lost on rebuild.
 
 ## What
 

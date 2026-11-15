@@ -59,6 +59,29 @@ function browser(files: string[] = FILES, initialDir?: string) {
 	return { component, results, render: (width = 80): string => component.render(width).join("\n") };
 }
 
+/**
+ * A theme that tags the "error" colour instead of dropping it, so the red
+ * changed-file styling is assertable as text without a TUI. Other colours stay
+ * plain, which keeps the rest of the assertions readable.
+ */
+const taggedTheme = {
+	fg: (color: string, text: string) =>
+		color === "error" ? `<error>${text}</error>` : color === "accent" ? `<accent>${text}</accent>` : text,
+	bold: (text: string) => text,
+} as never;
+
+/** A browser carrying a changed-file set, rendered through the tagging theme. */
+function changedBrowser(changedFiles: string[], files: string[] = FILES, initialDir?: string) {
+	const component = new FileBrowser(
+		tui,
+		taggedTheme,
+		keybindings,
+		{ branchLabel: "main", files, initialDir, changedFiles },
+		() => undefined,
+	);
+	return { component, render: (width = 80): string => component.render(width).join("\n") };
+}
+
 // ---------------------------------------------------------------------------
 // The directory model
 // ---------------------------------------------------------------------------
@@ -123,6 +146,68 @@ test("every rendered line fits the width it is given", () => {
 
 test("an empty directory says so instead of rendering no rows", () => {
 	assert.match(browser([], "").render(), /\(empty directory\)/);
+});
+
+// ---------------------------------------------------------------------------
+// Changed files — the red rows
+// ---------------------------------------------------------------------------
+
+test("a changed file is painted red, and so is the folder holding it", () => {
+	const { component, render } = changedBrowser(["src/main.ts"]);
+	const root = render();
+	assert.match(root, /<error>src\/<\/error>/, "the folder containing a changed path is red");
+	assert.doesNotMatch(root, /<error>assets\/<\/error>/, "a folder without changed paths keeps its normal colour");
+	assert.doesNotMatch(root, /<error>README\.md<\/error>/);
+
+	component.handleInput(DOWN); // assets(0) → docs(1)
+	component.handleInput(DOWN); // docs(1) → src(2)
+	component.handleInput(ENTER);
+	const src = render();
+	assert.match(src, /<error>main\.ts<\/error>/, "the changed file itself is red");
+	assert.doesNotMatch(src, /<error>lib\/<\/error>/, "its unchanged sibling folder is not");
+});
+
+test("a changed path in a nested folder colours every folder on the way down", () => {
+	const { component, render } = changedBrowser(["docs/guide/install.md"]);
+	assert.match(render(), /<error>docs\/<\/error>/);
+	component.handleInput(DOWN); // assets(0) → docs(1)
+	component.handleInput(ENTER);
+	assert.match(render(), /<error>guide\/<\/error>/);
+	component.handleInput(ENTER); // guide is the only folder in docs
+	assert.match(render(), /<error>install\.md<\/error>/);
+});
+
+test("the selected changed row keeps its red label instead of taking the selection colour", () => {
+	const { component, render } = changedBrowser(["src/main.ts"], FILES, "src");
+	// src lists lib/ first and main.ts second, so DOWN selects the changed row.
+	component.handleInput(DOWN);
+	const view = render();
+	assert.match(view, /<error>main\.ts<\/error>/, "the selected row still carries the error colour");
+	// `selectTheme().selectedText` is the identity today, so a row must not gain
+	// an accent wrapper. Asserting only that the error span survives would pass
+	// even if the label were repainted in the selection colour around it, which
+	// is exactly what this test's name forbids; the stub tags `accent` for that
+	// reason.
+	// `SelectList` wraps the whole selected line — pointer included — in
+	// `selectedText`, so a repaint by the selection colour puts the accent tag
+	// before the arrow. Asserting on the accent/error nesting instead would miss
+	// it, because the arrow sits between them.
+	assert.doesNotMatch(
+		view,
+		/<accent>→ /,
+		"the selection colour must not repaint the selected row",
+	);
+});
+
+test("nothing is painted red when there are no changed files", () => {
+	assert.doesNotMatch(changedBrowser([]).render(), /<error>/);
+});
+
+test("a changed path only colours a folder it is actually under", () => {
+	// `srcx/other.ts` must not redden `src/`, and a changed path absent from the
+	// listing must not redden anything.
+	const view = changedBrowser(["srcx/other.ts"]).render();
+	assert.doesNotMatch(view, /<error>/);
 });
 
 // ---------------------------------------------------------------------------

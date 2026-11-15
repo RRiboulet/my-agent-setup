@@ -1,11 +1,12 @@
-// Guards for the coding skill stack adapted from agent-coding-skills.
+// Guards for the coding skill stack adapted from agent-coding-skills, plus the
+// two skills ported straight from mattpocock/skills.
 //
-// Risk covered: the coding skills adapted from `agent-coding-skills` are local
-// copies now, edited by hand. Three things break silently as they change: a name
-// that stops matching its folder (pi tolerates it; other harnesses do not), an
-// entry point that loses `disable-model-invocation` and gets started by the
-// model unasked, and a script that loses its executable bit. These assertions
-// are about shape, not wording, so a reworded skill still passes.
+// Risk covered: the adapted skills are local copies now, edited by hand. Three
+// things break silently as they change: a name that stops matching its folder
+// (pi tolerates it; other harnesses do not), an entry point that loses
+// `disable-model-invocation` and gets started by the model unasked, and a script
+// that loses its executable bit. These assertions are about shape, not wording,
+// so a reworded skill still passes.
 
 import assert from "node:assert/strict";
 import { accessSync, constants, readFileSync, readdirSync, statSync } from "node:fs";
@@ -32,9 +33,16 @@ const ADAPTED = [
 	"to-tickets",
 ];
 
-// pi honors `disable-model-invocation`; these four are entry points only the
+// Ported straight from mattpocock/skills rather than through that stack, so they
+// are classified separately in licenses/NOTICE.md while getting the same shape
+// checks.
+const PORTED = ["grilling", "teach"];
+
+const ALL = [...ADAPTED, ...PORTED];
+
+// pi honors `disable-model-invocation`; these five are entry points only the
 // user starts, and AGENTS.md says so.
-const USER_INVOKED = ["handoff", "implement", "to-spec", "to-tickets"];
+const USER_INVOKED = ["handoff", "implement", "teach", "to-spec", "to-tickets"];
 
 function skillDirs(): string[] {
 	return readdirSync(SKILLS_ROOT)
@@ -59,14 +67,14 @@ function frontmatter(dir: string): Record<string, string> {
 test("every skill is classified in this test", () => {
 	// A new skill added to the tree without updating this test would otherwise
 	// escape the frontmatter assertions below.
-	const known = new Set([...ADAPTED, "add-model", "commit", "devcontainer", "github", "librarian", "native-web-search", "tmux", "update-changelog", "worktree"]);
+	const known = new Set([...ALL, "add-model", "commit", "devcontainer", "github", "librarian", "native-web-search", "tmux", "update-changelog", "worktree"]);
 	for (const dir of skillDirs()) {
 		assert.ok(known.has(dir), `unclassified skill .pi/skills/${dir}: add it to this test`);
 	}
 });
 
-test("every adapted skill declares a name equal to its folder", () => {
-	for (const dir of ADAPTED) {
+test("every adapted or ported skill declares a name equal to its folder", () => {
+	for (const dir of ALL) {
 		const meta = frontmatter(dir);
 		assert.equal(meta.name, dir, `.pi/skills/${dir}/SKILL.md name must equal the folder`);
 		assert.ok(meta.description?.trim(), `.pi/skills/${dir}/SKILL.md needs a description`);
@@ -84,7 +92,7 @@ test("skill names are unique across the tree", () => {
 	assert.equal(new Set(names).size, names.length, `duplicate skill names: ${names}`);
 });
 
-test("the four user-invoked entry points are hidden from model selection", () => {
+test("the user-invoked entry points are hidden from model selection", () => {
 	for (const dir of USER_INVOKED) {
 		assert.equal(
 			frontmatter(dir)["disable-model-invocation"],
@@ -92,7 +100,7 @@ test("the four user-invoked entry points are hidden from model selection", () =>
 			`.pi/skills/${dir}/SKILL.md must set disable-model-invocation: true`,
 		);
 	}
-	for (const dir of ADAPTED.filter((name) => !USER_INVOKED.includes(name))) {
+	for (const dir of ALL.filter((name) => !USER_INVOKED.includes(name))) {
 		assert.equal(
 			frontmatter(dir)["disable-model-invocation"],
 			undefined,
@@ -104,7 +112,7 @@ test("the four user-invoked entry points are hidden from model selection", () =>
 test("adapted scripts stay executable", () => {
 	// Upstream commits both scripts mode 100644 while requiring +x, so its own
 	// gate fails on a clone. A refresh must not bring that back.
-	for (const dir of ADAPTED) {
+	for (const dir of ALL) {
 		const scripts = path.join(SKILLS_ROOT, dir, "scripts");
 		let entries: string[];
 		try {
@@ -121,10 +129,11 @@ test("adapted scripts stay executable", () => {
 	}
 });
 
-test("every relative link in an adapted skill resolves", () => {
+test("every relative link in an adapted or ported skill resolves", () => {
 	// A refresh that moves references/ but leaves a link behind is invisible
-	// until an agent tries to read the file.
-	for (const dir of ADAPTED) {
+	// until an agent tries to read the file. `teach` depends on it most: its four
+	// *-FORMAT.md files are reached by link, not by name.
+	for (const dir of ALL) {
 		const root = path.join(SKILLS_ROOT, dir);
 		const files: string[] = [];
 		const walk = (current: string) => {

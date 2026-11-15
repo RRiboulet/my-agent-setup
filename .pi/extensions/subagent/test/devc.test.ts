@@ -260,8 +260,20 @@ function devc(sb: Sandbox, args: string[], extraEnv: NodeJS.ProcessEnv = {}) {
 	};
 }
 
-const stampPath = (sb: Sandbox) => path.join(sb.state, "devc", "proj.cfgsha");
-const stamp = (sb: Sandbox) => readFileSync(stampPath(sb), "utf8").trim();
+// The stamp's name, keyed the way devc must key it: the basename only makes the
+// file recognisable, and the first 16 hex characters of the resolved workspace
+// path distinguish two same-named projects — the same shape as the lock file
+// (`devc-<basename>-<key>.lock`; the stamp is `<basename>-<key>.cfgsha`). The
+// sanitiser is the lock's `tr -c`, which also maps the newline `basename`
+// appends, so the name part carries a trailing underscore (`devc-proj_-<key>.lock`
+// has always been spelled that way). A script that keys the stamp on the
+// basename alone computes `proj.cfgsha`, which is the name two same-named
+// projects both write and both read.
+const workspaceKey = (dir: string) =>
+	`${(path.basename(dir) + "\n").replace(/[^A-Za-z0-9._-]/g, "_")}-${lockKey(dir)}`;
+const stampPath = (sb: Sandbox, dir: string = sb.project) =>
+	path.join(sb.state, "devc", `${workspaceKey(dir)}.cfgsha`);
+const stamp = (sb: Sandbox, dir: string = sb.project) => readFileSync(stampPath(sb, dir), "utf8").trim();
 
 // sha256 of an empty stream. `cfg_hash` produced exactly this, forever, for any
 // project it failed to read — so it is the one value that proves "nothing was
@@ -546,6 +558,108 @@ test("devc: two projects that share a basename do not share a lock", () => {
 	}
 });
 
+test("devc: two projects that share a basename do not share a config stamp", () => {
+	// The stamp was `$STATE_DIR/$(basename "$dir").cfgsha`, so `~/a/web` and
+	// `~/b/web` wrote one file between them: whichever project ran last owned it,
+	// and both `ensure_up`'s stale detection and `doctor`'s stale report then read
+	// the other project's hash. Same class as the shared-lock bug, same fix: the
+	// file is keyed on the resolved workspace path.
+	const sb = sandbox();
+	const a = sb.addProject("web", path.join(sb.home, "a"));
+	const b = sb.addProject("web", path.join(sb.home, "b"));
+	assert.equal(devc(sb, ["up", a]).status, 0);
+	assert.equal(devc(sb, ["up", b]).status, 0);
+
+	assert.notEqual(
+		stampPath(sb, a),
+		stampPath(sb, b),
+		"same basename, different root: each project must have its own stamp file",
+	);
+	assert.match(stamp(sb, a), /^[0-9a-f]{64}$/);
+	assert.match(stamp(sb, b), /^[0-9a-f]{64}$/);
+
+	// A shared file does not only misname the stamps, it lets a run write into
+	// the record the other project's staleness check reads: A's next `up` would
+	// reconcile against B's last-written hash. So running `up` for one project
+	// again must leave the other's stamp byte-identical.
+	const stampB = readFileSync(stampPath(sb, b));
+	assert.equal(devc(sb, ["up", a]).status, 0);
+	assert.deepEqual(readFileSync(stampPath(sb, b)), stampB, "running up for A must leave B's stamp byte-identical");
+});
+
+test("devc: a stale same-basename sibling recreates its own container and not its sibling's stamp", () => {
+	// The cross-contamination `up` direction: B's config changes, so B must be
+	// recreated — and A's stamp, the record of what A's container was built
+	// from, must not move in the process. With one shared file, B's write
+	// replaced it and A's next run then read B's hash.
+	const sb = sandbox();
+	const a = sb.addProject("web", path.join(sb.home, "a"));
+	const b = sb.addProject("web", path.join(sb.home, "b"));
+	assert.equal(devc(sb, ["up", a]).status, 0);
+	assert.equal(devc(sb, ["up", b]).status, 0);
+
+	const stampA = readFileSync(stampPath(sb, a));
+	writeFileSync(path.join(b, ".devcontainer", "devcontainer.json"), '{"image":"other"}\n');
+	const run = devc(sb, ["up", b]);
+	assert.equal(run.status, 0, run.stderr);
+	assert.match(run.stderr, /config changed since this container was created; recreating/);
+	assert.deepEqual(readFileSync(stampPath(sb, a)), stampA, "recreating B must not disturb A's stamp");
+
+	// And the other way round.
+	const stampB = readFileSync(stampPath(sb, b));
+	writeFileSync(path.join(a, ".devcontainer", "devcontainer.json"), '{"image":"third"}\n');
+	const runA = devc(sb, ["up", a]);
+	assert.equal(runA.status, 0, runA.stderr);
+	assert.match(runA.stderr, /config changed since this container was created; recreating/);
+	assert.deepEqual(readFileSync(stampPath(sb, b)), stampB, "recreating A must not disturb B's stamp");
+});
+
+test("devc: a same-basename sibling's stamp cannot make devc leave a stale container running", () => {
+	// The silent half of the shared stamp: with one file for both projects, the
+	// sibling's last write can equal this project's config hash exactly — here
+	// both configs end up identical — and `ensure_up` then reports "already
+	// running" for a container built from an older config, never recreating it.
+	// The loud half (an unrelated hash) recreates by accident; this is the one
+	// that fails silently.
+	const sb = sandbox();
+	const a = sb.addProject("web", path.join(sb.home, "a"));
+	const b = sb.addProject("web", path.join(sb.home, "b"));
+	// Both configs start identical, so one shared stamp is indistinguishable
+	// from either project's own.
+	assert.equal(devc(sb, ["up", a]).status, 0);
+	assert.equal(devc(sb, ["up", b]).status, 0);
+
+	writeFileSync(path.join(b, ".devcontainer", "devcontainer.json"), '{"image":"other"}\n');
+	assert.equal(devc(sb, ["up", b]).status, 0); // recreates B; the shared file now holds B's new hash
+	writeFileSync(path.join(a, ".devcontainer", "devcontainer.json"), '{"image":"other"}\n'); // A's config becomes identical to B's
+	const run = devc(sb, ["up", a]);
+	assert.equal(run.status, 0, run.stderr);
+	assert.match(
+		run.stderr,
+		/config changed since this container was created; recreating/,
+		"A's container was built from the old config; a sibling's stamp must not pass for its own",
+	);
+});
+
+test("devc: rebuild writes the keyed stamp and leaves its sibling's alone", () => {
+	// `cmd_rebuild` wrote `$STATE_DIR/$(basename "$dir").cfgsha` too, so a
+	// rebuild claimed the sibling's container as freshly rebuilt from this
+	// project's config.
+	const sb = sandbox();
+	const a = sb.addProject("web", path.join(sb.home, "a"));
+	const b = sb.addProject("web", path.join(sb.home, "b"));
+	// Distinct configs, so the two hashes differ and a shared file cannot pass
+	// for both.
+	writeFileSync(path.join(b, ".devcontainer", "devcontainer.json"), '{"image":"other"}\n');
+	assert.equal(devc(sb, ["up", a]).status, 0);
+	assert.equal(devc(sb, ["up", b]).status, 0);
+
+	const stampB = readFileSync(stampPath(sb, b));
+	assert.equal(devc(sb, ["rebuild", a]).status, 0);
+	assert.match(stamp(sb, a), /^[0-9a-f]{64}$/, "a real rebuild updates the project's own stamp");
+	assert.deepEqual(readFileSync(stampPath(sb, b)), stampB, "rebuilding A must not rewrite B's stamp");
+});
+
 test("devc: a dry-run rebuild does not queue behind a held lock", () => {
 	// The lock waits up to `flock -w 900` in silence. A preview that blocks there
 	// prints nothing for fifteen minutes, which reads as a hang — and a dry run
@@ -633,6 +747,121 @@ test("devc doctor reports a stale container, and only once the config moved", ()
 	const stale = devc(sb, ["doctor", "proj"], { DEVC_TEST_CONTAINER: "1" });
 	assert.equal(stale.status, 0, stale.stderr);
 	assert.match(stale.stdout, /stale      devcontainer config changed; devc up will recreate it/);
+});
+
+test("devc doctor reports a root-style .devcontainer.json project, current and stale", () => {
+	// `doctor` built its config path as `.devcontainer/devcontainer.json` and
+	// skipped the project when that file was missing. A repo-root
+	// `.devcontainer.json` is a project everywhere else — `has_devcontainer`
+	// accepts it, `projects` lists it, `find_project` resolves it and `cfg_hash`
+	// hashes it — so the skip meant doctor never examined it: no uid comparison,
+	// no stale report, and "nothing blocking" for a container it never looked at.
+	const sb = sandbox();
+	rmSync(path.join(sb.project, ".devcontainer"), { recursive: true, force: true });
+	const rootConfig = path.join(sb.project, ".devcontainer.json");
+	writeFileSync(rootConfig, '{"image":"alpine"}\n');
+
+	const up = devc(sb, ["up", "proj"]);
+	assert.equal(up.status, 0, `devc up must succeed for the root style; stderr: ${up.stderr}`);
+
+	const fresh = devc(sb, ["doctor", "proj"], { DEVC_TEST_CONTAINER: "1" });
+	assert.equal(fresh.status, 0, fresh.stderr);
+	assert.ok(
+		fresh.stdout.includes(`proj ${sb.project}`),
+		`doctor must print a section for the root-style project; stdout: ${fresh.stdout}`,
+	);
+	assert.match(fresh.stdout, /running    container uid \d+, host uid \d+/);
+	assert.doesNotMatch(fresh.stdout, /stale {6}/, "a container built from this config is not stale");
+
+	// `devc doctor` with no name iterates `projects()` instead of `find_project`;
+	// both paths reach the same per-project section, so pin both.
+	const all = devc(sb, ["doctor"], { DEVC_TEST_CONTAINER: "1" });
+	assert.equal(all.status, 0, all.stderr);
+	assert.ok(
+		all.stdout.includes(`proj ${sb.project}`),
+		`devc doctor must list the root-style project; stdout: ${all.stdout}`,
+	);
+
+	writeFileSync(rootConfig, '{"image":"ubuntu"}\n');
+	const stale = devc(sb, ["doctor", "proj"], { DEVC_TEST_CONTAINER: "1" });
+	assert.equal(stale.status, 0, stale.stderr);
+	assert.match(stale.stdout, /stale      devcontainer config changed; devc up will recreate it/);
+});
+
+test("devc doctor reads a same-basename project's own stamp, not its sibling's", () => {
+	// `doctor`'s stale report read `$STATE_DIR/$name.cfgsha` as well, so a
+	// sibling with the same basename could flag this project stale when it is
+	// not — the read half must be keyed like the write half, or a half-fix
+	// leaves `doctor` reading the old shared path.
+	const sb = sandbox();
+	const a = sb.addProject("web", path.join(sb.home, "a"));
+	const b = sb.addProject("web", path.join(sb.home, "b"));
+	// Distinct configs, so the two hashes differ; A runs last, so a shared file
+	// would hold A's hash when B is examined.
+	writeFileSync(path.join(b, ".devcontainer", "devcontainer.json"), '{"image":"other"}\n');
+	assert.equal(devc(sb, ["up", b]).status, 0);
+	assert.equal(devc(sb, ["up", a]).status, 0);
+
+	// B is current: a sibling's hash must not flag it stale.
+	const fresh = devc(sb, ["doctor", b], { DEVC_TEST_CONTAINER: "1" });
+	assert.equal(fresh.status, 0, fresh.stderr);
+	assert.match(fresh.stdout, /running    container uid \d+, host uid \d+/);
+	assert.doesNotMatch(fresh.stdout, /stale /, "a sibling's hash must not call this project stale");
+
+	// Its own stale stamp must still be reported: keying the read must not
+	// break the report the single-project test pins.
+	writeFileSync(path.join(b, ".devcontainer", "devcontainer.json"), '{"image":"third"}\n');
+	const stale = devc(sb, ["doctor", b], { DEVC_TEST_CONTAINER: "1" });
+	assert.equal(stale.status, 0, stale.stderr);
+	assert.match(stale.stdout, /stale      devcontainer config changed; devc up will recreate it/);
+});
+
+test("devc doctor reads a root-style .devcontainer.json for its per-config checks", () => {
+	// Choosing `dc` from the layout is the half a membership-only fix leaves out:
+	// with `dc` still hard-coded to the directory form, the section prints and the
+	// uid/stale checks run, but every check that greps the config reads a file
+	// that does not exist and silently finds nothing. Docker-in-docker is the
+	// cheapest of those to observe, and this is the only test whose config the
+	// privileged check reads.
+	const sb = sandbox();
+	rmSync(path.join(sb.project, ".devcontainer"), { recursive: true, force: true });
+	const rootConfig = path.join(sb.project, ".devcontainer.json");
+	writeFileSync(rootConfig, '{"image":"alpine","features":{"docker-in-docker":{}}}\n');
+
+	assert.equal(devc(sb, ["up", "proj"]).status, 0);
+
+	const doctor = devc(sb, ["doctor", "proj"], { DEVC_TEST_CONTAINER: "1" });
+	assert.equal(doctor.status, 0, doctor.stderr);
+	assert.match(
+		doctor.stdout,
+		/privileged  Docker-in-Docker feature/,
+		`doctor must read the root config; stdout: ${doctor.stdout}`,
+	);
+});
+
+test("devc doctor does not reassure a stale container with its sibling's stamp", () => {
+	// The silent half for `doctor`: the sibling's last write can equal this
+	// project's config hash (both configs end up identical), and a shared file
+	// then makes `doctor` skip the stale report for a container built from an
+	// older config.
+	const sb = sandbox();
+	const a = sb.addProject("web", path.join(sb.home, "a"));
+	const b = sb.addProject("web", path.join(sb.home, "b"));
+	// Both configs start identical, so one shared stamp is indistinguishable
+	// from either project's own.
+	assert.equal(devc(sb, ["up", a]).status, 0);
+	assert.equal(devc(sb, ["up", b]).status, 0);
+
+	writeFileSync(path.join(b, ".devcontainer", "devcontainer.json"), '{"image":"other"}\n');
+	assert.equal(devc(sb, ["up", b]).status, 0); // recreates B; the shared file now holds B's new hash
+	writeFileSync(path.join(a, ".devcontainer", "devcontainer.json"), '{"image":"other"}\n'); // A's config becomes identical to B's
+	const run = devc(sb, ["doctor", a], { DEVC_TEST_CONTAINER: "1" });
+	assert.equal(run.status, 0, run.stderr);
+	assert.match(
+		run.stdout,
+		/stale      devcontainer config changed; devc up will recreate it/,
+		"A's container was built from the old config; its own stamp must say so",
+	);
 });
 
 test("devc: a dry-run rebuild executes nothing and writes no stamp", () => {

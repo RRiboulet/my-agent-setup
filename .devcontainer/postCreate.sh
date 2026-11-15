@@ -2,9 +2,13 @@
 set -euo pipefail
 
 REPO=/workspace
-# The shared, machine-wide pi agent dir, on the pi-agent-config volume. Other
-# projects that mount this volume use it directly; this container uses the dir in
-# PI_CODING_AGENT_DIR instead (README, "One copy of the extensions, never two").
+# This container's own agent dir, on its private pi volume. It is not the shared
+# `agent` dir any more: no other container mounts this volume. The name is the
+# *project's*, matching the shape `bin/pi-agent-dir` gives a host checkout named
+# after the repo — this checkout is not, since the repo is mounted at /workspace,
+# so the script would compute `agent-workspace` there (see its header on naming).
+# Nothing depends on the two agreeing: this dir is the container's own, and no
+# host ever resolves it (README, "One copy of the extensions, never two").
 AGENT_DIR=/home/vscode/.pi/agent
 PROJECT_AGENT_DIR="${PI_CODING_AGENT_DIR:-$AGENT_DIR}"
 
@@ -26,7 +30,7 @@ cp "$REPO/.devcontainer/shell/p10k.zsh" /home/vscode/.p10k.zsh
 # tmux config: used by pi's tmux-backed subagents.
 cp "$REPO/.devcontainer/shell/tmux.conf" /home/vscode/.tmux.conf
 
-# --- ownership of the pi-config volume, BEFORE anything writes into it ---
+# --- ownership of the private pi volume, BEFORE anything writes into it ---
 # On a first-run volume Docker copies the image's content at /home/vscode/.pi into
 # the new volume, ownership included, and the Dockerfile creates
 # /home/vscode/.pi/agent as root. So the whole volume can arrive root-owned, and
@@ -48,54 +52,66 @@ cp "$REPO/.devcontainer/shell/tmux.conf" /home/vscode/.tmux.conf
 sudo chown -R vscode:vscode /home/vscode/.pi "$REPO"
 
 # --- pi configuration ---
-# Seed the per-project agent dir from the shared one, once. Only files that are
-# missing are written, so a rebuild never overwrites a setting made in here; the
-# theme is the one exception and is re-pinned to kokomi-theme on every run, as it
-# always was. settings.json is seeded *without* .packages — that is the point of
-# the split, see README, "One copy of the extensions, never two".
-if [ "$PROJECT_AGENT_DIR" != "$AGENT_DIR" ]; then
-  mkdir -p "$PROJECT_AGENT_DIR"
-  if [ ! -f "$PROJECT_AGENT_DIR/settings.json" ] && [ -f "$AGENT_DIR/settings.json" ] \
-    && command -v jq >/dev/null 2>&1; then
-    # `jq -e .` first: a truncated or empty shared settings.json parses to
-    # *nothing*, and installing that would leave the container with no provider,
-    # model or tool defaults instead of failing visibly. The fallback says so.
-    if jq -e . "$AGENT_DIR/settings.json" >/dev/null 2>&1 \
-      && jq 'del(.packages, .extensionChangelogVersions)' "$AGENT_DIR/settings.json" \
-        > "$PROJECT_AGENT_DIR/settings.json.tmp" \
-      && [ -s "$PROJECT_AGENT_DIR/settings.json.tmp" ]; then
-      mv "$PROJECT_AGENT_DIR/settings.json.tmp" "$PROJECT_AGENT_DIR/settings.json"
-    else
-      rm -f "$PROJECT_AGENT_DIR/settings.json.tmp"
-      echo "postCreate: could not seed $PROJECT_AGENT_DIR/settings.json from $AGENT_DIR (missing, unreadable or invalid JSON); starting it minimal, so default provider/model/tool settings are NOT inherited" >&2
-      echo '{"theme": "kokomi-theme"}' > "$PROJECT_AGENT_DIR/settings.json"
-    fi
+# The volume is private, so there is no shared agent dir to seed from any more.
+# A committed template carries the provider/model/tool defaults this container
+# starts with; it is written only when settings.json is missing, so a rebuild
+# never overwrites a setting made in here. The template deliberately has no
+# `.packages`: this repo's checkout's `.pi/` is the single source of extensions
+# and skills (README, "One copy of the extensions, never two").
+mkdir -p "$PROJECT_AGENT_DIR"
+if [ ! -f "$PROJECT_AGENT_DIR/settings.json" ]; then
+  if command -v jq >/dev/null 2>&1 \
+    && jq -e . "$REPO/.devcontainer/pi/settings.json" >/dev/null 2>&1 \
+    && jq . "$REPO/.devcontainer/pi/settings.json" > "$PROJECT_AGENT_DIR/settings.json.tmp" \
+    && [ -s "$PROJECT_AGENT_DIR/settings.json.tmp" ]; then
+    mv "$PROJECT_AGENT_DIR/settings.json.tmp" "$PROJECT_AGENT_DIR/settings.json"
+  else
+    rm -f "$PROJECT_AGENT_DIR/settings.json.tmp"
+    # A malformed or unreadable template must fail visibly: a 0-byte settings.json
+    # would leave pi with no provider or model and look like a broken install.
+    echo "postCreate: could not install $REPO/.devcontainer/pi/settings.json into $PROJECT_AGENT_DIR" >&2
+    exit 1
   fi
-  # Credentials and per-user extension config. Copied, never overwritten: from
-  # here on this container owns them (re-run `pi auth login` / edit the file in
-  # here), while the shared copies keep serving the other projects. voice.json
-  # and review-triage.json are the two polished per-machine configs the
-  # extensions read out of the agent dir; models.json is the hand-maintained
-  # model catalogue override (`getModelsPath()`).
-  for name in auth.json voice.json review-triage.json models.json; do
-    if [ ! -f "$PROJECT_AGENT_DIR/$name" ] && [ -f "$AGENT_DIR/$name" ]; then
-      cp "$AGENT_DIR/$name" "$PROJECT_AGENT_DIR/$name"
-    fi
-  done
-  # Project trust is what makes pi read /workspace/.pi/{settings.json,
-  # extensions,skills} at all. Without an entry here the container starts
-  # untrusted, and since the package is gone that means **no** extensions or
-  # skills: a silent empty agent rather than a broken one.
-  #
-  # Written through a temp file and renamed, like the settings above: this guard
-  # is `-f`, so an interrupted write (or a crash between create and write) would
-  # leave a 0-byte trust.json that the guard then refuses to repair forever — and
-  # pi's own reader throws on it at every startup, which bricks the container in
-  # a way that names the file but not the cause.
-  if [ ! -f "$PROJECT_AGENT_DIR/trust.json" ]; then
-    printf '{\n  "%s": true\n}\n' "$REPO" > "$PROJECT_AGENT_DIR/trust.json.tmp" \
-      && mv "$PROJECT_AGENT_DIR/trust.json.tmp" "$PROJECT_AGENT_DIR/trust.json"
-  fi
+fi
+
+# Enforce the package-free invariant even on a volume migrated from the old
+# shared layout: this container loads the checkout's `.pi/` only, never a package
+# clone. Filter only this repo's entries so an unrelated package a user added is
+# left alone.
+if command -v jq >/dev/null 2>&1; then
+  jq '
+    if .packages then
+      .packages = [.packages[]
+        | select(((if type == "object" then (.source // "") else . end)
+            | tostring | test("my-agent-setup") | not))]
+      | if (.packages | length) == 0 then del(.packages) else . end
+    else . end
+  ' "$PROJECT_AGENT_DIR/settings.json" > "$PROJECT_AGENT_DIR/settings.json.tmp" \
+    && [ -s "$PROJECT_AGENT_DIR/settings.json.tmp" ] \
+    && mv "$PROJECT_AGENT_DIR/settings.json.tmp" "$PROJECT_AGENT_DIR/settings.json" \
+    || { rm -f "$PROJECT_AGENT_DIR/settings.json.tmp"; echo "postCreate: could not enforce the package-free settings in $PROJECT_AGENT_DIR" >&2; exit 1; }
+fi
+
+# Project trust is what makes pi read /workspace/.pi/{settings.json, extensions,
+# skills} at all. Without an entry here the container starts untrusted, and since
+# no package is installed that means **no** extensions or skills: a silent empty
+# agent rather than a broken one.
+#
+# Merge rather than create-if-missing, so an older volume that trusts a different
+# path still gains /workspace. Written through a temp file and renamed: pi's own
+# reader throws on a 0-byte trust.json at every startup, which bricks the
+# container in a way that names the file but not the cause.
+TRUST="$PROJECT_AGENT_DIR/trust.json"
+if [ -f "$TRUST" ] && ! jq -e . "$TRUST" >/dev/null 2>&1; then
+  echo "postCreate: $TRUST was not valid JSON; rewriting it" >&2
+  rm -f "$TRUST"
+fi
+if [ -f "$TRUST" ]; then
+  jq --arg repo "$REPO" '. + {($repo): true}' "$TRUST" > "$TRUST.tmp" \
+    && mv "$TRUST.tmp" "$TRUST"
+else
+  jq -n --arg repo "$REPO" '{($repo): true}' > "$TRUST.tmp" \
+    && mv "$TRUST.tmp" "$TRUST"
 fi
 
 mkdir -p "$PROJECT_AGENT_DIR/themes"
@@ -104,7 +120,7 @@ cp "$REPO/.devcontainer/pi/themes/kokomi-theme.json" "$PROJECT_AGENT_DIR/themes/
 # Select the theme WITHOUT clobbering the rest of the user's settings: the
 # previous version wrote settings.json wholesale, which silently discarded
 # anything else configured on the machine. Same temp-file-then-rename as the
-# seed above, for the same reason: an empty file must never land here.
+# template above, for the same reason: an empty file must never land here.
 SETTINGS="$PROJECT_AGENT_DIR/settings.json"
 if [ -f "$SETTINGS" ] && command -v jq >/dev/null 2>&1 \
   && jq --arg t kokomi-theme '.theme = $t' "$SETTINGS" > "$SETTINGS.tmp" \
@@ -151,11 +167,13 @@ for helper in wl-copy xclip xsel; do
 done
 
 # --- gh (GitHub CLI) ---
-# The token is not in the image and never in git. It lives in the pi-config volume
-# via GH_CONFIG_DIR (set in the Dockerfile), which is what makes one `gh auth login`
-# last across rebuilds. Creating the directory here is all this needs to do; an
-# unauthenticated gh is still useful (it reads public repos fine). The volume is
-# already chowned above — before the first write into it, not after.
+# The token is not in the image and never in git. It arrives as GH_TOKEN from the
+# host environment (devcontainer.json), so every container gets the same credential
+# without sharing a volume. GH_CONFIG_DIR (set in the Dockerfile) only holds gh's
+# non-secret config on this container's private volume. Creating the directory here
+# is all this needs to do; an unauthenticated gh is still useful (it reads public
+# repos fine). The volume is already chowned above — before the first write into
+# it, not after.
 mkdir -p "$GH_CONFIG_DIR"
 
 if ! gh auth status >/dev/null 2>&1; then
@@ -166,11 +184,13 @@ gh is installed but not authenticated. One-time setup, in this terminal:
   gh auth login --hostname github.com --git-protocol https --web
 
 It prints a one-time code and a URL: open the URL, paste the code, approve. The
-token lands in the pi-config volume, so it survives a rebuild. Then run
+token is stored by gh in GH_CONFIG_DIR on this container's private volume, so it
+survives a rebuild, but the supported path here is GH_TOKEN from the host
+environment (`~/.config/devc/env`, sourced by devc). Then run
 
 Nothing else is needed: git's credential helper is configured system-wide in
 the Dockerfile, so plain `git push` works in a fresh container without this.
 MSG
 fi
 
-echo "pi coding-agent ready. Sessions persist in the pi-agent-config volume."
+echo "pi coding-agent ready. Sessions persist in the private my-agent-setup-pi-config volume."

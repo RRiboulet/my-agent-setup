@@ -1,9 +1,11 @@
 FROM mcr.microsoft.com/devcontainers/base:bookworm
 
-# gh's token lives in the pi-config volume (see docker-compose.yml), not in this
-# image and not in the container-local home — /home/vscode is discarded on
-# rebuild, /home/vscode/.pi is a named volume. Set here rather than mid-file so
-# every later layer and postCreate sees it.
+# gh's configuration lives on this container's private pi volume (see
+# docker-compose.yml), not in this image and not in the container-local home —
+# /home/vscode is discarded on rebuild, /home/vscode/.pi is a named volume. The
+# token itself arrives as GH_TOKEN from the host environment; GH_CONFIG_DIR only
+# holds gh's non-secret config. Set here rather than mid-file so every later
+# layer and postCreate sees it.
 ENV GH_CONFIG_DIR=/home/vscode/.pi/gh
 ENV GH_PROMPT_DISABLED=1
 
@@ -39,12 +41,11 @@ ENV BASH_ENV=/etc/agent-bash-env
 # apt repo so it survives this layer rather than being apted in by hand at runtime,
 # which a rebuild would silently drop.
 #
-# The token itself is NOT baked in. `GH_CONFIG_DIR` points at the pi-config volume
-# (see docker-compose.yml), so `gh auth login` survives a rebuild: /home/vscode is
-# container-local and is discarded, while /home/vscode/.pi is a named volume.
-# `curl | dd` would mask curl's exit status and leave a 0-byte keyring, which apt
-# reports as NO_PUBKEY rather than "could not fetch the key". -o plus `test -s`
-# keeps the diagnostic honest.
+# The token itself is NOT baked in: it arrives as GH_TOKEN from the host
+# environment (devcontainer.json), and gh's non-secret config lives on this
+# container's private volume. `curl | dd` would mask curl's exit status and leave
+# a 0-byte keyring, which apt reports as NO_PUBKEY rather than "could not fetch
+# the key". -o plus `test -s` keeps the diagnostic honest.
 RUN curl -fsSL -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
       https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && test -s /usr/share/keyrings/githubcli-archive-keyring.gpg \
@@ -82,8 +83,8 @@ EOF
 
 # gh's credential helper, system-wide, so `git push` works in a FRESH container.
 # `gh auth setup-git` writes to ~/.gitconfig, which is on the container-local
-# overlay and is discarded on rebuild — the token survives (it lives in the volume)
-# but the thing that lets git USE it does not, so push breaks after every rebuild.
+# overlay and is discarded on rebuild — GH_TOKEN survives in the host env but the
+# thing that lets git USE it does not, so push breaks after every rebuild.
 # The empty-value line first, exactly as gh writes it, to shadow the helper
 # vscode-server installs system-wide.
 RUN git config --system credential.https://github.com.helper '' \

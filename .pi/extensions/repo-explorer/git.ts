@@ -384,8 +384,15 @@ export async function openGit(run: GitRunner, cwd: string): Promise<RepoGit> {
 		if (branch.startsWith("refs/remotes/")) return null;
 		const short = branch.startsWith("refs/heads/") ? branch.slice("refs/heads/".length) : branch;
 
-		// Prefer git's own upstream configuration when it exists.
-		const upstreamRes = await run(["rev-parse", "--verify", "--symbolic-full-name", "--end-of-options", `${branch}@{upstream}`], root);
+		// Prefer git's own upstream configuration when it exists. The probe must
+		// use the short branch name: git accepts only `<branchname>@{upstream}`,
+		// and the refnames the browser passes are full (`refs/heads/feature`),
+		// for which `rev-parse refs/heads/feature@{upstream}` exits 128 with
+		// "no such branch" and silently loses the configured upstream.
+		const upstreamRes = await run(
+			["rev-parse", "--verify", "--symbolic-full-name", "--end-of-options", `${short}@{upstream}`],
+			root,
+		);
 		if (upstreamRes.code === 0 && upstreamRes.stdout.trim()) return upstreamRes.stdout.trim();
 
 		// Fall back to the conventional origin/<branch> tracking ref, which is
