@@ -188,6 +188,28 @@ Fixed:
   every stamp site to the basename, or only `doctor`'s read, turns the
   corresponding tests red.
 
+- **`pi-agent-dir.test.ts` no longer fails wherever the checkout directory is not
+  named after the repo.** The test tied the host script's convention to the one
+  `.devcontainer/devcontainer.json` declares by comparing the declared directory
+  against `agent-` + `basename(REPO_ROOT)`. That is the *checkout* directory, not
+  the repo's identity, so it held only for a clone made into a directory named
+  after the repo: it was red on untouched `dev` inside this repo's own container,
+  which mounts the repo at `/workspace`, where the check computed
+  `agent-workspace` against the declared project name. The expected side now
+  comes from `package.json`'s `name` — the identity the sibling guard in
+  `devcontainer-agent-dir.test.ts` already treats as stable when it pins the
+  private volume — and renaming the declared directory still turns it red,
+  checked by renaming it to `agent-renamed-drift` and reading the failure, which
+  names the expected value. Both sides stay computed, so the "exactly one
+  literal" guard is unaffected, and the sandbox tests keep pinning the script's
+  own rule (`agent-<main checkout name>`) against a temp HOME. The naming prose is
+  now exact about the two sources instead of implying they are one convention:
+  the header comment in `bin/pi-agent-dir` and the README table row both say the
+  script names its dir after the main checkout's *directory* while the container
+  names its own after the *project*, so the two agree only for a directory named
+  after the repo — and that this is intended, since the container installs no
+  package and the shell hook derives the host name at call time.
+
 Maintenance:
 
 - **`README.md` now carries an "Upgrading to v1.12.0" block, and it says to

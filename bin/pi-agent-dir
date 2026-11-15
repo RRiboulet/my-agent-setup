@@ -32,13 +32,22 @@
 #   PI_AGENT_BASE   shared agent dir to seed from      (default: $PI_AGENT_ROOT/agent)
 #   PI_SHELL_RC     file `--shell` appends to          (default: ~/.bashrc)
 #
-# Naming: `$PI_AGENT_ROOT/agent-<main-checkout-name>`, a *sibling* of the shared
-# agent dir — the convention `.devcontainer/devcontainer.json` declares for this
-# repo and `lol-dataset`'s devcontainer for its own, so one host can hold both
-# without either being nested inside the other. Resolving through
-# `--git-common-dir` rather than `--show-toplevel` is load-bearing: a worktree
-# must map to its main checkout's dir, or every worktree would get a fresh,
-# unseeded one of its own.
+# Naming: `$PI_AGENT_ROOT/agent-<main checkout directory name>` — the *shape*
+# `.devcontainer/devcontainer.json` declares for this repo (and `lol-dataset`'s
+# devcontainer for its own): a sibling of the shared agent dir, so one host can
+# hold both without either being nested inside the other.
+#
+# The name is the checkout directory's, not the project's, and the two coincide
+# only when the clone was made into a directory named after the repo. `gh repo
+# clone` does that; a devcontainer mount does not. This repo is mounted at
+# /workspace, so this script computes `agent-workspace` *inside* the container
+# while `PI_CODING_AGENT_DIR` there carries the project's name. That is intended
+# rather than drift: the script exists for hosts (the container installs no
+# package, so it needs no per-project dir of its own), and a host that names the
+# directory differently needs no configuring either, because the shell hook below
+# derives the same name at call time. Resolving through `--git-common-dir`
+# rather than `--show-toplevel` is load-bearing: a worktree must map to its main
+# checkout's dir, or every worktree would get a fresh, unseeded one of its own.
 #
 # What it writes, and what it never touches:
 #   * settings.json — seeded from the base agent dir with `.packages` and the
