@@ -4,6 +4,27 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Fixed:
+
+- **`devc doctor` counts a stale container, so a report whose only finding is
+  staleness no longer ends in "nothing blocking".** The stale branch printed
+  `  stale      devcontainer config changed; devc up will recreate it` and never
+  incremented `problems`, so a container that is genuinely out of date was
+  reported in a section that then summarised as "nothing blocking" — the same
+  contradiction between detail and summary the root-style skip was, and the same
+  way of hiding a finding a user is meant to act on. It is now counted with
+  everything else above it. The summary's own wording for a non-zero count is
+  "%d item(s) need attention", which is what a stale container is: `devc up`
+  fixes it, so it is not *blocking* in the uid-mismatch sense, but it is not
+  current either — no wording changed, and `.pi/skills/devcontainer/SKILL.md`
+  needs none, since its "if it says nothing blocking, go ahead" line and its
+  `stale` → `devc up` row already assume doctor reports it. The existing test
+  `devc doctor reports a stale container, and only once the config moved` now
+  pins both halves: a current container still ends in "nothing blocking", and
+  editing the config makes the same run say `1 item(s) need attention` and stop
+  saying "nothing blocking". Against the previous script the second half failed
+  with exactly the old output.
+
 ## v1.13.0 — 2026-11-15
 
 Added:
