@@ -215,6 +215,23 @@ Fixed:
   after the repo — and that this is intended, since the container installs no
   package and the shell hook derives the host name at call time.
 
+- **`/explore`'s changed-files colouring now diffs against a branch's configured
+  upstream.** `index.ts` passes `choice.refname` — a full `refs/heads/<name>` —
+  and `upstreamOf` built its probe as `${branch}@{upstream}`, which git rejects
+  with `fatal: no such branch` (exit 128), because `@{upstream}` is only accepted
+  after a *short* branch name. So the "`@{upstream}` wins" half never ran in
+  production. It usually fell through to the conventional `origin/<branch>` and
+  looked right, but a branch whose configured upstream is a differently named
+  ref and has no `origin/<branch>` — `branch.feature.merge` pointing at
+  `refs/heads/main`, say — fell through to the merge base with the integration
+  branch and painted the branch's whole history red. The probe now uses the
+  `short` name `upstreamOf` already computes. Pinned by a test that is red on the
+  old form and asserts the probe's argv as well as the resulting paths, because a
+  resolver that misses the probe and falls back can produce plausible paths
+  anyway; the fixture makes the two answers disjoint (the upstream sits one
+  commit past the merge base) and omits `origin/feature` so nothing rescues it.
+  Mutating `${short}` back to `${branch}` turns that one test red.
+
 Maintenance:
 
 - **`README.md` now carries an "Upgrading to v1.12.0" block, and it says to
@@ -231,6 +248,38 @@ Maintenance:
   `pickProvider(undefined, settings, auth)` resolves `brave`, and an explicit
   `opencode-go` throws the documented `Unknown provider` error. Docs only; no
   provider precedence changed.
+
+- **`/explore`'s changed-files colouring now has tests, and writing them found
+  a real bug in it, fixed in the `Fixed:` block above.** `git.changedFiles`,
+  `FileBrowser.changedFiles`/`changedDirs` and the handler wiring shipped in
+  v1.12.0 with no coverage: `grep changedFiles` in the repo-explorer tests found
+  nothing, and every branch had a plausible wrong answer. The new tests pin the
+  four behaviours the v1.12.0 bullet claims. The configured upstream winning
+  over `origin/<branch>` (and the fallback when it is unset) — with the two refs
+  holding disjoint commits, so an implementation that diffed both and unioned
+  the results is caught rather than passing. A remote-tracking
+  ref never being diffed — in both shapes that matter, because the guards are
+  two: the early return is what stops a symref-`HEAD`-at-`origin/main` browse
+  from collecting the local working tree, and removing it *and* the
+  `!branch.startsWith("refs/remotes/")` guard is what would let the merge-base
+  fallback paint the whole tree. Uncommitted changes reaching the checked-out
+  branch only. The merge-base candidate order `origin/dev` → `dev` →
+  `origin/main` → `main`, asserted through the argv git actually received, not
+  just the resulting paths, and a non-ASCII path pinned from `-z` output (without
+  it git shell-quotes the name, so dropping the flag cannot pass). The browser
+  painting a changed file and every folder above it with
+  `theme.fg("error", …)`, leaving unaffected rows plain and a selected changed
+  row still red *without* being repainted in the selection colour — assertions
+  that were checked against those mutations, not just written — and the handler
+  turning a failed diff into
+  one `warning:` notify plus an empty set that still opens the browser with the
+  file list intact. The failed diff is a real git failure (`mktree --missing`
+  fabricates a tree that cannot be read), not a shim. Mutation-checked as the
+  todo asked: dropping the remote-tracking guard turns two tests red, dropping
+  `headBranch === branch` turns the uncommitted-changes test red; both restored,
+  the production diff is empty. `.pi/extensions/subagent/test/README.md`'s
+  coverage table gains the new coverage in the three repo-explorer rows, since
+  it is what AGENTS.md points at for "what is and is not covered".
 
 Changed:
 
