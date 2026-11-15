@@ -306,17 +306,23 @@ reviewer spends real tokens and runs an independent process, so it is the user's
 call every time. Propose the lens and model, then wait for a yes.
 
 When the user does approve one, the reviewer's `provider`, `model` and
-`thinking` come from the `candidates` in `~/.pi/agent/review-triage.json`. Never
-hand-pick a model outside that list: if a lens needs a model the config lacks,
-add it to the config first. Which model sits in which capability band is a human
-judgement, not the agent's.
+`thinking` come from the `candidates` in the effective review-triage policy —
+the built-in defaults, or `~/.pi/agent/review-triage.json` when that file
+exists. Never hand-pick a model outside that list: if a lens needs a model the
+config lacks, add it to the config first. Which model sits in which capability
+band is a human judgement, not the agent's.
 
 Every candidate must name `opencode-go`, the provider this machine actually
 authenticates; the judge is the only model on another provider (`openrouter`).
-The repository ships that policy as
-`.pi/extensions/review-triage/review-triage.example.json`, and a test fails if a
-candidate's provider or stated cost drifts from that — it cannot check which
-providers a machine has credentials for, so that part stays a human check.
+The policy is built into `.pi/extensions/review-triage/config.ts`, so installing
+the package is enough, and the same policy is written out for editing as
+`.pi/extensions/review-triage/review-triage.example.json`; a test fails if a
+candidate's provider or stated cost drifts, and another fails if the example and
+the built-in defaults diverge. Whether a machine has a provider's credential is
+checked at run time (`credentials.ts`), not assumed: a missing reviewer provider
+drops its bands and names the provider, models and fix in the plan, and a missing
+judge provider short-circuits the call as `judgeFailure: unavailable`. The plan
+therefore never names a model this machine cannot run without saying why.
 
 A `show-me-your-work` trail does not get its own reviewer. If a review is
 commissioned, hand the trail to that one reviewer alongside the diff.

@@ -23,6 +23,7 @@ import { test } from "node:test";
 
 import {
 	applyDotEnv,
+	DEFAULT_CANDIDATES,
 	DEFAULT_CONFIG,
 	DEFAULT_THINKING_LADDER,
 	generateCatalog,
@@ -73,6 +74,13 @@ import {
 	type ComposeArgs,
 } from "../../review-triage/compose.ts";
 import { decidePolicy, POLICY_REASONS, rationaleFor, type PolicyGates } from "../../review-triage/policy.ts";
+import {
+	authSourceFromRegistry,
+	credentialFix,
+	credentialReport,
+	providerEnvVar,
+	type ProviderAuth,
+} from "../../review-triage/credentials.ts";
 import { formatPlan } from "../../review-triage/format.ts";
 import { parseTriageArgs, resolveContext, resolveTarget } from "../../review-triage/index.ts";
 import reviewTriageExtension from "../../review-triage/index.ts";
@@ -213,6 +221,35 @@ test("config: defaults apply when no file exists", () => {
 	assert.equal(loaded.reverseChoice, true);
 	assert.equal(loaded.policy.skipThreshold, 0.9);
 	assert.deepEqual(loaded.thinkingLadder, DEFAULT_THINKING_LADDER);
+});
+
+test("config: an unconfigured install is already the shipped policy", () => {
+	// Installing the package has to be enough: a fresh project with no
+	// review-triage.json must get the judge and all three tiers, not the coarse
+	// price-bucket synthesis that used to be the only zero-config path.
+	const loaded = loadConfig({ path: "/nonexistent/review-triage.json", env: {} });
+	assert.ok(loaded.candidates.length > 0, "the built-in policy must name candidates");
+	assert.deepEqual(loaded.candidates, DEFAULT_CANDIDATES.map((candidate) => ({ ...candidate })));
+	for (const candidate of loaded.candidates) {
+		assert.equal(candidate.provider, "opencode-go", "the shipped reviewers stay on opencode-go");
+	}
+	for (const tier of ["low", "medium", "high"] as const) {
+		assert.ok(
+			loaded.candidates.some((candidate) => candidate.tier === tier),
+			`the default policy must offer the ${tier} band`,
+		);
+	}
+
+	// The example file is a template for editing the same policy, not a second
+	// policy; a change to one must not leave the other behind.
+	const REPO_ROOT = resolve(new URL("../../../..", import.meta.url).pathname);
+	const example = loadConfig({
+		path: join(REPO_ROOT, ".pi/extensions/review-triage/review-triage.example.json"),
+		env: {},
+		warn: () => {},
+	});
+	assert.deepEqual(example.candidates, loaded.candidates, "the example and the defaults cannot drift");
+	assert.deepEqual(example.judge, loaded.judge);
 });
 
 test("config: the tool switch is read from the file", () => {
@@ -406,6 +443,124 @@ test("config: policy.mandatoryReview and an explicit empty ladder band are honou
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+test("credentials: the shipped policy is usable when both providers are authenticated", () => {
+	const report = credentialReport({
+		judge: DEFAULT_CONFIG.judge,
+		candidates: DEFAULT_CANDIDATES,
+		auth: () => ({ configured: true }),
+	});
+	assert.deepEqual(report.gaps, []);
+	assert.equal(report.judgeGap, undefined);
+	assert.deepEqual(report.candidates, DEFAULT_CANDIDATES.map((candidate) => ({ ...candidate })));
+});
+
+test("credentials: a missing judge credential names the provider, the model and the fix", () => {
+	const report = credentialReport({
+		judge: DEFAULT_CONFIG.judge,
+		candidates: DEFAULT_CANDIDATES,
+		auth: (provider) => ({ configured: provider !== "openrouter" }),
+	});
+	assert.equal(report.judgeGap?.role, "judge");
+	assert.equal(report.judgeGap?.provider, "openrouter");
+	assert.deepEqual(report.judgeGap?.models, ["openrouter/typesafe/jev-1.13"]);
+	const message = report.judgeGap?.message ?? "";
+	assert.match(message, /openrouter/u, "the provider is named");
+	assert.match(message, /typesafe\/jev-1\.13/u, "the model is named");
+	assert.match(message, /OPENROUTER_API_KEY/u, "the environment variable is named");
+	assert.match(message, /auth\.json/u, "the stored-credential route is named");
+	assert.match(message, /\/login/u, "the interactive route is named");
+	assert.deepEqual(
+		report.candidates,
+		DEFAULT_CANDIDATES.map((candidate) => ({ ...candidate })),
+		"a judge gap does not discard usable reviewers",
+	);
+});
+
+test("credentials: a missing reviewer provider is dropped, grouped, and explained once", () => {
+	const report = credentialReport({
+		judge: DEFAULT_CONFIG.judge,
+		candidates: DEFAULT_CANDIDATES,
+		auth: (provider) => ({ configured: provider !== "opencode-go" }),
+	});
+	assert.equal(report.judgeGap, undefined);
+	assert.deepEqual(report.candidates, [], "no candidate from an unauthenticated provider is offered");
+	assert.equal(report.gaps.length, 1, "one gap per provider, not one per model");
+	const gap = report.gaps[0];
+	assert.equal(gap?.role, "reviewer");
+	assert.equal(gap?.provider, "opencode-go");
+	assert.deepEqual(
+		gap?.models,
+		DEFAULT_CANDIDATES.map((candidate) => `opencode-go/${candidate.model}`),
+	);
+	assert.match(gap?.message ?? "", /OPENCODE_API_KEY/u);
+	for (const candidate of DEFAULT_CANDIDATES) assert.match(gap?.message ?? "", new RegExp(candidate.model, "u"));
+});
+
+test("credentials: an unknown status is treated as usable, never as a failure", () => {
+	// A provider extension may authenticate where pi's status cannot see it. A
+	// false "missing credentials" would disable a working setup, which is worse
+	// than the gap this check exists to report.
+	const report = credentialReport({
+		judge: DEFAULT_CONFIG.judge,
+		candidates: DEFAULT_CANDIDATES,
+		auth: () => undefined,
+	});
+	assert.deepEqual(report.gaps, []);
+	assert.equal(report.candidates.length, DEFAULT_CANDIDATES.length);
+});
+
+test("credentials: an unknown provider gets a predictable environment variable", () => {
+	assert.equal(providerEnvVar("openrouter"), "OPENROUTER_API_KEY");
+	assert.equal(providerEnvVar("opencode-go"), "OPENCODE_API_KEY");
+	assert.equal(providerEnvVar("some-new-provider"), "SOME_NEW_PROVIDER_API_KEY");
+	assert.match(credentialFix("some-new-provider"), /SOME_NEW_PROVIDER_API_KEY/u);
+});
+
+test("credentials: the registry adapter asks pi, and an error leaves the provider unknown", () => {
+	const asked: string[] = [];
+	const source = authSourceFromRegistry(
+		{
+			getProviderAuthStatus: (provider) => {
+				asked.push(provider);
+				return { configured: true, source: "stored" };
+			},
+		},
+		{},
+	);
+	assert.deepEqual(source("openrouter"), { configured: true, source: "stored" });
+	assert.deepEqual(asked, ["openrouter"]);
+
+	// A key loaded from `.env` after pi's startup snapshot is still a credential.
+	const late = authSourceFromRegistry({ getProviderAuthStatus: () => ({ configured: false }) }, {
+		OPENROUTER_API_KEY: "present",
+	});
+	assert.deepEqual(late("openrouter"), {
+		configured: true,
+		source: "environment",
+		label: "OPENROUTER_API_KEY",
+	});
+	assert.equal(
+		authSourceFromRegistry({ getProviderAuthStatus: () => ({ configured: false }) }, {})("openrouter")?.configured,
+		false,
+		"a definite status with no environment key stays definite",
+	);
+
+	const throwing = authSourceFromRegistry(
+		{
+			getProviderAuthStatus: () => {
+				throw new Error("status unavailable");
+			},
+		},
+		{},
+	);
+	assert.equal(throwing("openrouter"), undefined, "a throwing status is unknown, not missing");
+	assert.equal(
+		authSourceFromRegistry({}, {})("openrouter"),
+		undefined,
+		"a registry without the probe is unknown, not missing",
+	);
 });
 
 test("dotenv: fills unset variables and never overwrites an existing one", () => {
@@ -1306,6 +1461,7 @@ interface PipelinePlan {
 	task?: { summary?: string; objective?: string; identity?: string };
 	scope?: { target?: string; snapshot?: string };
 	limitations?: string[];
+	judgeFailure?: { kind: string; message: string };
 	versions?: Record<string, string>;
 	adversarial?: {
 		needed?: boolean;
@@ -1388,12 +1544,43 @@ function fakePi(exec: GitExec): FakePi & Record<string, unknown> {
 	};
 }
 
-function fakeCtx(answers: Record<string, ClassifierAnswer>, notifications: string[]): Record<string, unknown> {
+type FakeAuthSource = (provider: string) => ProviderAuth | undefined;
+
+/** Every provider authenticated unless a test says otherwise. No real credential is read. */
+const allAuthenticated: FakeAuthSource = () => ({ configured: true });
+
+/**
+ * The provider keys the production auth adapter also honours as a live
+ * environment fallback. A pipeline test injects a fake registry status, so the
+ * developer's real keys must not leak through that fallback and turn a deliberate
+ * "missing credential" case into a configured one.
+ */
+const PROVIDER_ENV_KEYS = ["OPENROUTER_API_KEY", "OPENCODE_API_KEY"] as const;
+
+async function withoutProviderEnv<T>(fn: () => Promise<T>): Promise<T> {
+	const saved = new Map(PROVIDER_ENV_KEYS.map((key) => [key, process.env[key]]));
+	for (const key of PROVIDER_ENV_KEYS) delete process.env[key];
+	try {
+		return await fn();
+	} finally {
+		for (const [key, value] of saved) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+	}
+}
+
+function fakeCtx(
+	answers: Record<string, ClassifierAnswer>,
+	notifications: string[],
+	auth: FakeAuthSource = allAuthenticated,
+): Record<string, unknown> {
 	return {
 		modelRegistry: {
 			getAvailable: () => AVAILABLE,
 			findOfType: () => ({ provider: "openrouter", id: "typesafe/jev-1.13" }),
 			classify: async () => classifierResult(answers),
+			getProviderAuthStatus: (provider: string) => auth(provider),
 		},
 		cwd: "/repo",
 		signal: undefined,
@@ -1405,32 +1592,89 @@ function fakeCtx(answers: Record<string, ClassifierAnswer>, notifications: strin
 /**
  * Drive the registered tool once, with a temp agent dir so `loadConfig` sees no
  * stray user config. Returns the tool result's details, every appended session
- * entry, and the mock host.
+ * entry, and the mock host. `auth` is the injected credential source: the tests
+ * never read the real one.
  */
 async function runPipeline(options: {
 	exec: GitExec;
 	answers: Record<string, ClassifierAnswer>;
 	params?: Record<string, unknown>;
 	config?: Record<string, unknown>;
+	auth?: FakeAuthSource;
 }): Promise<{
 	details: { fingerprint?: string; plan?: PipelinePlan };
 	appended: FakePi["appended"];
 	pi: FakePi;
 }> {
 	const pi = fakePi(options.exec);
-	return withAgentDir(options.config ?? { candidates: PIPELINE_CANDIDATES }, async () => {
-		reviewTriageExtension(pi as never);
-		assert.ok(pi.tools[0]?.execute, "the extension registered the tool");
-		const result = await pi.tools[0].execute(
-			"id",
-			{ summary: "wire the dossier", target: "uncommitted", ...(options.params ?? {}) },
-			undefined,
-			undefined,
-			fakeCtx(options.answers, pi.notifications),
-		);
-		return { details: result.details as never, appended: pi.appended, pi };
-	});
+	return withAgentDir(options.config ?? { candidates: PIPELINE_CANDIDATES }, () =>
+		withoutProviderEnv(async () => {
+			reviewTriageExtension(pi as never);
+			assert.ok(pi.tools[0]?.execute, "the extension registered the tool");
+			const result = await pi.tools[0].execute(
+				"id",
+				{ summary: "wire the dossier", target: "uncommitted", ...(options.params ?? {}) },
+				undefined,
+				undefined,
+				fakeCtx(options.answers, pi.notifications, options.auth ?? allAuthenticated),
+			);
+			return { details: result.details as never, appended: pi.appended, pi };
+		}),
+	);
 }
+
+test("wiring: a missing reviewer credential is reported, and no model is invented", async () => {
+	// The failure this pins: `generateCatalog` filtered the band away with one
+	// note and the plan then said "no review", which reads like a judgement.
+	const { details } = await runPipeline({
+		exec: stableExec().exec,
+		answers: fullAnswers(),
+		auth: (provider) => ({ configured: provider !== "p" }),
+	});
+	const plan = details.plan;
+	assert.equal(plan?.status, "unavailable", "nothing can run, so the plan says so");
+	assert.equal(plan?.adversarial?.needed, true, "it is not a skip");
+	assert.ok(
+		plan?.limitations?.some(
+			(limitation) =>
+				limitation.includes('no credentials for provider "p"') && limitation.includes("P_API_KEY"),
+		),
+		"the gap names the provider and the fix",
+	);
+});
+
+test("wiring: a missing judge credential short-circuits the call with an actionable failure", async () => {
+	const { details } = await runPipeline({
+		exec: stableExec().exec,
+		answers: fullAnswers(),
+		auth: (provider) => ({ configured: provider !== "openrouter" }),
+	});
+	const plan = details.plan;
+	// `fullAnswers` would produce a real recommendation if the judge had run, so
+	// the failure here proves the credential check skipped the classifier call.
+	assert.equal(plan?.judgeFailure?.kind, "unavailable");
+	assert.match(plan?.judgeFailure?.message ?? "", /openrouter/u);
+	assert.match(plan?.judgeFailure?.message ?? "", /OPENROUTER_API_KEY/u);
+	assert.ok(
+		plan?.limitations?.some((limitation) => limitation.includes("OPENROUTER_API_KEY")),
+		"the fix is also visible in the rendered limitations",
+	);
+});
+
+test("wiring: authenticated providers reach the judge and keep the default tiers", async () => {
+	const { details } = await runPipeline({
+		exec: stableExec().exec,
+		answers: fullAnswers(),
+		auth: allAuthenticated,
+	});
+	assert.equal(details.plan?.judgeFailure, undefined, "the judge ran");
+	assert.equal(details.plan?.status, "recommended");
+	assert.equal(
+		details.plan?.limitations?.some((limitation) => limitation.includes("credentials")),
+		false,
+		"a fully authenticated run carries no credential limitation",
+	);
+});
 
 test("wiring: the session entry carries the dossier fingerprint", async () => {
 	const { details, appended } = await runPipeline({ exec: stableExec().exec, answers: fullAnswers() });

@@ -2,8 +2,8 @@
 
 `triage_change` (and the `/triage` command) decides how much independent review a
 finished change needs, and with which model. It measures the change, asks Jev (a
-calibrated decision model) for the judgement, then applies policy that lives in a
-config file.
+calibrated decision model) for the judgement, then applies policy: built-in
+defaults this repository ships, optionally overridden by a config file.
 
 It returns a **plan**, never an action. When it recommends a review, the plan
 carries a ready-to-paste task for the `subagent` tool, the model, and the
@@ -127,38 +127,41 @@ validation-result / risk-signal / limitation), `provenance`, `snapshot`,
 
 ## Configuration
 
-`~/.pi/agent/review-triage.json`, all fields optional. The judge model can also
-be set with `PI_REVIEW_TRIAGE_JUDGE_PROVIDER` / `PI_REVIEW_TRIAGE_JUDGE_MODEL`,
+`~/.pi/agent/review-triage.json`, all fields optional. The built-in defaults
+**are** this repository's policy: judge `openrouter`/`typesafe/jev-1.13` and the
+three `opencode-go` reviewer bands, so installing the package is enough and an
+unconfigured project gets the repo's judge and tiers. A config file is only
+needed to *change* something. The judge model can also be set with
+`PI_REVIEW_TRIAGE_JUDGE_PROVIDER` / `PI_REVIEW_TRIAGE_JUDGE_MODEL`,
 `PI_REVIEW_TRIAGE_OFF` / `PI_REVIEW_TRIAGE_ENABLED` override `enabled`, and a
 `.env` beside this file is read for `OPENROUTER_API_KEY` so a key that never
 reached `auth.json` still works.
 
-This repository ships a starting policy as `review-triage.example.json` beside
-this file — copy it to `~/.pi/agent/review-triage.json` (or
-`$PI_CODING_AGENT_DIR/review-triage.json` in a container) and edit it there. The
-copy in `~/.pi/agent` is the one read at run time; nothing keeps the two in step,
-so treat this file as a template, not as the live policy.
+`review-triage.example.json` beside this file is the same policy written out for
+a human to copy to `~/.pi/agent/review-triage.json` (or
+`$PI_CODING_AGENT_DIR/review-triage.json` in a container) and edit there. The
+copy in `~/.pi/agent` is the one read at run time; a test pins the example and
+the built-in defaults together so they cannot drift.
 
-`.pi/extensions/subagent/test/review-triage.test.ts` loads it and fails if a
-candidate's provider leaves `opencode-go`, if the judge stops being
-`openrouter`/`typesafe/jev-1.13`, if a stated `cost` disagrees with the
-opencode-go catalogue, or if a band has no candidate. What it cannot check is
-whether this machine has credentials for a provider: `generateCatalog` filters
-candidates by what the session can run, which silently drops a band whose
-provider is unauthenticated, and an agent reading `candidates` directly (as
-`AGENTS.md` tells it to) is not filtered at all — that is the failure that
-prompted the file, and it stays a human check.
+A test also pins what a repository can know about the shipped policy: every
+candidate's provider is `opencode-go`, the judge is
+`openrouter`/`typesafe/jev-1.13`, a stated `cost` agrees with the opencode-go
+catalogue, and every band has a candidate
+(`.pi/extensions/subagent/test/review-triage.test.ts`). Whether a provider has
+credentials is a property of the machine, not the repository, so that is checked
+at run time instead — see "Missing credentials" below.
 
 - **`enabled`** turns the whole extension off; a disabled run reports that
   nothing was judged rather than inventing a verdict.
 - **`tool`** registers the `triage_change` tool at extension load. `/triage` is
   always available, so `false` keeps the command and drops the tool's prompt
   weight. (Registration is a load-time act: changing this needs a reload.)
-- **`candidates`** — with none, the list is synthesised from the models this
-  session can actually use, bucketed by catalogue price. That fallback is a
-  coarse guess, not a capability judgement; a config with real `tier`s is what
-  makes routing meaningful. `cost` defaults to `0`, meaning "resolve from the
-  catalogue".
+- **`candidates`** — defaults to the four shipped reviewers (two `low`, one
+  `medium`, one `high`, all on `opencode-go`). An explicit empty array means
+  "synthesise from the models this session can actually use", bucketed by
+  catalogue price. That fallback is a coarse guess, not a capability judgement;
+  a config with real `tier`s is what makes routing meaningful. `cost` defaults
+  to `0`, meaning "resolve from the catalogue".
 - **`thinkingLadder`** — per band, the levels worth offering before the runtime
   prune. An explicit empty array means "never offer this band".
 - **`policy.skipThreshold`** — `P(none)` must be **strictly greater** than this
@@ -178,7 +181,37 @@ prompted the file, and it stays a human check.
 - **`redaction`** — see "The dossier" above. `paths` and `patterns` are lists of
   strings; `mask` is the replacement (default `[redacted]`).
 
-## Invoking it
+## Missing credentials
+
+A provider's credential is a property of the machine, so it is checked before
+the catalog is generated rather than assumed from the repository policy
+(`credentials.ts`). The check asks pi's model registry
+(`getProviderAuthStatus(provider)`), which reports whether a provider can
+authenticate without exposing the secret; the source is injected so the tests
+never read a real credential. It also accepts the provider's environment
+variable (`OPENROUTER_API_KEY`, `OPENCODE_API_KEY`), because a key this extension
+loads from `.env` after pi's startup snapshot is still a credential. An
+**unknown** status counts as usable: a provider extension may authenticate where
+the status cannot see, and a false "missing" would disable a working setup.
+
+- **A reviewer provider is missing.** Its candidates are not offered, its bands
+  drop out of the catalog, and the plan carries one actionable limitation per
+  provider naming the provider, every blocked `provider/model`, and the fix
+  (`OPENCODE_API_KEY`, `/login`, or an `auth.json` entry). When every reviewer
+  provider is missing the catalog is empty and both tracks report
+  `unavailable` — the verdict says "no review model resolved", never "no review
+  needed". A machine that still has one band gets a plan from it, marked with
+  the gap; the tool is not hard-failed, so unrelated work is not bricked.
+- **The judge's provider is missing.** Asking it would spend a round trip to
+  learn what pi already knows, so the request is skipped and the plan carries
+  `judgeFailure: { kind: "unavailable" }` with the same actionable message. That
+  reuses the existing judge-failure path and its `unavailable` kind rather than
+  inventing a second failure mode.
+
+A provider with credentials can still lack a model (an unregistered provider, a
+renamed catalogue entry); that stays visible as the catalog's per-band `notes`
+and a track that resolves to nothing.
+
 
 **`/triage`** is the primary explicit invocation:
 
@@ -208,11 +241,12 @@ level the plan names.
 A missing judge model, a provider error, a timeout or a malformed answer all
 become a `JudgeError`; the tool never fabricates a judgement, and outside a git
 repository the evidence degrades to the summary and notes with the reason
-attached. A **cancellation is not a failure**: an abort propagates and leaves no
-verdict, because composing one from a user's Esc is the fabrication this gate
-exists to avoid. Every other verdict is appended to the session as a
-`review-triage` entry carrying the plan, the judgement, the catalog and the
-dossier fingerprint.
+attached. Missing provider credentials are caught before either call and
+reported as described in "Missing credentials". A **cancellation is not a
+failure**: an abort propagates and leaves no verdict, because composing one from
+a user's Esc is the fabrication this gate exists to avoid. Every other verdict is
+appended to the session as a `review-triage` entry carrying the plan, the
+judgement, the catalog and the dossier fingerprint.
 
 ## Output
 
@@ -245,7 +279,8 @@ effective `policyOverrides`, `task` and `scope` identity, the evidence
 | File | Role |
 |---|---|
 | `index.ts` | the `triage_change` tool, `/triage`, the pipeline and the context resolver |
-| `config.ts` | policy: defaults, file + env merge, dotenv |
+| `config.ts` | policy: shipped defaults, file + env merge, dotenv |
+| `credentials.ts` | provider-credential check and its actionable gap messages |
 | `evidence.ts` | git measurement, risk labelling and the dossier adapter (pure parsers) |
 | `collectors.ts` | the thin artifact / harness / validation adapters (pure) |
 | `dossier.ts` | the fingerprinted, budgeted, redactable document Jev judges |
