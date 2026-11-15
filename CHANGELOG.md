@@ -48,9 +48,12 @@ Added:
   the package copy (`-ne` also drops built-in extensions and every extension not
   named with `-e`, and `--no-approve` starts but runs the main checkout's code
   rather than the branch's). The script creates
-  `~/.pi/agent-<main checkout name>`, the sibling-of-`agent` layout
-  `devcontainer.json` already declares, seeded from the shared `settings.json`
-  with `.packages` and its `extensionChangelogVersions` bookkeeping removed,
+  `~/.pi/agent-<main checkout directory name>`, a sibling of the shared `agent`
+  dir — the *shape* `devcontainer.json` declares, though not the same name
+  source: the script reads the checkout's directory while the container reads the
+  project's (see the `Fixed:` bullet below on `pi-agent-dir.test.ts`). It is
+  seeded from the shared `settings.json` with `.packages` and its
+  `extensionChangelogVersions` bookkeeping removed,
   copies credentials once, merges (never replaces) a `trust.json` entry for the
   checkout, and, with `--shell`, appends one marker-delimited `pi` function to
   `~/.bashrc` that selects that dir from anywhere inside the checkout or a
@@ -65,8 +68,8 @@ Added:
   throwaway HOME and repo trees: the seeded settings have no `packages`, a
   second run leaves hand-edited settings and credentials untouched, a linked
   worktree and its main checkout resolve to one dir, the installed hook resolves
-  both to that dir and nothing outside any checkout, and the convention equals
-  the one `devcontainer.json` declares. Mutation-checked the same way — using
+  both to that dir and nothing outside any checkout, and the shape matches the
+  one `devcontainer.json` declares. Mutation-checked the same way — using
   `--show-toplevel`, keeping `.packages`, or appending the hook unconditionally
   each turns the suite red. The README section "One copy of the extensions,
   never two" and `.pi/skills/worktree/` now name this as the host remedy.
@@ -187,6 +190,30 @@ Fixed:
   fail against the pre-fix script, and mutation-checked both ways — reverting
   every stamp site to the basename, or only `doctor`'s read, turns the
   corresponding tests red.
+
+- **`pi-agent-dir.test.ts` no longer fails wherever the checkout directory is not
+  named after the repo.** The test tied the host script's convention to the one
+  `.devcontainer/devcontainer.json` declares by comparing the declared directory
+  against `agent-` + `basename(REPO_ROOT)`. That is the *checkout* directory, not
+  the repo's identity, so it held only for a clone made into a directory named
+  after the repo: it was red on untouched `dev` inside this repo's own container,
+  which mounts the repo at `/workspace`, where the check computed
+  `agent-workspace` against the declared project name. The expected side now
+  comes from `package.json`'s `name` — the repo's declared identity, independent
+  of where it is cloned. That is not the same mechanism as the sibling guard's
+  volume literal, which is hard-coded, so a project rename now turns this test
+  red while that literal stays green: one stale name caught instead of none. And
+  renaming the declared directory still turns it red — checked by renaming it to
+  `agent-renamed-drift` and reading the failure, which names the expected value.
+  Both sides stay computed, so the "exactly one literal" guard is unaffected, and
+  the sandbox tests keep pinning the script's own rule
+  (`agent-<main checkout directory name>`) against a temp HOME. The naming prose is
+  now exact about the two sources instead of implying they are one convention:
+  the header comment in `bin/pi-agent-dir` and the README table row both say the
+  script names its dir after the main checkout's *directory* while the container
+  names its own after the *project*, so the two agree only for a directory named
+  after the repo — and that this is intended, since the container installs no
+  package and the shell hook derives the host name at call time.
 
 Maintenance:
 

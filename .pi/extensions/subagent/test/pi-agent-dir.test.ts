@@ -14,9 +14,14 @@
 // `--show-toplevel` instead of `--git-common-dir` would give each linked worktree
 // a fresh, unseeded dir of its own. Each of those is asserted directly.
 //
-// The last test ties this convention to the one the devcontainer already
-// declares, without repeating either literal: both are computed, so renaming one
-// and not the other fails rather than drifting.
+// The last test covers the devcontainer's half of the naming rule on its own: the
+// dir it declares is `agent-<project name>`, derived from `package.json`. It does
+// not claim to pin the script's half — that is `agent-<main checkout directory
+// name>`, pinned by the sandbox tests above — because the two sources are
+// different and agree only by the coincidence of a clone made into a directory
+// named after the repo. Nor does it use `basename(REPO_ROOT)`: that is the
+// *checkout* directory, and this container mounts the repo at `/workspace`, where
+// the checkout-basename form of the assertion failed.
 
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -176,15 +181,28 @@ test("--check fails while a package is still listed, and passes after the script
 	assert.equal(checked.status, 0, checked.stderr);
 });
 
-test("the convention is the one devcontainer.json already declares", () => {
+test("the declared dir is named after the project, not the checkout directory", () => {
 	// Computed on both sides: the guard in devcontainer-agent-dir.test.ts forbids
 	// a second *literal*, and comparing derived values is what keeps the two
 	// definitions from drifting apart.
+	//
+	// The name comes from `package.json` — the repo's identity — and deliberately
+	// *not* from `basename(REPO_ROOT)`, which is the checkout's directory and only
+	// equals the repo's name when the clone was made into one of that name. This
+	// container mounts the repo at `/workspace`, so the checkout-basename form of
+	// this assertion failed inside the very container the convention exists for,
+	// while passing in a CI checkout (`.../my-agent-setup/my-agent-setup`). The
+	// script's own rule, `agent-<main checkout directory name>`, is already pinned
+	// by the sandbox tests above, which derive `expectedDir` from the sandbox's
+	// repo name.
+	const { name: projectName } = JSON.parse(readFileSync(path.join(REPO_ROOT, "package.json"), "utf8")) as {
+		name: string;
+	};
 	const declared = /"PI_CODING_AGENT_DIR"\s*:\s*"([^"]+)"/u.exec(
 		readFileSync(path.join(REPO_ROOT, ".devcontainer", "devcontainer.json"), "utf8"),
 	)?.[1];
 	assert.ok(declared, ".devcontainer/devcontainer.json must declare PI_CODING_AGENT_DIR");
-	assert.equal(path.basename(declared), `agent-${path.basename(REPO_ROOT)}`);
+	assert.equal(path.basename(declared), `agent-${projectName}`);
 	// A sibling of the shared agent dir, never nested inside it: the script's
 	// sandbox tests pin the same shape against a temp HOME.
 	assert.equal(path.basename(path.dirname(declared)), ".pi");

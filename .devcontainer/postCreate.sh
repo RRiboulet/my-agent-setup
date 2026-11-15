@@ -3,10 +3,12 @@ set -euo pipefail
 
 REPO=/workspace
 # This container's own agent dir, on its private pi volume. It is not the shared
-# `agent` dir any more: no other container mounts this volume. Keeping the
-# `agent-<checkout>` name preserves the convention `bin/pi-agent-dir` uses on a
-# host, and costs nothing now that the volume is private (README, "One copy of
-# the extensions, never two").
+# `agent` dir any more: no other container mounts this volume. The name is the
+# *project's*, matching the shape `bin/pi-agent-dir` gives a host checkout named
+# after the repo — this checkout is not, since the repo is mounted at /workspace,
+# so the script would compute `agent-workspace` there (see its header on naming).
+# Nothing depends on the two agreeing: this dir is the container's own, and no
+# host ever resolves it (README, "One copy of the extensions, never two").
 AGENT_DIR=/home/vscode/.pi/agent
 PROJECT_AGENT_DIR="${PI_CODING_AGENT_DIR:-$AGENT_DIR}"
 
