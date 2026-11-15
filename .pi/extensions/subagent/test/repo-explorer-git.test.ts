@@ -388,14 +388,11 @@ const diffTargets = (calls: string[][], last: string): string[][] =>
 	calls.filter((argv) => argv[0] === "diff" && argv.at(-1) === last);
 
 test("changedFiles diffs against @{upstream} when set, and origin/<branch> when it is not", async () => {
-	// Known limitation, deliberately not pinned as correct below: the flow passes
-	// full refnames (`choice.refname`, e.g. "refs/heads/feature"), and git only
-	// accepts `<branchname>@{upstream}`, rejecting `refs/heads/feature@{upstream}`
-	// with "fatal: no such branch". So for the refnames the browser actually
-	// uses, the @{upstream} preference below never engages and the code falls
-	// back to origin/<branch>. This test exercises the short-name form, which
-	// does reach it; the full-refname gap is reported rather than fixed here
-	// (production behaviour is out of scope for this change).
+	// This one names the branch the way the code used to probe for it (short),
+	// and keeps doing so now that the probe converts the full refname first; the
+	// shape production actually passes — `refs/heads/<name>` — is covered by the
+	// "production full-refname call" test below, which is what failed before the
+	// probe was fixed.
 	const root = await initScratchRepo("upstream");
 	try {
 		const base = gitIn(root, "rev-parse", "HEAD").trim();
@@ -446,6 +443,55 @@ test("changedFiles diffs against @{upstream} when set, and origin/<branch> when 
 			"with no upstream configured, origin/<branch> is the diff target, so only its extra commit shows",
 		);
 		assert.ok(diffTargets(calls, "refs/remotes/origin/feature").length > 0, "the fallback names origin/<branch>");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("the production full-refname call still resolves @{upstream}, which git only accepts by short name", async () => {
+	// The browser passes `choice.refname` ("refs/heads/feature"), and git accepts
+	// only `<branchname>@{upstream}` — `refs/heads/feature@{upstream}` exits 128
+	// with "no such branch". This is the shape that reaches `changedFiles` in
+	// production; the test above exercises the short name the code happened to
+	// probe with, which is why the gap survived it.
+	//
+	// The fixture makes the two possible answers differ, so a resolver that
+	// misses the probe and falls through to the merge base cannot pass by luck:
+	// origin/main carries a commit the branch does not, so diffing the tips (the
+	// @{upstream} answer) names both paths, while diffing from the merge base
+	// names only the branch's own. origin/feature does not exist, so the
+	// conventional fallback cannot rescue the probe either.
+	const root = await initScratchRepo("prod-refname");
+	try {
+		gitIn(root, "remote", "add", "origin", "https://example.invalid/repo.git");
+		gitIn(root, "checkout", "-q", "-b", "feature");
+		await writeFile(path.join(root, "feature.txt"), "feature\n");
+		gitIn(root, "add", "-A");
+		gitIn(root, "commit", "-q", "-m", "feature only");
+		// The configured upstream, one commit ahead of the merge base.
+		gitIn(root, "checkout", "-q", "main");
+		await writeFile(path.join(root, "on-main.txt"), "upstream moved\n");
+		gitIn(root, "add", "-A");
+		gitIn(root, "commit", "-q", "-m", "upstream only");
+		gitIn(root, "update-ref", "refs/remotes/origin/main", gitIn(root, "rev-parse", "HEAD").trim());
+		gitIn(root, "config", "branch.feature.remote", "origin");
+		gitIn(root, "config", "branch.feature.merge", "refs/heads/main");
+
+		const { run, calls } = makeRunner();
+		const repo = await openGit(run, root);
+		assert.deepEqual(
+			await repo.changedFiles("refs/heads/feature"),
+			["feature.txt", "on-main.txt"],
+			"the configured upstream is diffed, so the upstream's own commit shows too",
+		);
+
+		// The probe itself: git must be asked with the short name, because it
+		// rejects the full refname. Asserted on argv, since a resolver that
+		// probes wrongly and falls back can still produce paths in other shapes.
+		const probes = calls.filter((argv) => argv.includes("--symbolic-full-name"));
+		assert.equal(probes.length, 1, "exactly one upstream probe");
+		assert.equal(probes[0]?.at(-1), "feature@{upstream}");
+		assert.equal(diffTargets(calls, "refs/remotes/origin/main").length, 1, "the diff names the configured upstream");
 	} finally {
 		await rm(root, { recursive: true, force: true });
 	}
