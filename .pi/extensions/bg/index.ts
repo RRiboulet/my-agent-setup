@@ -31,6 +31,7 @@ import { Type } from "typebox";
 import { createKillJob } from "./kill.ts";
 import { readLogsAction } from "./logs.ts";
 import { createBgNotifier } from "./notify.ts";
+import { repairSession } from "./repair.ts";
 import { buildJobEnv, signalProcessGroup, spawnBgJob, type BgProcessHandle } from "./spawn.ts";
 import {
 	commandFirstLine,
@@ -297,13 +298,28 @@ export default function bgExtension(pi: ExtensionAPI): void {
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
+		const sessionId = ctx.sessionManager.getSessionId();
 		// Creating the session's job root up front keeps the first `start` from
-		// racing on it and gives `status` somewhere to look. Ticket 06 adds its
-		// repair/prune call here, next to this line.
+		// racing on it and gives `status` somewhere to look.
 		try {
-			await ensureSessionJobsDir(ctx.sessionManager.getSessionId());
+			await ensureSessionJobsDir(sessionId);
 		} catch (error) {
 			console.error(`[bg] could not create the job directory: ${error instanceof Error ? error.message : String(error)}`);
+		}
+
+		// Trust nothing this process did not observe: a record claiming a running
+		// process whose pid is gone is settled to exited here, a live one is adopted
+		// by the watcher (and still notifies through its settle hook), and expired
+		// job directories are pruned. Repair reports problems in its result rather
+		// than throwing, so a corrupt record cannot stop a session from starting;
+		// the outer catch is only for the unexpected.
+		try {
+			const repair = await repairSession({ sessionId, watcher });
+			for (const problem of repair.problems) {
+				console.error(`[bg] job record problem at ${problem.dir}: ${problem.error}`);
+			}
+		} catch (error) {
+			console.error(`[bg] could not repair job state: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	});
 
