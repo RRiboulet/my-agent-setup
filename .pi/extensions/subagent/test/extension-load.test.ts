@@ -63,6 +63,7 @@ const MODULES: Record<string, string[]> = {
 	],
 	"../../bg/logs.ts": ["enforceLogCap", "logCapMarker", "logWasCapped", "readLogTail", "readLogsAction"],
 	"../../bg/watch.ts": ["createJobWatcher"],
+	"../../bg/notify.ts": ["createBgNotifier", "formatSettledNotice"],
 	"../../btw/launch.ts": [
 		"buildBtwKillServerArgs",
 		"buildBtwPaths",

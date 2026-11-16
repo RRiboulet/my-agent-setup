@@ -77,6 +77,10 @@ export interface BgHarness {
 	jobIds: () => Promise<string[]>;
 	/** Wait for a job's persisted state to satisfy `predicate`. */
 	waitForJob: (id: string, predicate: (job: BgJobRecord) => boolean, timeoutMs?: number) => Promise<BgJobRecord>;
+	/** Whether the agent is idle, as `ctx.isIdle()` reports it right now. */
+	isIdle: () => boolean;
+	/** Make the session streaming (false) or idle (true), as pi's state does mid-run. */
+	setIdle: (idle: boolean) => void;
 	/** Fire session_shutdown, as pi does when the session ends. */
 	shutdown: () => Promise<void>;
 }
@@ -88,6 +92,8 @@ export interface BgHarnessOptions {
 	env?: Record<string, string>;
 	/** Override the reported session id (a second session in the same agent dir). */
 	sessionId?: string;
+	/** Whether the agent is idle at boot. Default true; flip it with `h.setIdle`. */
+	idle?: boolean;
 }
 
 /**
@@ -105,7 +111,13 @@ export async function withBgHarness<T>(fn: (h: BgHarness) => Promise<T>, options
 			const registrations: BgToolRegistration[] = [];
 			const declared = ["read", "bash", "edit", "write"];
 			const messages: BgMessage[] = [];
-			const handlers = new Map<string, (...args: unknown[]) => unknown>();
+			// A LIST per event, not one handler: pi keeps every handler registered for
+			// an event and runs them in order, and the bg extension registers two on
+			// session_start (the job root, and the notifier's context) from two
+			// modules. A Map here would silently drop the first and, with it, the
+			// watcher's shutdown — which leaves a live timer and hangs `node --test`.
+			const handlers = new Map<string, ((...args: unknown[]) => unknown)[]>();
+			let idle = options.idle ?? true;
 			// Jobs this harness started, so the finally can stop them.
 			const started: number[] = [];
 
@@ -122,8 +134,14 @@ export async function withBgHarness<T>(fn: (h: BgHarness) => Promise<T>, options
 				registerCommand: () => undefined,
 				registerMessageRenderer: () => undefined,
 				on: (event: string, handler: (...args: unknown[]) => unknown) => {
-					handlers.set(event, handler);
-					return () => handlers.delete(event);
+					const list = handlers.get(event) ?? [];
+					list.push(handler);
+					handlers.set(event, list);
+					return () => {
+						const current = handlers.get(event) ?? [];
+						const index = current.indexOf(handler);
+						if (index >= 0) current.splice(index, 1);
+					};
 				},
 				sendMessage: (message: Record<string, unknown>, opts?: Record<string, unknown>) => {
 					messages.push({ message, options: opts });
@@ -137,7 +155,7 @@ export async function withBgHarness<T>(fn: (h: BgHarness) => Promise<T>, options
 				mode: "tui",
 				hasUI: false,
 				isProjectTrusted: () => true,
-				isIdle: () => true,
+				isIdle: () => idle,
 				signal: undefined,
 				model: { provider: "openrouter", id: "test/model" },
 				thinkingLevel: "medium",
@@ -148,6 +166,11 @@ export async function withBgHarness<T>(fn: (h: BgHarness) => Promise<T>, options
 				},
 				ui: { notify: () => undefined, setStatus: () => undefined },
 				shutdown: () => undefined,
+			};
+
+			/** Run every handler registered for an event, as pi's runner does. */
+			const emit = async (event: string): Promise<void> => {
+				for (const handler of [...(handlers.get(event) ?? [])]) await handler({}, ctx);
 			};
 
 			const harness: BgHarness = {
@@ -205,7 +228,11 @@ export async function withBgHarness<T>(fn: (h: BgHarness) => Promise<T>, options
 					return harness.readJob(id);
 				},
 				shutdown: async () => {
-					await handlers.get("session_shutdown")?.({}, ctx);
+					await emit("session_shutdown");
+				},
+				isIdle: () => idle,
+				setIdle: (value) => {
+					idle = value;
 				},
 			};
 
@@ -219,7 +246,7 @@ export async function withBgHarness<T>(fn: (h: BgHarness) => Promise<T>, options
 			};
 
 			bgExtension(pi as never);
-			await handlers.get("session_start")?.({}, ctx);
+			await emit("session_start");
 
 			try {
 				return await fn(harness);
