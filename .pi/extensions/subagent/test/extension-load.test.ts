@@ -23,6 +23,7 @@ import { test } from "node:test";
 
 const EXTENSIONS = [
 	"../../answer.ts",
+	"../../bg/index.ts",
 	"../../btw/index.ts",
 	"../../continue.ts",
 	"../../goal.ts",
@@ -42,6 +43,25 @@ const EXTENSIONS = [
 // loader. The exports an importer will use are named, so an accidental drop
 // of one fails here instead of at wiring time.
 const MODULES: Record<string, string[]> = {
+	// The bg extension's internals, and the surface tickets 03-06 import from:
+	// signalling a process group, reading the store, and the watcher's settle hook.
+	"../../bg/spawn.ts": ["buildJobEnv", "isProcessAlive", "signalJobGroup", "signalProcessGroup", "spawnBgJob"],
+	"../../bg/store.ts": [
+		"bgRootDir",
+		"commandFirstLine",
+		"createJobDir",
+		"ensureSessionJobsDir",
+		"jobDirFor",
+		"listJobs",
+		"loadJob",
+		"logPathFor",
+		"metaPathFor",
+		"readJobMeta",
+		"sessionDirName",
+		"sessionJobsDir",
+		"writeJobMeta",
+	],
+	"../../bg/watch.ts": ["createJobWatcher"],
 	"../../btw/launch.ts": [
 		"buildBtwKillServerArgs",
 		"buildBtwPaths",
