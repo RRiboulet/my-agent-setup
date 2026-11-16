@@ -28,6 +28,7 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { createBgNotifier } from "./notify.ts";
 import { buildJobEnv, signalProcessGroup, spawnBgJob, type BgProcessHandle } from "./spawn.ts";
 import {
 	commandFirstLine,
@@ -153,9 +154,12 @@ function notImplemented(action: BgAction): BgActionHandler {
 }
 
 export default function bgExtension(pi: ExtensionAPI): void {
-	// Ticket 05 attaches completion notifications to the settle hook here; the
-	// watcher itself needs nothing else.
-	const watcher = createJobWatcher();
+	// Completion notifications (ticket 05): the watcher hands one settled job at a
+	// time to the notifier, which owns the settle window, the message, and the
+	// delivery mode. The notifier registers its own session handlers — including
+	// stopping its timer on shutdown — so this file has one line to get right.
+	const notifier = createBgNotifier(pi);
+	const watcher = createJobWatcher({ onSettled: (job) => notifier.settled(job) });
 
 	const startJob = async (params: BgParamsType, ctx: ExtensionContext): Promise<BgToolResult> => {
 		const command = params.command ?? "";
