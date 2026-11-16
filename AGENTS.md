@@ -331,13 +331,26 @@ commissioned, hand the trail to that one reviewer alongside the diff.
 
 ```bash
 bash .pi/extensions/subagent/test/setup-deps.sh              # once: link pi's packages
-node --test .pi/extensions/subagent/test/*.test.ts
+node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts
 (cd .pi/extensions/opencode-go-provider && node --test)  # provider package tests (separate tree)
 ```
 
 Run it with `bash` (or `sh`), not as `./setup-deps.sh` — see "Line endings"
 below. Node runs the TypeScript directly; there is no build step. See
 `.pi/extensions/subagent/test/README.md` for what is and is not covered.
+
+**`--test-concurrency=8` is not optional.** Node defaults the file-concurrency to
+`availableParallelism() - 1`, which is **1** on this 2-core host, so the
+"parallel" runner was running one file at a time. The suite is wait-bound, not
+CPU-bound: a serial run spends 67 s of CPU across 184 s of wall clock (36 %), so
+there is headroom to oversubscribe. Measured 2026-11-16 on the 2-core dev host:
+184 s serial, 119-132 s at 8, and no further gain at 16 (132 s), which is why the
+number is fixed rather than derived from `nproc`. Raising it also exposed two
+tests that only passed because nothing ran beside them — a `trap '' TERM`
+escalation test that could signal the shell before its trap was installed, and a
+viewer test with an 8 s bound; both now wait for the state they assert instead of
+assuming it. If you raise the number and see a red run, suspect a missing wait
+before you suspect the code.
 
 #### One test file while iterating, the suite once through `bg`
 
@@ -349,7 +362,7 @@ start that run through `bg` rather than `bash`.
 `bg` is registered deferred (see "Subagent tools" above for what that means), so
 load it first — `tool_search` for `bg`, call the tool it hands you, and only then
 start the run:
-`bg({ action: "start", command: "node --test .pi/extensions/subagent/test/*.test.ts" })`.
+`bg({ action: "start", command: "node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts" })`.
 If `tool_search` finds nothing, say so in your report and run the suite with
 `bash` instead; do not guess a tool name.
 

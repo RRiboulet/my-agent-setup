@@ -129,10 +129,18 @@ test("a shell that ignores SIGTERM is still gone after the SIGKILL grace", async
 	await withBgHarness(async (h) => {
 		// `trap '' TERM` makes the shell ignore SIGTERM, and the disposition is
 		// inherited by the `sleep` it runs: only the escalation can end this.
-		const start = await h.call({ action: "start", command: "trap '' TERM; sleep 30" });
+		//
+		// The readiness line is load-bearing, not decoration. `start` returns as soon
+		// as the process exists, so killing immediately races the shell's own startup:
+		// a SIGTERM that lands before `trap` runs kills the shell outright and there is
+		// no escalation to observe (it failed in 92ms on a loaded box at
+		// `--test-concurrency=8`). Wait until the trap is installed before signalling.
+		const start = await h.call({ action: "start", command: "trap '' TERM; echo trapped; sleep 30" });
 		const job = jobOf(start);
 		const id = job.id as string;
 		const pid = job.pid as number;
+
+		await waitFor(async () => (await h.readLog(id)).includes("trapped"));
 
 		const startedAt = Date.now();
 		const result = await h.call({ action: "kill", id });

@@ -53,6 +53,30 @@ Added:
   runs per task against baselines taken by the same method. Deliberately blank
   until then: an interim number would be read as a result.
 
+Maintenance:
+
+- **The suite runs its files concurrently, which is what it always claimed to do.**
+  Node defaults `--test-concurrency` to `availableParallelism() - 1`, so on this
+  2-core host the runner was running **one file at a time**: 184 s of wall clock
+  for 67 s of CPU (36 %), which says the suite is wait-bound rather than
+  CPU-bound. The documented command now passes `--test-concurrency=8`: measured
+  2026-11-16 at 119-132 s, with no further gain at 16 (132 s), so the number is
+  fixed rather than derived from `nproc`. The flag is documented in `AGENTS.md`
+  with the reason, because a bare command loses it on the next copy-paste.
+
+  Parallelism also found two tests that had only ever passed because nothing ran
+  beside them, both fixed here rather than papered over: the SIGKILL escalation
+  test could signal a shell before its `trap '' TERM` was installed (it now waits
+  for the `trapped` line, and failed in 92 ms under load before the fix), and the
+  `btw` viewer test waited 8 s for a spawned node process to render (now 30 s,
+  the same generous-bound rule `helpers.ts` states for its own poll). A third
+  bound, the escalation test's 5 s ceiling on a 5 s grace, was already fixed.
+
+  This is the half of the `bg` motivation that does not need `bg`: asynchrony
+  moves the suite off the critical path, this shortens the critical path itself.
+  The old figure — 2 187 s of suite runs in 25 sessions at 143-178 s each — would
+  be roughly 1 400 s at the new wall-clock.
+
 ## v1.14.0 — 2026-11-16
 
 Added:
