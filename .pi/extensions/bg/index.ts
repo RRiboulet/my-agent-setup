@@ -36,6 +36,7 @@ import { buildJobEnv, signalProcessGroup, spawnBgJob, type BgProcessHandle } fro
 import {
 	commandFirstLine,
 	createJobDir,
+	formatDuration,
 	ensureSessionJobsDir,
 	listJobs,
 	loadJob,
@@ -68,14 +69,6 @@ function bgError(action: string, message: string): BgToolResult {
 	return { content: [{ type: "text", text: `Error: ${message}` }], details: { action, error: message } };
 }
 
-/** "0s", "42s", "3m 7s" — the same shape the subagent tool reports. */
-function formatElapsed(ms: number): string {
-	const seconds = Math.max(0, Math.round(ms / 1000));
-	if (seconds < 60) return `${seconds}s`;
-	const minutes = Math.floor(seconds / 60);
-	return `${minutes}m ${seconds % 60}s`;
-}
-
 function elapsedMs(job: BgJobRecord): number {
 	return Math.max(0, (job.finishedAt ?? Date.now()) - job.startedAt);
 }
@@ -106,7 +99,7 @@ function formatJobRow(job: BgJobRecord): string {
 	return [
 		job.id,
 		job.state.padEnd(15),
-		formatElapsed(elapsedMs(job)).padStart(6),
+		formatDuration(elapsedMs(job)).padStart(6),
 		exitColumn(job).padEnd(22),
 		commandFirstLine(job.command),
 	].join("  ");
@@ -114,7 +107,7 @@ function formatJobRow(job: BgJobRecord): string {
 
 function formatJobDetail(job: BgJobRecord): string {
 	const lines = [
-		`Job ${job.id}: ${job.state}, ${formatElapsed(elapsedMs(job))}`,
+		`Job ${job.id}: ${job.state}, ${formatDuration(elapsedMs(job))}`,
 		`Command: ${commandFirstLine(job.command)}`,
 		`Cwd: ${job.cwd}`,
 		job.pid === null ? "Pid: (none)" : `Pid: ${job.pid} (process group ${job.pgid ?? job.pid})`,

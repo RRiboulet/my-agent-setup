@@ -344,11 +344,20 @@ below. Node runs the TypeScript directly; there is no build step. See
 While you iterate, run only the test file(s) for what you touched
 (`node --test .pi/extensions/subagent/test/todos-tool.test.ts`), not the whole
 suite. Run the whole suite exactly once, immediately before you commit, and
-start that run through `bg` rather than `bash`:
+start that run through `bg` rather than `bash`.
+
+`bg` is registered deferred (see "Subagent tools" above for what that means), so
+load it first — `tool_search` for `bg`, call the tool it hands you, and only then
+start the run:
 `bg({ action: "start", command: "node --test .pi/extensions/subagent/test/*.test.ts" })`.
+If `tool_search` finds nothing, say so in your report and run the suite with
+`bash` instead; do not guess a tool name.
+
 Then check `bg({ action: "status" })` and keep working — do not `sleep` and
-`tail`. In your report, beside the other checks, say that the full suite ran
-through `bg`, and give that command.
+`tail`. A completion arrives as one message naming every job that finished in
+that window, so you do not have to poll at all: the message starts a turn when
+you are idle and steers you when you are not. In your report, beside the other
+checks, say that the full suite ran through `bg`, and give that command.
 
 The suite takes about 145 s, and 15 runs of it held 2 187 s — 52 % of all bash
 time — across the 25 sessions measured on 2026-11-16, while `sleep` polling held

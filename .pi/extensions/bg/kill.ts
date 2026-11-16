@@ -28,7 +28,7 @@
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { BG_KILL_GRACE_MS, isProcessAlive, signalJobGroup } from "./spawn.ts";
-import { loadJob, writeJobMeta, type BgJobRecord } from "./store.ts";
+import { describeJobState, loadJob, writeJobMeta, type BgJobRecord } from "./store.ts";
 import type { BgJobWatcher } from "./watch.ts";
 
 /** How often the job's liveness is re-checked while waiting out a signal. */
@@ -188,14 +188,6 @@ function killError(message: string): KillToolResult {
 	return { content: [{ type: "text", text: `Error: ${message}` }], details: { action: "kill", error: message } };
 }
 
-/** "exited (exit 3)", "killed", "never started: <reason>" — what the no-op message needs. */
-function stateText(job: BgJobRecord): string {
-	if (job.state === "failed-to-start") return job.error ? `failed-to-start: ${job.error}` : "failed-to-start";
-	if (job.state === "running") return "still running";
-	if (job.exitCode === null) return job.state;
-	return `${job.state} (exit ${job.exitCode})`;
-}
-
 /** The machine-readable half of a kill result: the same names `status` uses, plus what this call did. */
 function killDetails(job: BgJobRecord, extra: Record<string, unknown>): Record<string, unknown> {
 	return {
@@ -247,7 +239,7 @@ export function createKillJob(watcher: Pick<BgJobWatcher, "unwatch">): KillJobHa
 				// A no-op, not a failure: the caller asked for a state the job is
 				// already in, and there is nothing to report but which one.
 				return {
-					content: [{ type: "text", text: `Job ${job.id} is already ${stateText(outcome.job)}; nothing to kill.` }],
+					content: [{ type: "text", text: `Job ${job.id} is already ${describeJobState(outcome.job)}; nothing to kill.` }],
 					details: killDetails(outcome.job, { killed: false, alreadyFinished: true, escalated: false }),
 				};
 			case "already-exited":

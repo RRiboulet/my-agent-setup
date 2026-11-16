@@ -288,3 +288,47 @@ export function commandFirstLine(command: string, maxLength = 160): string {
 	if (!first) return "(empty command)";
 	return first.length > maxLength ? `${first.slice(0, maxLength - 1)}…` : first;
 }
+
+/**
+ * "0s", "42s", "3m 7s" — the one duration shape every `bg` message uses.
+ *
+ * Lives here because three owners each wrote their own copy of it while the
+ * tickets were built in parallel. Durations appear in listings, in kill's
+ * no-op message and in the settle notice; one formatter keeps them identical.
+ */
+export function formatDuration(ms: number): string {
+	const seconds = Math.max(0, Math.round(ms / 1000));
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	return `${minutes}m ${seconds % 60}s`;
+}
+
+/**
+ * A job's state as prose: "still running", "exited (exit 3)", "killed",
+ * "failed-to-start: <reason>".
+ *
+ * The single description of a record's state, for the same reason as
+ * `formatDuration`: `kill` and the settle notice both have to say what happened,
+ * and two spellings of the same fact read as two different facts.
+ */
+export function describeJobState(job: BgJobRecord): string {
+	if (job.state === "failed-to-start") return job.error ? `failed-to-start: ${job.error}` : "failed-to-start";
+	if (job.state === "running") return "still running";
+	if (job.exitCode === null) return job.state;
+	return `${job.state} (exit ${job.exitCode})`;
+}
+
+/**
+ * One job's exit status as a column: "exit 0", "exit 7", "killed",
+ * "killed (exit 7)", "exit unknown".
+ *
+ * Deliberately not `describeJobState`: the settle notice lists exit status per
+ * job and has no room for a sentence, while `kill` answers a question about
+ * state. Two projections of one record, both owned here so neither invents a
+ * third spelling.
+ */
+export function exitSummary(job: BgJobRecord): string {
+	if (job.state === "killed") return job.exitCode === null ? "killed" : `killed (exit ${job.exitCode})`;
+	if (job.exitCode === null) return "exit unknown";
+	return `exit ${job.exitCode}`;
+}

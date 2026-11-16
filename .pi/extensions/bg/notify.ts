@@ -32,7 +32,7 @@
 // message matters more than where it lands.
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { commandFirstLine, type BgJobRecord } from "./store.ts";
+import { commandFirstLine, exitSummary, formatDuration, type BgJobRecord } from "./store.ts";
 
 /** `customType` of the completion message, so a renderer or a test can name it. */
 export const BG_NOTIFY_MESSAGE_TYPE = "bg-jobs-settled";
@@ -77,14 +77,6 @@ export interface BgNotifier {
 	stop: () => void;
 }
 
-/** "0s", "42s", "3m 7s" — the same shape the tool's own listings use. */
-function formatDuration(ms: number): string {
-	const seconds = Math.max(0, Math.round(ms / 1000));
-	if (seconds < 60) return `${seconds}s`;
-	const minutes = Math.floor(seconds / 60);
-	return `${minutes}m ${seconds % 60}s`;
-}
-
 /** How long the job ran: start to finish. */
 export function jobDurationMs(job: BgJobRecord): number {
 	return Math.max(0, (job.finishedAt ?? job.startedAt) - job.startedAt);
@@ -102,13 +94,6 @@ export function jobAgeMs(job: BgJobRecord, at: number): number {
 	return Math.max(0, at - job.startedAt);
 }
 
-/** "exit 0", "exit 7", "killed", "exit unknown" — one fact, no column padding. */
-function exitLabel(job: BgJobRecord): string {
-	if (job.state === "killed") return job.exitCode === null ? "killed" : `killed (exit ${job.exitCode})`;
-	if (job.exitCode === null) return "exit unknown";
-	return `exit ${job.exitCode}`;
-}
-
 /**
  * The message body: a header, then one three-line block per job carrying every
  * fact the acceptance criteria ask for — id, exit code, runtime, age, the first
@@ -122,7 +107,7 @@ export function formatSettledNotice(jobs: readonly BgJobRecord[], at: number = D
 	const lines: string[] = [count === 1 ? "1 background job finished." : `${count} background jobs finished.`];
 	for (const job of jobs) {
 		lines.push(
-			`${job.id} · ${exitLabel(job)} · ran ${formatDuration(jobDurationMs(job))} · job age ${formatDuration(jobAgeMs(job, at))}`,
+			`${job.id} · ${exitSummary(job)} · ran ${formatDuration(jobDurationMs(job))} · job age ${formatDuration(jobAgeMs(job, at))}`,
 			`  command: ${commandFirstLine(job.command)}`,
 			`  log: ${job.logPath}`,
 		);

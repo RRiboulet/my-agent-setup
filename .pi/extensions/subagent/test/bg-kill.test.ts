@@ -144,9 +144,12 @@ test("a shell that ignores SIGTERM is still gone after the SIGKILL grace", async
 		assert.match(result.text, /SIGKILL/);
 
 		// It survived SIGTERM, so the kill cannot have finished before the grace,
-		// and it cannot hang on the trapped process either.
+		// and it cannot hang on the trapped process either. The ceiling is generous
+		// on purpose: this asserts "bounded", not "fast", and a tight bound turned
+		// a loaded machine into a red suite during the merge (the same mistake
+		// helpers.ts warns about for its poll bound).
 		assert.ok(elapsed >= BG_KILL_GRACE_MS, `escalated at ${elapsed}ms, before the grace elapsed`);
-		assert.ok(elapsed < BG_KILL_GRACE_MS + 5_000, `kill took ${elapsed}ms, which is not a bounded escalation`);
+		assert.ok(elapsed < BG_KILL_GRACE_MS + 30_000, `kill took ${elapsed}ms, which is not a bounded escalation`);
 		assert.equal(isAlive(pid), false, "SIGKILL cannot be trapped");
 		assert.equal(groupAlive(pid), false);
 
