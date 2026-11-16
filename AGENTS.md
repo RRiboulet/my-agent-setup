@@ -339,6 +339,23 @@ Run it with `bash` (or `sh`), not as `./setup-deps.sh` — see "Line endings"
 below. Node runs the TypeScript directly; there is no build step. See
 `.pi/extensions/subagent/test/README.md` for what is and is not covered.
 
+#### One test file while iterating, the suite once through `bg`
+
+While you iterate, run only the test file(s) for what you touched
+(`node --test .pi/extensions/subagent/test/todos-tool.test.ts`), not the whole
+suite. Run the whole suite exactly once, immediately before you commit, and
+start that run through `bg` rather than `bash`:
+`bg({ action: "start", command: "node --test .pi/extensions/subagent/test/*.test.ts" })`.
+Then check `bg({ action: "status" })` and keep working — do not `sleep` and
+`tail`. In your report, beside the other checks, say that the full suite ran
+through `bg`, and give that command.
+
+The suite takes about 145 s, and 15 runs of it held 2 187 s — 52 % of all bash
+time — across the 25 sessions measured on 2026-11-16, while `sleep` polling held
+another 1 183 s (the breakdown is in `CHANGELOG.md`, under the `bg` entry). One
+file's tests answer the same question in seconds, and leave the single expensive
+run where it belongs: at the end, off the session's critical path.
+
 #### Typechecking: deliberately none
 
 There is no `tsconfig.json` and no `tsc` in the tree, and this is on purpose.
