@@ -10,9 +10,10 @@
 // exit codes are the behaviour under test, and a mock would only assert our
 // beliefs about them.
 //
-// `logs` and `kill` are declared but owned by tickets 03/04. This file pins only
-// that they answer cleanly and promptly — never the placeholder's wording, which
-// is not desired behaviour.
+// `logs` is declared but owned by ticket 03; `kill` is implemented, and
+// bg-kill.test.ts pins its behaviour. This file pins only that the remaining
+// placeholder answers cleanly and promptly — never its wording, which is not
+// desired behaviour.
 
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
@@ -181,9 +182,8 @@ test("status explains a missing job instead of failing", async () => {
 
 // `logs` and `kill` are owned by tickets 03/04, so this file asserts only what
 // holds for any implementation of them: they answer promptly, they name the
-// action they were given, and they do not throw. Whether the answer is an error
-// or a result belongs to the owning ticket — 03 replaced `logs`, and `kill` is
-// still the placeholder — so nothing here pins either wording.
+// action they were given, and they do not throw. How each answers belongs to
+// the owning ticket, so nothing here pins either wording.
 test("logs and kill answer promptly for an unknown id", async () => {
 	await withBgHarness(async (h) => {
 		for (const action of ["logs", "kill"] as const) {
