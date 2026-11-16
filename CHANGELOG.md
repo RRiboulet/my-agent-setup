@@ -4,6 +4,55 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Added:
+
+- **A `bg` tool runs a command that outlives the tool call, and `AGENTS.md` now
+  states the testing rule it was built for.** A long command used to take
+  the session hostage: `bash` blocks until it exits, so a full-suite run, a
+  container rebuild or a dev-server probe meant minutes of alternating between
+  waiting and working, and the documented workaround — `nohup … &`, then `sleep`
+  and `tail` — is a polling loop paid for in wall-clock rather than tokens. `bg`
+  has four actions: `start` returns in milliseconds with a job id, the log path
+  and the command; `status` lists this session's jobs — state, exit code,
+  elapsed, first line of the command — or reports one by id; `logs` returns the
+  tail of combined stdout+stderr, capped with a marker when the cap is hit; and
+  `kill` signals the job's process group, SIGTERM then SIGKILL after a five-second
+  grace, and is a no-op with a message on a finished job. A job is an ordinary
+  detached child in its own process group, so one negative-pid signal reaches the
+  whole tree, and its state lives under the pi agent directory — one directory
+  per job, metadata written atomically plus a combined log — instead of `/tmp` or
+  a shared index, because a container rebuild empties `/tmp` and two concurrent
+  `start` calls would race on an index. The tool is registered deferred and
+  inactive, so it costs no prompt tokens until `tool_search` loads it. Finishing
+  jobs are reported once per settle window, naming every job that finished in it,
+  rather than once per job; a session start repairs its own state, adopting a
+  still-live job and marking a dead one exited, and prunes job directories past
+  the retention window.
+
+  `AGENTS.md`'s `Tests` section carries the rule this exists to make followable:
+  while iterating, run only the test file(s) for what you touched; run the full
+  suite exactly once before commit; run that one through `bg`, and say so with
+  the command. It belongs there rather than in a skill, because a skill is loaded
+  on demand and the failure mode is running the expensive command out of habit,
+  before anything is loaded.
+
+  The motivation is measured, on this machine over the 25 most recent sessions on
+  2026-11-16 (82 files, 21 MB). Wall-clock was 58 447 s, of which 47 589 s was
+  unstructured idle; on real work time (10 858 s), model calls were 6 632 s and
+  bash 4 175 s, and the bash time was concentrated: 23 calls over 60 s held
+  2 997 s, and 15 of them were the same documented command
+  (`node --test .pi/extensions/subagent/test/*.test.ts`) at 143–178 s each —
+  2 187 s, 52 % of all bash time — with 43 commands containing `sleep` holding
+  another 1 183 s. Errors were not the cost: 44 non-zero exits over 994 calls,
+  210 s in total.
+
+  **Acceptance numbers: pending acceptance run (ticket 08); no figures yet.**
+  The spec's four thresholds — infra-task wall-clock ≤ 60 % of baseline, blocking
+  bash time per session ≤ 50 % of baseline, ≤ 1 call over 60 s per task, ≤ 1
+  full-suite run per task — are recorded here once the timed replay has run, two
+  runs per task against baselines taken by the same method. Deliberately blank
+  until then: an interim number would be read as a result.
+
 ## v1.14.0 — 2026-11-16
 
 Added:
