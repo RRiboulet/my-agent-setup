@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.14.0 — 2026-11-16
+
 Added:
 
 - **review-triage ships its judge and reviewer tiers as built-in defaults, and
