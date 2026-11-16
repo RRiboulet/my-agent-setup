@@ -591,6 +591,10 @@ doctor() {
 			have="$(cat "$STATE_DIR/$(workspace_key "$d").cfgsha" 2>/dev/null || true)"
 			if [ -n "$have" ] && [ "$have" != "$want" ]; then
 				printf '  stale      devcontainer config changed; devc up will recreate it\n'
+				# Counted, like every other line above it. Printing the report
+				# without counting left a stale container under a summary that
+				# said "nothing blocking".
+				problems=$((problems + 1))
 			fi
 		fi
 	done

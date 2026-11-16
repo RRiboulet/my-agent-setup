@@ -4,6 +4,77 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.14.0 — 2026-11-16
+
+Added:
+
+- **review-triage ships its judge and reviewer tiers as built-in defaults, and
+  reports a missing provider credential instead of losing a band quietly.**
+  Installing the package used to leave `candidates` empty, so a fresh project
+  fell back to bucketing whatever models the session could use by catalogue
+  price — a coarse guess, not the three-band capability judgement this
+  repository actually wants. The judge (`openrouter`/`typesafe/jev-1.13`) and
+  the four `opencode-go` reviewers are now `DEFAULT_CANDIDATES` in `config.ts`,
+  the same policy `review-triage.example.json` writes out for editing, with the
+  file and `PI_REVIEW_TRIAGE_*` overrides still layered on top. A test pins the
+  example and the defaults together so they cannot drift, and an explicit empty
+  `candidates` array still means "synthesise from the session".
+
+- **A provider with no credential is named before a model is offered, rather
+  than after a subagent fails.** `generateCatalog` filtered candidates by what
+  the session could run, so an unauthenticated provider's band vanished into one
+  `notes:` line; an agent reading `candidates` directly (as `AGENTS.md` tells it
+  to) saw no filtering at all and got `No API key found for <provider>` later.
+  A new `credentials.ts` asks pi's model registry for each policy provider's
+  status — no secret is read, and the source is injected so tests use a fake —
+  and produces one actionable gap per provider naming the provider, every
+  blocked `provider/model`, and the fix (`OPENCODE_API_KEY` / `OPENROUTER_API_KEY`,
+  `/login`, or an `auth.json` entry). Missing reviewer credentials drop that
+  provider's candidates and bands, and when nothing is left both tracks report
+  `unavailable`; a missing judge credential short-circuits the classifier call
+  as `judgeFailure: { kind: "unavailable" }`. A machine with at least one usable
+  band still gets a plan, marked with the gap, so unrelated work is not
+  hard-failed. An unknown status counts as usable, because a false "missing"
+  would disable a provider that authenticates where pi cannot see it.
+
+- **The devcontainer seeds the review-triage policy and refreshes pi's model
+  catalogues, so a fresh volume starts on this repository's policy instead of the
+  extension's defaults.** The policy lives on the container's private volume,
+  which meant a new volume — or the same checkout on another host — began on
+  whatever `DEFAULT_CANDIDATES` happened to be, and the judge the policy names
+  (`openrouter`/`perplexity/pplx-decider-v1.3:free`) is newer than the OpenRouter
+  list pi ships with, so it was absent from the catalogue until someone ran
+  `pi update --models` by hand. `.devcontainer/pi/review-triage.json` is now the
+  committed policy (that judge plus the four `opencode-go` reviewers), installed
+  only when the agent dir has none and never over an existing file, so an edit
+  made inside a running container survives a rebuild. `postCreate.sh` then
+  refreshes the catalogues. The refresh fails soft — a host with no network or no
+  provider key still gets a usable container — but not silent: it says so when
+  the policy's judge is missing from the resulting catalogue, because the only
+  other symptom is triage quietly falling back to its most expensive profile. A
+  malformed seed template still fails loudly.
+
+Fixed:
+
+- **`devc doctor` counts a stale container, so a report whose only finding is
+  staleness no longer ends in "nothing blocking".** The stale branch printed
+  `  stale      devcontainer config changed; devc up will recreate it` and never
+  incremented `problems`, so a container that is genuinely out of date was
+  reported in a section that then summarised as "nothing blocking" — the same
+  contradiction between detail and summary the root-style skip was, and the same
+  way of hiding a finding a user is meant to act on. It is now counted with
+  everything else above it. The summary's own wording for a non-zero count is
+  "%d item(s) need attention", which is what a stale container is: `devc up`
+  fixes it, so it is not *blocking* in the uid-mismatch sense, but it is not
+  current either — no wording changed, and `.pi/skills/devcontainer/SKILL.md`
+  needs none, since its "if it says nothing blocking, go ahead" line and its
+  `stale` → `devc up` row already assume doctor reports it. The existing test
+  `devc doctor reports a stale container, and only once the config moved` now
+  pins both halves: a current container still ends in "nothing blocking", and
+  editing the config makes the same run say `1 item(s) need attention` and stop
+  saying "nothing blocking". Against the previous script the second half failed
+  with exactly the old output.
+
 ## v1.13.0 — 2026-11-15
 
 Added:

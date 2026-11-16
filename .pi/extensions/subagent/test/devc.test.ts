@@ -742,11 +742,19 @@ test("devc doctor reports a stale container, and only once the config moved", ()
 	assert.equal(fresh.status, 0, fresh.stderr);
 	assert.match(fresh.stdout, /running    container uid \d+, host uid \d+/);
 	assert.doesNotMatch(fresh.stdout, /stale /, "a container built from this config is not stale");
+	assert.match(fresh.stdout, /nothing blocking/, "a current container is not a problem to count");
 
 	writeFileSync(path.join(sb.project, ".devcontainer", "devcontainer.json"), '{"image":"other"}\n');
 	const stale = devc(sb, ["doctor", "proj"], { DEVC_TEST_CONTAINER: "1" });
 	assert.equal(stale.status, 0, stale.stderr);
 	assert.match(stale.stdout, /stale      devcontainer config changed; devc up will recreate it/);
+	// A stale container printed a line but was never counted, so the report ended
+	// with "nothing blocking" — the same contradiction between detail and summary
+	// the root-style skip was. The summary's own wording is "item(s) need
+	// attention", which a stale container is: `devc up` fixes it, but it is not
+	// current.
+	assert.match(stale.stdout, /1 item\(s\) need attention/);
+	assert.doesNotMatch(stale.stdout, /nothing blocking/, "a stale container is not nothing");
 });
 
 test("devc doctor reports a root-style .devcontainer.json project, current and stale", () => {
