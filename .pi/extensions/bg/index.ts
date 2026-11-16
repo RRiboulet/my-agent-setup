@@ -28,6 +28,7 @@
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { readLogsAction } from "./logs.ts";
 import { buildJobEnv, signalProcessGroup, spawnBgJob, type BgProcessHandle } from "./spawn.ts";
 import {
 	commandFirstLine,
@@ -286,7 +287,7 @@ export default function bgExtension(pi: ExtensionAPI): void {
 	const actions: Record<BgAction, BgActionHandler> = {
 		start: startJob,
 		status: statusJobs,
-		logs: notImplemented("logs"), // ticket 03
+		logs: readLogsAction, // ticket 03
 		kill: notImplemented("kill"), // ticket 04
 	};
 

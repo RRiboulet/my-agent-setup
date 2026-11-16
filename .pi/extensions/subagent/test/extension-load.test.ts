@@ -61,6 +61,7 @@ const MODULES: Record<string, string[]> = {
 		"sessionJobsDir",
 		"writeJobMeta",
 	],
+	"../../bg/logs.ts": ["enforceLogCap", "logCapMarker", "logWasCapped", "readLogTail", "readLogsAction"],
 	"../../bg/watch.ts": ["createJobWatcher"],
 	"../../btw/launch.ts": [
 		"buildBtwKillServerArgs",

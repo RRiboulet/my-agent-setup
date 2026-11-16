@@ -12,11 +12,18 @@
 // previous session with `watch(record)` alone, and it is why the exit code is
 // null for such a job: this process never reaped that child.
 //
+// The same tick also bounds the job's log: `enforceLogCap` (logs.ts) truncates
+// from the front once the file is past its cap, and is a `stat` otherwise. It
+// runs here rather than in a timer of its own for the same reason the liveness
+// check does — one beat, one per-job question — and it is idempotent, so a tick
+// that finds a log it has already capped changes nothing.
+//
 // Shutdown: `stop()` clears the timer and sets a flag the tick checks before it
 // re-arms. The suite depends on it — a live timer keeps node's event loop alive,
 // so a watcher that re-armed after `session_shutdown` would hang the run until
 // the test runner's timeout instead of exiting.
 
+import { enforceLogCap } from "./logs.ts";
 import { isProcessAlive, type BgProcessHandle } from "./spawn.ts";
 import { writeJobMeta, type BgJobRecord } from "./store.ts";
 
@@ -92,10 +99,27 @@ export function createJobWatcher(options: BgJobWatcherOptions = {}): BgJobWatche
 			// worse: the next tick retries, and the process is already gone.
 			console.error(`[bg] could not persist job ${job.id}: ${error instanceof Error ? error.message : String(error)}`);
 		}
+		// Once more before unwatching: the last burst of output may have arrived
+		// after the previous tick and pushed the log past its cap, and nothing polls
+		// this job again.
+		await capLog(job);
 		try {
 			await options.onSettled?.(job);
 		} catch (error) {
 			console.error(`[bg] settle hook failed for job ${job.id}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	};
+
+	/**
+	 * Bound one job's log. Best effort by design: a log that cannot be capped is
+	 * worth a line on stderr and nothing else, because a watcher that threw here
+	 * would stop settling every other job too.
+	 */
+	const capLog = async (job: BgJobRecord): Promise<void> => {
+		try {
+			await enforceLogCap(job.logPath);
+		} catch (error) {
+			console.error(`[bg] could not cap the log of job ${job.id}: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	};
 
@@ -111,7 +135,12 @@ export function createJobWatcher(options: BgJobWatcherOptions = {}): BgJobWatche
 					watched.delete(id);
 					continue;
 				}
-				if (isProcessAlive(entry.job.pid)) continue;
+				if (isProcessAlive(entry.job.pid)) {
+					// Still running, so its log may still be growing: bound it now, and
+					// leave the liveness question to the next tick.
+					await capLog(entry.job);
+					continue;
+				}
 				watched.delete(id);
 				await settle(entry);
 			}

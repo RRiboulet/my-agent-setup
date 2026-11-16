@@ -179,15 +179,19 @@ test("status explains a missing job instead of failing", async () => {
 	});
 });
 
-test("logs and kill are declared but fail cleanly and promptly", async () => {
+// `logs` and `kill` are owned by tickets 03/04, so this file asserts only what
+// holds for any implementation of them: they answer promptly, they name the
+// action they were given, and they do not throw. Whether the answer is an error
+// or a result belongs to the owning ticket — 03 replaced `logs`, and `kill` is
+// still the placeholder — so nothing here pins either wording.
+test("logs and kill answer promptly for an unknown id", async () => {
 	await withBgHarness(async (h) => {
 		for (const action of ["logs", "kill"] as const) {
 			const startedAt = Date.now();
 			const result = await h.call({ action, id: "deadbeef" });
 			assert.ok(Date.now() - startedAt < 1_000, `${action} must not hang`);
-			assert.match(result.text, /^Error: /, result.text);
-			assert.equal(result.details.action, action);
-			assert.match(String(result.details.error), /not implemented/i);
+			assert.equal(result.details.action, action, `${action} says which action it answered`);
+			assert.ok(result.text.length > 0, `${action} must say something`);
 		}
 	});
 });
