@@ -35,6 +35,23 @@ Added:
   hard-failed. An unknown status counts as usable, because a false "missing"
   would disable a provider that authenticates where pi cannot see it.
 
+- **The devcontainer seeds the review-triage policy and refreshes pi's model
+  catalogues, so a fresh volume starts on this repository's policy instead of the
+  extension's defaults.** The policy lives on the container's private volume,
+  which meant a new volume — or the same checkout on another host — began on
+  whatever `DEFAULT_CANDIDATES` happened to be, and the judge the policy names
+  (`openrouter`/`perplexity/pplx-decider-v1.3:free`) is newer than the OpenRouter
+  list pi ships with, so it was absent from the catalogue until someone ran
+  `pi update --models` by hand. `.devcontainer/pi/review-triage.json` is now the
+  committed policy (that judge plus the four `opencode-go` reviewers), installed
+  only when the agent dir has none and never over an existing file, so an edit
+  made inside a running container survives a rebuild. `postCreate.sh` then
+  refreshes the catalogues. The refresh fails soft — a host with no network or no
+  provider key still gets a usable container — but not silent: it says so when
+  the policy's judge is missing from the resulting catalogue, because the only
+  other symptom is triage quietly falling back to its most expensive profile. A
+  malformed seed template still fails loudly.
+
 Fixed:
 
 - **`devc doctor` counts a stale container, so a report whose only finding is
