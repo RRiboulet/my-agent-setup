@@ -62,6 +62,7 @@ const MODULES: Record<string, string[]> = {
 		"writeJobMeta",
 	],
 	"../../bg/watch.ts": ["createJobWatcher"],
+	"../../bg/notify.ts": ["createBgNotifier", "formatSettledNotice"],
 	"../../btw/launch.ts": [
 		"buildBtwKillServerArgs",
 		"buildBtwPaths",
