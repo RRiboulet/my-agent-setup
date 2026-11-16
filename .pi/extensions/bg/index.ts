@@ -21,13 +21,14 @@
 //     after a restart follows the same state machine as one started here; see
 //     watch.ts.
 //
-// `logs` and `kill` are declared in the schema from the start but answer with a
-// clean "not implemented yet" error: a model that has learned the tool should
-// get a sentence it can act on, not a missing-action failure.
+// `logs` is declared in the schema from the start but answers with a clean "not
+// implemented yet" error: a model that has learned the tool should get a sentence
+// it can act on, not a missing-action failure.
 
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { createKillJob } from "./kill.ts";
 import { buildJobEnv, signalProcessGroup, spawnBgJob, type BgProcessHandle } from "./spawn.ts";
 import {
 	commandFirstLine,
@@ -287,7 +288,7 @@ export default function bgExtension(pi: ExtensionAPI): void {
 		start: startJob,
 		status: statusJobs,
 		logs: notImplemented("logs"), // ticket 03
-		kill: notImplemented("kill"), // ticket 04
+		kill: createKillJob(watcher), // ticket 04
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
