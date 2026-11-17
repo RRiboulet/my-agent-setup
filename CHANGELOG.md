@@ -120,6 +120,23 @@ Added:
   polling is removed, and "one suite run" never counted the run inside the
   rebuild's postCreate. The spec carries the full revision.
 
+  **Declaring the tool does not change adoption**, which is the finding that
+  settles it. Activating `bg` at startup instead of leaving it behind
+  `tool_search` — a settings-only change (`defaultTools` gains `+bg`), so no code,
+  prompt or test moved — produced the same behaviour as deferred registration on
+  the same feature task: called in one run of two. The run that used it started
+  the suite through `bg` and then waited inside `bg({action:"wait"})`, blocking
+  bash 1.5 s against 202.5 s in the run that did not; wall clock was 308 s and
+  525 s respectively, which is model variance, not the tool, and is not claimed
+  as anything. The conclusion is about task shape rather than visibility: after
+  the suite is started the work left in this workflow is tens of seconds, so
+  backgrounding converts blocking into waiting instead of into progress, and an
+  overlap criterion cannot be satisfied honestly here. `bg` stays deferred and
+  undeclared — it costs no prompt tokens — with the rule in `AGENTS.md` as
+  guidance rather than a promise. What this change earned is measurable and
+  unrelated to it: the documented suite command runs its files concurrently,
+  184 s down to 119-132 s.
+
 ## v1.14.0 — 2026-11-16
 
 Added:
