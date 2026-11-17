@@ -46,6 +46,34 @@ Added:
   another 1 183 s. Errors were not the cost: 44 non-zero exits over 994 calls,
   210 s in total.
 
+- **`bg` gained a bounded `wait`, because the completion notice only reaches a
+  session that stays open.** The tool shipped believing a started job would
+  report itself, and an adoption test showed exactly where that fails: a child
+  session was told to verify its work, found `bg` through `tool_search` without
+  being told it existed, started the full suite through it and then ended its
+  turn to await the notice. The child's process exited, the watcher died with
+  it, no message was ever delivered, the suite kept running as an orphan with
+  its record stuck at `running`, and the work was never committed — while the
+  run reported "completed". `bg({ action: "wait", id, timeoutMs? })` now blocks
+  the call until the job settles (five minutes by default, ten at most, an
+  absurd value refused before anything waits) and returns the record plus the
+  log tail, so a caller that may not outlive the job has somewhere to wait that
+  is not `sleep` and `tail`; a timeout returns the partial state with the job
+  still running rather than an error. A settle consumed by `wait` is
+  suppressed in the notify window so the same fact is not delivered twice, and a
+  timed-out wait releases that suppression so the completion it stopped waiting
+  for still arrives. Six mutations — no suppression, no release, an unbounded
+  timeout, an unknown id that hangs, `exitCode ?? 0`, answering before the
+  settle — each turn the suite red.
+
+  `AGENTS.md`'s rule was wrong in the same way and is corrected with it: waiting
+  for a notice is now conditional on a session that outlives the job, a session
+  started by another session is called out as one that may end at any moment,
+  and `wait` comes before polling. `bg-rule-doc.test.ts` pins the shape of that
+  section — deferred discovery before the start call, the suite-once discipline,
+  the caveat, the wait-before-poll ordering, and the absence of the old
+  unconditional promise — with two mutation runs proving it can fail.
+
   **Acceptance numbers: pending acceptance run (ticket 08); no figures yet.**
   The criteria were revised once the baseline was measured, because two of the
   first four were unreachable rather than unmet: the infra rebuild's own critical

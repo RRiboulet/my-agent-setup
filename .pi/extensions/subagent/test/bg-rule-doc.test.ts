@@ -8,7 +8,8 @@
 // orphan, the work is never committed — and the run still reports "completed".
 // The document is the only thing steering an agent away from that, so its shape
 // is pinned here: deferred discovery, the suite-once discipline, the condition
-// that makes waiting safe, and the failure to recognise.
+// that makes waiting safe, the wait-before-poll ordering, and the failure to
+// recognise.
 //
 // These assertions are about shape, not wording, so a reworded rule still
 // passes; a deleted caveat does not.
@@ -68,6 +69,13 @@ test("bg rule: waiting is conditioned on a session that outlives the job", () =>
 	);
 	assert.ok(RULE.includes('bg({ action: "status" })'), "the rule must send a reader to status polling");
 	assert.ok(RULE.includes('bg({ action: "logs", id })'), "the rule must send a reader to the job's logs");
+	// The tool grew a bounded wait after the rule was first written: a scripted
+	// run that has nothing else to do should block inside the call, not poll.
+	assert.ok(
+		RULE.includes('bg({ action: "wait", id })'),
+		"the rule must offer wait before falling back to polling",
+	);
+	assert.match(RULE, /started by another session/i, "the rule must say how to recognise a child session");
 	assert.doesNotMatch(
 		RULE,
 		/do not have to poll/i,

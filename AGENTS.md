@@ -372,8 +372,18 @@ that stays open until the job finishes: the watcher that delivers it lives in th
 pi process that started the job, so a session that ends takes the watcher with
 it. In a child session, under `pi -p`, in a JSON or RPC run, or in anything
 scripted, the run can end before the job does — so do not end the turn on a
-running job. Poll `bg({ action: "status" })` and `bg({ action: "logs", id })`
-until it settles, or do other work and keep the session alive; only then report.
+running job. If you cannot tell which kind of session you are in, assume the
+worst: a session started by another session is a child and may end at any
+moment.
+
+In that case wait inside the tool call instead: `bg({ action: "wait", id })`
+blocks until the job settles — five minutes by default, `timeoutMs` up to ten —
+and returns the record plus the log tail. A timeout returns the partial state
+with the job still running: wait again, or fall back to polling
+`bg({ action: "status" })` and `bg({ action: "logs", id })`. Do other work and
+keep the session alive too if you have any; only report once the job has
+settled.
+
 The failure this prevents is silent and reads as success: the job is left running
 as an orphan, its work is never committed, and the run still reports
 "completed" — a status that proves nothing about a job nothing was watching. In
