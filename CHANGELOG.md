@@ -74,16 +74,51 @@ Added:
   the caveat, the wait-before-poll ordering, and the absence of the old
   unconditional promise — with two mutation runs proving it can fail.
 
-  **Acceptance numbers: pending acceptance run (ticket 08); no figures yet.**
-  The criteria were revised once the baseline was measured, because two of the
-  first four were unreachable rather than unmet: the infra rebuild's own critical
-  path is 65-72 % of its baseline before any polling is removed, and "one suite
-  run" never counted the run inside the rebuild's postCreate. What this change is
-  expected to move there is the count of calls over 60 s (4 per run, all polling)
-  and the blocking bash seconds; wall-clock is reported beside them, not
-  thresholded. On the feature task the criterion is overlap — at least 30 s of the
-  suite running while other work happens, against a baseline of zero, because a
-  blocking run cannot overlap anything. The spec carries the full revision.
+  **Acceptance, measured 2026-11-17: two runs per task, judged on the mean, one of
+  the four revised criteria met — and `bg` called in one run of six.** The feature
+  baseline was recaptured first, because the ticket-02 figure predates the suite
+  running its files concurrently: same prompt and worktree shape, with `bg`
+  unreachable (the worktree's settings carried `defaultTools: ["read","bash",
+  "edit","write"]`, a probe session confirmed neither `tool_search` nor `bg` was
+  available, and both runs reported the `bash` fallback themselves). Its two runs
+  gave 334.9 s mean wall-clock, 160.3 s blocking bash, one call over 60 s, one
+  explicit suite run and zero overlap. The infra and bug baselines are reused as
+  measured (682.8 s wall / 639.8 s blocking; 187.1 s / 91.2 s) because neither
+  runs this repository's suite, so the concurrency change cannot have moved them;
+  in `pupkeep` and `analytics-agent` the branch is not installed, so `bg` was
+  loaded through an explicit `--extension` path to the checkout that has it —
+  the same session without and with the tool, which is what those baselines are.
+  Two acceptance runs per task then gave: infra 474.8 s wall, 443.6 s blocking
+  (69.3 % of baseline), 3 and 2 calls over 60 s; feature 380.6 s wall, 101.5 s
+  blocking (63.3 %), 1 and 0 over 60 s, and 0 s of overlap in both runs; bug
+  139.9 s wall, 49.7 s blocking (54.5 %), no call over 60 s. **Met: one explicit
+  suite run per task** (exactly 1 in every run), with the rebuild's own postCreate
+  run named and excluded — 149.2 s measured from the rebuild log in one infra run,
+  and in the other named but not separately timed, because that session piped the
+  rebuild through `tail` instead of a log file. **Not met: zero calls over 60 s on
+  the infra task** (mean 2.5, against 4); **blocking bash ≤ 50 % of baseline on
+  all three tasks** (69.3 %, 63.3 %, 54.5 %); **at least 30 s of suite overlap on
+  the feature task** (0 s, against a baseline of 0). The misses are behavioural
+  rather than mechanical: `bg` was loaded in all six sessions — each created its
+  job directory — but called in one, and there as a blocking `wait`: 213.4 s of a
+  216.9 s suite spent inside `bg({action:"wait"})`, with nothing else running
+  beside it. So the infra and bug differences are not attributable to the tool —
+  neither task ever called it, and what changed is the model polling less (infra
+  run 1: `nohup` plus `sleep 45/180/150`; run 2: the rebuild and then the suite,
+  both blocking, nothing else), the same prompt having produced the polling on the
+  baseline; and on the feature task the one `bg` run moved blocking `bash` from
+  199.4 s to 3.5 s, but the wait moved with it, so the session gained no freedom,
+  which is the freedom the criterion is meant to detect. Run-to-run spread was
+  33 % on infra
+  wall-clock, 23 % on the feature baseline, 20 % on feature acceptance and 2 % on
+  the bug task, so nothing under 15 % is read as a result. Wall-clock is reported,
+  not thresholded: the infra rebuild's postCreate and its explicit suite are
+  sequential and were 67 % of one run and 95 % of the other, so no amount of
+  backgrounding moves that 40 %. The criteria themselves were revised once the
+  baseline was measured, because two of the first four were unreachable rather
+  than unmet: the infra critical path is 65-72 % of its baseline before any
+  polling is removed, and "one suite run" never counted the run inside the
+  rebuild's postCreate. The spec carries the full revision.
 
 ## v1.14.0 — 2026-11-16
 
