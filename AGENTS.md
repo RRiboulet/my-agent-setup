@@ -366,11 +366,19 @@ start the run:
 If `tool_search` finds nothing, say so in your report and run the suite with
 `bash` instead; do not guess a tool name.
 
-Then check `bg({ action: "status" })` and keep working — do not `sleep` and
-`tail`. A completion arrives as one message naming every job that finished in
-that window, so you do not have to poll at all: the message starts a turn when
-you are idle and steers you when you are not. In your report, beside the other
-checks, say that the full suite ran through `bg`, and give that command.
+Then check `bg({ action: "status" })` and keep working — do not shell out to
+`sleep` and `tail`. Waiting for the completion notice is only sound in a session
+that stays open until the job finishes: the watcher that delivers it lives in the
+pi process that started the job, so a session that ends takes the watcher with
+it. In a child session, under `pi -p`, in a JSON or RPC run, or in anything
+scripted, the run can end before the job does — so do not end the turn on a
+running job. Poll `bg({ action: "status" })` and `bg({ action: "logs", id })`
+until it settles, or do other work and keep the session alive; only then report.
+The failure this prevents is silent and reads as success: the job is left running
+as an orphan, its work is never committed, and the run still reports
+"completed" — a status that proves nothing about a job nothing was watching. In
+your report, beside the other checks, say that the full suite ran through `bg`,
+and give that command.
 
 The suite takes about 145 s, and 15 runs of it held 2 187 s — 52 % of all bash
 time — across the 25 sessions measured on 2026-11-16, while `sleep` polling held
