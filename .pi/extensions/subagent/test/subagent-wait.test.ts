@@ -455,6 +455,9 @@ test("a pending wait is released by shutdown instead of blocking it", async () =
 		await h.shutdown();
 		const waited = await waiting;
 		assert.ok(Date.now() - shutdownStarted < 5_000, "shutdown must not be blocked by the pending wait");
-		assert.match(waited.text, /running|did not settle/, "the wait returns the current record, not an error");
+		assert.match(waited.text, /Session ended before/, "shutdown says the session ended, not that the run settled");
+		assert.match(waited.text, /running/, "the record still reports the run as running");
+		assert.equal(waited.details.ended, true, "the wait details mark the release as a session end");
+		assert.equal(waited.details.timedOut, false, "a session end is not a timeout");
 	});
 });

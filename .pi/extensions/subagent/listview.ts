@@ -1,7 +1,7 @@
 // Bounded rendering for the `subagent_status` LIST view.
 //
-// There is no blocking wait, so polling `subagent_status` is the only way a model
-// collects a result — which makes each poll a cost the model pays every turn.
+// `subagent_status` is the live view; `subagent_wait` is how a model collects a
+// result. A model that polls instead makes each poll a cost it pays every turn.
 // The list used to render every live run in full, pane included
 // (PANE_PREVIEW_LINES = 18 lines each), so four concurrent runs cost roughly 70
 // lines of raw terminal noise per poll: mostly a TUI redrawing itself, which

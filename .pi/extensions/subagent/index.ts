@@ -97,7 +97,7 @@
 //     cannot finish, fail or interrupt anything — and `interrupted` is
 //     authoritative over it.
 // 15. Lazy tool exposure (see resolveManagementExposure and
-//     registerManagementTools): the five management tools — status, cancel,
+//     registerManagementTools): the six management tools — status, wait, cancel,
 //     interrupt, resume, clean — are registered at `session_start` and again at
 //     `before_agent_start` with pi's
 //     `exposure: "codemode"` when `codemode` or `tool_search` is active, so their
@@ -110,7 +110,7 @@
 //     tool activated on registration stays active. Re-checked before every agent
 //     turn, because `/tools` can switch discovery off and strand tools that were
 //     registered hidden.
-// 16. Bounded list output (see listview.ts): with no blocking wait, polling
+// 16. Bounded list output (see listview.ts): status is the live view, so polling
 //     `subagent_status` is the only way a model collects a result, so the list
 //     view is a per-turn cost rather than an occasional one. It used to render
 //     PANE_PREVIEW_LINES of raw pane for EVERY live run (~70 lines at the default
@@ -763,7 +763,10 @@ function formatConfirmWindow(ms: number): string {
  */
 function resolveWaitTimeout(timeoutMs: number | undefined): number {
 	if (timeoutMs === undefined) return DEFAULT_WAIT_TIMEOUT_MS;
-	return typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 0;
+	if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return 0;
+	// setTimeout clamps anything above 2^31-1 to 1 ms, which would report a
+	// 24-day wait as an instant timeout.
+	return Math.min(timeoutMs, 2_147_483_647);
 }
 
 /**
@@ -1273,6 +1276,9 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	 * released by its own timeout instead, which returns the current record.
 	 */
 	const settleWaiters = new Map<string, Set<(run: RunRecord) => void>>();
+	// Set while the session is shutting down: a released waiter must say so rather
+	// than claim its run settled.
+	let sessionEnding = false;
 	// Per-run classifier state (local patch 14). Pure state, kept here because it
 	// is derived from run.activity and thrown away with the run.
 	const statusStates = new Map<string, SubagentStatusState>();
@@ -1330,8 +1336,8 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		targets: RunRecord[],
 		timeoutMs: number,
 		signal: AbortSignal | undefined,
-	): Promise<{ timedOut: boolean }> =>
-		new Promise<{ timedOut: boolean }>((resolve, reject) => {
+	): Promise<{ timedOut: boolean; ended: boolean }> =>
+		new Promise<{ timedOut: boolean; ended: boolean }>((resolve, reject) => {
 			const pending = new Set(targets.filter((run) => !isTerminal(run.status)));
 			if (pending.size === 0) return resolve({ timedOut: false });
 			let settled = false;
@@ -1349,11 +1355,12 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 				signal?.removeEventListener("abort", onAbort);
 			};
 			const timer = setTimeout(() => finish(true), Math.max(0, timeoutMs));
+			let sawUnsettled = false;
 			const finish = (timedOut: boolean): void => {
 				if (settled) return;
 				settled = true;
 				cleanup();
-				resolve({ timedOut });
+				resolve({ timedOut, ended: sawUnsettled });
 			};
 			const onAbort = (): void => {
 				if (settled) return;
@@ -1361,8 +1368,13 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 				cleanup();
 				reject(new Error("Subagent wait aborted."));
 			};
+			if (signal?.aborted) {
+				onAbort();
+				return;
+			}
 			for (const run of pending) {
 				const waiter = (): void => {
+					if (sessionEnding && !isTerminal(run.status)) sawUnsettled = true;
 					pending.delete(run);
 					if (pending.size === 0) finish(false);
 				};
@@ -2257,7 +2269,8 @@ const noteInterrupt = async (
 		}
 		// Release any subagent_wait still pending: the session is ending, so no
 		// watcher can settle the run any more. The tool returns the current record
-		// rather than blocking out its timeout against a dead session.
+		// and says "session ended", never "settled".
+		sessionEnding = true;
 		for (const id of [...settleWaiters.keys()]) {
 			const run = runs.get(id);
 			if (run) notifyWaiters(run);
@@ -2440,6 +2453,7 @@ const noteInterrupt = async (
 
 			async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 				await ensureSessionPaths(ctx);
+				sessionEnding = false;
 				if (params.id !== undefined && params.ids !== undefined) {
 					throw new Error("subagent_wait takes either id or ids, not both.");
 				}
@@ -2448,11 +2462,13 @@ const noteInterrupt = async (
 					const id = params.id.trim();
 					const run = runs.get(id);
 					if (!run) throw new Error(`Unknown subagent run: ${id}`);
-					const { timedOut } = await waitForRunsSettled([run], timeoutMs, signal);
-					const text = timedOut
-						? `Subagent ${id.slice(0, 8)} did not settle within ${timeoutMs}ms (status: ${run.status}).\n\n${runSummary(run, { pane: true, output: true })}`
-						: runSummary(run, { pane: true, output: true });
-					return { content: [{ type: "text", text }], details: { runs: [run], timedOut } };
+					const { timedOut, ended } = await waitForRunsSettled([run], timeoutMs, signal);
+					const text = ended
+						? `Session ended before subagent ${id.slice(0, 8)} settled (status: ${run.status}). The run was not completed; it can be resumed in a later session.\n\n${runSummary(run, { pane: true, output: true })}`
+						: timedOut
+							? `Subagent ${id.slice(0, 8)} did not settle within ${timeoutMs}ms (status: ${run.status}).\n\n${runSummary(run, { pane: true, output: true })}`
+							: runSummary(run, { pane: true, output: true });
+					return { content: [{ type: "text", text }], details: { runs: [run], timedOut, ended } };
 				}
 				if (params.ids !== undefined) {
 					const ids = params.ids.map((value) => value.trim());
@@ -2463,17 +2479,19 @@ const noteInterrupt = async (
 						if (!run) throw new Error(`Unknown subagent run: ${id}`);
 						targets.push(run);
 					}
-					const { timedOut } = await waitForRunsSettled(targets, timeoutMs, signal);
+					const { timedOut, ended } = await waitForRunsSettled(targets, timeoutMs, signal);
 					const pendingRuns = targets.filter((run) => !isTerminal(run.status));
 					const lines = [
-						timedOut
-							? `Timed out after ${timeoutMs}ms: ${targets.length - pendingRuns.length} of ${targets.length} run(s) settled, ${pendingRuns.length} still ${pendingRuns.map((run) => run.status).join(", ")}.`
-							: `All ${targets.length} run(s) settled.`,
+						ended
+							? `Session ended before all runs settled: ${targets.length - pendingRuns.length} of ${targets.length} settled, ${pendingRuns.length} still ${pendingRuns.map((run) => run.status).join(", ")}. Not completed; resume in a later session.`
+							: timedOut
+								? `Timed out after ${timeoutMs}ms: ${targets.length - pendingRuns.length} of ${targets.length} run(s) settled, ${pendingRuns.length} still ${pendingRuns.map((run) => run.status).join(", ")}.`
+								: `All ${targets.length} run(s) settled.`,
 					];
 					for (const run of targets) {
 						lines.push("", runSummary(run, { pane: true, output: true }));
 					}
-					return { content: [{ type: "text", text: lines.join("\n") }], details: { runs: targets, timedOut } };
+					return { content: [{ type: "text", text: lines.join("\n") }], details: { runs: targets, timedOut, ended } };
 				}
 				throw new Error("subagent_wait needs an id or a list of ids.");
 			},

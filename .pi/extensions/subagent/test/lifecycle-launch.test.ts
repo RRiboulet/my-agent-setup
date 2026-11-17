@@ -228,8 +228,8 @@ test("subagent_clean reaps finished runs but leaves active ones alone", async ()
 });
 
 test("the single-run status path always returns the output, finished or not", async () => {
-	// With no blocking wait this is the only way to collect a result, so the
-	// obvious call — subagent_status({ id }) — has to be the right one, with
+	// `subagent_wait` is the blocking path now; `subagent_status({ id })` still has
+	// to be the right call for collecting a single finished run, with
 	// include_output reserved for the list view where many answers would otherwise
 	// arrive at once. `compact` is a list-view control for the same reason.
 	await withHarness({ paneText: "LIVE-PANE-CONTENT" }, async (h) => {

@@ -149,7 +149,7 @@ that was never set.
 
 ## Tool exposure
 
-`lifecycle-exposure.test.ts` covers local patch 15: the five management tools are
+`lifecycle-exposure.test.ts` covers local patch 15: the six management tools are
 registered with `exposure: "codemode"` when the harness reports
 `codemode`/`tool_search` in the ACTIVE set, and plain otherwise; `subagent` is
 never hidden; `/tools` switching discovery off mid-session re-registers them direct
