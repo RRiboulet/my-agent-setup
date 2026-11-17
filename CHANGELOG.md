@@ -4,6 +4,25 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Added:
+
+- **`subagent_wait` replaces polling a subagent's status with a single wait.
+  #163** The session baseline recorded 681 `subagent_status` calls against 39
+  `subagent` starts — 17 model turns per run asking "done yet?", each one
+  context the parent pays for. The new management tool blocks once: with `id`
+  it resolves when the run reaches a terminal state and returns the same record
+  `subagent_status` returns; with `ids` it waits out a whole fan-out and returns
+  every settled run plus the still-running ones; on timeout it returns the
+  current record plus the latest pane, never an error, with a run still queued
+  reported as `queued` and every failed-to-start, cancelled, dead or
+  interrupted run returned at once. It adds no second poll loop: waiters are
+  resolved by the terminal transitions the existing settle watcher (and cancel,
+  interrupt, shutdown) already drive, so a result lands within the 500 ms
+  watcher tick. The tool descriptions and `AGENTS.md` now teach "start, then
+  wait once" — `subagent_status` keeps the live what-is-it-doing-now question —
+  and `subagent-wait.test.ts` pins the acceptance: a scripted three-child
+  fan-out records exactly 3 starts, 1 wait and zero status calls.
+
 Maintenance:
 
 - **`lifecycle.test.ts` is nine topic files now, so its waits overlap and the
