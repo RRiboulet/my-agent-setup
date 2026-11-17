@@ -263,9 +263,9 @@ Three repo rules win over those skill bodies, and the skills say so in place:
 
 ## Subagent tools
 
-The five management tools — `subagent_status`, `subagent_cancel`,
-`subagent_interrupt`, `subagent_resume`, `subagent_clean` — are **not declared**
-in this repo's sessions: `defaultTools: ["+tool_search"]` in
+The six management tools — `subagent_wait`, `subagent_status`,
+`subagent_cancel`, `subagent_interrupt`, `subagent_resume`, `subagent_clean` —
+are **not declared** in this repo's sessions: `defaultTools: ["+tool_search"]` in
 `~/.pi/agent/settings.json` puts them behind `tool_search` so their descriptions
 and schemas stop riding along on every request (measured: ~890 tokens a
 request). `subagent` itself stays declared.
@@ -275,9 +275,13 @@ So reach them in two steps:
 1. `tool_search` for the tool you want.
 2. Then call it, e.g. `subagent_status({ id })`.
 
-There is no blocking wait, so collecting a result means polling
-`subagent_status` — `subagent_status({ compact: true })` is the cheap
-one-line-per-run form, and the single-run path is the one that returns output.
+Start, then wait once: `subagent_wait({ id })` blocks until the run settles and
+returns its record — `subagent_wait({ ids })` waits for a whole fan-out, and a
+timed-out wait returns the current state rather than an error. Keep
+`subagent_status` for the live "what is it doing right now" question
+(`subagent_status({ compact: true })` is the cheap one-line-per-run form, and
+the single-run path is the one that returns output), not for collecting a result
+you could have waited on.
 
 ## Reviews: one per change, and only when asked
 
