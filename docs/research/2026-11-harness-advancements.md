@@ -115,8 +115,10 @@ covers is marked *unmeasured* and cannot win the ratio on its own.
 
 ### 1. Land `bg` (ticket 01)
 
-Already built on `bg-tool-start` (19 commits) plus eight sibling branches. Its
-tests are green: 1,204 pass, 0 fail, 199 s. It is the only answer to the two
+Already built on `bg-tool-start`, with its eight sibling branches merged in. At
+the tip checked on 2026-11-17 (`facd92f`) its tests were green: 1,204 pass, 0
+fail, 199 s. The branch has moved since, and it is owned by another worktree, so
+re-run the suite before merging. It is the only answer to the two
 largest recoverable categories, and every later A/B baseline is cheaper to take
 after it. Do not reimplement it in this branch.
 

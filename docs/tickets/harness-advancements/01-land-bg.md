@@ -8,15 +8,17 @@ Evidence: `docs/research/2026-11-harness-advancements.md#1-land-bg-ticket-01`
 
 Nothing new. The `bg` tool — `start`/`status`/`logs`/`kill`, completion
 notifications, restart repair, the testing rule, and the concurrent test runner —
-is already implemented on the `bg-tool-start` branch (19 commits), with eight
-sibling branches (`bg-docs`, `bg-kill`, `bg-logs`, `bg-notify`, `bg-repair`,
-`bg-replay-baseline`, `bg-rule-honest`, `bg-wait-action`) merged into it.
+is already implemented on the `bg-tool-start` branch, with eight sibling branches
+(`bg-docs`, `bg-kill`, `bg-logs`, `bg-notify`, `bg-repair`, `bg-replay-baseline`,
+`bg-rule-honest`, `bg-wait-action`) merged into it.
 
 This ticket is the review, rebase, and merge: get it onto `dev` before any other
 ticket takes a baseline, because the sleep-polling and blocking-test costs it
 removes are two of the three largest measured categories.
 
-The branch was tested on 2026-11-17: **1,204 tests pass, 0 fail, 199 s**.
+At the tip checked on 2026-11-17 (`facd92f`): **1,204 tests pass, 0 fail,
+199 s**. The branch has moved since and is actively owned by another worktree;
+re-run the suite at merge time rather than trusting this number.
 
 ## Scope
 
