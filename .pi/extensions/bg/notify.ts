@@ -73,6 +73,23 @@ export interface BgNotifier {
 	flush: () => void;
 	/** How many jobs are waiting for the next flush. */
 	pending: () => number;
+	/**
+	 * Take a job out of the notification path: drop it from the open window and
+	 * ignore any settle that arrives for it afterwards.
+	 *
+	 * The one caller is `wait` (wait.ts), which reports the settle to the agent
+	 * inside its own result. Without this the agent would be told the same fact
+	 * twice — once by the tool result it is reading, once by a notice that lands a
+	 * second later — and the second telling is pure noise. This lives here, in the
+	 * module that owns the settle window, because it is a statement about
+	 * delivery; the tool action only knows it has answered the question.
+	 */
+	suppress: (id: string) => void;
+	/**
+	 * Undo `suppress`: a wait that timed out did not report the settle, so the
+	 * finish it stopped waiting for must still be announced.
+	 */
+	release: (id: string) => void;
 	/** Drop the timer and anything pending: nothing is delivered after this. */
 	stop: () => void;
 }
@@ -122,6 +139,11 @@ export function createBgNotifier(pi: ExtensionAPI, options: BgNotifierOptions = 
 	const now = options.now ?? (() => Date.now());
 	/** The open window, keyed by job id so a repeated settle cannot name a job twice. */
 	const pending = new Map<string, BgJobRecord>();
+	/**
+	 * Jobs a `wait` call answered for, whose settle must not also be delivered.
+	 * Small and one id per job waited on; cleared with the rest on `stop()`.
+	 */
+	const suppressed = new Set<string>();
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	let stopped = false;
 	let ctx: ExtensionContext | undefined;
@@ -146,6 +168,7 @@ export function createBgNotifier(pi: ExtensionAPI, options: BgNotifierOptions = 
 		stopped = true;
 		disarm();
 		pending.clear();
+		suppressed.clear();
 	};
 
 	// Where the context comes from, and why it is captured rather than passed in:
@@ -200,6 +223,8 @@ export function createBgNotifier(pi: ExtensionAPI, options: BgNotifierOptions = 
 			// A job that is somehow still running has not finished, and announcing it
 			// would be a lie the agent acts on.
 			if (job.state === "running") return;
+			// Already reported by a `wait` result the agent has in front of it.
+			if (suppressed.has(job.id)) return;
 			pending.set(job.id, job);
 			// First settle of this window opens it; later ones join it rather than
 			// pushing the edge back (see the file header).
@@ -212,6 +237,16 @@ export function createBgNotifier(pi: ExtensionAPI, options: BgNotifierOptions = 
 		},
 		flush,
 		pending: () => pending.size,
+		suppress: (id) => {
+			suppressed.add(id);
+			pending.delete(id);
+			// An emptied window has nothing left to deliver, so drop the timer rather
+			// than let it fire into a no-op. `settled` opens the next window itself.
+			if (pending.size === 0) disarm();
+		},
+		release: (id) => {
+			suppressed.delete(id);
+		},
 		stop,
 	};
 }
