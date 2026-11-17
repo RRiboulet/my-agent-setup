@@ -1,0 +1,11 @@
+{
+  "id": "one-test-file",
+  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-fixture",
+  "timeoutMs": 240000,
+  "prompt": "Run `node --test .pi/extensions/subagent/test/devc.test.ts` and report whether every test passed.",
+  "check": {
+    "expectAnswerContains": [
+      "pass"
+    ]
+  }
+}

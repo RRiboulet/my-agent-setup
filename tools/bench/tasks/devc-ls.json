@@ -1,0 +1,11 @@
+{
+  "id": "devc-ls",
+  "repo": "/home/ubuntu",
+  "timeoutMs": 120000,
+  "prompt": "Run `devc ls` once and list the project names it prints.",
+  "check": {
+    "expectAnswerContains": [
+      "pupkeep"
+    ]
+  }
+}

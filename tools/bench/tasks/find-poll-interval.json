@@ -1,0 +1,11 @@
+{
+  "id": "find-poll-interval",
+  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-fixture",
+  "timeoutMs": 150000,
+  "prompt": "Find the line in .pi/extensions/subagent/index.ts where POLL_INTERVAL_MS is declared, and quote that line.",
+  "check": {
+    "expectAnswerContains": [
+      "POLL_INTERVAL_MS = 500"
+    ]
+  }
+}

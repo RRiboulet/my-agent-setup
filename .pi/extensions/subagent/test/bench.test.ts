@@ -1,0 +1,83 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import path from "node:path";
+import { summarizeEvents, parseJsonl } from "../../../../tools/bench/lib/events.mjs";
+import { loadTasks, selectTasks, renderPrompt } from "../../../../tools/bench/lib/tasks.mjs";
+
+const REPO_ROOT = path.resolve(import.meta.dirname, "../../../..");
+
+test("summarizeEvents counts tool calls, durations, usage and the final answer", () => {
+	const records = [
+		{
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [{ type: "toolCall", name: "bash", arguments: { command: "echo hi" } }],
+				usage: { totalTokens: 100, cost: { total: 0.001 } },
+			},
+		},
+		{
+			type: "message_end",
+			message: { role: "toolResult", toolName: "bash", durationMs: 25, isError: false, content: [] },
+		},
+		{
+			type: "message_end",
+			message: {
+				role: "assistant",
+				content: [{ type: "text", text: "hi" }],
+				usage: { totalTokens: 10, cost: { total: 0.0001 } },
+			},
+		},
+		{ type: "turn_end", message: { role: "assistant" }, toolResults: [] },
+		{ type: "agent_settled", aborted: false },
+	];
+
+	const summary = summarizeEvents(records);
+	assert.equal(summary.toolCallCount, 1);
+	assert.equal(summary.toolCallsByName.bash, 1);
+	assert.equal(summary.toolResultCount, 1);
+	assert.equal(summary.toolTimeMs, 25);
+	assert.equal(summary.longestToolMs, 25);
+	assert.equal(summary.tokens, 110);
+	assert.ok(Math.abs(summary.cost - 0.0011) < 1e-9);
+	assert.equal(summary.turns, 1);
+	assert.equal(summary.errors, 0);
+	assert.equal(summary.aborted, false);
+	assert.equal(summary.finalAnswer, "hi");
+});
+
+test("summarizeEvents counts an errored tool result and ignores deltas", () => {
+	const summary = summarizeEvents([
+		{ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "ignored" } },
+		{ type: "message_end", message: { role: "toolResult", toolName: "read", durationMs: 3, isError: true } },
+		{ type: "agent_settled", aborted: true },
+	]);
+	assert.equal(summary.toolResultCount, 1);
+	assert.equal(summary.errors, 1);
+	assert.equal(summary.toolDurations.read, 3);
+	assert.equal(summary.aborted, true);
+	assert.equal(summary.finalAnswer, "");
+});
+
+test("parseJsonl names the line it cannot parse", () => {
+	assert.deepEqual(parseJsonl('{"type":"agent_start"}\n\n'), [{ type: "agent_start" }]);
+	assert.throws(() => parseJsonl('{"type":"ok"}\nnot json\n'), /line 2/);
+});
+
+test("every task definition loads and the ids are selectable", () => {
+	const tasks = loadTasks(path.join(REPO_ROOT, "tools/bench/tasks"));
+	assert.equal(tasks.length, 8);
+	const ids = new Set(tasks.map((task) => task.id));
+	assert.equal(ids.size, tasks.length);
+	for (const task of tasks) {
+		assert.ok(task.repo.length > 0, `${task.id} has no repo`);
+		assert.ok(task.timeoutMs > 0, `${task.id} has no timeout`);
+		assert.ok(task.prompt.length > 0, `${task.id} has no prompt`);
+	}
+	assert.deepEqual(selectTasks(tasks, "head-hash").map((task) => task.id), ["head-hash"]);
+	assert.throws(() => selectTasks(tasks, "nope"), /unknown task id/);
+});
+
+test("renderPrompt substitutes known variables and leaves unknown ones alone", () => {
+	assert.equal(renderPrompt("{{gitHead}} {{nope}}", { gitHead: "abc" }), "abc {{nope}}");
+});
