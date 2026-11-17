@@ -2,17 +2,18 @@
   "schemaVersion": 1,
   "cell": {
     "task": "count-extensions",
-    "model": "opencode-go/hy4-flash-free",
+    "model": "opencode-go/deepseek-v4.1-flash",
     "state": "baseline"
   },
   "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-fixture",
   "repoState": {
     "isGit": true,
     "head": "5946170701a6d57e4dacc11c27ef76a85f49814e",
-    "dirty": false
+    "dirty": false,
+    "dirtyAllowed": false
   },
-  "startedAt": "2026-11-17T15:09:32.099Z",
-  "wallMs": 14681.509553,
+  "startedAt": "2026-11-17T21:14:46.865Z",
+  "wallMs": 9542.180913,
   "exitCode": 0,
   "signal": null,
   "timedOut": false,
@@ -21,20 +22,21 @@
   "metrics": {
     "toolCallCount": 1,
     "toolCallsByName": {
-      "read": 1
+      "bash": 1
     },
     "toolResultCount": 1,
-    "toolTimeMs": 21,
-    "longestToolMs": 21,
+    "toolTimeMs": 59,
+    "longestToolMs": 59,
     "toolDurations": {
-      "read": 21
+      "bash": 59
     },
-    "tokens": 26849,
-    "cost": 0,
+    "tokens": 27521,
+    "cost": 0.00217182,
     "assistantMessages": 2,
     "turns": 2,
     "errors": 0,
-    "aborted": false
+    "aborted": false,
+    "skillLoads": {}
   },
   "answer": "13",
   "check": {
@@ -43,6 +45,7 @@
     "command": null
   },
   "parseError": null,
-  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go_hy4-flash-free/sessions/count-extensions",
+  "parseTruncated": false,
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go%2Fdeepseek-v4.1-flash/sessions/count-extensions",
   "stderrTail": ""
 }

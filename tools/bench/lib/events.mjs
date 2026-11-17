@@ -22,6 +22,27 @@ export function parseJsonl(text) {
   return records;
 }
 
+/**
+ * Parse a stream whose last line may have been cut off by a timeout kill. The
+ * records before the cut are still the run's data; returning none of them
+ * because of one missing brace would throw away the slowest cells.
+ */
+export function parseJsonlTolerant(text) {
+  try {
+    return { records: parseJsonl(text), truncated: false, error: null };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    const lines = text.split("\n");
+    while (lines.length > 0 && !lines[lines.length - 1].trim()) lines.pop();
+    lines.pop();
+    try {
+      return { records: parseJsonl(lines.join("\n")), truncated: true, error };
+    } catch {
+      return { records: [], truncated: true, error };
+    }
+  }
+}
+
 const textOf = (message) =>
   (message?.content ?? [])
     .filter((block) => block?.type === "text")

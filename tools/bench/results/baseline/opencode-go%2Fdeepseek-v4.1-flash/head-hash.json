@@ -9,10 +9,11 @@
   "repoState": {
     "isGit": true,
     "head": "5946170701a6d57e4dacc11c27ef76a85f49814e",
-    "dirty": false
+    "dirty": false,
+    "dirtyAllowed": false
   },
-  "startedAt": "2026-11-17T15:23:29.390Z",
-  "wallMs": 7076.849353,
+  "startedAt": "2026-11-17T21:16:19.336Z",
+  "wallMs": 6205.8276,
   "exitCode": 0,
   "signal": null,
   "timedOut": false,
@@ -24,17 +25,18 @@
       "bash": 1
     },
     "toolResultCount": 1,
-    "toolTimeMs": 16,
-    "longestToolMs": 16,
+    "toolTimeMs": 12,
+    "longestToolMs": 12,
     "toolDurations": {
-      "bash": 16
+      "bash": 12
     },
     "tokens": 27058,
-    "cost": 0.000157656,
+    "cost": 0.0021145200000000004,
     "assistantMessages": 2,
     "turns": 2,
     "errors": 0,
-    "aborted": false
+    "aborted": false,
+    "skillLoads": {}
   },
   "answer": "5946170701a6d57e4dacc11c27ef76a85f49814e",
   "check": {
@@ -43,6 +45,7 @@
     "command": null
   },
   "parseError": null,
-  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go_deepseek-v4.1-flash/sessions/head-hash",
+  "parseTruncated": false,
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go%2Fdeepseek-v4.1-flash/sessions/head-hash",
   "stderrTail": ""
 }

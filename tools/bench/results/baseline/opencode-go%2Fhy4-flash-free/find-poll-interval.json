@@ -2,17 +2,18 @@
   "schemaVersion": 1,
   "cell": {
     "task": "find-poll-interval",
-    "model": "opencode-go/deepseek-v4.1-flash",
+    "model": "opencode-go/hy4-flash-free",
     "state": "baseline"
   },
   "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-fixture",
   "repoState": {
     "isGit": true,
     "head": "5946170701a6d57e4dacc11c27ef76a85f49814e",
-    "dirty": false
+    "dirty": false,
+    "dirtyAllowed": false
   },
-  "startedAt": "2026-11-17T15:10:46.673Z",
-  "wallMs": 11945.757796,
+  "startedAt": "2026-11-17T21:16:13.367Z",
+  "wallMs": 5936.268427,
   "exitCode": 0,
   "signal": null,
   "timedOut": false,
@@ -24,25 +25,27 @@
       "bash": 1
     },
     "toolResultCount": 1,
-    "toolTimeMs": 22,
-    "longestToolMs": 22,
+    "toolTimeMs": 15,
+    "longestToolMs": 15,
     "toolDurations": {
-      "bash": 22
+      "bash": 15
     },
-    "tokens": 27144,
-    "cost": 0.0021503699999999995,
+    "tokens": 26299,
+    "cost": 0,
     "assistantMessages": 2,
     "turns": 2,
     "errors": 0,
-    "aborted": false
+    "aborted": false,
+    "skillLoads": {}
   },
-  "answer": "`.pi/extensions/subagent/index.ts:245`\n\n```ts\nconst POLL_INTERVAL_MS = 500;\n```\n\nIt's also used at line 1949 (`}, POLL_INTERVAL_MS);`).",
+  "answer": "Line 245:\n\n```ts\nconst POLL_INTERVAL_MS = 500;\n```",
   "check": {
     "passed": true,
     "failures": [],
     "command": null
   },
   "parseError": null,
-  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go_deepseek-v4.1-flash/sessions/find-poll-interval",
+  "parseTruncated": false,
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go%2Fhy4-flash-free/sessions/find-poll-interval",
   "stderrTail": ""
 }

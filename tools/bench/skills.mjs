@@ -35,7 +35,10 @@ function parseArgs(argv) {
     };
     if (arg === "--agent-dir") args.agentDir = next();
     else if (arg === "--all") args.all = true;
-    else if (arg === "--since") args.since = next();
+    else if (arg === "--since") {
+      args.since = next();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(args.since)) throw new Error("--since must be YYYY-MM-DD");
+    }
     else if (arg === "--json") args.json = true;
     else if (arg === "--help" || arg === "-h") args.help = true;
     else throw new Error(`unknown argument: ${arg}`);
@@ -57,7 +60,7 @@ function* walk(dir) {
   }
 }
 
-const SKILL_PATH = /\/skills\/([a-zA-Z0-9._-]+)\//;
+const SKILL_PATH = /(?:^|\/)skills\/([a-zA-Z0-9._-]+)\//;
 const SKILL_IN_COMMAND = /skills\/([a-zA-Z0-9._-]+)\/SKILL\.md/g;
 
 /** Skill directories named by one tool call, deduplicated. */

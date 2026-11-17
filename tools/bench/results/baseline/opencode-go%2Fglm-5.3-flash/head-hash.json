@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "cell": {
-    "task": "full-suite",
+    "task": "head-hash",
     "model": "opencode-go/glm-5.3-flash",
     "state": "baseline"
   },
@@ -9,40 +9,43 @@
   "repoState": {
     "isGit": true,
     "head": "5946170701a6d57e4dacc11c27ef76a85f49814e",
-    "dirty": false
+    "dirty": false,
+    "dirtyAllowed": false
   },
-  "startedAt": "2026-11-17T15:32:02.320Z",
-  "wallMs": 114088.151214,
+  "startedAt": "2026-11-17T21:16:25.569Z",
+  "wallMs": 2792.576614,
   "exitCode": 0,
   "signal": null,
   "timedOut": false,
   "spawnError": null,
-  "prompt": "Run the full test suite with `node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts` and report the pass count.",
+  "prompt": "Run `git log -1 --format=%H` in this repository and reply with only the hash.",
   "metrics": {
     "toolCallCount": 1,
     "toolCallsByName": {
       "bash": 1
     },
     "toolResultCount": 1,
-    "toolTimeMs": 110714,
-    "longestToolMs": 110714,
+    "toolTimeMs": 15,
+    "longestToolMs": 15,
     "toolDurations": {
-      "bash": 110714
+      "bash": 15
     },
-    "tokens": 26221,
-    "cost": 0.00241467,
+    "tokens": 25827,
+    "cost": 0.0024543399999999997,
     "assistantMessages": 2,
     "turns": 2,
     "errors": 0,
-    "aborted": false
+    "aborted": false,
+    "skillLoads": {}
   },
-  "answer": "Full suite ran clean:\n\n- **1134 passed, 0 failed** (1134 tests, 0 skipped) in ~111s",
+  "answer": "5946170701a6d57e4dacc11c27ef76a85f49814e",
   "check": {
     "passed": true,
     "failures": [],
     "command": null
   },
   "parseError": null,
-  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go_glm-5.3-flash/sessions/full-suite",
+  "parseTruncated": false,
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go%2Fglm-5.3-flash/sessions/head-hash",
   "stderrTail": ""
 }

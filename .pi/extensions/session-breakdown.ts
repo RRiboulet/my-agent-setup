@@ -284,8 +284,7 @@ function setBorderedLoaderMessage(loader: BorderedLoader, message: string) {
 	}
 }
 
-// Dark-ish background and empty cell color (close to GitHub dark)
-const DEFAULT_BG: RGB = { r: 13, g: 17, b: 23 };
+// Empty cell color (close to GitHub dark)
 const EMPTY_CELL_BG: RGB = { r: 22, g: 27, b: 34 };
 
 // Default palette (assigned to top models)
@@ -297,20 +296,8 @@ const PALETTE: RGB[] = [
 	{ r: 244, g: 67, b: 54 }, // red
 ];
 
-function clamp01(x: number): number {
-	return Math.max(0, Math.min(1, x));
-}
-
 function lerp(a: number, b: number, t: number): number {
 	return a + (b - a) * t;
-}
-
-function mixRgb(a: RGB, b: RGB, t: number): RGB {
-	return {
-		r: Math.round(lerp(a.r, b.r, t)),
-		g: Math.round(lerp(a.g, b.g, t)),
-		b: Math.round(lerp(a.b, b.b, t)),
-	};
 }
 
 function weightedMix(colors: Array<{ color: RGB; weight: number }>): RGB {
@@ -415,13 +402,6 @@ function addDaysLocal(d: Date, days: number): Date {
 	const x = new Date(d);
 	x.setDate(x.getDate() + days);
 	return x;
-}
-
-function countDaysInclusiveLocal(start: Date, end: Date): number {
-	// Avoid ms-based day math because DST transitions can make a “day” 23/25h in local time.
-	let n = 0;
-	for (let d = new Date(start); d <= end; d = addDaysLocal(d, 1)) n++;
-	return n;
 }
 
 function mondayIndex(date: Date): number {
@@ -1149,7 +1129,7 @@ function graphMetricForRange(
 }
 
 
-function renderDailyTable(range: RangeAgg, mode: MeasurementMode, maxRows: number): string[] {
+function renderDailyTable(range: RangeAgg, mode: MeasurementMode, maxRows: number, width = 0): string[] {
 	const withActivity = range.days.filter(
 		(day) => day.sessions + day.messages + day.tokens + day.totalCost > 0,
 	);
@@ -1157,7 +1137,11 @@ function renderDailyTable(range: RangeAgg, mode: MeasurementMode, maxRows: numbe
 
 	const metric = graphMetricForRange(range, mode);
 	const shown = withActivity.slice(-Math.max(1, maxRows)).reverse();
-	const lines = [dim(`${"date".padEnd(10)}  ${"sess".padStart(4)}  ${"msg".padStart(5)}  ${"tok".padStart(7)}  ${"cost".padStart(9)}  top model`)];
+	// The model column is the first thing to go on a narrow terminal: 54 columns
+	// before a provider-qualified name is added, and a clipped name says nothing.
+	const showModel = width <= 0 || width >= 70;
+	const header = `${"date".padEnd(10)}  ${"sess".padStart(4)}  ${"msg".padStart(5)}  ${"tok".padStart(7)}  ${"cost".padStart(9)}`;
+	const lines = [dim(showModel ? `${header}  top model` : header)];
 	for (const day of shown) {
 		let top = "";
 		let best = -1;
@@ -1175,8 +1159,8 @@ function renderDailyTable(range: RangeAgg, mode: MeasurementMode, maxRows: numbe
 			String(day.messages).padStart(5),
 			formatCount(day.tokens).padStart(7),
 			formatUsd(day.totalCost).padStart(9),
-			top ? displayModelName(top) : dim("-"),
 		];
+		if (showModel) values.push(top ? displayModelName(top) : dim("-"));
 		lines.push(values.join("  "));
 	}
 	return lines;
@@ -1636,8 +1620,11 @@ class BreakdownComponent implements Component {
 		const rows = this.tui.terminal.rows || 0;
 		if (rows <= 0) return 10;
 		// Fixed chrome (header, help, blank, summary, note, blank), the daily table,
-		// a blank, the lower table's header and divider, and one row of margin.
-		const overhead = 10 + dailyRows;
+		// a blank, the lower table's header and divider, and one row of margin. The
+		// inherited note is a line when it exists, and omitting it clipped a lower
+		// table row at 24 rows.
+		const noteRows = inheritedNote(this.data.inherited) ? 1 : 0;
+		const overhead = 10 + dailyRows + noteRows;
 		return Math.max(3, Math.min(10, rows - overhead));
 	}
 
@@ -1772,7 +1759,7 @@ class BreakdownComponent implements Component {
 
 		const summary = rangeSummary(range, selectedDays, metric.kind) + dim(`   (table: ${metric.kind}/day, newest first)`);
 		const dailyRows = this.dailyTableRows();
-		const dailyLines = renderDailyTable(range, this.measurement, dailyRows);
+		const dailyLines = renderDailyTable(range, this.measurement, dailyRows, width);
 		const maxRows = this.tableMaxRows(dailyRows);
 		const tableLines =
 			this.view === "model" ? renderModelTable(range, metric.kind, maxRows, !this.splitProviders)

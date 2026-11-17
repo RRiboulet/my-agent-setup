@@ -2,17 +2,18 @@
   "schemaVersion": 1,
   "cell": {
     "task": "find-poll-interval",
-    "model": "opencode-go/glm-5.3-flash",
+    "model": "opencode-go/deepseek-v4.1-flash",
     "state": "baseline"
   },
   "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-fixture",
   "repoState": {
     "isGit": true,
     "head": "5946170701a6d57e4dacc11c27ef76a85f49814e",
-    "dirty": false
+    "dirty": false,
+    "dirtyAllowed": false
   },
-  "startedAt": "2026-11-17T15:10:56.755Z",
-  "wallMs": 10845.071131,
+  "startedAt": "2026-11-17T21:16:02.956Z",
+  "wallMs": 6390.076219,
   "exitCode": 0,
   "signal": null,
   "timedOut": false,
@@ -24,25 +25,27 @@
       "bash": 1
     },
     "toolResultCount": 1,
-    "toolTimeMs": 16,
-    "longestToolMs": 16,
+    "toolTimeMs": 12,
+    "longestToolMs": 12,
     "toolDurations": {
-      "bash": 16
+      "bash": 12
     },
-    "tokens": 25842,
-    "cost": 0.00246009,
+    "tokens": 27118,
+    "cost": 0.00213657,
     "assistantMessages": 2,
     "turns": 2,
     "errors": 0,
-    "aborted": false
+    "aborted": false,
+    "skillLoads": {}
   },
-  "answer": "The declaration is at line 245 of `.pi/extensions/subagent/index.ts`:\n\n```ts\nconst POLL_INTERVAL_MS = 500;\n```",
+  "answer": "`.pi/extensions/subagent/index.ts:245`\n\n```ts\nconst POLL_INTERVAL_MS = 500;\n```\n\n(Used at line 1949 as the poll delay.)",
   "check": {
     "passed": true,
     "failures": [],
     "command": null
   },
   "parseError": null,
-  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go_glm-5.3-flash/sessions/find-poll-interval",
+  "parseTruncated": false,
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go%2Fdeepseek-v4.1-flash/sessions/find-poll-interval",
   "stderrTail": ""
 }

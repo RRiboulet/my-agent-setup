@@ -21,7 +21,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { summarizeEvents, parseJsonl } from "./lib/events.mjs";
+import { summarizeEvents, parseJsonlTolerant } from "./lib/events.mjs";
 import { loadTasks, selectTasks, renderPrompt } from "./lib/tasks.mjs";
 import { skillsInToolCall } from "./skills.mjs";
 
@@ -77,7 +77,8 @@ function parseArgs(argv) {
 }
 
 function modelSlug(model) {
-  return model.replaceAll("/", "_").replaceAll(":", "_");
+  // Reversible and collision-free: `a:b` and `a_b` used to land in one directory.
+  return encodeURIComponent(model);
 }
 
 function normalizeModels(spec) {
@@ -115,13 +116,16 @@ function taskVars(task) {
   } catch {
     vars.extensionsCount = "";
   }
-  try {
-    vars.docsCount = String(
-      spawnSync("git", ["-C", task.repo, "ls-files", "docs"], { encoding: "utf8" })
-        .stdout.split("\n").filter(Boolean).length,
-    );
-  } catch {
-    vars.docsCount = "";
+  vars.docsCount = "";
+  if (state.isGit) {
+    try {
+      vars.docsCount = String(
+        spawnSync("git", ["-C", task.repo, "ls-files", "docs"], { encoding: "utf8" })
+          .stdout.split("\n").filter(Boolean).length,
+      );
+    } catch {
+      vars.docsCount = "";
+    }
   }
   return vars;
 }
@@ -171,8 +175,9 @@ async function runCheck(check, { repo, timeoutMs }) {
   const failures = [];
 
   if (Array.isArray(check.expectAnswerContains)) {
+    const answer = String(check.answer ?? "").toLowerCase();
     for (const needle of check.expectAnswerContains) {
-      if (!String(check.answer ?? "").includes(needle)) failures.push(`answer does not contain ${JSON.stringify(needle)}`);
+      if (!answer.includes(needle.toLowerCase())) failures.push(`answer does not contain ${JSON.stringify(needle)}`);
     }
   }
 
@@ -238,14 +243,12 @@ async function runCell({ task, model, state, outRoot, force, allowDirty, timeout
     { cwd: task.repo, timeoutMs, env: { ...process.env, PI_BENCH_CELL: `${state}/${model}/${task.id}` } },
   );
 
-  let summary;
-  let parseError = null;
-  try {
-    summary = summarizeEvents(parseJsonl(run.stdout));
-  } catch (err) {
-    parseError = err instanceof Error ? err.message : String(err);
-    summary = summarizeEvents([]);
-  }
+  // A timeout kills pi mid-line; the tolerant parse keeps every complete record
+  // before the cut instead of zeroing a cell that ran for twenty minutes.
+  const parsed = parseJsonlTolerant(run.stdout);
+  const summary = summarizeEvents(parsed.records);
+  const parseError = parsed.error;
+  const parseTruncated = parsed.truncated;
 
   const skillLoads = Object.create(null);
   for (const call of summary.toolCalls) {
@@ -257,7 +260,12 @@ async function runCell({ task, model, state, outRoot, force, allowDirty, timeout
     schemaVersion: 1,
     cell: { task: task.id, model, state },
     repo: task.repo,
-    repoState: { isGit: repo.isGit, head: repo.head, dirty: repo.dirty },
+    repoState: {
+      isGit: repo.isGit,
+      head: repo.head,
+      dirty: repo.dirty,
+      dirtyAllowed: repo.dirty && Boolean(allowDirty || task.allowDirty),
+    },
     startedAt,
     wallMs: run.wallMs,
     exitCode: run.code,
@@ -283,12 +291,15 @@ async function runCell({ task, model, state, outRoot, force, allowDirty, timeout
     answer: summary.finalAnswer,
     check,
     parseError,
+    parseTruncated,
     sessionDir,
     stderrTail: run.stderr.slice(-2000),
   };
 
   fs.mkdirSync(stateDir, { recursive: true });
-  fs.writeFileSync(outFile, `${JSON.stringify(record, null, 2)}\n`);
+  const tmpFile = `${outFile}.tmp-${process.pid}`;
+  fs.writeFileSync(tmpFile, `${JSON.stringify(record, null, 2)}\n`);
+  fs.renameSync(tmpFile, outFile);
   return { skipped: false, outFile, record };
 }
 
@@ -328,8 +339,12 @@ async function main() {
   if (!args.state) throw new Error("--state is required (baseline or changed)");
   if (!["baseline", "changed"].includes(args.state)) throw new Error(`--state must be baseline or changed, got ${args.state}`);
 
+  if (args.timeout !== undefined && (!Number.isFinite(args.timeout) || args.timeout <= 0)) {
+    throw new Error("--timeout must be a positive number of milliseconds");
+  }
   const tasks = selectTasks(loadTasks(path.join(BENCH_DIR, "tasks")), args.tasks);
   const models = normalizeModels(args.models);
+  if (models.length === 0) throw new Error("--models selected no models");
   const cells = tasks.flatMap((task) => models.map((model) => ({ task, model })));
 
   if (args.dryRun) {

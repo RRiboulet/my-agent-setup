@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import path from "node:path";
-import { summarizeEvents, parseJsonl } from "../../../../tools/bench/lib/events.mjs";
+import { summarizeEvents, parseJsonl, parseJsonlTolerant } from "../../../../tools/bench/lib/events.mjs";
 import { loadTasks, selectTasks, renderPrompt } from "../../../../tools/bench/lib/tasks.mjs";
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "../../../..");
@@ -28,7 +28,7 @@ test("summarizeEvents counts tool calls, durations, usage and the final answer",
 				usage: { totalTokens: 10, cost: { total: 0.0001 } },
 			},
 		},
-		{ type: "turn_end", message: { role: "assistant" }, toolResults: [] },
+		{ type: "turn_end", message: { role: "assistant", usage: { totalTokens: 999 } }, toolResults: [] },
 		{ type: "agent_settled", aborted: false },
 	];
 
@@ -62,6 +62,16 @@ test("summarizeEvents counts an errored tool result and ignores deltas", () => {
 test("parseJsonl names the line it cannot parse", () => {
 	assert.deepEqual(parseJsonl('{"type":"agent_start"}\n\n'), [{ type: "agent_start" }]);
 	assert.throws(() => parseJsonl('{"type":"ok"}\nnot json\n'), /line 2/);
+});
+
+test("parseJsonlTolerant keeps the complete records before a truncated tail", () => {
+	const good = '{"type":"agent_start"}\n{"type":"agent_end"}';
+	const cut = `${good}\n{"type":"agent_sett`;
+	const parsed = parseJsonlTolerant(cut);
+	assert.deepEqual(parsed.records, [{ type: "agent_start" }, { type: "agent_end" }]);
+	assert.equal(parsed.truncated, true);
+	assert.match(parsed.error ?? "", /line 3/);
+	assert.equal(parseJsonlTolerant(good).truncated, false);
 });
 
 test("every task definition loads and the ids are selectable", () => {

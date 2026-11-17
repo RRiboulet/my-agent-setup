@@ -24,6 +24,7 @@ function parseArgs(argv) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
+  if (args.out && !args.out.endsWith(".json")) throw new Error("--out must end with .json");
   if (args.help || !args.state) {
     console.log("usage: node tools/bench/summarize.mjs --state <baseline|changed> [--out <file>]");
     process.exit(args.help ? 0 : 1);
@@ -37,8 +38,12 @@ function main() {
     if (!modelDir.isDirectory() || modelDir.name === "sessions") continue;
     const dir = path.join(root, modelDir.name);
     for (const file of fs.readdirSync(dir).filter((name) => name.endsWith(".json"))) {
-      const cell = JSON.parse(fs.readFileSync(path.join(dir, file), "utf8"));
-      cells.push(cell);
+      try {
+        const cell = JSON.parse(fs.readFileSync(path.join(dir, file), "utf8"));
+        cells.push(cell);
+      } catch (err) {
+        console.error(`summarize: skipping ${path.join(dir, file)}: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
   }
   cells.sort((a, b) => a.cell.task.localeCompare(b.cell.task) || a.cell.model.localeCompare(b.cell.model));

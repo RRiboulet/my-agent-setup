@@ -2,17 +2,18 @@
   "schemaVersion": 1,
   "cell": {
     "task": "one-test-file",
-    "model": "opencode-go/glm-5.3-flash",
+    "model": "opencode-go/deepseek-v4.1-flash",
     "state": "baseline"
   },
   "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-fixture",
   "repoState": {
     "isGit": true,
     "head": "5946170701a6d57e4dacc11c27ef76a85f49814e",
-    "dirty": false
+    "dirty": false,
+    "dirtyAllowed": false
   },
-  "startedAt": "2026-11-17T15:25:06.238Z",
-  "wallMs": 82958.824825,
+  "startedAt": "2026-11-17T21:16:40.427Z",
+  "wallMs": 42257.463161,
   "exitCode": 0,
   "signal": null,
   "timedOut": false,
@@ -24,25 +25,27 @@
       "bash": 1
     },
     "toolResultCount": 1,
-    "toolTimeMs": 64889,
-    "longestToolMs": 64889,
+    "toolTimeMs": 27936,
+    "longestToolMs": 27936,
     "toolDurations": {
-      "bash": 64889
+      "bash": 27936
     },
-    "tokens": 26568,
-    "cost": 0.0025703899999999997,
+    "tokens": 27816,
+    "cost": 0.00225702,
     "assistantMessages": 2,
     "turns": 2,
     "errors": 0,
-    "aborted": false
+    "aborted": false,
+    "skillLoads": {}
   },
-  "answer": "Yes — every test passed: **26/26** in `.pi/extensions/subagent/test/devc.test.ts` (0 failures, 0 skipped, ~64s total).",
+  "answer": "Yes — all 26 tests passed.\n\n```\nℹ tests 26\nℹ pass 26\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 27631.7\n```",
   "check": {
     "passed": true,
     "failures": [],
     "command": null
   },
   "parseError": null,
-  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go_glm-5.3-flash/sessions/one-test-file",
+  "parseTruncated": false,
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go%2Fdeepseek-v4.1-flash/sessions/one-test-file",
   "stderrTail": ""
 }

@@ -2,17 +2,18 @@
   "schemaVersion": 1,
   "cell": {
     "task": "devc-ls",
-    "model": "opencode-go/deepseek-v4.1-flash",
+    "model": "opencode-go/hy4-flash-free",
     "state": "baseline"
   },
   "repo": "/home/ubuntu",
   "repoState": {
     "isGit": false,
     "head": "",
-    "dirty": false
+    "dirty": false,
+    "dirtyAllowed": false
   },
-  "startedAt": "2026-11-17T15:10:15.269Z",
-  "wallMs": 10595.507222,
+  "startedAt": "2026-11-17T21:15:57.316Z",
+  "wallMs": 5612.219699,
   "exitCode": 0,
   "signal": null,
   "timedOut": false,
@@ -24,25 +25,27 @@
       "bash": 1
     },
     "toolResultCount": 1,
-    "toolTimeMs": 1474,
-    "longestToolMs": 1474,
+    "toolTimeMs": 745,
+    "longestToolMs": 745,
     "toolDurations": {
-      "bash": 1474
+      "bash": 745
     },
-    "tokens": 16899,
-    "cost": 0.001203582,
+    "tokens": 16353,
+    "cost": 0,
     "assistantMessages": 2,
     "turns": 2,
     "errors": 0,
-    "aborted": false
+    "aborted": false,
+    "skillLoads": {}
   },
-  "answer": "Project names printed by `devc ls`:\n\n1. `analytics-agent`\n2. `lol-dataset`\n3. `my-agent-setup`\n4. `pupkeep`\n\nAll four are currently `running`.",
+  "answer": "Projects printed by `devc ls`:\n\n- analytics-agent\n- lol-dataset\n- my-agent-setup\n- pupkeep",
   "check": {
     "passed": true,
     "failures": [],
     "command": null
   },
   "parseError": null,
-  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go_deepseek-v4.1-flash/sessions/devc-ls",
+  "parseTruncated": false,
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go%2Fhy4-flash-free/sessions/devc-ls",
   "stderrTail": ""
 }
