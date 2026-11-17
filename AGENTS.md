@@ -380,11 +380,12 @@ as an orphan, its work is never committed, and the run still reports
 your report, beside the other checks, say that the full suite ran through `bg`,
 and give that command.
 
-The suite takes about 145 s, and 15 runs of it held 2 187 s — 52 % of all bash
-time — across the 25 sessions measured on 2026-11-16, while `sleep` polling held
-another 1 183 s (the breakdown is in `CHANGELOG.md`, under the `bg` entry). One
-file's tests answer the same question in seconds, and leave the single expensive
-run where it belongs: at the end, off the session's critical path.
+The suite takes about 120 s at the concurrency the `Tests` section documents,
+and 15 serial runs of it held 2 187 s — 52 % of all bash time — across the 25
+sessions measured on 2026-11-16, while `sleep` polling held another 1 183 s (the
+breakdown is in `CHANGELOG.md`, under the `bg` entry). One file's tests answer
+the same question in seconds, and leave the single expensive run where it
+belongs: at the end, off the session's critical path.
 
 #### Typechecking: deliberately none
 
