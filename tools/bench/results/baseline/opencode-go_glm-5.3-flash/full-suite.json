@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "cell": {
+    "task": "full-suite",
+    "model": "opencode-go/glm-5.3-flash",
+    "state": "baseline"
+  },
+  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-fixture",
+  "repoState": {
+    "isGit": true,
+    "head": "5946170701a6d57e4dacc11c27ef76a85f49814e",
+    "dirty": false
+  },
+  "startedAt": "2026-11-17T15:32:02.320Z",
+  "wallMs": 114088.151214,
+  "exitCode": 0,
+  "signal": null,
+  "timedOut": false,
+  "spawnError": null,
+  "prompt": "Run the full test suite with `node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts` and report the pass count.",
+  "metrics": {
+    "toolCallCount": 1,
+    "toolCallsByName": {
+      "bash": 1
+    },
+    "toolResultCount": 1,
+    "toolTimeMs": 110714,
+    "longestToolMs": 110714,
+    "toolDurations": {
+      "bash": 110714
+    },
+    "tokens": 26221,
+    "cost": 0.00241467,
+    "assistantMessages": 2,
+    "turns": 2,
+    "errors": 0,
+    "aborted": false
+  },
+  "answer": "Full suite ran clean:\n\n- **1134 passed, 0 failed** (1134 tests, 0 skipped) in ~111s",
+  "check": {
+    "passed": true,
+    "failures": [],
+    "command": null
+  },
+  "parseError": null,
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go_glm-5.3-flash/sessions/full-suite",
+  "stderrTail": ""
+}

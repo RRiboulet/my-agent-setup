@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "cell": {
+    "task": "subagent-alpha",
+    "model": "opencode-go/glm-5.3-flash",
+    "state": "baseline"
+  },
+  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-fixture",
+  "repoState": {
+    "isGit": true,
+    "head": "5946170701a6d57e4dacc11c27ef76a85f49814e",
+    "dirty": false
+  },
+  "startedAt": "2026-11-17T15:27:19.536Z",
+  "wallMs": 19669.888174,
+  "exitCode": 0,
+  "signal": null,
+  "timedOut": false,
+  "spawnError": null,
+  "prompt": "Start one subagent whose entire task is: reply with the single word ALPHA. Wait for it, then reply with the word it returned.",
+  "metrics": {
+    "toolCallCount": 4,
+    "toolCallsByName": {
+      "subagent": 1,
+      "bash": 1,
+      "tool_search": 1,
+      "subagent_status": 1
+    },
+    "toolResultCount": 4,
+    "toolTimeMs": 8118,
+    "longestToolMs": 8011,
+    "toolDurations": {
+      "subagent": 99,
+      "bash": 8011,
+      "tool_search": 7,
+      "subagent_status": 1
+    },
+    "tokens": 69576,
+    "cost": 0.00577334,
+    "assistantMessages": 5,
+    "turns": 5,
+    "errors": 0,
+    "aborted": false
+  },
+  "answer": "ALPHA",
+  "check": {
+    "passed": true,
+    "failures": [],
+    "command": null
+  },
+  "parseError": null,
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go_glm-5.3-flash/sessions/subagent-alpha",
+  "stderrTail": ""
+}

@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "cell": {
+    "task": "count-extensions",
+    "model": "opencode-go/hy4-flash-free",
+    "state": "baseline"
+  },
+  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-fixture",
+  "repoState": {
+    "isGit": true,
+    "head": "5946170701a6d57e4dacc11c27ef76a85f49814e",
+    "dirty": false
+  },
+  "startedAt": "2026-11-17T15:09:32.099Z",
+  "wallMs": 14681.509553,
+  "exitCode": 0,
+  "signal": null,
+  "timedOut": false,
+  "spawnError": null,
+  "prompt": "Read package.json and reply with the number of entries in the pi.extensions array, and nothing else.",
+  "metrics": {
+    "toolCallCount": 1,
+    "toolCallsByName": {
+      "read": 1
+    },
+    "toolResultCount": 1,
+    "toolTimeMs": 21,
+    "longestToolMs": 21,
+    "toolDurations": {
+      "read": 21
+    },
+    "tokens": 26849,
+    "cost": 0,
+    "assistantMessages": 2,
+    "turns": 2,
+    "errors": 0,
+    "aborted": false
+  },
+  "answer": "13",
+  "check": {
+    "passed": true,
+    "failures": [],
+    "command": null
+  },
+  "parseError": null,
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go_hy4-flash-free/sessions/count-extensions",
+  "stderrTail": ""
+}

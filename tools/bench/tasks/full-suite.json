@@ -1,7 +1,7 @@
 {
   "id": "full-suite",
   "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-fixture",
-  "timeoutMs": 420000,
+  "timeoutMs": 600000,
   "prompt": "Run the full test suite with `node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts` and report the pass count.",
   "check": {
     "expectAnswerContains": [

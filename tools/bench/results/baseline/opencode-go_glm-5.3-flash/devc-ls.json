@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "cell": {
+    "task": "devc-ls",
+    "model": "opencode-go/glm-5.3-flash",
+    "state": "baseline"
+  },
+  "repo": "/home/ubuntu",
+  "repoState": {
+    "isGit": false,
+    "head": "",
+    "dirty": false
+  },
+  "startedAt": "2026-11-17T15:10:25.320Z",
+  "wallMs": 9789.47615,
+  "exitCode": 0,
+  "signal": null,
+  "timedOut": false,
+  "spawnError": null,
+  "prompt": "Run `devc ls` once and list the project names it prints.",
+  "metrics": {
+    "toolCallCount": 1,
+    "toolCallsByName": {
+      "bash": 1
+    },
+    "toolResultCount": 1,
+    "toolTimeMs": 1586,
+    "longestToolMs": 1586,
+    "toolDurations": {
+      "bash": 1586
+    },
+    "tokens": 15962,
+    "cost": 0.00060391,
+    "assistantMessages": 2,
+    "turns": 2,
+    "errors": 0,
+    "aborted": false
+  },
+  "answer": "`devc ls` shows 4 projects:\n\n| Project | Status | Directory |\n|---|---|---|\n| analytics-agent | running | /home/ubuntu/analytics-agent (port 8000) |\n| lol-dataset | running | /home/ubuntu/lol-dataset |\n| my-agent-setup | running | /home/ubuntu/my-agent-setup |\n| pupkeep | running | /home/ubuntu/pupkeep (port 8787) |",
+  "check": {
+    "passed": true,
+    "failures": [],
+    "command": null
+  },
+  "parseError": null,
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go_glm-5.3-flash/sessions/devc-ls",
+  "stderrTail": ""
+}

@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "cell": {
+    "task": "one-test-file",
+    "model": "opencode-go/glm-5.3-flash",
+    "state": "baseline"
+  },
+  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-fixture",
+  "repoState": {
+    "isGit": true,
+    "head": "5946170701a6d57e4dacc11c27ef76a85f49814e",
+    "dirty": false
+  },
+  "startedAt": "2026-11-17T15:25:06.238Z",
+  "wallMs": 82958.824825,
+  "exitCode": 0,
+  "signal": null,
+  "timedOut": false,
+  "spawnError": null,
+  "prompt": "Run `node --test .pi/extensions/subagent/test/devc.test.ts` and report whether every test passed.",
+  "metrics": {
+    "toolCallCount": 1,
+    "toolCallsByName": {
+      "bash": 1
+    },
+    "toolResultCount": 1,
+    "toolTimeMs": 64889,
+    "longestToolMs": 64889,
+    "toolDurations": {
+      "bash": 64889
+    },
+    "tokens": 26568,
+    "cost": 0.0025703899999999997,
+    "assistantMessages": 2,
+    "turns": 2,
+    "errors": 0,
+    "aborted": false
+  },
+  "answer": "Yes — every test passed: **26/26** in `.pi/extensions/subagent/test/devc.test.ts` (0 failures, 0 skipped, ~64s total).",
+  "check": {
+    "passed": true,
+    "failures": [],
+    "command": null
+  },
+  "parseError": null,
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go_glm-5.3-flash/sessions/one-test-file",
+  "stderrTail": ""
+}

@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "cell": {
+    "task": "find-poll-interval",
+    "model": "opencode-go/hy4-flash-free",
+    "state": "baseline"
+  },
+  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-fixture",
+  "repoState": {
+    "isGit": true,
+    "head": "5946170701a6d57e4dacc11c27ef76a85f49814e",
+    "dirty": false
+  },
+  "startedAt": "2026-11-17T15:11:07.630Z",
+  "wallMs": 7383.191352,
+  "exitCode": 0,
+  "signal": null,
+  "timedOut": false,
+  "spawnError": null,
+  "prompt": "Find the line in .pi/extensions/subagent/index.ts where POLL_INTERVAL_MS is declared, and quote that line.",
+  "metrics": {
+    "toolCallCount": 1,
+    "toolCallsByName": {
+      "bash": 1
+    },
+    "toolResultCount": 1,
+    "toolTimeMs": 50,
+    "longestToolMs": 50,
+    "toolDurations": {
+      "bash": 50
+    },
+    "tokens": 26310,
+    "cost": 0,
+    "assistantMessages": 2,
+    "turns": 2,
+    "errors": 0,
+    "aborted": false
+  },
+  "answer": "`.pi/extensions/subagent/index.ts:245`:\n\n```ts\nconst POLL_INTERVAL_MS = 500;\n```",
+  "check": {
+    "passed": true,
+    "failures": [],
+    "command": null
+  },
+  "parseError": null,
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go_hy4-flash-free/sessions/find-poll-interval",
+  "stderrTail": ""
+}

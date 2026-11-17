@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "cell": {
+    "task": "one-test-file",
+    "model": "opencode-go/deepseek-v4.1-flash",
+    "state": "baseline"
+  },
+  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-fixture",
+  "repoState": {
+    "isGit": true,
+    "head": "5946170701a6d57e4dacc11c27ef76a85f49814e",
+    "dirty": false
+  },
+  "startedAt": "2026-11-17T15:23:47.598Z",
+  "wallMs": 78373.782571,
+  "exitCode": 0,
+  "signal": null,
+  "timedOut": false,
+  "spawnError": null,
+  "prompt": "Run `node --test .pi/extensions/subagent/test/devc.test.ts` and report whether every test passed.",
+  "metrics": {
+    "toolCallCount": 1,
+    "toolCallsByName": {
+      "bash": 1
+    },
+    "toolResultCount": 1,
+    "toolTimeMs": 59759,
+    "longestToolMs": 59759,
+    "toolDurations": {
+      "bash": 59759
+    },
+    "tokens": 27817,
+    "cost": 0.00225537,
+    "assistantMessages": 2,
+    "turns": 2,
+    "errors": 0,
+    "aborted": false
+  },
+  "answer": "Yes — all 26 tests passed.\n\n```\nℹ tests 26\nℹ pass 26\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\n```\n\nNo failures, no skips, no todos; whole run took ~59s.",
+  "check": {
+    "passed": true,
+    "failures": [],
+    "command": null
+  },
+  "parseError": null,
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go_deepseek-v4.1-flash/sessions/one-test-file",
+  "stderrTail": ""
+}

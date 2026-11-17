@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "cell": {
+    "task": "devc-ls",
+    "model": "opencode-go/deepseek-v4.1-flash",
+    "state": "baseline"
+  },
+  "repo": "/home/ubuntu",
+  "repoState": {
+    "isGit": false,
+    "head": "",
+    "dirty": false
+  },
+  "startedAt": "2026-11-17T15:10:15.269Z",
+  "wallMs": 10595.507222,
+  "exitCode": 0,
+  "signal": null,
+  "timedOut": false,
+  "spawnError": null,
+  "prompt": "Run `devc ls` once and list the project names it prints.",
+  "metrics": {
+    "toolCallCount": 1,
+    "toolCallsByName": {
+      "bash": 1
+    },
+    "toolResultCount": 1,
+    "toolTimeMs": 1474,
+    "longestToolMs": 1474,
+    "toolDurations": {
+      "bash": 1474
+    },
+    "tokens": 16899,
+    "cost": 0.001203582,
+    "assistantMessages": 2,
+    "turns": 2,
+    "errors": 0,
+    "aborted": false
+  },
+  "answer": "Project names printed by `devc ls`:\n\n1. `analytics-agent`\n2. `lol-dataset`\n3. `my-agent-setup`\n4. `pupkeep`\n\nAll four are currently `running`.",
+  "check": {
+    "passed": true,
+    "failures": [],
+    "command": null
+  },
+  "parseError": null,
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go_deepseek-v4.1-flash/sessions/devc-ls",
+  "stderrTail": ""
+}
