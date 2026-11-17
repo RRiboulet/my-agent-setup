@@ -35,8 +35,11 @@ Owns (`.pi/extensions/subagent/` and its own new test file):
 - The tool descriptions and the `AGENTS.md`/skill text that teaches polling:
   replace "poll status" with "start, then wait once". Keep `status` for the
   live "what is it doing right now" question and keep the list view.
-- Its own `subagent-wait.test.ts`; it does not edit the shared helpers or the
-  tests owned by tickets 00/04/05.
+- Its own `subagent-wait.test.ts`; it does not edit the shared helpers, the
+  tests owned by tickets 00/04/05, or `devc.test.ts` (ticket 02's).
+- Register it beside the existing management tools array (`index.ts:2287`); if
+  the management tools are deferred, it loads with them. Do not add a second
+  exposure gate.
 
 Leaves for later: inter-agent messaging, a task board, persistent teams.
 

@@ -14,7 +14,8 @@ on a 2 vCPU / 11 GB / 19 GB-free devcontainer. Companion surveys:
   — code-level diagnosis of the two extensions the user called broken.
 
 This document supersedes `2026-11-harness-feature-survey.md`, an untracked
-survey on `main` that assumed none of these extensions existed. That assumption
+survey on `main` that assumed none of these extensions existed; it was deleted
+after the still-valid parts were folded in. That assumption
 is false: `pi-lens`, `pi-web-access`, `pi-tasks`, `pi-sandbox`, and `pi-memory`
 are published and maintained, so "build it" is no longer the default answer.
 
@@ -40,55 +41,64 @@ messages (4,510 assistant, 4,671 tool results, 321 user, 115 system).
 
 | Tool | Calls | Share |
 |---|---|---|
-| `bash` | 3,531 | 83% |
-| `subagent_status` | 681 | 16% |
-| `edit` | 191 | 4.5% |
-| `read` | 83 | 2% |
-| `codemode` / `subagent` / `write` | 43 / 39 / 38 | — |
-| `web_search` / `todo` / `triage_change` | 32 / 12 / 11 | — |
+| `bash` | 3,531 | 76% |
+| `subagent_status` | 681 | 15% |
+| `edit` | 191 | 4.1% |
+| `read` | 83 | 1.8% |
+| `codemode` / `subagent` / `write` | 43 / 39 / 38 | 0.9 / 0.8 / 0.8% |
+| `web_search` / `todo` / `triage_change` | 32 / 12 / 11 | <1% each |
 
-Bash holds 28,499 s of the 28,781 s of tool time. Median call 54 ms; 132 calls
-over 60 s hold 22,120 s (78%).
+Shares are of the 4,674 tool calls; the 4,671 tool results differ by three
+calls whose result was not recorded. Bash holds 28,499 s of the 28,781 s of tool
+time. Median call 54 ms; 132 calls over 60 s hold 22,120 s (78%).
 
-Split by command intent (mutually exclusive, sums to the bash total):
+Split by command intent (mutually exclusive, sums to the bash total; the two
+empty-command calls are in *other*):
 
 | Category | Time | Calls | Share |
 |---|---|---|---|
 | `devc` / docker | 8,476 s | 1,040 | 29.7% |
 | test suite (`node --test`) | 7,904 s | 171 | 27.7% |
 | `sleep`-polling | 7,786 s | 155 | 27.3% |
-| other (ls, rg, sed, node, python) | 2,888 s | 1,461 | 10.1% |
+| other (ls, rg, sed, node, python) | 2,888 s | 1,463 | 10.1% |
 | npm / gh / git / curl / tmux | 1,445 s | 702 | 5.1% |
 
 Corrections that matter to the ranking:
 
 - **`devc` is 252 real invocations / 6,389 s**, not 1,095 calls / 9,630 s.
   Both earlier numbers counted commands that merely mention `devcontainer`.
-  Of the 6,389 s: plain `<project> -- <cmd>` exec is 166 calls / 3,236 s
+  Of the 6,388 s: plain `<project> -- <cmd>` exec is 166 calls / 3,236 s
   (~19.5 s each), `ls` 30 / 253 s (~8.4 s), `up` 17 / 703 s, `rebuild` 16 /
-  2,068 s, `doctor` 13 / 115 s. The ticket-02 scope (read + exec) is 3,604 s;
-  rebuild/up are 2,771 s and are not in that scope.
+  2,068 s, `doctor` 13 / 115 s, and 10 help/list/stop/version invocations /
+  13 s. The ticket-02 scope (read + exec) is 3,604 s; rebuild/up are 2,771 s and
+  are not in that scope.
 - **Polling is the largest recoverable habit.** 155 bash calls contain `sleep`,
   declaring ~95,000 s between them; the measured tool time is the 7,786 s above.
 - **The test suite is 171 calls / 7,904 s.** The `bg` branch runs 1,204 tests
   green in 199 s at `a1d48c5`.
 - **Errors are not compile errors.** 191 tool errors: 168 bash, 9 edits, 5 web
-  searches, 4 status calls, 2 codemode, 2 triage, 1 read. **No TypeScript type
-  error appears in the tool results.** LSP's headline benefit — catch the type
-  error after an edit — is unmeasured here.
-- **Curl is a capability gap, not a time sink.** 70 calls / 42 s, mostly
-  localhost health checks and cloud metadata, not page reads.
-- **Slash commands are near-dead.** 2 user slash commands in 108 sessions.
+  searches, 4 status calls, 2 codemode, 2 triage, 1 read. The only TypeScript
+  diagnostics are 11 `TS5097` extension errors in one command's output — a
+  config complaint, not a type error. **No type-checker diagnostic follows an
+  edit.** LSP's headline benefit is unmeasured here.
+- **Curl is a capability gap, not a time sink.** 46 direct `curl` invocations /
+  11.7 s; 70 commands mention it / 42 s, mostly localhost health checks and
+  cloud metadata, not page reads.
+- **Slash commands are near-dead.** 2 user slash commands in 108 sessions (one
+  `/voice`, one typo); `/explore` and `/session-breakdown` were never invoked.
   `repo-explorer` (1,786 lines, 8 modules) and `session-breakdown` (2,127
   lines) are large surfaces with no measurable invocation traffic.
-- **Skills are dormant.** 33 explicit skill loads in 108 sessions, against 23
-  skills; the system prompt carries their names and descriptions (~6 KB),
-  while their 2,887 body lines load on demand. `worktree` is 623 lines;
-  `add-model` is 327.
+- **Skills are dormant.** 22 reads of a `SKILL.md` in 16 sessions, against 23
+  skills; the system prompt carries their names and descriptions (~9 KB
+  measured at the last frozen prompt), while their 2,887 body lines load on
+  demand. `worktree` is 623 lines; `add-model` is 327.
 - **`subagent_status` is polled 17× per `subagent` start** (681 vs 39).
 - `hy4-flash-free` is live on `opencode-go` (1M context, thinking `none/high`)
-  but absent from `enabledModels`; enabling it needs one settings line, not a
-  model curation.
+  and was absent from `enabledModels`; it is enabled as of 2026-11-17.
+
+The window is by session start; a session still open at the freeze contributes
+its calls as read, which is why two runs of the same script can differ by a few
+seconds of a long-running command.
 
 ## Candidate ranking
 
@@ -97,12 +107,15 @@ is what the measurement supports, per 17-day window; value that no measurement
 covers is marked *unmeasured* and cannot win the ratio on its own. The order is
 the user's confirmed order from the investigation; the ratio column is shown so
 the thin rows are visible, not to hide them. `devc` at #2 is the clearest
-example: its in-scope recovery is minutes, and it stays because it is the only
-tool every project goes through.
+example: its in-scope recovery is minutes, it stays because the user confirmed
+the order and it is the only tool every project goes through, and the ratio
+does not earn the slot.
 
-Two-week shape: week 1 is ticket 00 Phase A, ticket 01 (land `bg`), and 00 Phase
-B; week 2 runs 02–05 on parallel branches. If it slips, 04 and 05 defer first —
-their evidence is felt pain and routing, not measured wall-clock.
+Two-week shape: week 1 is ticket 00 Phase A, ticket 01 (land `bg`), and the
+`bg` cells of Phase B. Week 2 runs **at most two** implementation branches at a
+time; this host is 2 vCPU and a four-way grid plus the full suite already
+contends. If it slips, 04 and 05 defer first — their evidence is felt pain and
+routing, not measured wall-clock.
 
 | # | Candidate | Evidence | Recovery | Build | Ratio | Band |
 |---|---|---|---|---|---|---|
@@ -110,7 +123,7 @@ their evidence is felt pain and routing, not measured wall-clock.
 | 2 | `devc` fast paths | 252 calls / 6,389 s; ticket scope 3,604 s | ~18 min at 30% of scope; up to +14 min if `rebuild --if-stale` lands | 16 h | ~0.1–0.2 min/h | top 5 |
 | 3 | Subagent `wait`/collect | 681 polls vs 39 runs (17×) | ~20 min + context | 6 h | structural | top 5 |
 | 4 | repo-explorer `/diff` + `/explore` | 1,786 lines; wrong-branch bug; transcript pollution | phone workflow | 12–16 h | felt pain | top 5 |
-| 5 | Skills prune/merge/split | 33 loads / 108 sessions; 23 skills; one 623-line skill | context + routing | 10 h | unmeasured | top 5 |
+| 5 | Skills prune/merge/split | 22 SKILL.md reads / 16 sessions; 23 skills; one 623-line skill | context + routing | 10 h | unmeasured | top 5 |
 | 6 | Measurement harness | 2,127-line report tool; no A/B runner | enables all of the above | 6 h | prerequisite | ticket 00 |
 | 7 | Repeat-breaker ladder (Kimi) | 14× the same `docker ps`; 8–9× the same suite | small | 4 h | cheap | later |
 | 8 | Phone notify | SSH+tmux; no Tailscale | attention | 4 h | unmeasured | later |
@@ -126,12 +139,13 @@ their evidence is felt pain and routing, not measured wall-clock.
 
 ### 1. Land `bg` (ticket 01)
 
-Already built on `bg-tool-start`, with its eight sibling branches merged in. At
+Already built on `bg-tool-and-test-discipline`, with its nine sibling branches
+merged in. At
 the tip checked on 2026-11-17 (`a1d48c5`) its tests were green: 1,204 pass, 0
 fail, 199 s. The branch has moved twice since and is owned by another worktree,
 so re-run the suite before merging. It is the only answer to the two largest
-recoverable categories, and every later A/B baseline is cheaper to take after
-it. Do not reimplement it in this branch.
+recoverable categories. Phase A records the baseline before it lands; Phase B
+re-runs only its cells. Do not reimplement it in this branch.
 
 ### 2. `devc` latency (ticket 02)
 
@@ -188,6 +202,10 @@ Kept with a trigger, not dropped:
 - **Checkpoint/rewind**: the largest safety idea in the survey, but 20 h and no
   measured failure data. Revisit after a lost-work incident.
 - **Task graph**: 12 `todo` calls. The flat list is not the bottleneck.
+- **Context pruning** (Qwen's microcompaction, KCode's priced withholding):
+  pi only summarizes at compaction, and no session in the baseline has
+  compacted, so the trigger is the first real compaction. Revisit then; the
+  mechanism is cheap but unmeasured here.
 
 Rejected on purpose: permission language and OS sandbox (single user, already
 containerized), auto-memory (no measured need; context risk), declarative hooks
@@ -202,8 +220,8 @@ because one does not fit all five:
 
 - **Model runs**: 8 tasks × 3 models (`deepseek-v4.1-flash`, `glm-5.3-flash`,
   `hy4-flash-free`) × 2 harness states (baseline, changed), one run per cell.
-  Repos: `my-agent-setup` and `pupkeep` (the latter carries the measured 28 s
-  `devc` exec). ~7 min per task, so ~6 h of model time. A second run only for a
+  Repos: a clean detached fixture at `origin/dev`, plus `/home/ubuntu` for the
+  `devc` tasks (`pupkeep`'s exec path is the measured ~19.5 s). ~7 min per task, so ~6 h of model time. A second run only for a
   delta that looks real.
 - **Deterministic microbenchmarks**: `devc` subcommand latency (100 invocations
   per subcommand, cold and warm) and repo-explorer keystrokes/time for the

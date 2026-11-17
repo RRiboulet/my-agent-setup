@@ -17,8 +17,11 @@ time, and the only tool every project goes through. Counted precisely
 - `rebuild` — 16 calls, 2,068 s; `up` — 17 calls, 703 s
   (`cmd_rebuild`, `ensure_up`)
 
-The ticket's scope is the first three (3,604 s). `rebuild`/`up` (2,771 s) are
-touched only through the opt-in `--if-stale` below. Every existing subcommand,
+The session average for `ls` (~8.4 s) is not the benchmark: it includes host
+load and wrapper overhead. The bench's isolated p50 is ~739 ms, so every target
+below is relative to the benchmark, not to the session average. The ticket's
+scope is the first three (3,604 s); `rebuild`/`up` (2,771 s) are touched only
+through the opt-in `--if-stale` below. Every existing subcommand,
 flag, and output line stays; `--no-cache` already exists for `rebuild` and is
 extended to the new cached paths.
 
@@ -49,7 +52,9 @@ ticket 00 defines):
 - `devc timings --last` (or equivalent), gated and quiet by default, reporting
   where the last invocation spent its time.
 - Scenarios added to ticket 00's `tools/bench/devc-latency.mjs` data file:
-  `ls`, `doctor`, exec, `rebuild --if-stale`, cold and warm.
+  the file already has `ls`, `doctor` and an exec; extend it with
+  `rebuild --if-stale`. No cold/warm distinction: the cache is the thing under
+  test, and a cold run is just `--no-cache`.
 
 Does **not** own: the devcontainer CLI, image contents, compose semantics, the
 rebuild strategy itself, or any change to `devc`'s user-visible contract. No
@@ -58,8 +63,9 @@ new subcommand other than `timings`; no new flag other than `--if-stale` and
 
 ## Acceptance criteria
 
-- [ ] `node tools/bench/devc-latency.mjs` reports p50/p90 per scenario, cold and warm, before and after, with the same project and config.
-- [ ] Warm `ls` and `doctor` are at least 50% faster at p50, with **identical** stdout, stderr, and exit code to the baseline for the same repository state.
+- [ ] `node tools/bench/devc-latency.mjs` reports p50/p90 per scenario before and after, with the same project and config.
+- [ ] `ls` is at least 50% faster at p50, with **identical** stdout, stderr, and exit code to the baseline for the same repository state.
+- [ ] `doctor` is profiled first: if its p50 is dominated by `devcontainer --version` / `docker info` rather than project resolution, the cache cannot remove it and the 50% target is replaced by the measured profile, recorded in the PR. Do not claim a win the profile does not show.
 - [ ] A plain exec (`devc pupkeep -- true`) is at least 30% faster at p50, with identical stdout/stderr/exit code, and `--remote-env PI_TRUE_COLOR` still reaches the command.
 - [ ] Editing `devcontainer.json`, rebuilding the container, or restarting the daemon invalidates the cache; a test simulates each and asserts the command is re-derived from the real state.
 - [ ] `devc rebuild <name> --if-stale` skips a current container and prints why, rebuilds a stale one, and a bare `devc rebuild` is unchanged.

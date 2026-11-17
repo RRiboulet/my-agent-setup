@@ -8,24 +8,30 @@ Evidence: `docs/research/2026-11-harness-advancements.md#1-land-bg-ticket-01`
 
 Nothing new. The `bg` tool — `start`/`status`/`logs`/`kill`, completion
 notifications, restart repair, the testing rule, and the concurrent test runner —
-is already implemented on the `bg-tool-start` branch, with eight sibling branches
-(`bg-docs`, `bg-kill`, `bg-logs`, `bg-notify`, `bg-repair`, `bg-replay-baseline`,
-`bg-rule-honest`, `bg-wait-action`) merged into it.
+is already implemented on the `bg-tool-and-test-discipline` branch, with nine
+sibling branches (`bg-docs`, `bg-kill`, `bg-logs`, `bg-notify`, `bg-repair`,
+`bg-replay-baseline`, `bg-rule-honest`, `bg-wait-action`, `bg-acceptance`)
+merged into it.
 
 This ticket is the review, rebase, and merge: get it onto `dev` **after ticket
-00 Phase A records the pre-`bg` baseline and before any other ticket takes its
-baseline**, because the sleep-polling and blocking-test costs it removes are two
-of the three largest measured categories.
+00 Phase A records the pre-`bg` baseline**. Phase B then re-runs only the `bg`
+cells. No other ticket takes a baseline before Phase A, and no ticket treats a
+post-`bg` measurement as its own baseline.
 
 At the tip checked on 2026-11-17 (`a1d48c5`): **1,204 tests pass, 0 fail,
 199 s**. The branch has moved twice since (`203ae56`, `a3ebad6`) and is actively
 owned by another worktree; re-run the suite at merge time rather than trusting
-this number.
+this number. **PR #161 is already open and mergeable.** Its body is candid that
+only one of its four acceptance criteria was met and that the measured win came
+from the concurrent test runner, not from `bg`; land it as a capability, and do
+not repeat the speedup claim in the changelog.
 
 ## Scope
 
-- Rebase `bg-tool-start` onto current `origin/dev`; resolve `CHANGELOG.md` and
-  `AGENTS.md` conflicts in favour of the bg branch's own entries.
+- Rebase `bg-tool-and-test-discipline` onto current `origin/dev`; resolve
+  `CHANGELOG.md` and `AGENTS.md` conflicts in favour of the bg branch's own
+  entries. The worktree happens to be named `bg-tool-start`; the branch is the
+  source of truth.
 - Confirm the extension is registered in `package.json` and that the testing
   rule is in `AGENTS.md`.
 - Run the full suite once through `bg` itself, and `node --test --test-concurrency=8`
