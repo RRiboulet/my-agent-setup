@@ -1,53 +1,74 @@
 # 02: `devc` latency on the read-only and exec paths
 
-**Blocked by:** 00 (baseline benchmark exists)
+**Blocked by:** 00 (the benchmark entry point exists)
 **Status:** ready
 Evidence: `docs/research/2026-11-harness-advancements.md#2-devc-latency-ticket-02`
 
 ## What to build
 
-`devc` is 389 real invocations and 9,089 s across 25 sessions and 6 projects —
-34% of all bash time, more than every file tool combined. The cost is not one
-slow rebuild; it is a long tail of small, repeated resolutions:
+`devc` is 252 real invocations / 6,389 s across 6 projects — 22% of all bash
+time, and the only tool every project goes through. Counted precisely
+(`bin/devc:626-672`), the cost is:
 
-- `devc ls` — 35 calls, 260 s, ~7 s each.
-- `devc doctor` — 15 calls, 119 s, ~8 s each.
-- `devc pupkeep -- <cmd>` — 54 calls, 1,497 s, **~28 s each** for a plain exec.
-- `devc rebuild` — 30 calls, 3,976 s; `devc up` — 24 calls, 1,184 s.
+- plain `<project> -- <cmd>` exec — 166 calls, 3,236 s, **~19.5 s each**
+  (`exec_in`, `bin/devc:406`)
+- `ls` — 30 calls, 253 s, ~8.4 s each (`cmd_ls`, `bin/devc:453`)
+- `doctor` — 13 calls, 115 s, ~8.8 s each (`doctor`, `bin/devc:500`)
+- `rebuild` — 16 calls, 2,068 s; `up` — 17 calls, 703 s
+  (`cmd_rebuild`, `ensure_up`)
 
-Make the repeated work cheap without changing what `devc` means. Every existing
-subcommand, flag, and output line stays; the changes are additive and opt-out.
+The ticket's scope is the first three (3,604 s). `rebuild`/`up` (2,771 s) are
+touched only through the opt-in `--if-stale` below. Every existing subcommand,
+flag, and output line stays; `--no-cache` already exists for `rebuild` and is
+extended to the new cached paths.
 
 ## Scope
 
-Owns (`bin/devc` and a new test file; no other ticket edits them):
+Owns (`bin/devc`, `bin/devc`'s existing stub harness
+`.pi/extensions/subagent/test/devc.test.ts`, and the scenario data file that
+ticket 00 defines):
 
-- A cached, TTL'd index for the read-only queries (`ls`, `doctor`, `hashes`),
-  keyed on the resolved compose/config file set, its mtimes/hashes, and the
-  docker daemon identity. A stale entry must be detectably stale, not silently
-  wrong; `--no-cache` bypasses it and forces a refresh.
-- A persistent exec path for `<project> -- <cmd>`: resolve the container and
-  environment once per project generation, then `docker exec` directly instead
-  of re-deriving compose state on every call. Fall back to the current path when
-  the container is missing, restarting, or the generation changed.
-- One `devc timings --last` (or equivalent) surface that reports where the last
-  invocation spent its time, gated so it is not in the normal output.
-- `devc-latency.mjs` scenarios wired into ticket 00's benchmark.
+- **Cache the discovery, not the answer.** `cmd_ls`/`doctor` re-resolve project
+  roots, compose files and container state on every call. Cache the resolved
+  project list and config hashes, keyed on the config file set + mtimes and
+  the docker daemon identity; re-derive container state from one `docker ps`
+  and the container ID. `ls` output must be byte-identical to today's, so do
+  not TTL the container rows — a rebuilt container changes its ID and therefore
+  the key. `--no-cache` bypasses the cache for one invocation.
+- **A faster exec path.** `exec_in` runs `ensure_up` (uid guard, staleness
+  probe) then `devcontainer exec --remote-env ...`. Cache the `ensure_up`
+  result per (config hash, container ID) and keep the exact `devcontainer exec`
+  argv, including both `--remote-env` pairs; do **not** replace it with a raw
+  `docker exec`, which drops the remote env and the uid check. Fall back to the
+  full path when the container is missing, restarting, or the generation
+  changed.
+- **Opt-in `devc rebuild <name> --if-stale`.** Skip the rebuild only when the
+  config hash is unchanged and the recorded container is running and current;
+  print why it skipped. Default behaviour is unchanged — a bare `devc rebuild`
+  still rebuilds.
+- `devc timings --last` (or equivalent), gated and quiet by default, reporting
+  where the last invocation spent its time.
+- Scenarios added to ticket 00's `tools/bench/devc-latency.mjs` data file:
+  `ls`, `doctor`, exec, `rebuild --if-stale`, cold and warm.
 
-Does **not** own: rebuild strategy, the devcontainer CLI, image contents,
-compose semantics, or any change to `devc`'s user-visible contract.
+Does **not** own: the devcontainer CLI, image contents, compose semantics, the
+rebuild strategy itself, or any change to `devc`'s user-visible contract. No
+new subcommand other than `timings`; no new flag other than `--if-stale` and
+`--no-cache` on the cached paths.
 
 ## Acceptance criteria
 
-- [ ] `node tools/bench/devc-latency.mjs` reports p50/p90 per subcommand, cold and warm, before and after, with the same command set and the same project.
-- [ ] Warm `devc ls` and `devc doctor` are at least 50% faster at p50, and no slower at p90 than the baseline.
-- [ ] A plain exec (`devc pupkeep -- true`) is at least 30% faster at p50; correctness is proven by running the same command through the old and new paths and diffing stdout, stderr, and exit code.
-- [ ] A changed `devcontainer.json`, a rebuilt container, or a stopped daemon invalidates the cache; a test simulates each and asserts the query is re-derived.
-- [ ] `--no-cache` changes nothing except bypassing the cache, and an environment variable can disable the cache for one shell.
-- [ ] No existing subcommand, flag, exit code, or output line changes; the help text gains only the new flag and the timings command.
+- [ ] `node tools/bench/devc-latency.mjs` reports p50/p90 per scenario, cold and warm, before and after, with the same project and config.
+- [ ] Warm `ls` and `doctor` are at least 50% faster at p50, with **identical** stdout, stderr, and exit code to the baseline for the same repository state.
+- [ ] A plain exec (`devc pupkeep -- true`) is at least 30% faster at p50, with identical stdout/stderr/exit code, and `--remote-env PI_TRUE_COLOR` still reaches the command.
+- [ ] Editing `devcontainer.json`, rebuilding the container, or restarting the daemon invalidates the cache; a test simulates each and asserts the command is re-derived from the real state.
+- [ ] `devc rebuild <name> --if-stale` skips a current container and prints why, rebuilds a stale one, and a bare `devc rebuild` is unchanged.
+- [ ] The uid-mismatch guard still fires: a container running as a different uid than the host is reported, not silently exec'd into.
+- [ ] `.pi/extensions/subagent/test/devc.test.ts` covers the cache invalidation and the `--if-stale` decision table; no new test file is created.
 
 ## Validation
 
 - Run the benchmark twice; deterministic latency numbers must match within noise.
+- Diff old vs new stdout for `ls`, `doctor`, and one exec, byte for byte.
 - Prove the cache cannot serve a stale project: edit a compose file, call
   `devc ls`, and assert the new project appears without `--no-cache`.

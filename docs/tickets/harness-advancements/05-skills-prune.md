@@ -1,15 +1,16 @@
-# 05: 24 skills become ~15, and the long ones stop being read whole
+# 05: 23 skills become ~15, and the long ones stop being read whole
 
-**Blocked by:** 00 (load and context-token baseline)
+**Blocked by:** 00 (per-skill load and context-token baseline)
 **Status:** ready
 Evidence: `docs/research/2026-11-harness-advancements.md#5-skills-prune-merge-split-ticket-05`
 
 ## What to build
 
-24 skills, 2,887 lines, advertised in every system prompt, and **22 explicit
-loads across 109 sessions**. The dormancy is not harmless: every skill is a
-routing candidate the model must reject, and the three longest are longer than
-most files the agent reads in a turn.
+23 skills, 2,887 body lines, and **33 explicit loads across 108 sessions**. The
+system prompt carries only each skill's name, description and path (~6 KB);
+the bodies load on demand. The dormancy is still not harmless: every skill is a
+routing candidate the model must reject, and the longest are longer than most
+files the agent reads in a turn.
 
 Three moves, all measured:
 
@@ -18,11 +19,15 @@ Three moves, all measured:
    `diagnosing-bugs`, `prove-it-works`, `blast-radius`, `benchmark-checklist`,
    `update-changelog`, `native-web-search`, `librarian`, `handoff`; decide the
    rest from the load data.
-2. **Merge.** The planning cluster — `in-your-own-words`, `grilling`,
-   `to-spec`, `to-tickets`, `implement` — overlaps at the trigger level. One
-   router skill ("shape a change before building it") with the five bodies as
-   `references/`, entered by the router's decision table. `grilling` stays
-   directly invocable, because it is a mode, not a phase.
+2. **Merge.** The model-invoked planning members — `in-your-own-words`,
+   `grilling` — overlap at the trigger level. One router skill ("shape a change
+   before building it") with the bodies as `references/`, entered by the
+   router's decision table. `grilling` stays directly invocable and
+   model-invoked, because it is a mode, not a phase. The user-invoked entry
+   points (`implement`, `to-spec`, `to-tickets`) **cannot** be absorbed: they
+   are pinned by `coding-skills.test.ts`'s `USER_INVOKED` rule and deliberately
+   hidden from model selection, so they stay as thin wrappers that point at the
+   router's references.
 3. **Split.** `worktree` (623 lines) and `add-model` (327) move their worked
    examples, recipes, and tables into `references/`; the SKILL.md keeps the
    decision rules and the safety rails, under 150 lines.
@@ -32,7 +37,10 @@ Three moves, all measured:
 Owns (`.pi/skills/`, `package.json`'s `pi.skills`, and the skill tests):
 
 - The consolidated skill list, with no two descriptions competing for the same
-  trigger; the router's table names which reference to load.
+  trigger; the router's table names which reference to load. The
+  `coding-skills.test.ts` classification lists (`ALL`, `USER_INVOKED`) and
+  `package.json`'s `pi.skills` are updated together; a removed skill's notice in
+  `licenses/NOTICE.md` goes with it.
 - `references/` files for `worktree`, `add-model`, and the merged planning
   skill; every path the SKILL.md mentions must resolve.
 - `package.json` and any `licenses/NOTICE.md` entries for vendored material; a
@@ -46,9 +54,9 @@ capabilities deferred to the later band.
 
 - [ ] The advertised skill count is ~15, and no two SKILL.md descriptions share a trigger phrase.
 - [ ] `worktree/SKILL.md` and `add-model/SKILL.md` are each under 150 lines, with their recipes and tables in `references/` and every referenced path resolving.
-- [ ] The planning cluster is one router with a decision table, and `/skill:grilling` still works directly.
+- [ ] The planning router has a decision table; `/skill:grilling` still works directly, and `implement`/`to-spec`/`to-tickets` remain user-invoked (`disable-model-invocation: true`) and pass the classification test.
 - [ ] `node --test .pi/extensions/subagent/test/coding-skills.test.ts` passes, and `package.json` lists exactly the directories that exist.
-- [ ] The ticket-00 measurement shows skill loads and the always-on skill block smaller than baseline, or the difference is explained.
+- [ ] The ticket-00 per-skill load data names at least one pruned skill with zero loads; a skill with a load is not pruned without saying why.
 
 ## Validation
 

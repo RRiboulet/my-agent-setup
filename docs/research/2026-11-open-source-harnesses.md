@@ -1,6 +1,6 @@
 # Source reading: three open-source harnesses (2026-11)
 
-**Method.** Read the source, not the marketing. Shallow clones via the `librarian` skill (`checkout.sh <repo> --path-only`), cached under `/home/ubuntu/.pi/agent-my-agent-setup/cache/checkouts/` — note the `PI_CODING_AGENT_DIR` suffix, not the `~/.pi/agent/cache/checkouts` the skill text implies.
+**Method.** Read the source, not the marketing. Shallow clones via the `librarian` skill (`checkout.sh <repo> --path-only`), cached under the resolved agent dir's `cache/checkouts/` (`PI_CODING_AGENT_DIR`; on a devcontainer that is the private volume, not `~/.pi/agent/cache/checkouts`).
 
 | Harness | Commit | Date | Language |
 |---|---|---|---|

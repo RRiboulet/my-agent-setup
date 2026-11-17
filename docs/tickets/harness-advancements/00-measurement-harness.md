@@ -6,9 +6,13 @@ Evidence: `docs/research/2026-11-harness-advancements.md#measurement-plan`
 
 ## What to build
 
-One command that records a baseline now, and the same command after each of the
+One command that records a baseline, and the same command after each of the
 five top tickets, so every claim in this investigation is checked rather than
-argued. Two kinds of measurement, because one does not fit all five:
+argued. There is an ordering constraint with ticket 01: the `bg` cells must be
+recorded **before** `bg` lands (Phase A, on a session without the tool), then
+re-recorded after it lands (Phase B). Otherwise the A/B credits `bg` with a
+baseline it already changed. Two kinds of measurement, because one does not fit
+all five:
 
 1. **Model runs** for the harness-level changes (`bg`, `subagent`, skills): 8
    fixed tasks × 3 models × 2 harness states, one run per cell. Repos:
@@ -31,15 +35,20 @@ A table is what the A/B consumes.
 Owns (create these; no other ticket edits them):
 
 - `tools/bench/` — the runner, the task definitions, the JSON schema, and a
-  `README.md` stating how to add a task and how to run one model only.
+  `README.md` stating how to add a task and how to run one model only. Other
+  tickets add **scenario data** through the documented entry point; they do not
+  edit the runner.
 - `tools/bench/tasks/*.md` — the 8 tasks, each with an explicit success check
   the runner or the operator can evaluate, and the repo it runs in.
-- `tools/bench/devc-latency.mjs` — a standalone microbenchmark, no model.
+- `tools/bench/devc-latency.mjs` plus its scenario data file — a standalone
+  microbenchmark, no model. Ticket 02 adds scenarios to the data file only.
 - `tools/bench/repo-explorer-trials.md` — the manual protocol and a results
   table, not an automated TUI driver.
-- `tools/bench/results/2026-11-17-baseline.json` — the baseline captured on
-  this branch before any change.
+- `tools/bench/results/2026-11-17-baseline-a.json` — Phase A, before `bg` lands.
+- `tools/bench/results/2026-11-17-baseline-b.json` — Phase B, after ticket 01.
 - the `/session-breakdown` table view and its height budget.
+- **Per-skill load recording**: which SKILL.md was read in each session, so
+  ticket 05's prune is decided by data rather than by the 33-load aggregate.
 
 Leaves for later: a dashboard, per-token cost accounting, CI integration.
 
@@ -49,9 +58,12 @@ Leaves for later: a dashboard, per-token cost accounting, CI integration.
 - [ ] The runner refuses to run with a dirty working tree unless `--allow-dirty`, because a harness state has to be identifiable.
 - [ ] Each task definition names its repo, its prompt, its success check, and the timeout; there are exactly 8.
 - [ ] `node tools/bench/devc-latency.mjs` prints p50/p90 per subcommand and writes JSON, with no model and no network beyond the local docker socket.
-- [ ] The baseline file covers all five tickets: `bg` (blocking time and sleep calls), `devc` (latency), `subagent` (status calls per run), repo-explorer (trial time/keystrokes), skills (loads and context tokens).
+- [ ] The Phase A baseline file covers all five tickets **before** `bg` lands: `bg` (blocking time and sleep calls, on a session where the tool is not loaded), `devc` (latency), `subagent` (status calls per run), repo-explorer (trial time/keystrokes), skills (per-skill loads and context tokens).
+- [ ] The Phase B file re-runs the `bg` cells after ticket 01 and names the commit it measured.
+- [ ] The runner records which SKILL.md files a session reads, per session, keyed by skill directory.
 - [ ] `/session-breakdown` at 80×24 shows its table, tabs, and key hints without scrolling; the range note names the selected range; a test renders at `rows: 24`, not only 40.
-- [ ] `hy4-flash-free` is added to `enabledModels` in the agent settings, not to the model catalogue, and the runner names the exact setting it changed.
+- [ ] `hy4-flash-free` is added to `enabledModels` in the agent settings, not to the model catalogue; the runner names the exact setting it changed.
+- [ ] This ticket owns its own test files; it does not edit the tests of tickets 03, 04, or 05, and they do not edit its runner.
 
 ## Validation
 

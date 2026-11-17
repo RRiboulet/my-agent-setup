@@ -1,6 +1,6 @@
 # 01: Land the `bg` stack that is already built
 
-**Blocked by:** None (can start immediately)
+**Blocked by:** 00 Phase A (the pre-`bg` baseline)
 **Status:** ready
 Evidence: `docs/research/2026-11-harness-advancements.md#1-land-bg-ticket-01`
 
@@ -12,13 +12,15 @@ is already implemented on the `bg-tool-start` branch, with eight sibling branche
 (`bg-docs`, `bg-kill`, `bg-logs`, `bg-notify`, `bg-repair`, `bg-replay-baseline`,
 `bg-rule-honest`, `bg-wait-action`) merged into it.
 
-This ticket is the review, rebase, and merge: get it onto `dev` before any other
-ticket takes a baseline, because the sleep-polling and blocking-test costs it
-removes are two of the three largest measured categories.
+This ticket is the review, rebase, and merge: get it onto `dev` **after ticket
+00 Phase A records the pre-`bg` baseline and before any other ticket takes its
+baseline**, because the sleep-polling and blocking-test costs it removes are two
+of the three largest measured categories.
 
-At the tip checked on 2026-11-17 (`facd92f`): **1,204 tests pass, 0 fail,
-199 s**. The branch has moved since and is actively owned by another worktree;
-re-run the suite at merge time rather than trusting this number.
+At the tip checked on 2026-11-17 (`a1d48c5`): **1,204 tests pass, 0 fail,
+199 s**. The branch has moved twice since (`203ae56`, `a3ebad6`) and is actively
+owned by another worktree; re-run the suite at merge time rather than trusting
+this number.
 
 ## Scope
 
