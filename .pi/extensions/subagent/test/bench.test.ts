@@ -81,3 +81,15 @@ test("every task definition loads and the ids are selectable", () => {
 test("renderPrompt substitutes known variables and leaves unknown ones alone", () => {
 	assert.equal(renderPrompt("{{gitHead}} {{nope}}", { gitHead: "abc" }), "abc {{nope}}");
 });
+
+import { skillsInToolCall } from "../../../../tools/bench/skills.mjs";
+
+test("skillsInToolCall reads a path and a bash command, and deduplicates", () => {
+	assert.deepEqual(skillsInToolCall({ name: "read", arguments: { path: "/repo/.pi/skills/worktree/SKILL.md" } }), ["worktree"]);
+	assert.deepEqual(
+		skillsInToolCall({ name: "bash", arguments: { command: "cat .pi/skills/commit/SKILL.md .pi/skills/commit/references/x.md" } }),
+		["commit"],
+	);
+	assert.deepEqual(skillsInToolCall({ name: "read", arguments: { path: "/repo/README.md" } }), []);
+	assert.deepEqual(skillsInToolCall({ name: "bash", arguments: { command: "ls .pi/skills" } }), []);
+});

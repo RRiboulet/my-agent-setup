@@ -23,6 +23,7 @@ import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { summarizeEvents, parseJsonl } from "./lib/events.mjs";
 import { loadTasks, selectTasks, renderPrompt } from "./lib/tasks.mjs";
+import { skillsInToolCall } from "./skills.mjs";
 
 const BENCH_DIR = import.meta.dirname;
 const DEFAULT_OUT = path.join(BENCH_DIR, "results");
@@ -246,6 +247,11 @@ async function runCell({ task, model, state, outRoot, force, allowDirty, timeout
     summary = summarizeEvents([]);
   }
 
+  const skillLoads = Object.create(null);
+  for (const call of summary.toolCalls) {
+    for (const name of skillsInToolCall(call)) skillLoads[name] = (skillLoads[name] ?? 0) + 1;
+  }
+
   const check = await runCheck({ ...(resolvedCheck ?? {}), answer: summary.finalAnswer }, { repo: task.repo, timeoutMs });
   const record = {
     schemaVersion: 1,
@@ -272,6 +278,7 @@ async function runCell({ task, model, state, outRoot, force, allowDirty, timeout
       turns: summary.turns,
       errors: summary.errors,
       aborted: summary.aborted,
+      skillLoads,
     },
     answer: summary.finalAnswer,
     check,

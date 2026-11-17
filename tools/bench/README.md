@@ -104,6 +104,17 @@ assumed.
 
 Ticket 02 adds `rebuild --if-stale` to the scenario file once the flag exists.
 
+## Per-skill loads
+
+```bash
+node tools/bench/skills.mjs --all --since 2026-10-31
+```
+
+Scans every `~/.pi/agent*` session for a `SKILL.md` read (a `read` path or a
+bash `cat`/`sed` mention), grouped by skill and by session. This is the table
+ticket 05's prune is decided by. Every model cell also records
+`metrics.skillLoads` for its own run.
+
 ## The manual repo-explorer trials
 
 TUI interaction cannot be driven by a model or a headless script honestly. See
