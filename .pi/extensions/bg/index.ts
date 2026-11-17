@@ -24,6 +24,13 @@
 // `logs` is declared in the schema from the start but answers with a clean "not
 // implemented yet" error: a model that has learned the tool should get a sentence
 // it can act on, not a missing-action failure.
+//
+// `wait` (wait.ts) is the action that makes the tool safe for a caller that may
+// not outlive the job: it blocks the call — not the session — until the job
+// settles, which keeps this process and its watcher alive for exactly as long as
+// the job needs. That is why it alone needs something from the notifier: a settle
+// it has already reported must not be announced again a second later, so this
+// file wires the notifier's `suppress`/`release` into it (see the dispatch entry).
 
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -45,17 +52,25 @@ import {
 	type BgJobRecord,
 } from "./store.ts";
 import { createJobWatcher } from "./watch.ts";
+import { createWaitJob } from "./wait.ts";
 
 const BgParams = Type.Object({
-	action: StringEnum(["start", "status", "logs", "kill"] as const, {
-		description: "start a command in the background, or inspect one: status (list or one job), logs, kill",
+	action: StringEnum(["start", "status", "logs", "kill", "wait"] as const, {
+		description:
+			"start a command in the background, or inspect one: status (list or one job), logs, kill, wait (block until it settles)",
 	}),
-	id: Type.Optional(Type.String({ description: "The job id from `start` (status/logs/kill). Omit it on `status` to list this session's jobs." })),
+	id: Type.Optional(Type.String({ description: "The job id from `start` (status/logs/kill/wait). Omit it on `status` to list this session's jobs." })),
 	command: Type.Optional(Type.String({ description: "The command to run in the background (start). Run by the same shell as bash, in the session's cwd." })),
+	timeoutMs: Type.Optional(
+		Type.Number({
+			description:
+				"How long `wait` blocks before reporting the job as still running (default 300000 = 5 minutes, maximum 600000 = 10 minutes). The job is not killed by a timeout.",
+		}),
+	),
 });
 
-type BgParamsType = { action: string; id?: string; command?: string };
-type BgAction = "start" | "status" | "logs" | "kill";
+type BgParamsType = { action: string; id?: string; command?: string; timeoutMs?: number };
+type BgAction = "start" | "status" | "logs" | "kill" | "wait";
 
 interface BgToolResult {
 	content: { type: "text"; text: string }[];
@@ -288,6 +303,18 @@ export default function bgExtension(pi: ExtensionAPI): void {
 		status: statusJobs,
 		logs: readLogsAction, // ticket 03
 		kill: createKillJob(watcher), // ticket 04
+		// Blocks this call until the job settles (wait.ts). The notifier's
+		// suppress/release pair is wired here because this is the file that already
+		// hands the watcher to the notifier: a wait that reports a settle must take
+		// that settle out of the notification window, and index.ts is the only place
+		// that can see both sides.
+		wait: createWaitJob({
+			watcher,
+			suppress: (id) => notifier.suppress(id),
+			release: (id) => notifier.release(id),
+			jobDetails,
+			formatJobDetail,
+		}),
 	};
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -325,9 +352,10 @@ export default function bgExtension(pi: ExtensionAPI): void {
 		name: "bg",
 		label: "Background jobs",
 		description: [
-			"Run a command in the background and inspect it later (start, status, logs, kill).",
+			"Run a command in the background and inspect it later (start, status, logs, kill, wait).",
 			"`start` returns as soon as the command is running: a job id, the log path, and the command. The job is detached in its own process group, writes combined stdout+stderr to its own log, and outlives the turn.",
 			"`status` lists this session's jobs — state, exit code, elapsed, first line of the command — or reports one by id.",
+			"`wait` blocks until one job settles (or its timeout expires) and reports the record with its log tail; use it when a caller may not outlive the job.",
 			"Use it for anything slow enough to block the session: a full test suite, a container rebuild, a dev-server probe. Then keep working and check `status` instead of sleeping.",
 		].join(" "),
 		parameters: BgParams,
