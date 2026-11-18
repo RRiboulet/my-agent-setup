@@ -331,13 +331,28 @@ commissioned, hand the trail to that one reviewer alongside the diff.
 
 ```bash
 bash .pi/extensions/subagent/test/setup-deps.sh              # once: link pi's packages
-node --test .pi/extensions/subagent/test/*.test.ts
+node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts
 (cd .pi/extensions/opencode-go-provider && node --test)  # provider package tests (separate tree)
 ```
 
 Run it with `bash` (or `sh`), not as `./setup-deps.sh` — see "Line endings"
 below. Node runs the TypeScript directly; there is no build step. See
 `.pi/extensions/subagent/test/README.md` for what is and is not covered.
+
+**`--test-concurrency=8` is not optional.** Node defaults the file concurrency to
+`availableParallelism() - 1`, which is **1** on this 2-core host, so the
+"parallel" runner was running one file at a time: 184 s of wall clock for 67 s of
+CPU (36 %), which says the suite is wait-bound, not CPU-bound. Measured
+2026-11-16: 119-132 s with the flag at 8, and no further gain at 16 (132 s), so
+the number is fixed rather than derived from `nproc`.
+
+Raising it also exposed two tests that had only ever passed because nothing ran
+beside them, both fixed here: a `btw` viewer test that waited 8 s for a spawned
+`node` process to render (now 30 s), and a widget ticker that needed two 20 ms
+ticks inside 120 ms (now 500 ms). Both now assert the behaviour rather than the
+machine, which is the rule `helpers.ts` already states for its own poll bound. If
+you raise the concurrency and see a red run, suspect a missing or tight wait
+before you suspect the code.
 
 #### Typechecking: deliberately none
 

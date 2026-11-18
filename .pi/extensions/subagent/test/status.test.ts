@@ -96,7 +96,10 @@ test("startRepeatingRefresh fires and, crucially, can be stopped", async () => {
 	// Pinned here on its own so the mechanism cannot rot behind the integration.
 	let ticks = 0;
 	const stop = startRepeatingRefresh(() => (ticks += 1), 20);
-	await new Promise((resolve) => setTimeout(resolve, 120));
+	// 500 ms, not 120: the assertion is "fires repeatedly", and on a loaded box a
+	// starved event loop missed two 20 ms ticks inside 120 ms. Same rule as the
+	// generous bounds in helpers.ts — assert the behaviour, not the machine.
+	await new Promise((resolve) => setTimeout(resolve, 500));
 	assert.ok(ticks >= 2, `expected repeated ticks, got ${ticks}`);
 	stop();
 	const settled = ticks;

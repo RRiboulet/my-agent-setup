@@ -4,6 +4,24 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Maintenance:
+
+- **The suite runs its files concurrently, which is what it always claimed to do.**
+  Node defaults `--test-concurrency` to `availableParallelism() - 1`, so on this
+  2-core host the runner was running **one file at a time**: 184 s of wall clock
+  for 67 s of CPU (36 %), which says the suite is wait-bound rather than
+  CPU-bound. The documented command now passes `--test-concurrency=8`: measured
+  2026-11-16 at 119-132 s, with no further gain at 16 (132 s), so the number is
+  fixed rather than derived from `nproc`. It is documented in `AGENTS.md` with
+  the reason, because a bare command loses the flag on the next copy-paste.
+
+  Parallelism also found two tests that had only ever passed because nothing ran
+  beside them, both fixed here rather than papered over: the `btw` viewer test
+  waited 8 s for a spawned node process to render (now 30 s), and a widget ticker
+  needed two 20 ms ticks inside 120 ms (now 500 ms). Both now assert behaviour
+  rather than the machine, which is the rule `helpers.ts` already states for its
+  own poll bound.
+
 ## v1.14.0 — 2026-11-16
 
 Added:
