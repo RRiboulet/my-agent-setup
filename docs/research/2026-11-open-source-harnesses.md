@@ -57,6 +57,17 @@ COMPATIBILITY-BREAKING CHANGES" (`README.md:7,13`).
 as a pi *convention*: hard rules in `tool_call` that return only `{block:true}` or `undefined` — pi's chain has
 no allow/deny lattice, so the discipline is "deny-only handlers, loaded last".
 
+**Measured on this host, 2026-11-18: (1) is withdrawn.** Its key is
+`(tool, canonical-args)` over every tool, so a bash-only count is not enough:
+measured that way, within one user-message segment, a streak of 3 fires in **9 of
+124 sessions** — but every fire is `subagent_status` polling (4 sessions) or a
+`codemode` call wrapping the same poll (5), 698 repeated calls, worst 640 on one
+run id. That is the traffic `subagent_wait` (#163) replaced, so the reminder
+would nudge a loop the harness has already removed; after #163 it has no workload
+left. The Kimi ladder (the other Top 3, below) was withdrawn on the same
+measurement. See
+[`2026-11-harness-advancements.md#correction-candidate-07-was-measured-and-withdrawn-2026-11-18`](2026-11-harness-advancements.md#correction-candidate-07-was-measured-and-withdrawn-2026-11-18).
+
 ---
 
 ## 2. Qwen Code
@@ -162,12 +173,12 @@ risk in pi 1.5.2.
 
 | # | Mechanism | Copy from | pi mapping | V | C | V/C |
 |---|---|---|---|---|---|---|
-| 1 | Repeat-call reminder | `guard/repeat-tool-reminder/src/index.ts:apply()` (DS) | `pi.on("tool_result")` + `pi.sendMessage(...,{deliverAs:"steer"})` | 9 | 1 | **9.0** |
+| 1 | Repeat-call reminder (**withdrawn 2026-11-18**; fires only on #163's polling) | `guard/repeat-tool-reminder/src/index.ts:apply()` (DS) | `pi.on("tool_result")` + `pi.sendMessage(...,{deliverAs:"steer"})` | 9 | 1 | **9.0** |
 | 2 | Head/marker/tail pruner | `compaction-tool-result-pruner/src/index.ts:pruneContent()` (DS) | `tool_result` patching `{content}` | 6 | 1 | **6.0** |
 | 3 | `intent` on every call | `jcode-tool-core/src/lib.rs:48` (KC) | bash override, `renderCall` | 5 | 1 | **5.0** |
 | 4 | Deny-only guard layer | `contracts.ts:402 ToolGuard` (DS) | convention: deny-only `tool_call` handlers, loaded last | 5 | 1 | **5.0** |
 | 5 | Clear old tool results | `microcompact.ts:microcompactHistory()` (QW) | `pi.on("context")` → `{messages}` | 9 | 2 | **4.5** |
-| 5a | Repeat-breaker ladder (build instead of #1) | `toolDedupe/toolDedupeService.ts:390-430` (KM) | `tool_result` + `sendMessage({deliverAs:"steer"})` + `terminate` | 9 | 2 | **4.5** |
+| 5a | Repeat-breaker ladder (**withdrawn 2026-11-18**; was: build instead of #1) | `toolDedupe/toolDedupeService.ts:390-430` (KM) | `tool_result` + `sendMessage({deliverAs:"steer"})` + `terminate` | 9 | 2 | **4.5** |
 | 6 | Withhold + price oversized results | `tool/mod.rs:1184 guard_context_overflow()` (KC) | `tool_result` + `ctx.getContextUsage()` | 8 | 2 | **4.0** |
 | 6a | Compaction handoff brief | `fullCompaction/compaction-instruction.md:6-45` (KM) | `pi.on("session_before_compact")` → `{compaction}` | 7 | 2 | **3.5** |
 | 6b | Session-scope approval rules w/ arg patterns | `policies/session-approval-history.ts:12-31` (KM) | `tool_call` + `ctx.ui.select` + rule match | 6 | 2 | **3.0** |
@@ -178,7 +189,8 @@ risk in pi 1.5.2.
 | 11 | Two-stage classifier for bash | `permissions/classifier.ts:6` (QW) | `getModelOfType(...)`/`classify()` in `tool_call` | 5 | 4 | **1.25** |
 | 12 | Background jobs + wake notice | `jobs/tool-jobs` (DS) | 3 `registerTool`s + `sendMessage({triggerTurn:true})` | 6 | 5 | **1.2** |
 
-Build 1, 2, 5, 6 first: four standalone extensions, none touches pi core.
+Build 2, 5 and 6 first: three standalone extensions, none touches pi core. (1 is
+withdrawn on this workload's trigger rate — see the notes above; so is 5a.)
 
 ## Already in pi 1.5.2 — do not port
 
@@ -231,6 +243,18 @@ containing `$`, backtick, `*`, `?`, `[`, `~` degrades to `unanalyzable` → ask 
 
 **Philosophy.** Product: "The Starting Point for Next-Gen Agents" (`docs/en/index.md:5`), "Single-binary distribution", "Blazing-fast startup. The TUI is ready in milliseconds", "Purpose-built TUI … optimized end to end for long, focused agent sessions" (`README.md:55-57`). Engineering, from the repo's own agent guide: "Think from first principles… Treat code, not documentation, as the source of truth" (`AGENTS.md:9-10`) — which is why behaviour is configured through `config.toml` + DI rather than a public extension SDK. Half-built work is flag-gated off by default under `KIMI_CODE_EXPERIMENTAL_*` (`AGENTS.md:66`).
 
-**Top 3** (rows 5a/6a/6b in the ranking table). (1) **Repeat-breaker ladder** — a `(tool, canonical-args)` streak appends an in-band `<system-reminder>` to the result at 3 / 5 / 8 ("state what new information you expect", then "pick one: falsification test, missing input, or conclude", then "write your final response now, no further tool calls"), and at 12 injects that text as a user message and stops the turn as `repeat_breaker` (`agent/toolDedupe/toolDedupeService.ts:36-68,390-430`, `agent/toolDedupe/toolDedupe.ts:18`) → `pi.on("tool_result")` returning patched `{content}` + `pi.sendMessage({customType:"repeat-breaker"},{deliverAs:"steer"})` for the escalation, while the stop is `pi.on("tool_call")` → `{block:true, terminate:true}` (`extensions.md:987,1627`). Build this *instead of* #1. (2) **Compaction as a handoff brief** — port `compaction-instruction.md` wholesale and run the summary in `pi.on("session_before_compact")`, which may return `{compaction:{summary,firstKeptEntryId,tokensBefore}}` (`extensions.md:534-562`); the prompt, not the code, is the asset. (3) **Session-scope approval rules with argument patterns** — each execution carries an `approvalRule` + `matchesRule`, an approval may answer `{scope:"session"}`, and the resulting `session-runtime` rule is replayed *ahead of* the ask and inherited by subagents (`agent/permissionPolicy/policies/session-approval-history.ts:12-31`, `agent/permissionRules/permissionRules.ts:6-22`, `docs/en/customization/agents.md:48`) → `tool_call` + `ctx.ui.select` (once/session/deny) + a literal path pattern, tool-name-only for swarm-like tools (`docs/en/reference/tools.md:100`). Ranked out: `NotifyUser` progress panel, cron jitter/coalescing (`tools.md:149`), goal budgets that reject *all* tool calls on exhaustion (`features/goal/goalService.ts:26-36`).
+**Top 3** (rows 5a/6a/6b in the ranking table). **Do not build (1): it was measured against this workload and withdrawn — see the note at the end of this section.** (1) **Repeat-breaker ladder** — a `(tool, canonical-args)` streak appends an in-band `<system-reminder>` to the result at 3 / 5 / 8 ("state what new information you expect", then "pick one: falsification test, missing input, or conclude", then "write your final response now, no further tool calls"), and at 12 injects that text as a user message and stops the turn as `repeat_breaker` (`agent/toolDedupe/toolDedupeService.ts:36-68,390-430`, `agent/toolDedupe/toolDedupe.ts:18`) → `pi.on("tool_result")` returning patched `{content}` + `pi.sendMessage({customType:"repeat-breaker"},{deliverAs:"steer"})` for the escalation, while the stop is `pi.on("tool_call")` → `{block:true, terminate:true}` (`extensions.md:987,1627`). (2) **Compaction as a handoff brief** — port `compaction-instruction.md` wholesale and run the summary in `pi.on("session_before_compact")`, which may return `{compaction:{summary,firstKeptEntryId,tokensBefore}}` (`extensions.md:534-562`); the prompt, not the code, is the asset. (3) **Session-scope approval rules with argument patterns** — each execution carries an `approvalRule` + `matchesRule`, an approval may answer `{scope:"session"}`, and the resulting `session-runtime` rule is replayed *ahead of* the ask and inherited by subagents (`agent/permissionPolicy/policies/session-approval-history.ts:12-31`, `agent/permissionRules/permissionRules.ts:6-22`, `docs/en/customization/agents.md:48`) → `tool_call` + `ctx.ui.select` (once/session/deny) + a literal path pattern, tool-name-only for swarm-like tools (`docs/en/reference/tools.md:100`). Ranked out: `NotifyUser` progress panel, cron jitter/coalescing (`tools.md:149`), goal budgets that reject *all* tool calls on exhaustion (`features/goal/goalService.ts:26-36`).
+
+**Measured on this host, 2026-11-18: (1) is withdrawn.** The reminder was
+ranked on this harness's own workload, and the trigger does not occur there: a
+consecutive **bash** streak of 3 fires in **0 of 124 sessions**
+over the frozen window (host dirs plus the devcontainer's private volume);
+across all tools it fires in 9, and every one is `subagent_status`/`codemode`
+polling that #163 removed. An identical-output streak of 3 fires in 1, for 5 s. The ranking's "14× `docker ps`"
+was 18 calls containing `docker ps`, 18 distinct commands. See
+[`2026-11-harness-advancements.md#correction-candidate-07-was-measured-and-withdrawn-2026-11-18`](2026-11-harness-advancements.md#correction-candidate-07-was-measured-and-withdrawn-2026-11-18)
+and `tickets/harness-advancements/07-repeat-breaker.md`. Row 5a still ranks
+the mechanism fairly; the reason not to build it is this workload, not the
+source.
 
 **Unverified here.** Read-before-write staleness is documented (`docs/en/reference/tools.md:26,28`) but I found no tracker enforcing it in the v2 tools; `minidb` (embedded JSON store + WAL search index) and Tower's comms protocol were read at package/README level only; `*Goal` gating and the `select_tools` catalog rendering were traced by call site, not exercised.

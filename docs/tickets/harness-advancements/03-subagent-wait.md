@@ -1,7 +1,8 @@
-# 03: A subagent run can be waited on, instead of polled
+# 03: A subagent run can be waited on, instead of polled — **landed 2026-11-18 (#163)**
 
 **Blocked by:** 00 (baseline records status calls per run)
-**Status:** ready
+**Status:** **landed** (#163). `subagent_wait` ships in
+`.pi/extensions/subagent/`; `subagent-wait.test.ts` pins the acceptance below.
 Evidence: `docs/research/2026-11-harness-advancements.md#3-subagent-wait--collect-ticket-03`
 
 ## What to build
@@ -45,12 +46,14 @@ Leaves for later: inter-agent messaging, a task board, persistent teams.
 
 ## Acceptance criteria
 
-- [ ] A scripted three-child fan-out (the test harness's fake model, not a live model) records exactly 3 `subagent` starts, 1 `subagent_wait`, and **zero** `subagent_status` calls.
-- [ ] `subagent_wait` returns within 1 s of the child's settle event; a 30 s child does not return early; a `timeoutMs` of 1 s returns the current record with pane output.
-- [ ] A queued run returns `queued` at timeout; a failed-to-start, cancelled, or dead run is returned as terminal and never waited on forever.
-- [ ] `subagent_status` still answers "what is it doing now" and its tests are unchanged.
-- [ ] The tool description and the skill text no longer tell the model to poll; a test asserts the description mentions `subagent_wait`.
-- [ ] No regression in the existing lifecycle, interrupt, resume, or result tests.
+All met in `subagent-wait.test.ts` (#163):
+
+- [x] A scripted three-child fan-out (the test harness's fake model, not a live model) records exactly 3 `subagent` starts, 1 `subagent_wait`, and **zero** `subagent_status` calls.
+- [x] `subagent_wait` returns within 1 s of the child's settle event; a 30 s child does not return early; a `timeoutMs` of 1 s returns the current record with pane output.
+- [x] A queued run returns `queued` at timeout; a failed-to-start, cancelled, or dead run is returned as terminal and never waited on forever.
+- [x] `subagent_status` still answers "what is it doing now" and its tests are unchanged.
+- [x] The tool description and the skill text no longer tell the model to poll; a test asserts the description mentions `subagent_wait`.
+- [x] No regression in the existing lifecycle, interrupt, resume, or result tests.
 
 ## Validation
 

@@ -1,7 +1,9 @@
 # 00: A measurement harness the five changes can be judged by
 
 **Blocked by:** None (can start immediately)
-**Status:** ready
+**Status:** **in progress** — the harness half landed in #162; the open slice is
+the `/session-breakdown` table described in Scope. The body already reflects
+that split.
 Evidence: `docs/research/2026-11-harness-advancements.md#measurement-plan`
 
 ## What to build
