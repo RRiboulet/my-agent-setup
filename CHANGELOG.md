@@ -25,7 +25,11 @@ Added:
   watcher tick. The tool descriptions and `AGENTS.md` now teach "start, then
   wait once" — `subagent_status` keeps the live what-is-it-doing-now question —
   and `subagent-wait.test.ts` pins the acceptance: a scripted three-child
-  fan-out records exactly 3 starts, 1 wait and zero status calls.
+  fan-out records exactly 3 starts, 1 wait and zero status calls. A fan-out
+  wait returns each settled run's output but not its pane — a dead TUI frame
+  full of spinner remnants once the child is gone — so three children no longer
+  add three panes to the parent's context; only a still-running or interrupted
+  run carries a pane, the same rule the status list uses.
 
 Maintenance:
 

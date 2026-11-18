@@ -213,6 +213,24 @@ async function waitForRunStatus(h: WaitHarness, id: string, status: string): Pro
 	assert.fail(`run never reached "${status}"; last record=${JSON.stringify(last)}; ${probes} capture-pane calls`);
 }
 
+/**
+ * Wait until the watcher has captured a pane for every named run.
+ *
+ * A run that settles on the FIRST watcher tick has no pane yet (the tick reads
+ * result.json before capture-pane), so a settle-before-pane test would pass
+ * without exercising the pane at all. Real children run for seconds; this makes
+ * the unit case match that: pane first, then result.
+ */
+async function waitForPanes(h: WaitHarness, ids: string[]): Promise<void> {
+	const deadline = Date.now() + 30_000;
+	while (Date.now() < deadline) {
+		const runs = await h.readRuns();
+		if (ids.every((id) => runs.find((run) => run.id === id)?.pane)) return;
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
+	assert.fail(`the watcher never captured a pane for ${ids.join(", ")}`);
+}
+
 test("the scripted three-child fan-out: 3 starts, 1 wait, zero status calls", async () => {
 	// The acceptance the ticket scripts: start three children, then wait ONCE for
 	// all of them. No subagent_status call anywhere — that is the 17-per-run poll
@@ -222,6 +240,10 @@ test("the scripted three-child fan-out: 3 starts, 1 wait, zero status calls", as
 		const second = (await h.call("subagent", { task: "second child" })).details as unknown as RunRecord;
 		const third = (await h.call("subagent", { task: "third child" })).details as unknown as RunRecord;
 
+		// Let the watcher capture each pane FIRST, as it would for a real child
+		// that runs for a while. Otherwise the runs settle on their first tick,
+		// before any pane exists, and the assertion below proves nothing.
+		await waitForPanes(h, [first.id, second.id, third.id]);
 		const waiting = h.call("subagent_wait", { ids: [first.id, second.id, third.id], timeoutMs: 30_000 });
 		await h.writeResult(first, completedResult("answer one"));
 		await h.writeResult(second, completedResult("answer two"));
@@ -241,6 +263,10 @@ test("the scripted three-child fan-out: 3 starts, 1 wait, zero status calls", as
 		assert.match(waited.text, /answer two/);
 		assert.match(waited.text, /answer three/);
 		assert.match(waited.text, /All 3 run\(s\) settled/);
+		// A settled run's pane is a dead TUI frame (spinner remnants included), not
+		// a result: the fan-out wait must not carry one per run. The fake pane text
+		// is only reachable through the pane.
+		assert.doesNotMatch(waited.text, /child working/, "settled runs carry no pane");
 
 		// The count IS the acceptance: 3 starts, 1 wait, zero polls.
 		assert.equal(h.countCalls("subagent"), 3);
@@ -369,6 +395,7 @@ test("with ids, a timeout returns every settled run plus the still-running ones"
 	await withWaitHarness(undefined, async (h) => {
 		const settledRun = (await h.call("subagent", { task: "settles" })).details as unknown as RunRecord;
 		const runningRun = (await h.call("subagent", { task: "keeps running" })).details as unknown as RunRecord;
+		await waitForPanes(h, [settledRun.id, runningRun.id]);
 		await h.writeResult(settledRun, completedResult("settled answer"));
 
 		const waited = await h.call("subagent_wait", { ids: [settledRun.id, runningRun.id], timeoutMs: 1_500 });
@@ -379,6 +406,12 @@ test("with ids, a timeout returns every settled run plus the still-running ones"
 		assert.match(waited.text, /1 still running/);
 		assert.match(waited.text, /settled answer/, "the settled run carries its output");
 		assert.match(waited.text, /running/, "the still-running run is reported as running");
+		// Only the still-running run needs its pane; the settled run's is dead.
+		assert.equal(
+			(waited.text.match(/child working/g) ?? []).length,
+			1,
+			"exactly one pane in the fan-out result: the still-running run's",
+		);
 	});
 });
 
