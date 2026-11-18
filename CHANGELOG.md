@@ -6,6 +6,29 @@ Versions are git tags. This repository is not published to npm.
 
 Maintenance:
 
+- **`lifecycle.test.ts` is nine topic files now, so its waits overlap and the
+  suite's 8-lane floor is no longer dominated by one file.** It was 2,473 lines
+  with 89 tests, and it cost 97.3 s of wall clock on its own while using 4% CPU:
+  71 `waitFor` calls and 20 fixed sleeps, all orbiting the extension's
+  `POLL_INTERVAL_MS = 500`. Node runs test FILES concurrently but tests inside a
+  file strictly sequentially, so none of those waits could overlap with
+  anything, and because that one file took 97.3 s it alone set the floor for the
+  whole suite at `--test-concurrency=8` — every other file was ≤ 16.2 s. Split
+  by behaviour (launch/queueing, result finalisation, failure detection, the
+  activity snapshot and its stall rule, interrupt, shutdown/reload, the widget,
+  handoff/resume, and tool exposure) the waits run in parallel: the whole suite
+  went from 117.2-121.6 s to 46.3-53.9 s at `--test-concurrency=8` on this
+  machine, and the 8-lane floor the shape tool computes from a serial pass went
+  from 98.8 s to 24.2 s (the shape tool's serial pass over each tree; the
+  baseline was an untouched `origin/dev` worktree). The heaviest lifecycle file
+  is 21.3 s. All 89 tests moved unchanged — the count is identical, no assertion
+  was relaxed, and each new file passes on its own — with the fake
+  `ExtensionAPI`, its waits and its fixtures in `lifecycle-harness.ts`. Product
+  code and `POLL_INTERVAL_MS` are untouched: those intervals are the behaviour
+  under test. Worth knowing: the denser suite is what surfaced the
+  two tight bounds in the entry below — the `btw` viewer's 8 s wait for a
+  spawned `node`, and the widget's 20 ms ticker needing two ticks in 120 ms.
+  Both are widened there; this split did not cause either.
 - **The suite runs its files concurrently, which is what it always claimed to do.**
   Node defaults `--test-concurrency` to `availableParallelism() - 1`, so on this
   2-core host the runner was running **one file at a time**: 184 s of wall clock

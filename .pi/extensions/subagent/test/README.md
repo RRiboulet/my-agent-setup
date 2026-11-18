@@ -20,13 +20,13 @@ node --test .pi/extensions/subagent/test/*.test.ts
 No `--test-force-exit` is needed: `session_shutdown` sets a `shuttingDown` flag
 that stops the watcher from re-arming its poll timer (local patch 10 in
 `index.ts`), so the suite drains its event loop and exits on its own.
-`lifecycle.test.ts` pins that behaviour with a regression test that asserts no
-further `pi.exec` calls happen after shutdown.
+`lifecycle-shutdown.test.ts` pins that behaviour with a regression test that
+asserts no further `pi.exec` calls happen after shutdown.
 
 The suite is safe to run from inside a pi subagent child: `createHarness` clears
 `PI_TMUX_SUBAGENT_CHILD` / `PI_TMUX_SUBAGENT_RESULT`, which the extension factory
-otherwise branches on, and `lifecycle.test.ts` guards that with a regression
-test.
+otherwise branches on, and `lifecycle-launch.test.ts` guards that with a
+regression test.
 
 ## Layout
 
@@ -49,7 +49,16 @@ test.
 | `btw.test.ts` | the `/btw` command wiring: reset and viewer start, the popup ladder/argv/title (the question comes from the answer file's header on launch and reattach; multi-line is joined, a body blockquote is ignored, and `#`/escape sequences are cleaned) and its fallbacks (vanished pane, no client, failed bind), reattach with and without an answer, restarting a dead viewer, the answer/usage/error footers, the guard ladder, replace ordering, the failed-kill replace that keeps the old answer, the `blockImages` wiring, multi-line question headers, and the factory's prompt/reattach/empty-submission/non-TUI/starting paths |
 | `btw-lifecycle.test.ts` | the owner-pid lifecycle: the start and shutdown reason tables, the live-owner guard on both paths, missing and malformed owner files, kill→delete ordering, the failed-kill retry that keeps the answer and socket, the cross-session sweep, stray files in the root, and idempotency |
 | `btw-request.test.ts` | the sibling `.pi/extensions/btw/request.ts`: the projection→`convertToLlm` prefix with no system/tools override, the deliberate absence of `tool_choice`, the main-session routing header, `reasoning`/`sessionId` (including `off` → dropped), the `blockImages` mirror, the sanitizer, and the stream / tool-call-continuation outcomes; plus the resolved thinking level + thinking budgets, the telemetry attribution headers, the ignored-tool-call accumulation across the continuation, the zero-cache warning threshold, and the drift guard against pi's mirrored internals |
-| `lifecycle.test.ts` | launch, concurrency queueing, finalisation, failure detection, cancel, status, clean, shutdown stops the watcher, turn-level interrupt, the `result.json` protocol in situ (an unusable read retried across ticks with a later good result still winning, an unusable result failing the run once and stopping the watcher, a newer protocol version with a compatible shape finalizing, and the dead-child and cancel-mid-tick branches), the live widget (install/refresh/clear), and the widget→panel wiring (a click binds Escape then launches the popup detached, through a fake launcher) |
+| `lifecycle-launch.test.ts` | the front of the lifecycle: launch, task/cwd validation, concurrency queueing, `subagent_cancel`, `subagent_status` (list, one run, the pane budget, the withheld-output note), `subagent_clean`, and the two harness self-checks (the fake exercises the parent branch even inside a child; a socket path containing `-V` is not read as the version probe) |
+| `lifecycle-result.test.ts` | result finalisation: a child result completing or failing a run, the notification staying inert, a result caught mid-write, a newer protocol version with a compatible shape, the late-result paths (as the session disappears, during the pane probe), and the usage a run reports when it is cancelled or fails at the tmux layer |
+| `lifecycle-failures.test.ts` | failure detection: a dead pane, an unclassifiable tmux failure tolerated three times, and the `result.json` shapes the parent must refuse in situ (bad JSON failing the run once and stopping the watcher, wrong shape on a newer protocol version, missing output, unknown status, unreadable path, non-string field, missing `finishedAt`, a dead child's unusable result, and the cancel-mid-settle branch) |
+| `lifecycle-activity.test.ts` | liveness (the child's activity snapshot): the status line, monotonicity, the rewrite dedupe, wrong-id and malformed snapshots, the real child branch's done phase, and the stall rule the widget applies to a silent one (thresholds, a queued run never being stalled) |
+| `lifecycle-interrupt.test.ts` | turn-level interrupt: Escape delivery and its absence, confirmation from the child's marker, the watcher-wins and superseded races, the stale-marker and double-escape guards, the interrupted status keeping its concurrency slot, a later result still finalizing, and `subagent_cancel` releasing it |
+| `lifecycle-shutdown.test.ts` | shutdown and reload: the watcher and the widget ticker stopping, the flag being per load, state persisted without killing children, an interrupted run surviving a reload, and kill-on-shutdown recording usage |
+| `lifecycle-widget.test.ts` | the live widget: lazy install above the editor and TUI-only, the row following the child, an interrupted run never reading as active, the ticker refreshing when the watcher cannot, clear-on-last-finish, interrupted rows sorting last, elapsed time measured from the start, and the widget→panel wiring (a click binds Escape then launches the popup detached, through a fake launcher) |
+| `lifecycle-handoff.test.ts` | context handoff and resume: fork inheriting only the live branch, lineage linking without copying, one transcript per resume (including two fired in parallel), resume refusing a live child, and `subagent_clean` retaining a run dir that still owns a live run's transcript |
+| `lifecycle-exposure.test.ts` | lazy tool exposure (local patch 15): declared when pi cannot reach them on demand, hidden behind codemode/`tool_search` but never `subagent`, re-checked on `/tools` changes, the note only when hidden, one registration per load, and an unbound `pi` leaving everything declared |
+| `lifecycle-harness.ts` | the fake `ExtensionAPI` the `lifecycle-*.test.ts` files drive, plus their waits (`waitForRunStatus`, `assertWatcherStopped`, `assertUnusableResultFailsRun`) and fixtures (activity snapshots, the live-branch session manager, `completeRun`) |
 | `interrupt.test.ts` | the `interrupt.json` marker (validation, reading, writing), the child reporter's abort path, and the parent lifecycle of an interrupted run |
 | `session-breakdown.test.ts` | the vendored `/session-breakdown`: aggregation over fixture session trees, its four `LOCAL PATCH` hunks — agent-dir roots, inherited-prefix exclusion, the footer note (including that it reaches both the TUI and the non-interactive path), and the `__test__` surface — the upstream behaviours re-vendored on 2026-10-05 (faux/test-provider sessions skipped, only models that produced a message counted, cost/session + provider grouping), which ship untested upstream, and the four metric tables' exact layout plus both palette choosers (pinned against the pre-2026-10-08-dedup output) |
 | `review.test.ts` | the vendored `/review`: strict-ESM load guard, the `__test__` surface, arg parsing (`tokenizeArgs`/`parseArgs`/`parseReviewPaths`/`parsePrReference`), and the verdict/findings rubric (`hasNeedsAttentionVerdict`, `hasBlockingReviewFindings`, code-fence skipping, verdict fall-through) |
@@ -65,10 +74,23 @@ test.
 | `tmux-config.test.ts` | the truecolor claims in `.devcontainer/shell/tmux.conf` and the two skills that describe them: that the falsified `terminal-features` sentence stays gone, that `setenv -g` is named as what flips pi, and that both skills say a config edit needs a server restart and what that restart kills |
 | `helpers.ts` | env/temp-dir isolation and polling helpers |
 
-`lifecycle.test.ts` drives the real extension factory with a fake
+The `lifecycle-*.test.ts` files drive the real extension factory with a fake
 `ExtensionAPI`; all tmux access goes through `pi.exec`, so no tmux server or
 child pi process is required. `PI_CODING_AGENT_DIR` is redirected to a temp
 directory, so the tests never touch the real `~/.pi/agent` tree.
+
+They are split by topic on purpose, and should stay split. Node runs test FILES
+in parallel but tests inside one file strictly sequentially, and this behaviour
+is mostly waiting: 89 tests, 71 `waitFor` calls, 20 fixed sleeps, ~96 s of wall
+clock at 4% CPU while they were one file. That file alone set the 8-lane floor
+for the whole suite. Split, the waits overlap; the heaviest of these files is
+~20 s, and each passes alone. Merging two of them back together buys nothing
+and costs the parallelism again.
+
+`lifecycle-harness.ts` is the shared half: the fake `pi`, the waits that report
+WHY a run never reached a status, and the fixtures. A per-test harness is a
+fresh object inside a fresh temp agent dir, so these files are safe to run
+concurrently with each other and with the rest of the suite.
 
 ## Not covered here
 
@@ -126,7 +148,7 @@ that was never set.
 
 ## Tool exposure
 
-`lifecycle.test.ts` covers local patch 15: the five management tools are
+`lifecycle-exposure.test.ts` covers local patch 15: the five management tools are
 registered with `exposure: "codemode"` when the harness reports
 `codemode`/`tool_search` in the ACTIVE set, and plain otherwise; `subagent` is
 never hidden; `/tools` switching discovery off mid-session re-registers them direct
@@ -155,7 +177,7 @@ such a directory EVERY tmux call was answered with `tmux 3.3a`. The `pane_dead`
 probe never read `1`, the probe hook never fired, and the 30s bound expired.
 About 1.6% of harness dirs are affected — frequent enough to appear across a
 session, rare enough to pass alone and on a rerun. The mock now matches the
-version call on its argv, and `lifecycle.test.ts` pins the classification with
+version call on its argv, and `lifecycle-launch.test.ts` pins the classification with
 a socket path that contains `-V`.
 
 Driving the extension from a subagent shell needs `env -u PI_TMUX_SUBAGENT_CHILD`:
