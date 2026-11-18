@@ -72,6 +72,9 @@ function main() {
   lines.push(`# Benchmark state: ${args.state}`);
   lines.push("");
   lines.push(`Cells: ${rows.length}. Generated ${new Date().toISOString()}.`);
+  const heads = [...new Set(cells.map((cell) => cell.repoState?.head || "(non-git task)"))];
+  const starts = cells.map((cell) => cell.startedAt).filter(Boolean).sort();
+  lines.push(`Recorded: ${starts[0] ?? "?"} .. ${starts[starts.length - 1] ?? "?"}; harness head: ${heads.join(", ")}.`);
   lines.push("");
   lines.push("| task | model | wall s | calls | longest ms | tokens | errors | check | suite |");
   lines.push("|---|---|---|---|---|---|---|---|---|");

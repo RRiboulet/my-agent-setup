@@ -1,6 +1,7 @@
 # Benchmark state: baseline
 
-Cells: 24. Generated 2026-11-18T09:33:51.092Z.
+Cells: 24. Generated 2026-11-18T13:25:59.523Z.
+Recorded: 2026-11-17T21:14:46.865Z .. 2026-11-17T21:44:16.758Z; harness head: 5946170701a6d57e4dacc11c27ef76a85f49814e, (non-git task).
 
 | task | model | wall s | calls | longest ms | tokens | errors | check | suite |
 |---|---|---|---|---|---|---|---|---|
