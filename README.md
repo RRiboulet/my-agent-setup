@@ -207,7 +207,7 @@ default when it does not, and the `opencode-go` credential itself still serves
 | Path | What it is |
 |---|---|
 | `package.json` | the `pi` manifest that makes this repo installable as a package (see above) |
-| `.pi/extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent`, `subagent_status`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel`, `subagent_clean`, a live child-activity phase and a status widget above the editor |
+| `.pi/extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent`, `subagent_status`, `subagent_wait`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel`, `subagent_clean`, a live child-activity phase and a status widget above the editor |
 | `.pi/extensions/todos.ts` | `/todos` TUI and the `todo` tool |
 | `.pi/extensions/answer.ts` | `/answer`: extract questions from the last response and answer them in a focused TUI |
 | `.pi/extensions/continue.ts` | `shift+alt+enter` sends the literal prompt `continue`, but only when the agent is idle, so it never steers or queues a message mid-run. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), unmodified |
@@ -552,8 +552,8 @@ The subagent extension reads `PI_SUBAGENT_*` environment variables —
 `PI_SUBAGENT_TOOL_STALL_SECONDS`. The test README documents what each one does;
 the header comment in `.pi/extensions/subagent/index.ts` lists the local patches.
 
-The subagent management tools (`subagent_status`, `subagent_cancel`,
-`subagent_interrupt`, `subagent_resume`, `subagent_clean`) are hidden from the
+The subagent management tools (`subagent_status`, `subagent_wait`,
+`subagent_cancel`, `subagent_interrupt`, `subagent_resume`, `subagent_clean`) are hidden from the
 model's tool declarations when pi can reach them another way — that is, when
 `codemode` or `tool_search` is in your tool set:
 
@@ -587,7 +587,7 @@ request of each run:
 | `["+codemode", "+tool_search"]` + `codemode.mode: "only"` | 19,985 B | 2 |
 
 So `+tool_search` alone is the win: **−3,578 B per request (~890 tokens)**, and
-0 of the 5 management tools declared. `subagent` stays declared throughout, and
+0 of the 6 management tools declared (the table predates `subagent_wait`). `subagent` stays declared throughout, and
 a real run confirmed the model reaching `subagent_status` through `tool_search`
 when it was not declared.
 
@@ -595,12 +595,15 @@ when it was not declared.
 and with `codemode.mode: "on"` (the default) every declared tool also carries a
 `Codemode: tools.<name>(args) resolves to …` note — ~52 bytes × the declared
 set, which scales against you on a large tool set. Together they cost more than
-the five hidden tools do. `mode: "only"` hides the base tools too, but its
+the hidden tools do. `mode: "only"` hides the base tools too, but its
 description then lists all of them, so it lands in the same place. Add
 `"+codemode"` if you want the script workflow and the prompt is worth its price
 to you; it is one entry, and nothing in the extension changes either way.
 
-Subagent delegation is non-blocking: start independent tasks together and poll
-with `subagent_status`. There is no blocking wait, and a finishing run never
-takes the turn — its notification is appended to the transcript and the model
-reads it next time it acts, while the widget shows the same thing live.
+Subagent delegation is non-blocking: start independent tasks together, then
+call `subagent_wait` once per run (or once with `ids`) instead of polling.
+`subagent_status` remains the live "what is it doing right now" view. If the
+session ends while a wait is pending, it returns `details.ended` with the run's
+current state — never a claim that the run settled. A finishing run never takes the turn — its notification is appended to the
+transcript and the model reads it next time it acts, while the widget shows the
+same thing live.

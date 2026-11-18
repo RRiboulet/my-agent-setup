@@ -585,8 +585,9 @@ longer exists.
   `index.lock`.
 - Pass an absolute `cwd` (`<repo-root>/.worktrees/<slug>`), not a relative
   path.
-- Remove a worktree only after `subagent_status({ compact: true })` shows the
-  run terminal; cancel it first if you cannot wait. Because subagent launch is
+- Remove a worktree only after `subagent_wait({ id })` reports the run terminal
+  (or `subagent_status({ compact: true })` shows it terminal); cancel it first
+  if you cannot wait. Because subagent launch is
   queued and tmux's `-c` silently falls back to the server's cwd when the path
   is missing, a vanished worktree can run in the wrong directory instead of
   failing.

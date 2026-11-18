@@ -97,7 +97,7 @@
 //     cannot finish, fail or interrupt anything — and `interrupted` is
 //     authoritative over it.
 // 15. Lazy tool exposure (see resolveManagementExposure and
-//     registerManagementTools): the five management tools — status, cancel,
+//     registerManagementTools): the six management tools — status, wait, cancel,
 //     interrupt, resume, clean — are registered at `session_start` and again at
 //     `before_agent_start` with pi's
 //     `exposure: "codemode"` when `codemode` or `tool_search` is active, so their
@@ -110,9 +110,9 @@
 //     tool activated on registration stays active. Re-checked before every agent
 //     turn, because `/tools` can switch discovery off and strand tools that were
 //     registered hidden.
-// 16. Bounded list output (see listview.ts): with no blocking wait, polling
-//     `subagent_status` is the only way a model collects a result, so the list
-//     view is a per-turn cost rather than an occasional one. It used to render
+// 16. Bounded list output (see listview.ts): status is the live view, and a
+//     model that polls it pays for the list on every turn, so the list view is a
+//     per-turn cost rather than an occasional one. It used to render
 //     PANE_PREVIEW_LINES of raw pane for EVERY live run (~70 lines at the default
 //     concurrency, mostly a TUI redrawing itself). Now the budget is on the LIST,
 //     not per run: at most LIST_DETAIL_BUDGET runs get the full block and every
@@ -163,6 +163,17 @@
 //     read is not failed on sight either: partial writes and transient errnos
 //     are retried up to MAX_TRANSIENT_RESULT_FAILURES consecutive ticks, and a
 //     good result at any point still wins.
+//
+// 19. Wait tool (`subagent_wait`): with `id` or `ids` it blocks once until the
+//     named run(s) reach a terminal state and returns the same record
+//     `subagent_status` returns; on timeout it returns the current record plus
+//     the latest pane, never an error (a run still queued is reported as
+//     `queued`). It adds NO second poll loop: waiters are resolved by the
+//     terminal transitions the existing settle watcher — and cancel, interrupt
+//     and shutdown — already drive (`settleWaiters`/`notifyWaiters`), so the
+//     500 ms watcher cadence is the only latency. The tool descriptions that
+//     used to teach polling now teach "start, then wait once"; `subagent_status`
+//     stays for the live "what is it doing right now" question.
 //
 // The child reporter (CHILD_ENV) still reports completion the same way; patch 11
 // only adds the activity snapshot to it, and patch 13 only diverts the aborted
@@ -255,6 +266,14 @@ const DEFAULT_STALL_SECONDS = DEFAULT_STALL_AFTER_MS / 1000;
 const DEFAULT_TOOL_STALL_SECONDS = DEFAULT_TOOL_STALL_AFTER_MS / 1000;
 /** How often the live widget re-renders when nothing else asks it to. */
 const WIDGET_TICK_MS = 1_000;
+/**
+ * Default bound for one `subagent_wait` call (local patch 19).
+ *
+ * Long enough that a real delegation rarely times out, short enough that a model
+ * that mistyped an id is not blocked for a whole session. A timed-out wait is a
+ * normal result, never an error.
+ */
+const DEFAULT_WAIT_TIMEOUT_MS = 600_000;
 /** Widget key, so pi can replace and clear our widget without touching others. */
 const WIDGET_KEY = "subagent-status";
 
@@ -293,7 +312,7 @@ type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "
  * to it when — and only when — the management tools are hidden from the model.
  */
 const SUBAGENT_DESCRIPTION =
-	"Start a delegated task in a separate interactive Pi process inside a detached tmux session and return immediately. The main agent is not blocked and may start more subagents or keep working. Runs execute concurrently (bounded by PI_SUBAGENT_MAX_CONCURRENT, default 4); extra runs are queued. Children inherit the current provider/model/thinking, defaulting the provider to OpenRouter. Use subagent_status to inspect progress and collect results (subagent_status({ id }) returns that run's output once it finishes; subagent_status({ compact: true }) is a cheap one-line-per-run poll), subagent_interrupt to abort a run's current turn while keeping its child alive, and subagent_cancel to stop a run outright. There is no blocking wait: poll subagent_status. Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.";
+	"Start a delegated task in a separate interactive Pi process inside a detached tmux session and return immediately. The main agent is not blocked and may start more subagents or keep working. Runs execute concurrently (bounded by PI_SUBAGENT_MAX_CONCURRENT, default 4); extra runs are queued. Children inherit the current provider/model/thinking, defaulting the provider to OpenRouter. Start the run, then wait once: subagent_wait({ id }) blocks until that run settles and returns its record (subagent_wait({ ids }) waits for a fan-out together). Keep subagent_status for the live 'what is it doing right now' question, subagent_interrupt to abort a run's current turn while keeping its child alive, and subagent_cancel to stop a run outright. Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.";
 
 interface RunActivity {
 	phase: SubagentActivityPhase;
@@ -733,6 +752,21 @@ function truncateToolText(text: string): string {
 function formatConfirmWindow(ms: number): string {
 	if (ms <= 0) return "time (confirmation is disabled)";
 	return `${Math.round(ms / 1000)}s`;
+}
+
+/**
+ * The wait bound for one `subagent_wait` call (local patch 19).
+ *
+ * A zero or negative bound means "check once and return the current state": a
+ * timed-out wait is a result rather than an error, so an unusable number
+ * degrades to that instead of throwing or silently waiting out the default.
+ */
+function resolveWaitTimeout(timeoutMs: number | undefined): number {
+	if (timeoutMs === undefined) return DEFAULT_WAIT_TIMEOUT_MS;
+	if (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0) return 0;
+	// setTimeout clamps anything above 2^31-1 to 1 ms, which would report a
+	// 24-day wait as an instant timeout.
+	return Math.min(timeoutMs, 2_147_483_647);
 }
 
 /**
@@ -1231,6 +1265,20 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	 * fail the run; see MAX_TRANSIENT_RESULT_FAILURES.
 	 */
 	const resultFailures = new Map<string, number>();
+	/**
+	 * Resolvers for pending `subagent_wait` calls (local patch 19), keyed by run id.
+	 *
+	 * The settle watcher is the extension's only poll loop; a wait adds none. These
+	 * resolvers are invoked by the terminal transitions that already exist —
+	 * `finalizeRun` and `markRunFailed` (both watcher-driven), `subagent_cancel`,
+	 * `noteInterrupt` and `session_shutdown` — so a waiter wakes within one 500 ms
+	 * tick of the run actually settling. A waiter that never gets a transition is
+	 * released by its own timeout instead, which returns the current record.
+	 */
+	const settleWaiters = new Map<string, Set<(run: RunRecord) => void>>();
+	// Released at session end, before kill-on-shutdown flips any status: a waiter
+	// pending when the session ends must say "ended", never "settled".
+	const endWaiters = new Set<() => void>();
 	// Per-run classifier state (local patch 14). Pure state, kept here because it
 	// is derived from run.activity and thrown away with the run.
 	const statusStates = new Map<string, SubagentStatusState>();
@@ -1258,6 +1306,93 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		resultFailures.set(run.id, next);
 		return next;
 	};
+
+	/**
+	 * Release every `subagent_wait` call registered for `run` (local patch 19).
+	 *
+	 * Called only where a run REACHES a terminal state, which is the only thing a
+	 * waiter is waiting for: the tool reads no status before registering, so
+	 * there is no check-to-registration gap to lose a transition in, and one
+	 * that is never woken at all is caught by its timeout, which returns the
+	 * current record rather than an error.
+	 */
+	const notifyWaiters = (run: RunRecord): void => {
+		const waiters = settleWaiters.get(run.id);
+		if (!waiters) return;
+		settleWaiters.delete(run.id);
+		for (const waiter of waiters) waiter(run);
+	};
+
+	/**
+	 * Wait until every named run is terminal, or `timeoutMs` elapses, whichever
+	 * first. Resolves `{ timedOut, ended }`; it never rejects except on tool-call abort.
+	 *
+	 * One registered waiter per still-live run: whichever settles last releases
+	 * the whole call. The filter at entry is the terminal check — the tool makes
+	 * no earlier status read to race with, and the registration loop below is
+	 * synchronous, so no transition can land between the two.
+	 */
+	const waitForRunsSettled = (
+		targets: RunRecord[],
+		timeoutMs: number,
+		signal: AbortSignal | undefined,
+	): Promise<{ timedOut: boolean; ended: boolean }> =>
+		new Promise<{ timedOut: boolean; ended: boolean }>((resolve, reject) => {
+			const pending = new Set(targets.filter((run) => !isTerminal(run.status)));
+			if (pending.size === 0) return resolve({ timedOut: false, ended: false });
+			let settled = false;
+			const registered = new Map<string, (run: RunRecord) => void>();
+			const cleanup = (): void => {
+				for (const [runId, waiter] of registered) {
+					const set = settleWaiters.get(runId);
+					if (set) {
+						set.delete(waiter);
+						if (set.size === 0) settleWaiters.delete(runId);
+					}
+				}
+				registered.clear();
+				endWaiters.delete(end);
+				clearTimeout(timer);
+				signal?.removeEventListener("abort", onAbort);
+			};
+			const timer = setTimeout(() => finish(true), Math.max(0, timeoutMs));
+			let sawEnded = false;
+			const end = (): void => {
+				sawEnded = true;
+				finish(false);
+			};
+			const finish = (timedOut: boolean): void => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				resolve({ timedOut, ended: sawEnded });
+			};
+			const onAbort = (): void => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				reject(new Error("Subagent wait aborted."));
+			};
+			if (signal?.aborted) {
+				onAbort();
+				return;
+			}
+			endWaiters.add(end);
+			for (const run of pending) {
+				const waiter = (): void => {
+					pending.delete(run);
+					if (pending.size === 0) finish(false);
+				};
+				let set = settleWaiters.get(run.id);
+				if (!set) {
+					set = new Set();
+					settleWaiters.set(run.id, set);
+				}
+				set.add(waiter);
+				registered.set(run.id, waiter);
+			}
+			signal?.addEventListener("abort", onAbort, { once: true });
+		});
 
 	/**
 	 * A run that is terminal AND owns no live child has nothing left to settle.
@@ -1431,6 +1566,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		}
 		run.output = truncateToolText(output || "(no text output)");
 		await settleRun(run);
+		notifyWaiters(run);
 		void drainQueue();
 	};
 
@@ -1446,6 +1582,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		run.error = message;
 		run.finishedAt = Date.now();
 		await settleRun(run);
+		notifyWaiters(run);
 	};
 
 	/**
@@ -1468,7 +1605,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 
 // --- Lazy tool exposure (local patch 15) -------------------------------------
 //
-// The management tools (status, cancel, interrupt, resume, clean) cost a request
+// The management tools (status, wait, cancel, interrupt, resume, clean) cost a request
 // nothing when they are not used: their descriptions, parameter schemas, prompt
 // snippets and guidelines are declared to the model on every call. pi already has
 // a mechanism for that — a tool with `exposure: "codemode"` is never activated
@@ -1490,7 +1627,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
  *
  * Called at `session_start` and again before every agent turn, because the tool
  * set can change underneath us: `/tools` switching `codemode` off would otherwise
- * strand all five at once — declared-as-codemode, no longer declared, and no
+ * strand all six at once — declared-as-codemode, no longer declared, and no
  * longer reachable. Re-registering `direct` re-activates them, since pi activates
  * a tool whose exposure BECOMES declarable and was not activated on registration.
  *
@@ -1499,7 +1636,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 // CLOSURE state, not module state: the factory (`subagentExtension`) opened far
 // above and closes at the end of this file, so these reset on every extension
 // load. A reload or a session replacement builds a new runtime and re-invokes the
-// factory (`createAgentSessionServices` -> `resourceLoader.reload`), so the five
+// factory (`createAgentSessionServices` -> `resourceLoader.reload`), so the six
 // tools are registered again for the new session. Do NOT hoist them to module
 // scope: a module-level memo would survive the load and leave a fresh session
 // with no management tools at all. (This block is written without the factory's
@@ -1725,6 +1862,9 @@ const noteInterrupt = async (
 		// only writer of it — without this the strip keeps claiming the run is
 		// active for up to a tick after the tool reported it stopped.
 		refreshStatusWidget();
+		// `interrupted` is terminal for wait too, so a pending subagent_wait on this
+		// run must return now rather than wait out its timeout.
+		notifyWaiters(run);
 		return true;
 	};
 
@@ -2100,6 +2240,9 @@ const noteInterrupt = async (
 
 	pi.on("session_shutdown", async () => {
 		shuttingDown = true;
+		// First, before any kill-on-shutdown flip: every pending wait is ending,
+		// and none of them settled, whatever the run status becomes below.
+		for (const end of [...endWaiters]) end();
 		for (const timer of timers.values()) clearTimeout(timer);
 		timers.clear();
 		for (const timer of reapTimers.values()) clearTimeout(timer);
@@ -2122,6 +2265,7 @@ const noteInterrupt = async (
 				// Kill first, then read: the child has stopped writing, but the tokens it
 				// already burned are still its own. Same reason as subagent_cancel.
 				await captureRunUsage(run);
+				notifyWaiters(run);
 				continue;
 			}
 			// An interrupted child is reaped here even though holdsChild says it is
@@ -2148,7 +2292,7 @@ const noteInterrupt = async (
 		promptSnippet: "Start a delegated, non-blocking, tmux-backed Pi subagent",
 		promptGuidelines: [
 			"Use subagent to delegate an isolated task without blocking: it returns immediately, so start several when useful and keep working.",
-			"Collect a finished run's output with subagent_status({ id }); there is no blocking wait, so poll it rather than blocking the turn.",
+			"Start, then wait once: collect a finished run's output with subagent_wait({ id }) as soon as you have started the run. Keep subagent_status for the live 'what is it doing right now' question, and for runs you deliberately left unwaited.",
 			"To stop a run that is going the wrong way, prefer subagent_interrupt (keeps the child and its transcript, then attach to steer it) over subagent_cancel (throws the run away). An interrupted run still occupies a concurrency slot until it is cancelled, so cancel the ones you are done with.",
 			"subagent_resume needs a run whose child is really gone: cancel or finish it first, or attach to an interrupted run and type the follow-up there.",
 		],
@@ -2233,7 +2377,7 @@ const noteInterrupt = async (
 				`tmux: ${run.tmuxSession}`,
 				`Attach: ${run.attachCommand}`,
 				`Capture: ${run.captureCommand}`,
-				`Status: call subagent_status({ id: "${id}" }) to collect the result`,
+				`Wait: call subagent_wait({ id: "${id}" }) once to collect the result`,
 			].join("\n");
 			return { content: [{ type: "text", text }], details: run };
 		},
@@ -2252,7 +2396,7 @@ const noteInterrupt = async (
 			const description = tool?.description ?? SUBAGENT_DESCRIPTION;
 			return {
 				descriptions: {
-					subagent: `${description} The other subagent tools (subagent_status, subagent_cancel, subagent_interrupt, subagent_resume, subagent_clean) are not declared while \`codemode\` or \`tool_search\` is active: reach them with tool_search, or tools.<name>(...) in a codemode script.`,
+					subagent: `${description} The other subagent tools (subagent_wait, subagent_status, subagent_cancel, subagent_interrupt, subagent_resume, subagent_clean) are not declared while \`codemode\` or \`tool_search\` is active: reach them with tool_search, or tools.<name>(...) in a codemode script.`,
 				},
 			};
 		},
@@ -2286,10 +2430,77 @@ const noteInterrupt = async (
 	// the entry point, and it stays declared.
 	const managementToolDefinitions: ToolDefinition[] = [
 		{
+			name: "subagent_wait",
+			label: "Subagent Wait",
+			description:
+				"subagent_wait blocks once until a subagent run settles and returns its result, instead of polling subagent_status. With an id: resolves as soon as that run reaches a terminal state (completed, failed, cancelled, interrupted) and returns the same record subagent_status({ id }) returns; if timeoutMs elapses first, returns the current record plus the latest pane output — a timed-out wait is a normal result, never an error. A run still queued at the timeout is reported as queued; a run that failed to start, was cancelled, died or was interrupted is terminal and returns immediately. With ids: waits until all of the named runs are terminal (or the timeout) and returns every settled run plus the still-running ones. If the session ends before the run settles, the call returns early with the current record and reports that the session ended (details.ended), never that the run settled. Built on the existing settle watcher, so results land within about a second of the child's settle event; there is no second poll loop. To ask what a run is doing right now without waiting, use subagent_status.",
+			promptSnippet: "Wait once for a subagent run to settle and collect its result",
+			parameters: Type.Object({
+				id: Type.Optional(Type.String({ description: "Run id to wait for. Omit when passing ids." })),
+				ids: Type.Optional(
+					Type.Array(Type.String(), {
+						description:
+							"Several run ids to wait for together. Returns every settled run plus the still-running ones.",
+					}),
+				),
+				timeoutMs: Type.Optional(
+					Type.Number({
+						description:
+							"How long to wait before returning the current state. Defaults to 600000 (10 minutes).",
+					}),
+				),
+			}),
+
+			async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+				await ensureSessionPaths(ctx);
+				if (params.id !== undefined && params.ids !== undefined) {
+					throw new Error("subagent_wait takes either id or ids, not both.");
+				}
+				const timeoutMs = resolveWaitTimeout(params.timeoutMs);
+				if (params.id !== undefined) {
+					const id = params.id.trim();
+					const run = runs.get(id);
+					if (!run) throw new Error(`Unknown subagent run: ${id}`);
+					const { timedOut, ended } = await waitForRunsSettled([run], timeoutMs, signal);
+					const text = ended
+						? `Session ended before subagent ${id.slice(0, 8)} settled (status: ${run.status}). The run was not completed; its transcript is preserved.\n\n${runSummary(run, { pane: true, output: true })}`
+						: timedOut
+							? `Subagent ${id.slice(0, 8)} did not settle within ${timeoutMs}ms (status: ${run.status}).\n\n${runSummary(run, { pane: true, output: true })}`
+							: runSummary(run, { pane: true, output: true });
+					return { content: [{ type: "text", text }], details: { runs: [run], timedOut, ended } };
+				}
+				if (params.ids !== undefined) {
+					const ids = params.ids.map((value) => value.trim());
+					if (ids.length === 0) throw new Error("subagent_wait needs at least one id in ids.");
+					const targets: RunRecord[] = [];
+					for (const id of ids) {
+						const run = runs.get(id);
+						if (!run) throw new Error(`Unknown subagent run: ${id}`);
+						targets.push(run);
+					}
+					const { timedOut, ended } = await waitForRunsSettled(targets, timeoutMs, signal);
+					const pendingRuns = targets.filter((run) => !isTerminal(run.status));
+					const lines = [
+						ended
+							? `Session ended before all runs settled: ${targets.length - pendingRuns.length} of ${targets.length} settled, ${pendingRuns.length} still ${pendingRuns.map((run) => run.status).join(", ")}. Not completed; the transcript is preserved.`
+							: timedOut
+								? `Timed out after ${timeoutMs}ms: ${targets.length - pendingRuns.length} of ${targets.length} run(s) settled, ${pendingRuns.length} still ${pendingRuns.map((run) => run.status).join(", ")}.`
+								: `All ${targets.length} run(s) settled.`,
+					];
+					for (const run of targets) {
+						lines.push("", runSummary(run, { pane: true, output: true }));
+					}
+					return { content: [{ type: "text", text: lines.join("\n") }], details: { runs: targets, timedOut, ended } };
+				}
+				throw new Error("subagent_wait needs an id or a list of ids.");
+			},
+		},
+
+		{
 			name: "subagent_status",
 			label: "Subagent Status",
 			description:
-				"Collect a subagent result, or list this session's runs. With an id: that run's status, model, tmux attach command, its final output once finished and its latest pane output while running. Without an id: every run's status, duration and usage, with the full detail — pane, activity, attach command — for at most the two runs that still hold a child, and a one-line row for the rest. Pass compact: true for one line per run and no pane. There is no blocking wait, so poll this instead. Non-blocking.",
+				"Answer 'what is this run doing right now', or list this session's runs. With an id: that run's status, model, tmux attach command, its final output once finished and its latest pane output while running. Without an id: every run's status, duration and usage, with the full detail — pane, activity, attach command — for at most the two runs that still hold a child, and a one-line row for the rest. Pass compact: true for one line per run and no pane. To wait for a run to finish, use subagent_wait instead of polling this. Non-blocking.",
 			promptSnippet: "Inspect non-blocking subagent runs and their output",
 			parameters: Type.Object({
 				id: Type.Optional(Type.String({ description: "Run id to inspect. Omit to list all runs in this session." })),
@@ -2314,9 +2525,9 @@ const noteInterrupt = async (
 				if (params.id) {
 					const run = runs.get(params.id.trim());
 					if (!run) throw new Error(`Unknown subagent run: ${params.id}`);
-					// This is the ONLY way to collect a result now that there is no blocking
-					// wait, so the obvious call has to be the right one: `include_output`
-					// is a LIST-view control and never suppresses the output here.
+					// `subagent_wait` is the blocking path, but a finished run's result must
+					// still come back here: `include_output` is a LIST-view control and
+					// never suppresses the output for a single run.
 					//
 					// The pane is included either way. For a live run it is the only view of
 					// the child there is, and for a finished one it is usually the answer —
@@ -2392,6 +2603,7 @@ const noteInterrupt = async (
 				// session file survives the tmux kill, so this is still readable.
 				await captureRunUsage(run);
 				await persist();
+				notifyWaiters(run);
 				refreshStatusWidget();
 				void drainQueue();
 				return { content: [{ type: "text", text: `Subagent ${id} cancelled.` }], details: run };
@@ -2760,6 +2972,7 @@ export const __test__ = {
 	readNonNegativeIntEnv,
 	resolveManagementExposure,
 	resolveModel,
+	resolveWaitTimeout,
 	runDirOwnsLiveTranscript,
 	runSummary,
 	setPanelLauncher: (launcher?: PanelLauncher): void => {
