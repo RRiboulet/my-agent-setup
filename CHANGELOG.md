@@ -15,9 +15,13 @@ Added:
   every settled run plus the still-running ones; on timeout it returns the
   current record plus the latest pane, never an error, with a run still queued
   reported as `queued` and every failed-to-start, cancelled, dead or
-  interrupted run returned at once. It adds no second poll loop: waiters are
-  resolved by the terminal transitions the existing settle watcher (and cancel,
-  interrupt, shutdown) already drive, so a result lands within the 500 ms
+  interrupted run returned at once. If the session ends first, the wait says so
+  (`details.ended`) and returns the live record; it never calls a run settled
+  because shutdown killed it, including under `PI_SUBAGENT_KILL_ON_SHUTDOWN`.
+  A `timeoutMs` above 2^31-1 is clamped, because `setTimeout` would otherwise
+  fire after 1 ms. It adds no second poll loop: waiters are resolved by the
+  terminal transitions the existing settle watcher (and cancel, interrupt,
+  shutdown) already drive, so a result lands within the 500 ms
   watcher tick. The tool descriptions and `AGENTS.md` now teach "start, then
   wait once" — `subagent_status` keeps the live what-is-it-doing-now question —
   and `subagent-wait.test.ts` pins the acceptance: a scripted three-child

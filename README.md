@@ -602,7 +602,8 @@ to you; it is one entry, and nothing in the extension changes either way.
 
 Subagent delegation is non-blocking: start independent tasks together, then
 call `subagent_wait` once per run (or once with `ids`) instead of polling.
-`subagent_status` remains the live "what is it doing right now" view. A
-finishing run never takes the turn — its notification is appended to the
+`subagent_status` remains the live "what is it doing right now" view. If the
+session ends while a wait is pending, it returns `details.ended` with the run's
+current state — never a claim that the run settled. A finishing run never takes the turn — its notification is appended to the
 transcript and the model reads it next time it acts, while the widget shows the
 same thing live.

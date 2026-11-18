@@ -46,6 +46,8 @@ interface WaitHarnessOptions {
 	paneDead?: boolean;
 	/** Fail the `tmux -V` probe, so the launch itself throws: a failed-to-start run. */
 	failVersionProbe?: boolean;
+	/** Turn on kill-on-shutdown: the shutdown handler cancels live runs before releasing waiters. */
+	killOnShutdown?: boolean;
 }
 
 async function createWaitHarness(options: WaitHarnessOptions = {}): Promise<WaitHarness> {
@@ -124,6 +126,7 @@ async function createWaitHarness(options: WaitHarnessOptions = {}): Promise<Wait
 			PI_SUBAGENT_AUTO_REAP: "true",
 			PI_SUBAGENT_REAP_DELAY_MS: "0",
 			PI_SUBAGENT_GC_DAYS: "7",
+			PI_SUBAGENT_KILL_ON_SHUTDOWN: options.killOnShutdown ? "true" : "false",
 		},
 		async () => {
 			subagentExtension(pi as never);
@@ -459,5 +462,23 @@ test("a pending wait is released by shutdown instead of blocking it", async () =
 		assert.match(waited.text, /running/, "the record still reports the run as running");
 		assert.equal(waited.details.ended, true, "the wait details mark the release as a session end");
 		assert.equal(waited.details.timedOut, false, "a session end is not a timeout");
+	});
+});
+
+
+test("kill-on-shutdown still reports ended, never settled", async () => {
+	// The shutdown handler cancels live runs before it releases waiters. If the
+	// release ran after that flip, the waiter would see a terminal status and
+	// cheerfully report "settled" for a run that was just killed by the session
+	// ending. The end channel must win.
+	await withWaitHarness({ killOnShutdown: true }, async (h) => {
+		const run = (await h.call("subagent", { task: "killed by shutdown" })).details as unknown as RunRecord;
+		const waiting = h.call("subagent_wait", { id: run.id, timeoutMs: 60_000 });
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		await h.shutdown();
+		const waited = await waiting;
+		assert.match(waited.text, /Session ended before/, "kill-on-shutdown is an ending, not a settle");
+		assert.equal(waited.details.ended, true);
+		assert.equal(waited.details.timedOut, false);
 	});
 });

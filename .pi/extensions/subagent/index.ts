@@ -110,9 +110,9 @@
 //     tool activated on registration stays active. Re-checked before every agent
 //     turn, because `/tools` can switch discovery off and strand tools that were
 //     registered hidden.
-// 16. Bounded list output (see listview.ts): status is the live view, so polling
-//     `subagent_status` is the only way a model collects a result, so the list
-//     view is a per-turn cost rather than an occasional one. It used to render
+// 16. Bounded list output (see listview.ts): status is the live view, and a
+//     model that polls it pays for the list on every turn, so the list view is a
+//     per-turn cost rather than an occasional one. It used to render
 //     PANE_PREVIEW_LINES of raw pane for EVERY live run (~70 lines at the default
 //     concurrency, mostly a TUI redrawing itself). Now the budget is on the LIST,
 //     not per run: at most LIST_DETAIL_BUDGET runs get the full block and every
@@ -1276,9 +1276,9 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	 * released by its own timeout instead, which returns the current record.
 	 */
 	const settleWaiters = new Map<string, Set<(run: RunRecord) => void>>();
-	// Set while the session is shutting down: a released waiter must say so rather
-	// than claim its run settled.
-	let sessionEnding = false;
+	// Released at session end, before kill-on-shutdown flips any status: a waiter
+	// pending when the session ends must say "ended", never "settled".
+	const endWaiters = new Set<() => void>();
 	// Per-run classifier state (local patch 14). Pure state, kept here because it
 	// is derived from run.activity and thrown away with the run.
 	const statusStates = new Map<string, SubagentStatusState>();
@@ -1325,7 +1325,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 
 	/**
 	 * Wait until every named run is terminal, or `timeoutMs` elapses, whichever
-	 * first. Resolves `{ timedOut }`; it never rejects except on tool-call abort.
+	 * first. Resolves `{ timedOut, ended }`; it never rejects except on tool-call abort.
 	 *
 	 * One registered waiter per still-live run: whichever settles last releases
 	 * the whole call. The filter at entry is the terminal check — the tool makes
@@ -1339,7 +1339,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	): Promise<{ timedOut: boolean; ended: boolean }> =>
 		new Promise<{ timedOut: boolean; ended: boolean }>((resolve, reject) => {
 			const pending = new Set(targets.filter((run) => !isTerminal(run.status)));
-			if (pending.size === 0) return resolve({ timedOut: false });
+			if (pending.size === 0) return resolve({ timedOut: false, ended: false });
 			let settled = false;
 			const registered = new Map<string, (run: RunRecord) => void>();
 			const cleanup = (): void => {
@@ -1351,16 +1351,21 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 					}
 				}
 				registered.clear();
+				endWaiters.delete(end);
 				clearTimeout(timer);
 				signal?.removeEventListener("abort", onAbort);
 			};
 			const timer = setTimeout(() => finish(true), Math.max(0, timeoutMs));
-			let sawUnsettled = false;
+			let sawEnded = false;
+			const end = (): void => {
+				sawEnded = true;
+				finish(false);
+			};
 			const finish = (timedOut: boolean): void => {
 				if (settled) return;
 				settled = true;
 				cleanup();
-				resolve({ timedOut, ended: sawUnsettled });
+				resolve({ timedOut, ended: sawEnded });
 			};
 			const onAbort = (): void => {
 				if (settled) return;
@@ -1372,9 +1377,9 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 				onAbort();
 				return;
 			}
+			endWaiters.add(end);
 			for (const run of pending) {
 				const waiter = (): void => {
-					if (sessionEnding && !isTerminal(run.status)) sawUnsettled = true;
 					pending.delete(run);
 					if (pending.size === 0) finish(false);
 				};
@@ -1600,7 +1605,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 
 // --- Lazy tool exposure (local patch 15) -------------------------------------
 //
-// The management tools (status, cancel, interrupt, resume, clean) cost a request
+// The management tools (status, wait, cancel, interrupt, resume, clean) cost a request
 // nothing when they are not used: their descriptions, parameter schemas, prompt
 // snippets and guidelines are declared to the model on every call. pi already has
 // a mechanism for that — a tool with `exposure: "codemode"` is never activated
@@ -1622,7 +1627,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
  *
  * Called at `session_start` and again before every agent turn, because the tool
  * set can change underneath us: `/tools` switching `codemode` off would otherwise
- * strand all five at once — declared-as-codemode, no longer declared, and no
+ * strand all six at once — declared-as-codemode, no longer declared, and no
  * longer reachable. Re-registering `direct` re-activates them, since pi activates
  * a tool whose exposure BECOMES declarable and was not activated on registration.
  *
@@ -1631,7 +1636,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 // CLOSURE state, not module state: the factory (`subagentExtension`) opened far
 // above and closes at the end of this file, so these reset on every extension
 // load. A reload or a session replacement builds a new runtime and re-invokes the
-// factory (`createAgentSessionServices` -> `resourceLoader.reload`), so the five
+// factory (`createAgentSessionServices` -> `resourceLoader.reload`), so the six
 // tools are registered again for the new session. Do NOT hoist them to module
 // scope: a module-level memo would survive the load and leave a fresh session
 // with no management tools at all. (This block is written without the factory's
@@ -2235,6 +2240,9 @@ const noteInterrupt = async (
 
 	pi.on("session_shutdown", async () => {
 		shuttingDown = true;
+		// First, before any kill-on-shutdown flip: every pending wait is ending,
+		// and none of them settled, whatever the run status becomes below.
+		for (const end of [...endWaiters]) end();
 		for (const timer of timers.values()) clearTimeout(timer);
 		timers.clear();
 		for (const timer of reapTimers.values()) clearTimeout(timer);
@@ -2266,14 +2274,6 @@ const noteInterrupt = async (
 			// keeps the transcript, so the run stays resumable — exactly like the
 			// auto-reap of a completed run.
 			if (autoReap && isTerminal(run.status)) await killTmuxSession(run);
-		}
-		// Release any subagent_wait still pending: the session is ending, so no
-		// watcher can settle the run any more. The tool returns the current record
-		// and says "session ended", never "settled".
-		sessionEnding = true;
-		for (const id of [...settleWaiters.keys()]) {
-			const run = runs.get(id);
-			if (run) notifyWaiters(run);
 		}
 		await persist();
 	});
@@ -2433,7 +2433,7 @@ const noteInterrupt = async (
 			name: "subagent_wait",
 			label: "Subagent Wait",
 			description:
-				"subagent_wait blocks once until a subagent run settles and returns its result, instead of polling subagent_status. With an id: resolves as soon as that run reaches a terminal state (completed, failed, cancelled, interrupted) and returns the same record subagent_status({ id }) returns; if timeoutMs elapses first, returns the current record plus the latest pane output — a timed-out wait is a normal result, never an error. A run still queued at the timeout is reported as queued; a run that failed to start, was cancelled, died or was interrupted is terminal and returns immediately. With ids: waits until all of the named runs are terminal (or the timeout) and returns every settled run plus the still-running ones. Built on the existing settle watcher, so results land within about a second of the child's settle event; there is no second poll loop. To ask what a run is doing right now without waiting, use subagent_status.",
+				"subagent_wait blocks once until a subagent run settles and returns its result, instead of polling subagent_status. With an id: resolves as soon as that run reaches a terminal state (completed, failed, cancelled, interrupted) and returns the same record subagent_status({ id }) returns; if timeoutMs elapses first, returns the current record plus the latest pane output — a timed-out wait is a normal result, never an error. A run still queued at the timeout is reported as queued; a run that failed to start, was cancelled, died or was interrupted is terminal and returns immediately. With ids: waits until all of the named runs are terminal (or the timeout) and returns every settled run plus the still-running ones. If the session ends before the run settles, the call returns early with the current record and reports that the session ended (details.ended), never that the run settled. Built on the existing settle watcher, so results land within about a second of the child's settle event; there is no second poll loop. To ask what a run is doing right now without waiting, use subagent_status.",
 			promptSnippet: "Wait once for a subagent run to settle and collect its result",
 			parameters: Type.Object({
 				id: Type.Optional(Type.String({ description: "Run id to wait for. Omit when passing ids." })),
@@ -2453,7 +2453,6 @@ const noteInterrupt = async (
 
 			async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 				await ensureSessionPaths(ctx);
-				sessionEnding = false;
 				if (params.id !== undefined && params.ids !== undefined) {
 					throw new Error("subagent_wait takes either id or ids, not both.");
 				}
@@ -2464,7 +2463,7 @@ const noteInterrupt = async (
 					if (!run) throw new Error(`Unknown subagent run: ${id}`);
 					const { timedOut, ended } = await waitForRunsSettled([run], timeoutMs, signal);
 					const text = ended
-						? `Session ended before subagent ${id.slice(0, 8)} settled (status: ${run.status}). The run was not completed; it can be resumed in a later session.\n\n${runSummary(run, { pane: true, output: true })}`
+						? `Session ended before subagent ${id.slice(0, 8)} settled (status: ${run.status}). The run was not completed; its transcript is preserved.\n\n${runSummary(run, { pane: true, output: true })}`
 						: timedOut
 							? `Subagent ${id.slice(0, 8)} did not settle within ${timeoutMs}ms (status: ${run.status}).\n\n${runSummary(run, { pane: true, output: true })}`
 							: runSummary(run, { pane: true, output: true });
@@ -2483,7 +2482,7 @@ const noteInterrupt = async (
 					const pendingRuns = targets.filter((run) => !isTerminal(run.status));
 					const lines = [
 						ended
-							? `Session ended before all runs settled: ${targets.length - pendingRuns.length} of ${targets.length} settled, ${pendingRuns.length} still ${pendingRuns.map((run) => run.status).join(", ")}. Not completed; resume in a later session.`
+							? `Session ended before all runs settled: ${targets.length - pendingRuns.length} of ${targets.length} settled, ${pendingRuns.length} still ${pendingRuns.map((run) => run.status).join(", ")}. Not completed; the transcript is preserved.`
 							: timedOut
 								? `Timed out after ${timeoutMs}ms: ${targets.length - pendingRuns.length} of ${targets.length} run(s) settled, ${pendingRuns.length} still ${pendingRuns.map((run) => run.status).join(", ")}.`
 								: `All ${targets.length} run(s) settled.`,
@@ -2526,9 +2525,9 @@ const noteInterrupt = async (
 				if (params.id) {
 					const run = runs.get(params.id.trim());
 					if (!run) throw new Error(`Unknown subagent run: ${params.id}`);
-					// This is the ONLY way to collect a result now that there is no blocking
-					// wait, so the obvious call has to be the right one: `include_output`
-					// is a LIST-view control and never suppresses the output here.
+					// `subagent_wait` is the blocking path, but a finished run's result must
+					// still come back here: `include_output` is a LIST-view control and
+					// never suppresses the output for a single run.
 					//
 					// The pane is included either way. For a live run it is the only view of
 					// the child there is, and for a finished one it is usually the answer —
