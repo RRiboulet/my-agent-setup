@@ -25,12 +25,25 @@ Maintenance:
   was relaxed, and each new file passes on its own — with the fake
   `ExtensionAPI`, its waits and its fixtures in `lifecycle-harness.ts`. Product
   code and `POLL_INTERVAL_MS` are untouched: those intervals are the behaviour
-  under test. Worth knowing: the suite is denser now, so the fixed-timeout tests
-  meet more contention. `btw-markdown.test.ts`'s viewer tests (a fixed 8 s wait
-  for a spawned `node`) missed once here and once on the untouched baseline, and
-  `status.test.ts`'s 20 ms ticker (≥ 2 ticks in 120 ms) missed once. Both are
-  pre-existing and worth widening if they recur; neither is caused by this
-  split.
+  under test. Worth knowing: the denser suite is what surfaced the
+  two tight bounds in the entry below — the `btw` viewer's 8 s wait for a
+  spawned `node`, and the widget's 20 ms ticker needing two ticks in 120 ms.
+  Both are widened there; this split did not cause either.
+- **The suite runs its files concurrently, which is what it always claimed to do.**
+  Node defaults `--test-concurrency` to `availableParallelism() - 1`, so on this
+  2-core host the runner was running **one file at a time**: 184 s of wall clock
+  for 67 s of CPU (36 %), which says the suite is wait-bound rather than
+  CPU-bound. The documented command now passes `--test-concurrency=8`: measured
+  2026-11-16 at 119-132 s, with no further gain at 16 (132 s), so the number is
+  fixed rather than derived from `nproc`. It is documented in `AGENTS.md` with
+  the reason, because a bare command loses the flag on the next copy-paste.
+
+  Parallelism also found two tests that had only ever passed because nothing ran
+  beside them, both fixed here rather than papered over: the `btw` viewer test
+  waited 8 s for a spawned node process to render (now 30 s), and a widget ticker
+  needed two 20 ms ticks inside 120 ms (now 500 ms). Both now assert behaviour
+  rather than the machine, which is the rule `helpers.ts` already states for its
+  own poll bound.
 
 ## v1.14.0 — 2026-11-16
 

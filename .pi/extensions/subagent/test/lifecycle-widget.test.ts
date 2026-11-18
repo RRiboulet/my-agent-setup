@@ -158,13 +158,31 @@ test("a run's elapsed time starts when it starts, not when it was queued", async
 		const queued = (await h.call("subagent", { task: "waits in the queue" })).details as unknown as RunRecord;
 		await waitFor(() => (h.renderWidget() ?? []).some((line) => line.includes(queued.id.slice(0, 8)) && /queued for a slot/.test(line)));
 
-		// Free the slot so the queued run actually starts.
+		// Hold the queue long enough that "counts the queue wait" and "counts only
+		// the run" differ by more than the rounding noise a loaded box adds: with a
+		// ~2.5 s queue, a widget measuring from `createdAt` reports 2s or more, while
+		// one measuring from `startedAt` reports 0s or 1s.
+		await new Promise((resolve) => setTimeout(resolve, 2_500));
+
+		// Free the slot so the queued run actually starts, then wait for the WIDGET to
+		// say so: the run record flips first and the widget refreshes on its own
+		// ticker, so asserting on a row read too early measures the refresh lag rather
+		// than what the widget reports about a started run (it said "queued for a slot
+		// · 3s" under load, which is correct for a queued row).
 		await h.call("subagent_cancel", { id: first.id });
 		await waitFor(async () => (await h.readRuns()).find((run) => run.id === queued.id)?.status === "running");
+		await waitFor(() => {
+			const line = (h.renderWidget() ?? []).find((rendered) => rendered.includes(queued.id.slice(0, 8)));
+			return Boolean(line && !/queued for a slot/.test(line));
+		});
 
 		const row = (h.renderWidget() as string[]).find((line) => line.includes(queued.id.slice(0, 8))) as string;
 		const elapsed = row?.match(/· (\d+s|[0-9]+m[^·]*) · /)?.[1];
-		assert.equal(elapsed, "0s", `a run that just started must not report its queue wait as elapsed time: ${row}`);
+		const elapsedSeconds = Number(/(\d+)s/.exec(elapsed ?? "")?.[1]);
+		assert.ok(
+			Number.isFinite(elapsedSeconds) && elapsedSeconds <= 1,
+			`a run that just started must not report its ~2.5 s queue wait as elapsed time: ${row}`,
+		);
 
 		// And the widget agrees with subagent_status, which measures the same thing.
 		const status = await h.call("subagent_status", { id: queued.id });

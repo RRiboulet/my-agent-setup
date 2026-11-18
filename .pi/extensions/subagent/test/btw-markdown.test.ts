@@ -184,8 +184,15 @@ async function startViewer(answer: string, spec?: unknown) {
 		raw: () => output,
 		drawn: () => plain(output),
 		errors: () => errors.join(""),
-		/** Wait until the drawn text contains `needle`, or give up. */
-		async until(needle: string, timeoutMs = 8000) {
+		/**
+		 * Wait until the drawn text contains `needle`, or give up.
+		 *
+		 * The bound is generous on purpose, as `helpers.ts` argues for its own
+		 * poll: this spawns a whole node process and waits for it to render, and
+		 * the suite runs test files concurrently. An 8 s bound went red on a
+		 * loaded 2-core box; a real break still fails well inside this one.
+		 */
+		async until(needle: string, timeoutMs = 30_000) {
 			const deadline = Date.now() + timeoutMs;
 			while (Date.now() < deadline) {
 				if (plain(output).includes(needle)) return true;
