@@ -23,11 +23,13 @@ are published and maintained, so "build it" is no longer the default answer.
 
 1. Read the installed pi `1.5.2` docs and the local extensions before claiming
    any api or hook exists.
-2. Measure this machine's sessions across all three agent dirs
-   (the user agent dir, the devcontainer's private agent dir, and the host agent dir), pairing
-   every `toolCall` with its recorded `durationMs`. The snapshot is frozen at
-   sessions **started before 2026-11-17T09:15Z**, so the investigation's own
-   sessions do not inflate it. Read-only scripts; no session was modified.
+2. Measure this machine's sessions across the host agent dirs, pairing every
+   `toolCall` with its recorded `durationMs`. The snapshot is frozen at sessions
+   **started before 2026-11-17T09:15Z**, so the investigation's own sessions do
+   not inflate it. Read-only scripts; no session was modified. The sentence here
+   originally claimed all three dirs including the devcontainer's private one;
+   the 108-session baseline is the host dirs only — see "Correction: candidate
+   07" below.
 3. Survey competitors from their docs/changelogs, and the open-source trio from
    their source.
 4. Rank by **minutes recovered per 17-day window ÷ hours to build**, with a
@@ -113,8 +115,63 @@ slower end to end. Full evidence and what survived: `tickets/harness-advancement
 
 The concurrent test runner and the two bounds it exposed are re-landed alone in
 #165; the lifecycle split stands in #164. Treat the suite category as being fixed
-by those, and the polling category as ticket 03's for subagents and candidate 07's
-for bash.
+by those, and the polling category as ticket 03's for subagents. Bash polling is
+not a repeat-breaker problem either; candidate 07 was measured and withdrawn
+below.
+
+## Correction: candidate 07 was measured and withdrawn (2026-11-18)
+
+Row 7 rested on "14× the same `docker ps`; 8–9× the same suite". No reachable
+session reproduces 14 repeats of one command: those numbers are counts of
+commands that *mention* `docker ps` or `node --test`. The closest sessions are
+18 `docker ps` calls (01a1d0f6, all 18 distinct) and 32 `node --test` calls
+(01a1d1e9, 31 distinct), and both ended before the freeze, so they are not an
+earlier read that grew later.
+
+Re-measured on this host on 2026-11-18, with three trigger keys and a streak
+counted consecutively within one session (Kimi's chain semantics). The scan is
+transcript-only, so host load does not affect the counts:
+
+| trigger key | sessions firing (streak ≥ 3) | worst | calls / time in repeats |
+|---|---|---|---|
+| exact command, leading `cd … &&` stripped | **0 of 124** | — | 0 / 0 s |
+| verb + subcommand (`docker exec`, `node --test`) | 43 of 124 | 17× `docker exec` | 740 / 6 480 s |
+| identical output, ≥ 40 chars, sha1 | **1 of 124** | 3× | 2 / 5 s |
+
+Corpus: the survey window (2026-10-31 .. 2026-11-17T09:15Z) over the host agent
+dirs (108 sessions) **plus this repo's devcontainer private volume** (16
+sessions), 6 140 tool calls, 4 671 of them bash. The 65 sessions in the legacy shared
+`pi-agent-config` volume dedupe entirely into those. The container volume was
+not reachable at the freeze and is not in the 108-session baseline; it is
+reachable over `docker exec`. All-time (145 sessions, 5 145 bash calls) gives the
+same exact-args zero. The other project containers on this host (pupkeep,
+lol-dataset, analytics-agent; 145 sessions) are excluded because this repo's
+extensions are not what they load; their repeats are `sleep` polls and post-edit
+verification runs.
+
+Sensitivity check — if the ladder counted occurrences rather than consecutive
+calls — leaves exact-args at 1 of 124, and that one session is three
+`sleep 300; echo waited` calls, a deliberate poll.
+
+One scope correction: those keys are bash-only, and Kimi's chain (like
+DeepSeek's reminder) keys on every tool. Across all tools, a repeat of 3 within
+one user-message segment fires in 9 of 124 sessions — every one of them
+`subagent_status` polling (4 sessions) or a `codemode` call wrapping the same
+poll (5), 698 repeated calls, worst 640 on one run id. That is the category
+`subagent_wait` (#163) removed; a reminder there would re-fight a solved
+problem, and after #163 the all-tool trigger has no workload left either.
+
+Read it as the `bg` result: the exact-args ladder fires zero times and would
+ship as dead code with green tests. The verb-level row is real but is `devc`
+latency: one session's 17-call consecutive `docker exec` run is 17 different
+commands, and the 6 480 s across 43 sessions is 740 commands sharing a two-word
+prefix. A ladder keyed that coarsely would fire on every `devc`/`sed` session
+and tell the model nothing. Output-hash is real and rare (three sessions repeat
+an answer three times: a model list, an SSH timeout, a missing API key), and in
+the busiest other-project case the repeated answer is a post-edit `tsc --noEmit`
+— the deliberate retry a nudge must not block. Row 7 is therefore **withdrawn,
+not deferred**; the evidence and the revival trigger are in
+`tickets/harness-advancements/07-repeat-breaker.md`.
 
 ## Candidate ranking
 
@@ -141,7 +198,7 @@ routing, not measured wall-clock.
 | 4 | repo-explorer `/diff` + `/explore` | 1,786 lines; wrong-branch bug; transcript pollution | phone workflow | 12–16 h | felt pain | top 5 |
 | 5 | Skills prune/merge/split | 22 SKILL.md reads / 16 sessions; 23 skills; one 623-line skill | context + routing | 10 h | unmeasured | top 5 |
 | 6 | Measurement harness | 2,127-line report tool; no A/B runner | enables all of the above | 6 h | prerequisite | ticket 00 |
-| 7 | Repeat-breaker ladder (Kimi) | 14× the same `docker ps`; 8–9× the same suite | small | 4 h | cheap | later |
+| 7 | ~~Repeat-breaker ladder (Kimi)~~ **rejected 2026-11-18** | measured: bash exact-args streak ≥ 3 in 0 of 124 sessions; one 5 s output streak (see `tickets/…/07-repeat-breaker.md`) | ~5 s | — | — | withdrawn |
 | 8 | Phone notify | SSH+tmux; no Tailscale | attention | 4 h | unmeasured | later |
 | 9 | `pi-lens` LSP trial | 0 type errors measured; ~0.5 GB RAM | unproven | 3 h | unproven | later |
 | 10 | `pi-web-access` fetch | 70 curls / 42 s, mostly non-web | capability | 2 h | unmeasured | later |
@@ -206,8 +263,11 @@ by per-skill loads and context tokens, not by a word count.
 
 Kept with a trigger, not dropped:
 
-- **Repeat-breaker ladder** (Kimi Code): reminders at streak 3/5/8, forced stop
-  at 12. Cheap; build when a new loop is observed rather than pre-emptively.
+- ~~**Repeat-breaker ladder** (Kimi Code)~~ — withdrawn 2026-11-18 on
+  measurement: a bash exact-args streak of 3 fires in 0 of 124 sessions, and
+  every all-tool repeat is #163's polling. Revive only
+  on a measured loop that is neither a poll nor a verification retry, per
+  `tickets/harness-advancements/07-repeat-breaker.md`.
 - **Phone notifications**: tmux bell/status only. No Tailscale at home and no
   third-party push channel on a box holding SSH keys.
 - **`pi-lens` LSP trial**: install for one week, measure post-edit diagnostics
@@ -253,7 +313,8 @@ writes JSON; the report is a table.
 - Four axes ranked together; measured pain outranks competitor parity.
 - Ratio ranking with a maintenance veto; no daemon, no paid service, no second
   runtime; 11 GB / 2 vCPU is the budget.
-- `bg` lands first; it is already built in another worktree.
+- `bg` lands first; it is already built in another worktree. The repeat-breaker
+  ladder is withdrawn on measurement, not deferred.
 - Skills: prune + merge + progressive disclosure, all three.
 - Session-breakdown: replace the graph with a compact table and keep
   `tools/measure-session-usage.mjs`.
@@ -270,7 +331,8 @@ writes JSON; the report is a table.
 - A measured post-edit diagnostic cost (say, a week of TypeScript errors in
   tool results) promotes LSP.
 - A lost-work incident promotes checkpoints above repo-explorer.
-- `devc` rework failing to find 20% latency promotes the repeat-breaker ladder
-  and phone notify into the top five.
+- `devc` rework failing to find 20% latency promotes phone notify into the top
+  five. It does not promote the repeat-breaker ladder: that was measured and
+  withdrawn separately, on the trigger rather than on `devc`.
 - A second developer using this package invalidates the single-user assumptions
   and the "free rein to break the tool API" decision.

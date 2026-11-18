@@ -67,6 +67,24 @@ Maintenance:
   needed two 20 ms ticks inside 120 ms (now 500 ms). Both now assert behaviour
   rather than the machine, which is the rule `helpers.ts` already states for its
   own poll bound.
+- **The repeat-breaker ladder is withdrawn on measurement, and the frozen
+  baseline's corpus is corrected.** Row 7 of the harness ranking rested on "14×
+  the same `docker ps`; 8–9× the same suite", which counts commands that mention
+  `docker ps`/`node --test`, not repeats: no reachable session has 14 repeats of
+  one command, and the closest are 18 `docker ps` calls (all distinct) and 32
+  `node --test` calls (31 distinct). Re-measured over the frozen window across the host
+  agent dirs plus this container's private volume — reachable over `docker
+  exec`; the survey's 108-session baseline was host-only, despite the Method
+  paragraph — a consecutive bash exact-args streak of 3 fires in **0 of 124**
+  sessions, an identical-output streak of 3 in 1 (5 s), and the largest
+  verb-level run, 17 `docker exec` calls, is 17 different commands inside a
+  session of 75 — `devc` latency, not a loop. Across all tools the only repeats
+  are `subagent_status`/`codemode` polling, the traffic `subagent_wait` (#163)
+  removed, so the reminder has no workload left. The candidate is rejected
+  rather than deferred, with its revival trigger in
+  `docs/tickets/harness-advancements/07-repeat-breaker.md`.
+  Ticket 03 is marked landed (#163) and ticket 00 in progress, where both had
+  still said `ready`.
 
 ## v1.14.0 — 2026-11-16
 
