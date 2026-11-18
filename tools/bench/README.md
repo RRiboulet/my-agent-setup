@@ -30,7 +30,7 @@ node tools/bench/run.mjs --state baseline --models deepseek-v4.1-flash,glm-5.3-f
 ```
 
 A cell is (task, model, state) and writes one JSON file to
-`tools/bench/results/<state>/<provider>_<model>/<task>.json`. An existing cell is
+`tools/bench/results/<state>/<encoded-model>/<task>.json (`encodeURIComponent`, so a `:` and a `/` cannot collide)`. An existing cell is
 skipped unless `--force`, so a long grid can be resumed.
 
 `--state` is required and is the label that names the harness state. Use

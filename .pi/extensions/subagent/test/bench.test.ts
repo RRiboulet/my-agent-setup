@@ -103,3 +103,14 @@ test("skillsInToolCall reads a path and a bash command, and deduplicates", () =>
 	assert.deepEqual(skillsInToolCall({ name: "read", arguments: { path: "/repo/README.md" } }), []);
 	assert.deepEqual(skillsInToolCall({ name: "bash", arguments: { command: "ls .pi/skills" } }), []);
 });
+
+import { suiteFromAnswer } from "../../../../tools/bench/lib/suite.mjs";
+
+
+test("suiteFromAnswer separates a completed task from a green suite", () => {
+	assert.deepEqual(suiteFromAnswer("Pass: 1133\nFail: 1"), { passed: 1133, failed: 1, green: false });
+	assert.deepEqual(suiteFromAnswer("**Passed:** 1132\n**Failed:** 2"), { passed: 1132, failed: 2, green: false });
+	assert.deepEqual(suiteFromAnswer("1134 pass, 0 fail"), { passed: 1134, failed: 0, green: true });
+	assert.equal(suiteFromAnswer("0 passed, 1134 failed").green, false);
+	assert.equal(suiteFromAnswer("I ran the suite."), null);
+});

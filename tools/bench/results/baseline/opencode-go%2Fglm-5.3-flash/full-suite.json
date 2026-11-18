@@ -47,5 +47,10 @@
   "parseError": null,
   "parseTruncated": false,
   "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go%2Fglm-5.3-flash/sessions/full-suite",
-  "stderrTail": ""
+  "stderrTail": "",
+  "suite": {
+    "passed": 1132,
+    "failed": 2,
+    "green": false
+  }
 }

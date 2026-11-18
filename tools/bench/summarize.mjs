@@ -57,6 +57,7 @@ function main() {
     tokens: cell.metrics.tokens,
     errors: cell.metrics.errors,
     passed: cell.check.passed,
+    suite: cell.suite ?? null,
     timedOut: cell.timedOut,
     head: cell.repoState?.head?.slice(0, 7) ?? "",
   }));
@@ -72,13 +73,18 @@ function main() {
   lines.push("");
   lines.push(`Cells: ${rows.length}. Generated ${new Date().toISOString()}.`);
   lines.push("");
-  lines.push("| task | model | wall s | calls | longest ms | tokens | errors | check |");
-  lines.push("|---|---|---|---|---|---|---|---|");
+  lines.push("| task | model | wall s | calls | longest ms | tokens | errors | check | suite |");
+  lines.push("|---|---|---|---|---|---|---|---|---|");
   for (const row of rows) {
+    const suite = row.suite ? `${row.suite.passed}/${row.suite.failed}${row.suite.green ? "" : " red"}` : "-";
     lines.push(
-      `| ${row.task} | ${row.model.replace("opencode-go/", "")} | ${row.wallS} | ${row.calls} | ${row.longestMs} | ${row.tokens} | ${row.errors} | ${row.passed ? "pass" : `FAIL${row.timedOut ? " (timeout)" : ""}`} |`,
+      `| ${row.task} | ${row.model.replace("opencode-go/", "")} | ${row.wallS} | ${row.calls} | ${row.longestMs} | ${row.tokens} | ${row.errors} | ${row.passed ? "pass" : `FAIL${row.timedOut ? " (timeout)" : ""}`} | ${suite} |`,
     );
   }
+  lines.push("");
+  lines.push("`check` means the task was completed; `suite` is the runner's own pass/fail count when the task reports one. A red suite with a passing check is a completed task that measured a red suite, not a green one.");
+  lines.push("");
+  lines.push("Each model contributes **one** run per task, so a median across models is not a distribution. Treat wall-time differences below ~2x as noise until there is a second run.");
   lines.push("");
   lines.push("## Per-task median across models");
   lines.push("");

@@ -47,5 +47,10 @@
   "parseError": null,
   "parseTruncated": false,
   "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go%2Fhy4-flash-free/sessions/one-test-file",
-  "stderrTail": ""
+  "stderrTail": "",
+  "suite": {
+    "passed": 26,
+    "failed": 0,
+    "green": true
+  }
 }

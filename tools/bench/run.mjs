@@ -24,6 +24,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { summarizeEvents, parseJsonlTolerant } from "./lib/events.mjs";
 import { loadTasks, selectTasks, renderPrompt } from "./lib/tasks.mjs";
 import { skillsInToolCall } from "./skills.mjs";
+import { suiteFromAnswer } from "./lib/suite.mjs";
 
 const BENCH_DIR = import.meta.dirname;
 const DEFAULT_OUT = path.join(BENCH_DIR, "results");
@@ -43,6 +44,7 @@ function usage() {
   --out <dir>             result root, default tools/bench/results
   --timeout <ms>          override every task's timeout
   --force                 overwrite an existing cell
+  --recheck               re-evaluate check/suite from stored answers, no model run
   --allow-dirty           allow a dirty task repo (recorded in the result)
   --dry-run               print the cells without running them
   --list                  list the tasks and models and exit
@@ -65,6 +67,7 @@ function parseArgs(argv) {
       case "--out": args.out = path.resolve(next()); break;
       case "--timeout": args.timeout = Number(next()); break;
       case "--force": args.force = true; break;
+      case "--recheck": args.recheck = true; break;
       case "--allow-dirty": args.allowDirty = true; break;
       case "--dry-run": args.dryRun = true; break;
       case "--list": args.list = true; break;
@@ -207,11 +210,27 @@ async function runCheck(check, { repo, timeoutMs }) {
   };
 }
 
-async function runCell({ task, model, state, outRoot, force, allowDirty, timeoutOverride }) {
+async function runCell({ task, model, state, outRoot, force, allowDirty, timeoutOverride, recheck }) {
   const stateDir = path.join(outRoot, state, modelSlug(model));
   const outFile = path.join(stateDir, `${task.id}.json`);
   if (fs.existsSync(outFile) && !force) {
-    return { skipped: true, outFile };
+    if (!recheck) return { skipped: true, outFile };
+    const existing = JSON.parse(fs.readFileSync(outFile, "utf8"));
+    const vars = taskVars(task);
+    const resolvedCheck = task.check
+      ? {
+          ...task.check,
+          expectAnswerContains: (task.check.expectAnswerContains ?? []).map((needle) => renderPrompt(needle, vars)),
+          command: task.check.command ? renderPrompt(task.check.command, vars) : undefined,
+          expectContains: (task.check.expectContains ?? []).map((needle) => renderPrompt(needle, vars)),
+        }
+      : undefined;
+    existing.check = await runCheck({ ...(resolvedCheck ?? {}), answer: existing.answer }, { repo: task.repo, timeoutMs: task.timeoutMs });
+    if (task.parseSuite) existing.suite = suiteFromAnswer(existing.answer);
+    const tmp = `${outFile}.tmp-${process.pid}`;
+    fs.writeFileSync(tmp, `${JSON.stringify(existing, null, 2)}\n`);
+    fs.renameSync(tmp, outFile);
+    return { rechecked: true, outFile, record: existing };
   }
 
   const repo = repoState(task.repo);
@@ -256,6 +275,7 @@ async function runCell({ task, model, state, outRoot, force, allowDirty, timeout
   }
 
   const check = await runCheck({ ...(resolvedCheck ?? {}), answer: summary.finalAnswer }, { repo: task.repo, timeoutMs });
+  const suite = task.parseSuite ? suiteFromAnswer(summary.finalAnswer) : null;
   const record = {
     schemaVersion: 1,
     cell: { task: task.id, model, state },
@@ -290,6 +310,7 @@ async function runCell({ task, model, state, outRoot, force, allowDirty, timeout
     },
     answer: summary.finalAnswer,
     check,
+    suite,
     parseError,
     parseTruncated,
     sessionDir,
@@ -367,7 +388,13 @@ async function main() {
         force: Boolean(args.force),
         allowDirty: Boolean(args.allowDirty),
         timeoutOverride: args.timeout,
+        recheck: Boolean(args.recheck),
       });
+      if (result.rechecked) {
+        console.log(`recheck (${result.record.check.passed ? "pass" : "FAIL"}${result.record.suite ? `, suite ${result.record.suite.passed}/${result.record.suite.failed}` : ""})`);
+        rows.push({ task: task.id, model, ...result.record });
+        continue;
+      }
       if (result.skipped) {
         console.log(`skip (exists; --force to rerun)`);
         continue;
