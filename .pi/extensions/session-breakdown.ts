@@ -284,8 +284,7 @@ function setBorderedLoaderMessage(loader: BorderedLoader, message: string) {
 	}
 }
 
-// Dark-ish background and empty cell color (close to GitHub dark)
-const DEFAULT_BG: RGB = { r: 13, g: 17, b: 23 };
+// Empty cell color (close to GitHub dark)
 const EMPTY_CELL_BG: RGB = { r: 22, g: 27, b: 34 };
 
 // Default palette (assigned to top models)
@@ -297,20 +296,8 @@ const PALETTE: RGB[] = [
 	{ r: 244, g: 67, b: 54 }, // red
 ];
 
-function clamp01(x: number): number {
-	return Math.max(0, Math.min(1, x));
-}
-
 function lerp(a: number, b: number, t: number): number {
 	return a + (b - a) * t;
-}
-
-function mixRgb(a: RGB, b: RGB, t: number): RGB {
-	return {
-		r: Math.round(lerp(a.r, b.r, t)),
-		g: Math.round(lerp(a.g, b.g, t)),
-		b: Math.round(lerp(a.b, b.b, t)),
-	};
 }
 
 function weightedMix(colors: Array<{ color: RGB; weight: number }>): RGB {
@@ -415,13 +402,6 @@ function addDaysLocal(d: Date, days: number): Date {
 	const x = new Date(d);
 	x.setDate(x.getDate() + days);
 	return x;
-}
-
-function countDaysInclusiveLocal(start: Date, end: Date): number {
-	// Avoid ms-based day math because DST transitions can make a “day” 23/25h in local time.
-	let n = 0;
-	for (let d = new Date(start); d <= end; d = addDaysLocal(d, 1)) n++;
-	return n;
 }
 
 function mondayIndex(date: Date): number {
@@ -1126,61 +1106,6 @@ function buildTodPalette(): { todColors: Map<TodKey, RGB>; orderedTods: TodKey[]
 	return { todColors, orderedTods };
 }
 
-function dayMixedColor(
-	day: DayAgg,
-	colorMap: Map<string, RGB>,
-	otherColor: RGB,
-	mode: MeasurementMode,
-	view: BreakdownView = "model",
-	groupProviders = false,
-): RGB {
-	const parts: Array<{ color: RGB; weight: number }> = [];
-	let otherWeight = 0;
-
-	let map: Map<string, number>;
-	if (view === "dow") {
-		// For dow, each day IS a single dow – use the dow color directly
-		const dowKey = DOW_NAMES[mondayIndex(day.date)];
-		const c = colorMap.get(dowKey);
-		return c ?? otherColor;
-	} else if (view === "tod") {
-		if (mode === "tokens") {
-			map = day.tokens > 0 ? day.tokensByTod : day.messages > 0 ? day.messagesByTod : day.sessionsByTod;
-		} else if (mode === "messages") {
-			map = day.messages > 0 ? day.messagesByTod : day.sessionsByTod;
-		} else {
-			map = day.sessionsByTod;
-		}
-	} else if (view === "cwd") {
-		if (mode === "tokens") {
-			map = day.tokens > 0 ? day.tokensByCwd : day.messages > 0 ? day.messagesByCwd : day.sessionsByCwd;
-		} else if (mode === "messages") {
-			map = day.messages > 0 ? day.messagesByCwd : day.sessionsByCwd;
-		} else {
-			map = day.sessionsByCwd;
-		}
-	} else {
-		const sByModel = groupProviders ? day.groupedSessionsByModel : day.sessionsByModel;
-		const mByModel = groupProviders ? day.groupedMessagesByModel : day.messagesByModel;
-		const tByModel = groupProviders ? day.groupedTokensByModel : day.tokensByModel;
-		if (mode === "tokens") {
-			map = day.tokens > 0 ? tByModel : day.messages > 0 ? mByModel : sByModel;
-		} else if (mode === "messages") {
-			map = day.messages > 0 ? mByModel : sByModel;
-		} else {
-			map = sByModel;
-		}
-	}
-
-	for (const [mk, w] of map.entries()) {
-		const c = colorMap.get(mk);
-		if (c) parts.push({ color: c, weight: w });
-		else otherWeight += w;
-	}
-	if (otherWeight > 0) parts.push({ color: otherColor, weight: otherWeight });
-	return weightedMix(parts);
-}
-
 function graphMetricForRange(
 	range: RangeAgg,
 	mode: MeasurementMode,
@@ -1203,90 +1128,49 @@ function graphMetricForRange(
 	return { kind: "sessions", max: maxSessions, denom: Math.log1p(maxSessions) };
 }
 
-function weeksForRange(range: RangeAgg): number {
-	const days = range.days;
-	const start = days[0].date;
-	const end = days[days.length - 1].date;
-	const gridStart = addDaysLocal(start, -mondayIndex(start));
-	const gridEnd = addDaysLocal(end, 6 - mondayIndex(end));
-	const totalGridDays = countDaysInclusiveLocal(gridStart, gridEnd);
-	return Math.ceil(totalGridDays / 7);
-}
 
-function renderGraphLines(
-	range: RangeAgg,
-	colorMap: Map<string, RGB>,
-	otherColor: RGB,
-	mode: MeasurementMode,
-	options?: { cellWidth?: number; gap?: number },
-	view: BreakdownView = "model",
-	groupProviders = false,
-): string[] {
-	const days = range.days;
-	const start = days[0].date;
-	const end = days[days.length - 1].date;
-
-	const gridStart = addDaysLocal(start, -mondayIndex(start));
-	const gridEnd = addDaysLocal(end, 6 - mondayIndex(end));
-	const totalGridDays = countDaysInclusiveLocal(gridStart, gridEnd);
-	const weeks = Math.ceil(totalGridDays / 7);
-
-	const cellWidth = Math.max(1, Math.floor(options?.cellWidth ?? 1));
-	const gap = Math.max(0, Math.floor(options?.gap ?? 1));
-	const block = "█".repeat(cellWidth);
-	const gapStr = " ".repeat(gap);
+function renderDailyTable(range: RangeAgg, mode: MeasurementMode, maxRows: number, width = 0): string[] {
+	const withActivity = range.days.filter(
+		(day) => day.sessions + day.messages + day.tokens + day.totalCost > 0,
+	);
+	if (withActivity.length === 0) return [dim("no activity in this range")];
 
 	const metric = graphMetricForRange(range, mode);
-	const denom = metric.denom;
-
-	// Label only Mon/Wed/Fri like GitHub (saves space)
-	const labelByRow = new Map<number, string>([
-		[0, "Mon"],
-		[2, "Wed"],
-		[4, "Fri"],
-	]);
-
-	const lines: string[] = [];
-	for (let row = 0; row < 7; row++) {
-		const label = labelByRow.get(row);
-		let line = label ? padRight(label, 3) + " " : "    ";
-
-		for (let w = 0; w < weeks; w++) {
-			const cellDate = addDaysLocal(gridStart, w * 7 + row);
-			const inRange = cellDate >= start && cellDate <= end;
-			const colGap = w < weeks - 1 ? gapStr : "";
-			if (!inRange) {
-				line += " ".repeat(cellWidth) + colGap;
-				continue;
+	const shown = withActivity.slice(-Math.max(1, maxRows)).reverse();
+	// The model column is the first thing to go on a narrow terminal: 54 columns
+	// before a provider-qualified name is added, and a clipped name says nothing.
+	const showModel = width <= 0 || width >= 70;
+	const header = `${"date".padEnd(10)}  ${"sess".padStart(4)}  ${"msg".padStart(5)}  ${"tok".padStart(7)}  ${"cost".padStart(9)}`;
+	const lines = [dim(showModel ? `${header}  top model` : header)];
+	for (const day of shown) {
+		let top = "";
+		let best = -1;
+		const models = dayMetricMap(day, metric.kind);
+		for (const [model, value] of models) {
+			if (value > best) {
+				best = value;
+				top = model;
 			}
-
-			const key = toLocalDayKey(cellDate);
-			const day = range.dayByKey.get(key);
-			const value =
-				metric.kind === "tokens"
-					? (day?.tokens ?? 0)
-					: metric.kind === "messages"
-						? (day?.messages ?? 0)
-						: (day?.sessions ?? 0);
-
-			if (!day || value <= 0) {
-				line += ansiFg(EMPTY_CELL_BG, block) + colGap;
-				continue;
-			}
-
-			const hue = dayMixedColor(day, colorMap, otherColor, mode, view, groupProviders);
-			let t = denom > 0 ? Math.log1p(value) / denom : 0;
-			t = clamp01(t);
-			const minVisible = 0.2;
-			const intensity = minVisible + (1 - minVisible) * t;
-			const rgb = mixRgb(DEFAULT_BG, hue, intensity);
-			line += ansiFg(rgb, block) + colGap;
 		}
-
-		lines.push(line);
+		const date = `${day.date.getFullYear()}-${String(day.date.getMonth() + 1).padStart(2, "0")}-${String(day.date.getDate()).padStart(2, "0")}`;
+		const values = [
+			date.padEnd(10),
+			String(day.sessions).padStart(4),
+			String(day.messages).padStart(5),
+			formatCount(day.tokens).padStart(7),
+			formatUsd(day.totalCost).padStart(9),
+		];
+		if (showModel) values.push(top ? displayModelName(top) : dim("-"));
+		lines.push(values.join("  "));
 	}
-
 	return lines;
+}
+
+/** The per-day map for the selected metric, grouped so provider prefixes do not split a model. */
+function dayMetricMap(day: DayAgg, kind: "sessions" | "messages" | "tokens"): Map<ModelKey, number> {
+	if (kind === "tokens") return day.groupedTokensByModel.size > 0 ? day.groupedTokensByModel : day.tokensByModel;
+	if (kind === "messages") return day.groupedMessagesByModel.size > 0 ? day.groupedMessagesByModel : day.messagesByModel;
+	return day.groupedSessionsByModel.size > 0 ? day.groupedSessionsByModel : day.sessionsByModel;
 }
 
 function displayModelName(modelKey: string): string {
@@ -1418,43 +1302,6 @@ function dowMetricForRange(
 		{ tokens: range.totalTokens, messages: range.totalMessages, sessions: range.sessions },
 	);
 	return { kind, perDow, total };
-}
-
-function renderDowDistributionLines(
-	range: RangeAgg,
-	mode: MeasurementMode,
-	dowColors: Map<DowKey, RGB>,
-	width: number,
-): string[] {
-	const { kind, perDow, total } = dowMetricForRange(range, mode);
-	const dayWidth = 3;
-	const pctWidth = 4; // "100%"
-	const valueWidth = kind === "tokens" ? 10 : 8;
-	const showValue = width >= dayWidth + 1 + 10 + 1 + pctWidth + 1 + valueWidth;
-	const fixedWidth = dayWidth + 1 + 1 + pctWidth + (showValue ? 1 + valueWidth : 0);
-	const barWidth = Math.max(1, width - fixedWidth);
-	const fallbackColor: RGB = { r: 160, g: 160, b: 160 };
-
-	const lines: string[] = [];
-	for (const dow of DOW_NAMES) {
-		const value = perDow.get(dow) ?? 0;
-		const share = total > 0 ? value / total : 0;
-		let filled = share > 0 ? Math.round(share * barWidth) : 0;
-		if (share > 0) filled = Math.max(1, filled);
-		filled = Math.min(barWidth, filled);
-		const empty = Math.max(0, barWidth - filled);
-
-		const color = dowColors.get(dow) ?? fallbackColor;
-		const filledBar = filled > 0 ? ansiFg(color, "█".repeat(filled)) : "";
-		const emptyBar = empty > 0 ? ansiFg(EMPTY_CELL_BG, "█".repeat(empty)) : "";
-		const pct = padLeft(`${Math.round(share * 100)}%`, pctWidth);
-
-		let line = `${padRight(dow, dayWidth)} ${filledBar}${emptyBar} ${pct}`;
-		if (showValue) line += ` ${padLeft(formatCount(value), valueWidth)}`;
-		lines.push(line);
-	}
-
-	return lines;
 }
 
 function renderDowTable(range: RangeAgg, mode: MeasurementMode): string[] {
@@ -1763,13 +1610,22 @@ class BreakdownComponent implements Component {
 		this.cachedLines = undefined;
 	}
 
-	private tableMaxRows(): number {
+	private dailyTableRows(): number {
 		const rows = this.tui.terminal.rows || 0;
-		if (rows <= 0) return 12;
-		// Fixed chrome above/around the table: header, help, blank, summary,
-		// blank, graph (7), blank, table header + divider (2), plus some margin.
-		const overhead = 17;
-		return Math.max(4, Math.min(12, rows - overhead));
+		if (rows <= 0) return 7;
+		return Math.max(3, Math.min(8, rows - 14));
+	}
+
+	private tableMaxRows(dailyRows = this.dailyTableRows()): number {
+		const rows = this.tui.terminal.rows || 0;
+		if (rows <= 0) return 10;
+		// Fixed chrome (header, help, blank, summary, note, blank), the daily table,
+		// a blank, the lower table's header and divider, and one row of margin. The
+		// inherited note is a line when it exists, and omitting it clipped a lower
+		// table row at 24 rows.
+		const noteRows = inheritedNote(this.data.inherited) ? 1 : 0;
+		const overhead = 10 + dailyRows + noteRows;
+		return Math.max(3, Math.min(10, rows - overhead));
 	}
 
 	handleInput(data: string): void {
@@ -1901,33 +1757,10 @@ class BreakdownComponent implements Component {
 			}
 		}
 
-		const graphDescriptor = this.view === "dow" ? `share of ${metric.kind} by weekday` : `${metric.kind}/day`;
-		const summary = rangeSummary(range, selectedDays, metric.kind) + dim(`   (graph: ${graphDescriptor})`);
-
-		let graphLines: string[];
-		if (this.view === "dow") {
-			graphLines = renderDowDistributionLines(range, this.measurement, this.data.dowPalette.dowColors, width);
-		} else {
-			const maxScale = selectedDays === 7 ? 4 : selectedDays === 30 ? 3 : 2;
-			const weeks = weeksForRange(range);
-			const leftMargin = 4; // "Mon " (or 4 spaces)
-			const gap = 1;
-			const graphArea = Math.max(1, width - leftMargin);
-			// Each week column uses: cellWidth + gap. Last column also gets gap (fine; we truncate anyway).
-			const idealCellWidth = Math.floor((graphArea + gap) / Math.max(1, weeks)) - gap;
-			const cellWidth = Math.min(maxScale, Math.max(1, idealCellWidth));
-
-			graphLines = renderGraphLines(
-				range,
-				activeColorMap,
-				activeOtherColor,
-				this.measurement,
-				{ cellWidth, gap },
-				this.view,
-				this.view === "model" && !this.splitProviders,
-			);
-		}
-		const maxRows = this.tableMaxRows();
+		const summary = rangeSummary(range, selectedDays, metric.kind) + dim(`   (table: ${metric.kind}/day, newest first)`);
+		const dailyRows = this.dailyTableRows();
+		const dailyLines = renderDailyTable(range, this.measurement, dailyRows, width);
+		const maxRows = this.tableMaxRows(dailyRows);
 		const tableLines =
 			this.view === "model" ? renderModelTable(range, metric.kind, maxRows, !this.splitProviders)
 			: this.view === "cwd" ? renderCwdTable(range, metric.kind, maxRows)
@@ -1949,58 +1782,16 @@ class BreakdownComponent implements Component {
 		if (note) lines.push(truncateToWidth(dim(note), width));
 		lines.push("");
 
-		if (this.view === "dow") {
-			for (const gl of graphLines) lines.push(truncateToWidth(gl, width));
-		} else {
-			// Render legend on the RIGHT of the graph if there is space.
-			const graphWidth = Math.max(0, ...graphLines.map((l) => visibleWidth(l)));
-			const sep = 2;
-			const legendWidth = width - graphWidth - sep;
-			const showSideLegend = legendWidth >= 22;
-
-			if (showSideLegend) {
-				const legendBlock: string[] = [];
-				const legendTitle =
-					this.view === "model" ? "Top models (30d palette):"
-					: this.view === "cwd" ? "Top directories (30d palette):"
-					: "Time of day:";
-				legendBlock.push(dim(legendTitle));
-				legendBlock.push(...legendItems);
-				// Fit into 7 rows (same as graph). If too many, show a final "+N more" line.
-				const maxLegendRows = graphLines.length;
-				let legendLines = legendBlock.slice(0, maxLegendRows);
-				if (legendBlock.length > maxLegendRows) {
-					const remaining = legendBlock.length - (maxLegendRows - 1);
-					legendLines = [...legendBlock.slice(0, maxLegendRows - 1), dim(`+${remaining} more`)];
-				}
-				while (legendLines.length < graphLines.length) legendLines.push("");
-
-				const padRightAnsi = (s: string, target: number): string => {
-					const w = visibleWidth(s);
-					return w >= target ? s : s + " ".repeat(target - w);
-				};
-
-				for (let i = 0; i < graphLines.length; i++) {
-					const left = padRightAnsi(graphLines[i] ?? "", graphWidth);
-					const right = truncateToWidth(legendLines[i] ?? "", Math.max(0, legendWidth));
-					lines.push(truncateToWidth(left + " ".repeat(sep) + right, width));
-				}
-			} else {
-				// Fallback: graph only (legend will be shown below).
-				for (const gl of graphLines) lines.push(truncateToWidth(gl, width));
-				lines.push("");
-				// Compact legend below, left-aligned.
-				const legendTitleBelow =
-					this.view === "model" ? "Top models (30d palette):"
-					: this.view === "cwd" ? "Top directories (30d palette):"
-					: "Time of day:";
-				lines.push(truncateToWidth(dim(legendTitleBelow), width));
-				for (const it of legendItems) lines.push(truncateToWidth(it, width));
-			}
-		}
+		for (const dl of dailyLines) lines.push(truncateToWidth(dl, width));
 
 		lines.push("");
 		for (const tl of tableLines) lines.push(truncateToWidth(tl, width));
+
+		// The tabs, key hints and range summary are the orientation; the lower table
+		// is the part that may be cut. Clamp after building so a 16-row terminal
+		// still shows the header and the daily table.
+		const maxLines = termRows > 0 ? Math.max(8, termRows - 1) : lines.length;
+		if (lines.length > maxLines) lines.length = maxLines;
 
 		// Ensure no overly long lines (truncateToWidth already), but keep at least 1 line.
 		this.cachedWidth = width;

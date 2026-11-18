@@ -16,3 +16,6 @@ local.properties
 .artifacts/
 *.apk
 .worktrees/
+
+# Bench sessions are local transcripts, not results.
+tools/bench/results/**/sessions/

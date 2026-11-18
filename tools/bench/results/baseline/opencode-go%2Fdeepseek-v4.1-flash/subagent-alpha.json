@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "cell": {
+    "task": "subagent-alpha",
+    "model": "opencode-go/deepseek-v4.1-flash",
+    "state": "baseline"
+  },
+  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-fixture",
+  "repoState": {
+    "isGit": true,
+    "head": "5946170701a6d57e4dacc11c27ef76a85f49814e",
+    "dirty": false,
+    "dirtyAllowed": false
+  },
+  "startedAt": "2026-11-17T21:17:51.779Z",
+  "wallMs": 35402.086129,
+  "exitCode": 0,
+  "signal": null,
+  "timedOut": false,
+  "spawnError": null,
+  "prompt": "Start one subagent whose entire task is: reply with the single word ALPHA. Wait for it, then reply with the word it returned.",
+  "metrics": {
+    "toolCallCount": 5,
+    "toolCallsByName": {
+      "subagent": 1,
+      "codemode": 3,
+      "bash": 1
+    },
+    "toolResultCount": 5,
+    "toolTimeMs": 15926,
+    "longestToolMs": 15016,
+    "toolDurations": {
+      "subagent": 111,
+      "codemode": 799,
+      "bash": 15016
+    },
+    "tokens": 86483,
+    "cost": 0.002872415999999999,
+    "assistantMessages": 6,
+    "turns": 6,
+    "errors": 1,
+    "aborted": false,
+    "skillLoads": {}
+  },
+  "answer": "ALPHA",
+  "check": {
+    "passed": true,
+    "failures": [],
+    "command": null
+  },
+  "parseError": null,
+  "parseTruncated": false,
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go%2Fdeepseek-v4.1-flash/sessions/subagent-alpha",
+  "stderrTail": ""
+}
