@@ -1,57 +1,62 @@
-# 01: Land the `bg` stack that is already built
+# 01: Land the `bg` stack — **cancelled 2026-11-17, on measurement**
 
-**Blocked by:** 00 Phase A (the pre-`bg` baseline)
-**Status:** ready
-Evidence: `docs/research/2026-11-harness-advancements.md#1-land-bg-ticket-01`
+**Blocked by:** —
+**Status:** **cancelled** (was: ready)
 
-## What to build
+The stack was built, merged, and then measured. It did not earn its surface, and
+its branch has been closed and deleted. What follows is the evidence, so nobody
+rebuilds it in the belief that it works.
 
-Nothing new. The `bg` tool — `start`/`status`/`logs`/`kill`, completion
-notifications, restart repair, the testing rule, and the concurrent test runner —
-is already implemented on the `bg-tool-and-test-discipline` branch, with nine
-sibling branches (`bg-docs`, `bg-kill`, `bg-logs`, `bg-notify`, `bg-repair`,
-`bg-replay-baseline`, `bg-rule-honest`, `bg-wait-action`, `bg-acceptance`)
-merged into it.
+## What was built
 
-This ticket is the review, rebase, and merge: get it onto `dev` **after ticket
-00 Phase A records the pre-`bg` baseline**. Phase B then re-runs only the `bg`
-cells. No other ticket takes a baseline before Phase A, and no ticket treats a
-post-`bg` measurement as its own baseline.
+`bg` with `start`/`status`/`logs`/`kill`/`wait`, a poll watcher, coalesced
+completion notices, session-start repair, the `AGENTS.md` testing rule, and
+`--test-concurrency=8` for the suite. Roughly 3 270 lines of code and 2 235 of
+tests across 36 files, PR #161.
 
-At the tip checked on 2026-11-17 (`a1d48c5`): **1,204 tests pass, 0 fail,
-199 s**. The branch has moved twice since (`203ae56`, `a3ebad6`) and is actively
-owned by another worktree; re-run the suite at merge time rather than trusting
-this number. **PR #161 is already open and mergeable.** Its body is candid that
-only one of its four acceptance criteria was met and that the measured win came
-from the concurrent test runner, not from `bg`; land it as a capability, and do
-not repeat the speedup claim in the changelog.
+## Why it was cancelled
 
-## Scope
+Nine measured runs, one session per run, nothing else started while a run was in
+flight, `bg` verified reachable or unreachable per session:
 
-- Rebase `bg-tool-and-test-discipline` onto current `origin/dev`; resolve
-  `CHANGELOG.md` and `AGENTS.md` conflicts in favour of the bg branch's own
-  entries. The worktree happens to be named `bg-tool-start`; the branch is the
-  source of truth.
-- Confirm the extension is registered in `package.json` and that the testing
-  rule is in `AGENTS.md`.
-- Run the full suite once through `bg` itself, and `node --test --test-concurrency=8`
-  once directly.
-- Remove the eight sibling worktrees after the merge; `bg-tool-start` is the
-  only worktree that needs to survive until then.
-- Do not rewrite the tool, rename its actions, or fold the wait action
-  (`bg-wait-action`) into this ticket — that is separate work if it is wanted.
+| Run | Condition | Wall | What happened |
+|---|---|---:|---|
+| Acceptance ×6 | `bg` available | — | **1 of 4 criteria met**; `bg` called in **1 of 6** sessions |
+| Adoption ×2 | `bg` declared at startup | 308 / 525 s | **1 of 2** used it — identical to deferred |
+| Fan-out A | no `bg`, neutral | 732 s | four suite runs in a sequential `for` loop |
+| Fan-out B | `bg` declared, neutral | 711 s | `start` a script that ran all four **sequentially**, then `wait` |
+| Fan-out C | no `bg`, told to parallelise | 1 732 s | four runs **in parallel**: 291.6 s of suite time, then 1 400 s of flake triage |
 
-## Acceptance criteria
+Three conclusions, each measured rather than argued:
 
-- [ ] `git log --oneline origin/dev..HEAD` on the bg branch lists only bg commits, and `git merge-base --is-ancestor origin/dev HEAD` exits 0.
-- [ ] The full suite is green, with the count recorded in the PR body.
-- [ ] A full suite run started through `bg` returns immediately, notifies once on settle, and leaves no orphan process after the session ends.
-- [ ] `AGENTS.md` states the discipline: touched test files while iterating, the full suite once before commit, through `bg`.
-- [ ] `CHANGELOG.md` carries the `bg` entry and the measured motivation, dated.
-- [ ] `git worktree list` no longer shows the eight absorbed worktrees.
+1. **Availability is not adoption.** Declaring the tool changed usage not at all.
+2. **The model does not fan out.** Given a fan-out task and the tool, it wraps a
+   sequential batch in one job and waits — blocking relabelled, not removed.
+3. **Parallelism works, and `bg` is not what delivers it.** Condition C's four runs
+   finished in 291.6 s instead of ~660–960 s, using plain `&`. Its cost was
+   flake triage on a 2-core host, which made the session 2.4× slower end to end.
 
-## Validation
+The tool also exposed a real bug before it was retired: `watch.ts` settles a job
+from `handle.exitCode()` the moment the pid is gone, so under a starved event loop
+it can record `exited` with a null code before the child's `exit` event arrives —
+and settlement is one-shot, so `wait` then hands back `settled: true,
+exitCode: null` for a job that exited 0. Anyone reviving this code should fix that
+first.
 
-- Start a 180 s full suite through `bg`, do a second small task while it runs,
-  then read `logs` and the settle notification.
-- `ps -ef | grep -c 'node --test'` is 0 after the session's `session_shutdown`.
+## What survived, and where
+
+- **The concurrent test runner** — 184 s to ~119–132 s, plus the two load-sensitive
+  bounds it exposed — re-landed alone in **#165** (`test-suite-speed`).
+- **The lifecycle split** — the suite's floor from 98.8 s to 24.2 s — stands on its
+  own in **#164** (`split-lifecycle-tests`).
+- The `bg` code itself is gone: PR #161 closed, branch deleted. The commits remain
+  reachable through GitHub's `refs/pull/161/head` if anyone needs the history.
+
+## What replaces this in the ranking
+
+The two categories this ticket claimed — 7 786 s of `sleep`-polling and 7 904 s of
+blocking suites — are not recovered by adding a background-job tool. The suite
+category is reduced by making the suite faster (#165, #164) and by not running it
+548 times; the polling category needs the *caller* to stop polling, which is
+ticket 03's subject for subagents and a repeated-command breaker for bash
+(candidate 07).

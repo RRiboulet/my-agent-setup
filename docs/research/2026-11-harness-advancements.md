@@ -100,6 +100,22 @@ The window is by session start; a session still open at the freeze contributes
 its calls as read, which is why two runs of the same script can differ by a few
 seconds of a long-running command.
 
+## Correction: the `bg` ticket was measured and withdrawn (2026-11-17)
+
+The ranking below put "land `bg`" first on the strength of the two largest
+recoverable categories. It was built, then measured over nine runs, and it does
+not recover them: `bg` was called in 1 of 6 acceptance sessions, declaring it at
+startup did not change adoption (1 of 2 either way), and on a fan-out task the
+model wrapped a sequential batch in one job and waited, so no wall clock moved.
+Where parallelism did win — four suite runs in 291.6 s instead of ~660–960 s — it
+came from plain `&`, and the flake triage it triggered made that session 2.4×
+slower end to end. Full evidence and what survived: `tickets/harness-advancements/01-land-bg.md`.
+
+The concurrent test runner and the two bounds it exposed are re-landed alone in
+#165; the lifecycle split stands in #164. Treat the suite category as being fixed
+by those, and the polling category as ticket 03's for subagents and candidate 07's
+for bash.
+
 ## Candidate ranking
 
 Effort is hours at this repository's observed cadence, not ideal days. Recovery
@@ -119,7 +135,7 @@ routing, not measured wall-clock.
 
 | # | Candidate | Evidence | Recovery | Build | Ratio | Band |
 |---|---|---|---|---|---|---|
-| 1 | Land the `bg` stack | 7,786 s sleep + 7,904 s blocking tests | 60–90 min | 0 h build, 2 h review | already paid | top 5 |
+| 1 | ~~Land the `bg` stack~~ **cancelled 2026-11-17** | measured: adoption 1 of 6, no wavefront (see `tickets/…/01-land-bg.md`) | 0 | — | — | withdrawn |
 | 2 | `devc` fast paths | 252 calls / 6,389 s; ticket scope 3,604 s | ~18 min at 30% of scope; up to +14 min if `rebuild --if-stale` lands | 16 h | ~0.1–0.2 min/h | top 5 |
 | 3 | Subagent `wait`/collect | 681 polls vs 39 runs (17×) | ~20 min + context | 6 h | structural | top 5 |
 | 4 | repo-explorer `/diff` + `/explore` | 1,786 lines; wrong-branch bug; transcript pollution | phone workflow | 12–16 h | felt pain | top 5 |
