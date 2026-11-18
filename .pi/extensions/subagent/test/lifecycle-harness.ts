@@ -472,6 +472,11 @@ export async function assertUnusableResultFailsRun(h: Harness, raw: string, expe
 	const failed = await waitForRunStatus(h, "failed", "an unusable result.json must fail the run, not stall it");
 	assert.match(failed.error ?? "", expected);
 	assert.ok((failed.error ?? "").includes(run.resultPath), "the failure names the file a human must inspect");
+	// The session is reaped the moment the run settles, so the last captured pane
+	// is the only readable trace of what the child was doing when its result file
+	// turned out unusable. It must ride in the error, not live only in a record a
+	// fan-out wait no longer renders.
+	assert.ok((failed.error ?? "").includes("child working"), "the failure carries the last pane");
 }
 
 export async function withHarness<T>(

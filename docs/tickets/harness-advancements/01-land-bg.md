@@ -58,5 +58,5 @@ The two categories this ticket claimed — 7 786 s of `sleep`-polling and 7 904 
 blocking suites — are not recovered by adding a background-job tool. The suite
 category is reduced by making the suite faster (#165, #164) and by not running it
 548 times; the polling category needs the *caller* to stop polling, which is
-ticket 03's subject for subagents and a repeated-command breaker for bash
-(candidate 07).
+ticket 03's subject for subagents. The repeated-command breaker for bash
+(candidate 07) was measured and withdrawn — see `07-repeat-breaker.md`.
