@@ -358,6 +358,26 @@ machine, which is the rule `helpers.ts` already states for its own poll bound. I
 you raise the concurrency and see a red run, suspect a missing or tight wait
 before you suspect the code.
 
+#### One heavy thing at a time on this host
+
+`cat /proc/loadavg` and `ps` before you time anything, and record the load average
+beside every number you keep. This host has 2 vCPUs and more than one agent
+session runs on it, so a benchmark grid, another session's suite or a `devc` call
+will take the load from 0.4 to 33 — and a measurement taken in that window is a
+measurement of someone else's work. It cuts both ways: a grid started while
+another session is timing makes *its* numbers meaningless, which is worse than
+being slow, because each side then spends an hour triaging a "flake" that was
+contention.
+
+Two rules follow. **Never compare two timings taken at different loads** — re-run
+the pair, or say the comparison cannot be made. And when the suite goes red under
+load, **run the failing file alone before calling it a bug**: every red we have had
+under contention was a wall-clock bound in a test rather than the code it tests —
+a viewer waiting on a spawned `node` process, a 20 ms ticker needing two ticks, a
+widget row read one ticker before it refreshed itself. Those bounds are widened
+now, but the lesson is general: suspect a missing or too-tight wait first, and
+check the load average before you suspect the product.
+
 #### Typechecking: deliberately none
 
 There is no `tsconfig.json` and no `tsc` in the tree, and this is on purpose.
