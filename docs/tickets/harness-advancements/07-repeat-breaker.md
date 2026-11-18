@@ -47,23 +47,27 @@ in a run after the first. Calls and results pair by `toolCallId` in the
 `sessions/*.jsonl` transcripts, so the measurement needs no instrumentation.
 
 Corpus: 108 host sessions + 16 sessions from this container's private volume =
-124 sessions, 6 140 tool calls, 4 671 of them bash. The 65 sessions in the legacy
-shared volume
-dedupe entirely into those. All-time (145 sessions, 5 145 bash calls) gives the
-same exact-args zero and the same one output-hash session. The other project
+124 sessions, 6 140 tool calls, 4 671 of them bash (sessions started in the
+window; a session still open at the cut contributes later calls, 184 of the
+6 140). The 65 sessions in the legacy shared volume all dedupe into sessions
+already counted — 9 into this container's volume, 56 into lol-dataset's — so
+they add none. All-time (145 sessions, 5 145 bash calls) gives the same
+exact-args zero and the same one output-hash session. The other project
 containers on this host (pupkeep, lol-dataset, analytics-agent; 145 sessions,
 10 513 bash calls) are reported apart because this repo's extensions are not what
-they load.
+they load; their verb-level loops (`sed -n`, `python3 -`, `gh pr`, `git stash`)
+and repeat verification runs (`tsc`, `node --test`) are a different workload.
 
 Sensitivity check, in case the ladder should count occurrences rather than
 consecutive calls: exact-args still fires in **1 of 124** sessions, and that one
 is three `sleep 300; echo waited` calls — a deliberate poll.
 
 One scope correction: those keys are bash-only, and Kimi's chain (like
-DeepSeek's reminder) keys on every tool. Across all tools, a repeat of 3 within
-one user-message segment fires in **9 of 124** sessions — every one of them
+DeepSeek's reminder) keys on every tool. Across all tools a **consecutive**
+repeat of 3 fires in **2 of 124** sessions; counted the way DeepSeek does —
+occurrences within one user-message segment — **9 of 124**. Every fire is
 `subagent_status` polling (4 sessions) or a `codemode` call wrapping the same
-poll (5), 698 repeated calls, worst 640 on one run id. That is exactly the
+poll (5), worst 640 on one run id. That is exactly the
 traffic `subagent_wait` (#163) replaced: after it the all-tool trigger has no
 workload left, and before it the reminder would have nudged a poll the harness
 was about to stop by other means.
@@ -74,7 +78,8 @@ What each row means:
   green unit tests — the failure mode `bg` had.
 - **The verb-level number is real, but it is not a loop.** The worst run is 17
   consecutive `docker exec` calls, and they are 17 different commands in a
-  session of 75; across 43 sessions the 6 480 s is 740 commands sharing a
+  185-call session (75 of its calls are `docker exec`); across 43 sessions the
+  6 480 s is 740 commands sharing a
   two-word prefix. That is `devc`/`sed` latency (candidate 02), and a ladder
   keyed that coarsely would fire on ordinary work, not on a loop.
 - **Output-hash is real and rare.** Three sessions in the window repeat an
@@ -84,7 +89,8 @@ What each row means:
 - **Output-hash is also the wrong key for a nudge.** In the busiest
   other-project case the same `tsc --noEmit` output repeats 33 times because the
   model verifies after each edit — the deliberate-retry pattern any ladder must
-  not block. That container's 4× and 3× output streaks are the same shape.
+  not block. That container's five output streaks (4×, 4×, 4×, 3×, 3×) are the
+  same shape.
 
 ## Why rejected instead of built
 

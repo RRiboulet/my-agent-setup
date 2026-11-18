@@ -26,10 +26,14 @@ Added:
   wait once" — `subagent_status` keeps the live what-is-it-doing-now question —
   and `subagent-wait.test.ts` pins the acceptance: a scripted three-child
   fan-out records exactly 3 starts, 1 wait and zero status calls. A fan-out
-  wait returns each settled run's output but not its pane — a dead TUI frame
-  full of spinner remnants once the child is gone — so three children no longer
-  add three panes to the parent's context; only a still-running or interrupted
-  run carries a pane, the same rule the status list uses.
+  wait returns a settled run's output but not its pane — a dead TUI frame full
+  of spinner remnants once the child is gone — so three children no longer add
+  three panes to the parent's context; only a still-running or interrupted run
+  carries a pane, the same rule the status list uses, and the record keeps the
+  last snapshot for `subagent_status({ id })`. A failed run whose result file is
+  unusable now carries that pane inside its error, because the session is reaped
+  the moment the run settles and the snapshot is otherwise the only readable
+  trace left.
 
 Maintenance:
 
@@ -82,7 +86,8 @@ Maintenance:
   paragraph — a consecutive bash exact-args streak of 3 fires in **0 of 124**
   sessions, an identical-output streak of 3 in 1 (5 s), and the largest
   verb-level run, 17 `docker exec` calls, is 17 different commands inside a
-  session of 75 — `devc` latency, not a loop. Across all tools the only repeats
+  185-call session (75 of its calls are `docker exec`) — `devc` latency, not a
+  loop. Across all tools the only repeats
   are `subagent_status`/`codemode` polling, the traffic `subagent_wait` (#163)
   removed, so the reminder has no workload left. The candidate is rejected
   rather than deferred, with its revival trigger in

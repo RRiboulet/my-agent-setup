@@ -164,15 +164,17 @@
 //     are retried up to MAX_TRANSIENT_RESULT_FAILURES consecutive ticks, and a
 //     good result at any point still wins.
 //
-// 19. Wait tool (`subagent_wait`): with `id` or `ids` it blocks once until the
-//     named run(s) reach a terminal state and returns the same record
-//     `subagent_status` returns; on timeout it returns the current record plus
-//     the latest pane, never an error (a run still queued is reported as
-//     `queued`). With `ids`, a settled run returns its output but no pane: the
-//     pane is a dead TUI frame once the child is gone, and a fan-out that paid
-//     one per child would recreate the context cost this tool removes. Only a
-//     live child (running or interrupted) carries a pane, as in the status
-//     list. It adds NO second poll loop: waiters are resolved by the
+// 19. Wait tool (`subagent_wait`): it blocks once until the named run(s) reach
+//     a terminal state. With `id` it returns the same record
+//     `subagent_status({ id })` returns; with `ids` too, except that a settled
+//     run whose child is gone returns its output and no pane — a dead TUI frame
+//     at that point, and one per child would recreate the context cost this
+//     tool removes. Only a live child (running or interrupted) carries a pane,
+//     as in the status list; the record retains the last snapshot, so
+//     `subagent_status({ id })` can still show it. On timeout it returns the
+//     current record plus the latest pane, never an error (a run still queued
+//     is reported as `queued`). It adds NO second poll loop: waiters are
+//     resolved by the
 //     terminal transitions the existing settle watcher — and cancel, interrupt
 //     and shutdown — already drive (`settleWaiters`/`notifyWaiters`), so the
 //     500 ms watcher cadence is the only latency. The tool descriptions that
@@ -1592,10 +1594,12 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	/**
 	 * The failure text for a result file this parent cannot use.
 	 *
-	 * It deliberately does not offer a tmux capture: `settleRun` reaps the session
-	 * immediately (`PI_SUBAGENT_REAP_DELAY_MS` defaults to 0), so by the time a
-	 * human reads this the session is usually gone. What survives is the file and,
-	 * once known, the child's transcript — so the message names those instead.
+	 * It does not capture tmux live: `settleRun` reaps the session immediately
+	 * (`PI_SUBAGENT_REAP_DELAY_MS` defaults to 0), so by the time a human reads
+	 * this the session is usually gone. What survives is the file, the child's
+	 * transcript, and the run's retained `pane` snapshot — so the message names
+	 * those instead, and `{ pane: true }` appends the last one when the caller's
+	 * result no longer renders the pane separately.
 	 */
 	const unusableResultMessage = (run: RunRecord, detail: string | undefined, options: { pane?: boolean } = {}): string => {
 		const lines = [`The child's result file at ${run.resultPath} is unusable: ${detail ?? "unknown reason"}.`];
@@ -1979,7 +1983,11 @@ const noteInterrupt = async (
 				// markRunFailed clears the timer and this path returns without
 				// `scheduleWatch`, so the watcher stops here.
 				if (countResultFailure(run) >= MAX_TRANSIENT_RESULT_FAILURES) {
-					await markRunFailed(run, unusableResultMessage(run, result.error));
+					// Carry the retained pane (the last watcher capture) into the error.
+					// `settleRun` reaps the session immediately, so once this run is
+					// terminal the pane snapshot in the record is the only trace of what
+					// the child was doing; a fan-out wait no longer renders it separately.
+					await markRunFailed(run, unusableResultMessage(run, result.error, { pane: true }));
 					void drainQueue();
 					return;
 				}
@@ -2437,7 +2445,7 @@ const noteInterrupt = async (
 			name: "subagent_wait",
 			label: "Subagent Wait",
 			description:
-				"subagent_wait blocks once until a subagent run settles and returns its result, instead of polling subagent_status. With an id: resolves as soon as that run reaches a terminal state (completed, failed, cancelled, interrupted) and returns the same record subagent_status({ id }) returns; if timeoutMs elapses first, returns the current record plus the latest pane output — a timed-out wait is a normal result, never an error. A run still queued at the timeout is reported as queued; a run that failed to start, was cancelled, died or was interrupted is terminal and returns immediately. With ids: waits until all of the named runs are terminal (or the timeout) and returns every settled run plus the still-running ones, in the order given; a settled run returns its output without the pane, which is carried only for a run whose child is still alive (running or interrupted). If the session ends before the run settles, the call returns early with the current record and reports that the session ended (details.ended), never that the run settled. Built on the existing settle watcher, so results land within about a second of the child's settle event; there is no second poll loop. To ask what a run is doing right now without waiting, use subagent_status.",
+				"subagent_wait blocks once until a subagent run settles and returns its result, instead of polling subagent_status. With an id: resolves as soon as that run reaches a terminal state (completed, failed, cancelled, interrupted) and returns the same record subagent_status({ id }) returns; if timeoutMs elapses first, returns the current record plus the latest pane output — a timed-out wait is a normal result, never an error. A run still queued at the timeout is reported as queued; a run that failed to start, was cancelled, died or was interrupted is terminal and returns immediately. With ids: waits until all of the named runs are terminal (or the timeout) and returns every settled run plus the still-running ones, in the order given; a settled run whose child is gone returns its output (when it has one) without the dead pane, which is carried only for a run whose child is still alive (running or interrupted). If the session ends before the run settles, the call returns early with the current record and reports that the session ended (details.ended), never that the run settled. Built on the existing settle watcher, so results land within about a second of the child's settle event; there is no second poll loop. To ask what a run is doing right now without waiting, use subagent_status.",
 			promptSnippet: "Wait once for a subagent run to settle and collect its result",
 			parameters: Type.Object({
 				id: Type.Optional(Type.String({ description: "Run id to wait for. Omit when passing ids." })),
@@ -2497,6 +2505,9 @@ const noteInterrupt = async (
 						// whose child is still alive needs its pane, which is the same rule
 						// the status list uses (`showsPane`). Otherwise a fan-out wait pays
 						// one pane per child for nothing — the cost this tool exists to cut.
+						// A cancelled run has no output, but the caller issued the cancel and
+						// the record retains the last pane for `subagent_status({ id })`; a
+						// failed run's error now embeds that pane itself.
 						lines.push("", runSummary(run, { pane: showsPane(run.status), output: true }));
 					}
 					return { content: [{ type: "text", text: lines.join("\n") }], details: { runs: targets, timedOut, ended } };

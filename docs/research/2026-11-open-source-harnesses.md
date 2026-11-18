@@ -61,8 +61,7 @@ no allow/deny lattice, so the discipline is "deny-only handlers, loaded last".
 `(tool, canonical-args)` over every tool, so a bash-only count is not enough:
 measured that way, within one user-message segment, a streak of 3 fires in **9 of
 124 sessions** — but every fire is `subagent_status` polling (4 sessions) or a
-`codemode` call wrapping the same poll (5), 698 repeated calls, worst 640 on one
-run id. That is the traffic `subagent_wait` (#163) replaced, so the reminder
+`codemode` call wrapping the same poll (5), worst 640 on one run id. That is the traffic `subagent_wait` (#163) replaced, so the reminder
 would nudge a loop the harness has already removed; after #163 it has no workload
 left. The Kimi ladder (the other Top 3, below) was withdrawn on the same
 measurement. See
@@ -249,8 +248,9 @@ containing `$`, backtick, `*`, `?`, `[`, `~` degrades to `unanalyzable` → ask 
 ranked on this harness's own workload, and the trigger does not occur there: a
 consecutive **bash** streak of 3 fires in **0 of 124 sessions**
 over the frozen window (host dirs plus the devcontainer's private volume);
-across all tools it fires in 9, and every one is `subagent_status`/`codemode`
-polling that #163 removed. An identical-output streak of 3 fires in 1, for 5 s. The ranking's "14× `docker ps`"
+across all tools consecutively it fires in 2 (9 counted within one user-message
+segment), and every one is `subagent_status`/`codemode` polling that #163
+removed. An identical-output streak of 3 fires in 1, for 5 s. The ranking's "14× `docker ps`"
 was 18 calls containing `docker ps`, 18 distinct commands. See
 [`2026-11-harness-advancements.md#correction-candidate-07-was-measured-and-withdrawn-2026-11-18`](2026-11-harness-advancements.md#correction-candidate-07-was-measured-and-withdrawn-2026-11-18)
 and `tickets/harness-advancements/07-repeat-breaker.md`. Row 5a still ranks

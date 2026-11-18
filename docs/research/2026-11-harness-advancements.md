@@ -138,26 +138,33 @@ transcript-only, so host load does not affect the counts:
 | verb + subcommand (`docker exec`, `node --test`) | 43 of 124 | 17× `docker exec` | 740 / 6 480 s |
 | identical output, ≥ 40 chars, sha1 | **1 of 124** | 3× | 2 / 5 s |
 
-Corpus: the survey window (2026-10-31 .. 2026-11-17T09:15Z) over the host agent
-dirs (108 sessions) **plus this repo's devcontainer private volume** (16
-sessions), 6 140 tool calls, 4 671 of them bash. The 65 sessions in the legacy shared
-`pi-agent-config` volume dedupe entirely into those. The container volume was
-not reachable at the freeze and is not in the 108-session baseline; it is
-reachable over `docker exec`. All-time (145 sessions, 5 145 bash calls) gives the
-same exact-args zero. The other project containers on this host (pupkeep,
-lol-dataset, analytics-agent; 145 sessions) are excluded because this repo's
-extensions are not what they load; their repeats are `sleep` polls and post-edit
-verification runs.
+Corpus: sessions started in the survey window (2026-10-31 .. 2026-11-17T09:15Z)
+across the host agent dirs (108 sessions) **plus this repo's devcontainer private
+volume** (16 sessions), 6 140 tool calls, 4 671 of them bash. A session still open
+at the cut contributes its later calls too — 184 of the 6 140 were recorded after
+09:15Z — which is why a re-read can exceed the baseline's totals. The 65 sessions
+in the legacy shared `pi-agent-config` volume all dedupe into sessions already
+counted: 9 into this container's volume and 56 into lol-dataset's, so they add
+no session. The container volume was not reachable at the freeze and is not in
+the 108-session baseline; it is reachable over `docker exec`. All-time (145
+sessions, 5 145 bash calls) gives the same exact-args zero. The other project
+containers on this host (pupkeep, lol-dataset, analytics-agent; 145 sessions) are
+excluded because this repo's extensions are not what they load: their verb-level
+runs fire in 73 of 145 sessions (2 021 tail calls, 23 862 s) over `sed -n`,
+`python3 -`, `gh pr`, `git stash` and `wc -l` loops, and their exact repeats are
+dominated by `sleep` polling and repeat verification runs (`tsc`, `node --test`),
+not one habitual command.
 
 Sensitivity check — if the ladder counted occurrences rather than consecutive
 calls — leaves exact-args at 1 of 124, and that one session is three
 `sleep 300; echo waited` calls, a deliberate poll.
 
 One scope correction: those keys are bash-only, and Kimi's chain (like
-DeepSeek's reminder) keys on every tool. Across all tools, a repeat of 3 within
-one user-message segment fires in 9 of 124 sessions — every one of them
+DeepSeek's reminder) keys on every tool. Across all tools a **consecutive**
+repeat of 3 fires in 2 of 124 sessions; counted the way DeepSeek does —
+occurrences within one user-message segment — 9 do. Every fire is
 `subagent_status` polling (4 sessions) or a `codemode` call wrapping the same
-poll (5), 698 repeated calls, worst 640 on one run id. That is the category
+poll (5), worst 640 on one run id. That is the category
 `subagent_wait` (#163) removed; a reminder there would re-fight a solved
 problem, and after #163 the all-tool trigger has no workload left either.
 
@@ -261,7 +268,8 @@ by per-skill loads and context tokens, not by a word count.
 
 ## Later band
 
-Kept with a trigger, not dropped:
+Kept with a trigger, not dropped, except where a later measurement withdrew the
+item:
 
 - ~~**Repeat-breaker ladder** (Kimi Code)~~ — withdrawn 2026-11-18 on
   measurement: a bash exact-args streak of 3 fires in 0 of 124 sessions, and
