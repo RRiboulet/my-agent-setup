@@ -168,7 +168,11 @@
 //     named run(s) reach a terminal state and returns the same record
 //     `subagent_status` returns; on timeout it returns the current record plus
 //     the latest pane, never an error (a run still queued is reported as
-//     `queued`). It adds NO second poll loop: waiters are resolved by the
+//     `queued`). With `ids`, a settled run returns its output but no pane: the
+//     pane is a dead TUI frame once the child is gone, and a fan-out that paid
+//     one per child would recreate the context cost this tool removes. Only a
+//     live child (running or interrupted) carries a pane, as in the status
+//     list. It adds NO second poll loop: waiters are resolved by the
 //     terminal transitions the existing settle watcher — and cancel, interrupt
 //     and shutdown — already drive (`settleWaiters`/`notifyWaiters`), so the
 //     500 ms watcher cadence is the only latency. The tool descriptions that
@@ -2433,7 +2437,7 @@ const noteInterrupt = async (
 			name: "subagent_wait",
 			label: "Subagent Wait",
 			description:
-				"subagent_wait blocks once until a subagent run settles and returns its result, instead of polling subagent_status. With an id: resolves as soon as that run reaches a terminal state (completed, failed, cancelled, interrupted) and returns the same record subagent_status({ id }) returns; if timeoutMs elapses first, returns the current record plus the latest pane output — a timed-out wait is a normal result, never an error. A run still queued at the timeout is reported as queued; a run that failed to start, was cancelled, died or was interrupted is terminal and returns immediately. With ids: waits until all of the named runs are terminal (or the timeout) and returns every settled run plus the still-running ones. If the session ends before the run settles, the call returns early with the current record and reports that the session ended (details.ended), never that the run settled. Built on the existing settle watcher, so results land within about a second of the child's settle event; there is no second poll loop. To ask what a run is doing right now without waiting, use subagent_status.",
+				"subagent_wait blocks once until a subagent run settles and returns its result, instead of polling subagent_status. With an id: resolves as soon as that run reaches a terminal state (completed, failed, cancelled, interrupted) and returns the same record subagent_status({ id }) returns; if timeoutMs elapses first, returns the current record plus the latest pane output — a timed-out wait is a normal result, never an error. A run still queued at the timeout is reported as queued; a run that failed to start, was cancelled, died or was interrupted is terminal and returns immediately. With ids: waits until all of the named runs are terminal (or the timeout) and returns every settled run plus the still-running ones, in the order given; a settled run returns its output without the pane, which is carried only for a run whose child is still alive (running or interrupted). If the session ends before the run settles, the call returns early with the current record and reports that the session ended (details.ended), never that the run settled. Built on the existing settle watcher, so results land within about a second of the child's settle event; there is no second poll loop. To ask what a run is doing right now without waiting, use subagent_status.",
 			promptSnippet: "Wait once for a subagent run to settle and collect its result",
 			parameters: Type.Object({
 				id: Type.Optional(Type.String({ description: "Run id to wait for. Omit when passing ids." })),
@@ -2488,7 +2492,12 @@ const noteInterrupt = async (
 								: `All ${targets.length} run(s) settled.`,
 					];
 					for (const run of targets) {
-						lines.push("", runSummary(run, { pane: true, output: true }));
+						// A settled run's pane is a dead TUI frame (spinner remnants and
+						// stale text), not a result: the output is the result. Only a run
+						// whose child is still alive needs its pane, which is the same rule
+						// the status list uses (`showsPane`). Otherwise a fan-out wait pays
+						// one pane per child for nothing — the cost this tool exists to cut.
+						lines.push("", runSummary(run, { pane: showsPane(run.status), output: true }));
 					}
 					return { content: [{ type: "text", text: lines.join("\n") }], details: { runs: targets, timedOut, ended } };
 				}
