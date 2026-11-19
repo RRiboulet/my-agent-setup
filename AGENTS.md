@@ -337,6 +337,7 @@ commissioned, hand the trail to that one reviewer alongside the diff.
 bash .pi/extensions/subagent/test/setup-deps.sh              # once: link pi's packages
 node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts
 (cd .pi/extensions/opencode-go-provider && node --test)  # provider package tests (separate tree)
+node --test .pi/skills/prevent-recurrence/scripts/test/*.test.mjs  # rule-table checker
 ```
 
 Run it with `bash` (or `sh`), not as `./setup-deps.sh` — see "Line endings"

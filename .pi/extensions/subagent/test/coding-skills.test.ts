@@ -67,7 +67,7 @@ function frontmatter(dir: string): Record<string, string> {
 test("every skill is classified in this test", () => {
 	// A new skill added to the tree without updating this test would otherwise
 	// escape the frontmatter assertions below.
-	const known = new Set([...ALL, "add-model", "commit", "devcontainer", "github", "librarian", "native-web-search", "tmux", "update-changelog", "worktree"]);
+	const known = new Set([...ALL, "add-model", "commit", "devcontainer", "github", "librarian", "native-web-search", "prevent-recurrence", "tmux", "update-changelog", "worktree"]);
 	for (const dir of skillDirs()) {
 		assert.ok(known.has(dir), `unclassified skill .pi/skills/${dir}: add it to this test`);
 	}
