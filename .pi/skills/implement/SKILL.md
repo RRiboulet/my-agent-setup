@@ -37,6 +37,7 @@ prescribes. Parallel sub-agents only on request, and ask before launching one.
 
 - New or changed behavior with a testable seam: load the `tdd` skill and build at the seams the spec agreed.
 - A bug, failing test, or unexpected behavior: load the `diagnosing-bugs` skill.
+- The user corrects the same thing twice: the second correction is evidence of a class, not a request for a third edit. Load the `prevent-recurrence` skill and turn it into a check before the next unit; do not wait for a review to say it a third time.
 - Run focused tests and type or lint checks on what changed after each unit. Never start the next unit on red.
 - Do not redesign mid-flight. If the spec turns out wrong or incomplete, stop and surface the conflict with a recommendation instead of silently deviating.
 - For long or unattended runs, load the `show-me-your-work` skill and log each non-obvious decision as you make it.

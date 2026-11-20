@@ -1,5 +1,6 @@
-// Guards for the coding skill stack adapted from agent-coding-skills, plus the
-// two skills ported straight from mattpocock/skills.
+// Guards for the coding skill stack adapted from agent-coding-skills, the two
+// skills ported straight from mattpocock/skills, and this repository's own
+// prevent-recurrence skill.
 //
 // Risk covered: the adapted skills are local copies now, edited by hand. Three
 // things break silently as they change: a name that stops matching its folder
@@ -38,7 +39,11 @@ const ADAPTED = [
 // checks.
 const PORTED = ["grilling", "teach"];
 
-const ALL = [...ADAPTED, ...PORTED];
+// This repository's own skills. They carry no upstream classification, but a
+// missing description or a dead reference breaks them the same way.
+const OURS = ["prevent-recurrence"];
+
+const ALL = [...ADAPTED, ...PORTED, ...OURS];
 
 // pi honors `disable-model-invocation`; these five are entry points only the
 // user starts, and AGENTS.md says so.
@@ -73,7 +78,7 @@ test("every skill is classified in this test", () => {
 	}
 });
 
-test("every adapted or ported skill declares a name equal to its folder", () => {
+test("every adapted, ported or local skill declares a name equal to its folder", () => {
 	for (const dir of ALL) {
 		const meta = frontmatter(dir);
 		assert.equal(meta.name, dir, `.pi/skills/${dir}/SKILL.md name must equal the folder`);
@@ -129,7 +134,7 @@ test("adapted scripts stay executable", () => {
 	}
 });
 
-test("every relative link in an adapted or ported skill resolves", () => {
+test("every relative link in an adapted, ported or local skill resolves", () => {
 	// A refresh that moves references/ but leaves a link behind is invisible
 	// until an agent tries to read the file. `teach` depends on it most: its four
 	// *-FORMAT.md files are reached by link, not by name.

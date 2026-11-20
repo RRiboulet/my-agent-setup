@@ -6,11 +6,13 @@ The twelve coding skills under `.pi/skills/` (`in-your-own-words`,
 `to-spec`, `to-tickets`, `implement`, `handoff`) were adapted from
 <https://github.com/RRiboulet/agent-coding-skills> at commit `25deecd`. Two more
 skills, `grilling` and `teach`, were adapted straight from mattpocock/skills
-rather than through that stack; they are listed below with the rest. All of them
-are maintained here as this repository's own skills; there is no refresh
+rather than through that stack; they are listed below with the rest.
+`prevent-recurrence` is this repository's own, adapted from pstack's `/correct`
+and `principle-encode-lessons-in-structure` at the commit pinned below. All of
+them are maintained here as this repository's own skills; there is no refresh
 mechanism and no upstream to track.
 
-That repository adapts material from two MIT-licensed projects. Their license
+The adapted material comes from two MIT-licensed projects. Their license
 texts are kept beside this file, and the sources are listed per skill below.
 
 | Upstream | Copyright | Pinned commit | License |
@@ -28,6 +30,7 @@ Paths are relative to each upstream repository at the pinned commit.
 | `blast-radius` | pstack `skills/blast-radius` |
 | `tdd` | Matt `skills/engineering/tdd` (with `tests.md`, `mocking.md`); pstack `skills/tdd` |
 | `diagnosing-bugs` | Matt `skills/engineering/diagnosing-bugs` (with `scripts/hitl-loop.template.sh`); pstack `skills/principle-fix-root-causes` |
+| `prevent-recurrence` | pstack `skills/correct`, `skills/principle-encode-lessons-in-structure` |
 | `prove-it-works` | pstack `skills/principle-prove-it-works` |
 | `idempotent-operations` | pstack `skills/principle-make-operations-idempotent` |
 | `benchmark-checklist` | pstack `skills/benchmark-checklist` |
@@ -59,6 +62,17 @@ The skills were edited to fit this repository rather than kept as copies:
   `AGENTS.md` (there is no `.agent/quality.yaml`); `handoff` writes under the
   persistent agent dir instead of `/tmp` and is disambiguated from the `subagent`
   tool's context-handoff modes.
+- **`prevent-recurrence` is model-invoked, and its table has a checker.**
+  pstack's `/correct` and `principle-encode-lessons-in-structure` are
+  user-invoked; here a repeated correction is something the agent notices, so the
+  skill is advertised by its description and `/skill:prevent-recurrence` still
+  works. The ordered ladder, the rule table, the ratchet, and "the diagnostic
+  names the fix" are pstack's. Added here: a deterministic Node-stdlib checker
+  for the rule table, the lint-locality question that sends semantic rules to a
+  type or a test, and the hard stop before committing and reviewing. A lesson
+  that needs judgment does not become a lint that guesses: it stays prose with a
+  `judgment: <reason>` row and an example of the failure mode, which is the
+  boundary `principle-encode-lessons-in-structure` draws.
 - **`grilling` merged the family.** Upstream splits the same interview into a
   model-invoked `grilling` and a user-invoked `grill-me` wrapper whose whole body
   is "call `grilling`". Here there is one skill: pi runs user-invoked skills as

@@ -242,6 +242,10 @@ than waiting to be told:
   not watch and will judge afterwards: `show-me-your-work`. Not for ordinary
   sessions.
 - Before saying work is done: `prove-it-works`.
+- The same mistake class corrected a second time, or a review that calls a fix a
+  repeat: `prevent-recurrence`. It chooses the highest level that can carry the
+  rule, proves it at the bad and good revision, and records the row; it does not
+  commission another review.
 
 Only the user starts the five user-invoked entry points, which pi spells
 `/skill:<name>`: `/skill:to-spec`, `/skill:to-tickets`, `/skill:implement`,
@@ -257,6 +261,17 @@ still works). `teach` is user-invoked and stateful: it builds a
 teaching workspace outside any project checkout — never in this one — and the
 course is continued by starting a session in that directory and asking for the
 next lesson, or by `/skill:handoff` out of the session you are in.
+
+`prevent-recurrence` is ours: the correction-to-check loop, the ordered ladder,
+the rule table, the ratchet and "the diagnostic names the fix" come from pstack's
+`/correct`; the judgment boundary — when a lesson cannot be encoded, make the
+instruction more prominent and show the failure mode — comes from
+`principle-encode-lessons-in-structure`. The static checker for the table and
+the lint-locality test are added here. It is model-invoked because a repeated
+correction is something the agent can notice, and `/skill:prevent-recurrence`
+still works. Its Python recipes are in `references/python.md`. It ends at the
+check, the proof and the row; committing and reviewing stay with the existing
+skills and the review policy below.
 
 Three repo rules win over those skill bodies, and the skills say so in place:
 

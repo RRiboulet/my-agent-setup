@@ -48,6 +48,16 @@ a stale base), a shallow clone whose grafted history cannot decide ancestry, or
 a repository with no commit yet. Fix the environment and run it again; do not
 proceed on anything but 0.
 
+When the change adds or updates a rule in the repository's `AGENTS.md` under
+**Rules and enforcement**, load the `prevent-recurrence` skill and run the table
+checker as part of the gate. A new row needs a check that failed at the bad
+revision and passes at the good one; a row without that is a claim, not a rule.
+In this repository the canonical checker is:
+
+```bash
+node .pi/skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md  # must exit 0
+```
+
 ## 3. Run it
 
 - While iterating, run the narrowest relevant checks: focused tests, and lint or type checks on the changed files.
