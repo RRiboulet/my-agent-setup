@@ -92,6 +92,13 @@ Write the regression test before the fix, at a **correct seam**: one where the t
 3. Watch the test pass, then re-run the original, un-minimised Phase 1 loop.
 4. Search for the same faulty pattern elsewhere and fix every instance.
 
+When the same class has now been corrected twice, the second fix is evidence of
+a repeat, not another instance to handle one at a time. Load the
+`prevent-recurrence` skill and turn the class into a check at the highest level
+that works, with the bad and good proof and a row in the repository's
+`AGENTS.md`. The regression test this phase writes proves one bug; the rule from
+that skill is what stops the class.
+
 ## Phase 6: Clean up
 
 - [ ] The original repro no longer reproduces.

@@ -49,15 +49,18 @@ each entry point explicitly:
     ".pi/skills/devcontainer",
     ".pi/skills/diagnosing-bugs",
     ".pi/skills/github",
+    ".pi/skills/grilling",
     ".pi/skills/handoff",
     ".pi/skills/idempotent-operations",
     ".pi/skills/implement",
     ".pi/skills/in-your-own-words",
     ".pi/skills/librarian",
     ".pi/skills/native-web-search",
+    ".pi/skills/prevent-recurrence",
     ".pi/skills/prove-it-works",
     ".pi/skills/show-me-your-work",
     ".pi/skills/tdd",
+    ".pi/skills/teach",
     ".pi/skills/tmux",
     ".pi/skills/to-spec",
     ".pi/skills/to-tickets",
@@ -231,6 +234,7 @@ default when it does not, and the `opencode-go` credential itself still serves
 | `.pi/skills/benchmark-checklist/` | Seven questions that vet a performance number before it is reported or acted on |
 | `.pi/skills/show-me-your-work/` | Append-only TSV decision log for a big task left unsupervised for a long time, self-audited before handing back; `scripts/log.sh` writes a sanitised row |
 | `.pi/skills/prove-it-works/` | Verifies the real artifact, runs the repository's quality gate, checks the final diff for scope and hygiene, and reports statuses with honest meaning. The one finishing step — it never starts a reviewer |
+| `.pi/skills/prevent-recurrence/` | Turns the second correction of one mistake class into a check at the highest level that works — architecture, type, lint, test, then prose — proves it at the bad and good revision, ratchets existing findings, and records the rule with its enforcer in `AGENTS.md`'s "Rules and enforcement" table. **Ours**, adapted from pstack's `/correct` and `principle-encode-lessons-in-structure`; `scripts/rule-table.mjs` is the checker |
 | `.pi/skills/to-spec/` | User-invoked `/skill:to-spec`: writes the conversation up as a spec with test seams and acceptance criteria |
 | `.pi/skills/to-tickets/` | User-invoked `/skill:to-tickets`: splits a spec into tracer-bullet tickets with blocked-by edges |
 | `.pi/skills/implement/` | User-invoked `/skill:implement`: builds a spec or ticket end to end through the skills above |
@@ -263,6 +267,20 @@ records them separately. `grilling` joins the trigger list in `AGENTS.md` as the
 full design-tree interview — `in-your-own-words` remains the cheap default — and
 `teach` is the fifth user-invoked entry point, which builds a teaching workspace
 outside any project checkout.
+
+`prevent-recurrence` is the model-invoked answer to a correction that came back.
+It classifies the mistake from the fix commits and review comments, then walks
+architecture → type → lint → test → prose and has to say why every higher rung
+did not work. A lint is allowed only when the offending lines alone prove the
+violation, and an existing stock rule is tried first: the Python adapter in
+`references/python.md` covers Ruff `TID251` and the stock rules worth selecting,
+ast-grep, `import-linter`, and a project test. The check must fail at the
+recorded bad revision and pass at the fixed one, with both commands and exit
+codes recorded in a proof file; existing violations may land behind a ratchet
+that only shrinks. The rule then gets a row in the target's `AGENTS.md`
+`Rules and enforcement` table, which `scripts/rule-table.mjs` validates. It never
+adds a suppression, commits, pushes, opens a PR, or starts a review — it hands
+back the rule, level, proof, row, and open work.
 
 The review workflow is deliberately narrow:
 

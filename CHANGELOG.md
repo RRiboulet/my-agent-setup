@@ -63,6 +63,38 @@ Added:
   commit committed on top of this branch's own is indistinguishable from its own
   work, which the root count cannot see.
 
+- **`prevent-recurrence` is a loadable skill now, with the Python adapter its
+  first conversion needs.** The scaffold that shipped with the checker was
+  deliberately hidden from model selection: an advertised skill with no process
+  behind it is worse than an absent one. This change writes the process. The
+  description advertises the second correction of one mistake class; the body
+  pins the inputs (conversation, review comment, revert, fix commit, or bad and
+  good snippets), the ordered ladder — architecture, type, lint, test, prose —
+  with a required reason why every higher rung did not work, the question that
+  sends a semantic rule to a type or a test instead of a brittle lint,
+  existing-tool-first, the bad-and-good proof with both commands and exit codes,
+  the shrinking ratchet, the no-suppression rule, and the stop before committing
+  or starting a review. It ends with a fixed report: rule, evidence, level, why
+  not higher, check, proof, ratchet, table row, checker result, open work. The
+  Python adapter is `references/python.md`: Ruff `TID251` with a `msg` that names
+  the replacement, the stock rules worth selecting first (`S110`, `BLE001`,
+  `B006`, `RUF006`, `PGH003`, `RUF100`), ast-grep with `message`, `note`, `fix`
+  and `sg test`, `import-linter` contracts, and a project test as the fallback.
+  Every recipe has a worked bad and good example and the exact command; they
+  were run on 2026-11-20 with Ruff 0.17.6, ast-grep 0.51.3, import-linter 2.17
+  and Python 3.12.3 in a scratch venv only — this repository still consumes no
+  Python or npm package. The dry run on a `/tmp` fixture records the whole path:
+  `TID251` exits 1 on the bad revision and 0 on the fix, the row validates, and
+  the checker exits 0; the transcript is
+  `docs/experiments/prevent-recurrence-dry-run.md`. The checker itself is the
+  canonical `scripts/rule-table.mjs`, unchanged; a project vendors it under
+  `tools/` and records the contract version and hash beside it. The four-week
+  branch experiment is ticket 05 and is not in this change. `diagnosing-bugs`,
+  `implement` and `prove-it-works` now name the skill at their trigger, the
+  `coding-skills` test checks its frontmatter and links with the other skills,
+  and README, `AGENTS.md` and `licenses/NOTICE.md` advertise and credit it (the
+  package manifest already listed it).
+
 Fixed:
 
 - **The worktree sweep no longer goes blind on a C-locale host.** The Remove
