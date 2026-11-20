@@ -58,6 +58,47 @@ In this repository the canonical checker is:
 node .pi/skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md  # must exit 0
 ```
 
+### Branch-only: a repeat fix needs its row (`exp/prevent-recurrence`)
+
+This part is the `exp/prevent-recurrence` experiment branch's own policy. It is
+branch-only: `dev`'s copy of this skill does not have it, and nothing else in the
+repository enforces it. It exists here for four weeks, and it goes when the
+branch goes.
+
+When a change **claims to fix a repeat** — the same mistake class a second time
+within 30 days, evidenced by chat, a review comment, a revert, or commits — it is
+not done until three things are true:
+
+- `AGENTS.md`'s **Rules and enforcement** table carries a row for the class, not
+  for the instance, or its existing row is updated. No row means not fixed.
+- The row's proof ran both ways: the enforcer exits 1 at the bad revision and 0 at
+  the good one. Both commands and both exit codes are in the proof file and pasted
+  into the report.
+- `node .pi/skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md`
+  exits 0.
+
+The same change appends one row to
+[docs/experiments/prevent-recurrence.md](../../../docs/experiments/prevent-recurrence.md),
+which defines the columns and what counts as a repeat. That row is how the
+four-week decision counts conversions, so a conversion that is proven but not
+logged has not happened.
+
+Load the `prevent-recurrence` skill for the conversion itself: it chooses the
+level, writes the check and records the proof. This section only decides when the
+work may be called done. A change that does not claim to fix a repeat is not
+touched by it, and the gate above is the whole gate.
+
+What makes this a contract rather than a request is the same thing that makes any
+row one: the checker decides the row's shape and whether its proof exists, and the
+proof is two exit codes a reviewer can rerun. What the checker cannot decide is
+whether the change really is a repeat — that claim is the author's, which is why
+the branch's review asks for it by name (`REVIEW_GUIDELINES.md`).
+
+Report the three results in the §5 template as their own `Checks` lines. A repeat
+fix whose row is missing, whose proof was never run at the bad revision, or whose
+checker exits 1 is `failed` — or `not_run`, if it was skipped — whatever else
+passed.
+
 ## 3. Run it
 
 - While iterating, run the narrowest relevant checks: focused tests, and lint or type checks on the changed files.

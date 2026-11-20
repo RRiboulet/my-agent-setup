@@ -47,6 +47,30 @@ mode is on). Report in whatever format the review mechanism requires — `/revie
 has its own priority tags, verdict, and human-reviewer callouts — but keep the
 three axes distinguishable inside it.
 
+**Branch-only question (`exp/prevent-recurrence`).** On that branch the review
+asks one more thing. It is asked inside the single review above, so it adds no
+round and changes neither who reviews nor how often; `dev` has no such question.
+The answer is `no` when the change does not claim to fix a repeat — the same
+mistake class a second time within 30 days:
+
+> Does this fix a repeat, and where is the row and the proof?
+
+If yes, three things must be in the diff:
+
+- a row in `AGENTS.md`'s **Rules and enforcement** table, added or updated, for
+  the class rather than the instance;
+- the proof that row points at, recording the enforcer's exit code at the bad
+  revision and at the good one, and the commands that produced them;
+- `node .pi/skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md`
+  exiting 0, and one row in `docs/experiments/prevent-recurrence.md`.
+
+A yes with any of the three missing is a finding: the claimed repeat was fixed
+without the thing that would stop it recurring, which is the finding itself, not
+an untidy diff. Say which axis it fails — **Spec** if the row was required and is
+missing, **Correctness** if the proof never failed at the bad revision,
+**Standards** if the row or the log row is malformed — and do not file it as a
+style note.
+
 ## Standards baseline
 
 Smells from Martin Fowler, *Refactoring*, chapter 3. Label them as possible
