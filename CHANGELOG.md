@@ -196,6 +196,37 @@ Maintenance:
   `docs/tickets/harness-advancements/07-repeat-breaker.md`.
   Ticket 03 is marked landed (#163) and ticket 00 in progress, where both had
   still said `ready`.
+- **The comment question is measured, and the answer is `pupkeep` yes,
+  `analytics-agent` no.** R13 asked whether comment slop is a real problem in the
+  two projects before any comment skill was written: a stratified sample of 30
+  comments each, classified as invariant, external quirk, workaround
+  justification or narration, with 20% workaround justification as the bar. The
+  measurement is `tools/comment-audit.mjs` — stdlib only, read-only, `git
+  ls-files` for the inventory, ±3-line strata for suppressions and
+  timers/retries/async, and a fixed-seed draw with content-addressed IDs — plus
+  `docs/experiments/comment-audit.md` with all 60 units and the per-unit reason
+  for its class. `pupkeep` lands at 7 of 30 (23.3%, weighted 23.1% over 3,616
+  units), so a comment experiment is justified there; `analytics-agent` lands at
+  1 of 30 (3.3%, weighted 3.2% over 962), so nothing supports one there. The
+  margin in `pupkeep` is one unit: five of the seven are workarounds of a defect
+  or a hazard and two justify an error path, and dropping both error-path units
+  puts it at 5 of 30 (16.7%), below the bar — which is why the report tabulates
+  all three readings rather than quoting 23.3% alone. Two findings outlast the
+  percentage. `analytics-agent` has 49 suppression directives in 13 files, 44 of
+  them in `tests/`, and 6 of the 10 suppression-adjacent sample units are bare
+  `# type: ignore[...]` / `# noqa` with no reason recorded — the practice R8 now
+  forbids. `pupkeep` has none at all, and 17 of its 30 sampled comments are
+  invariants. No comment skill is added: R13 only asks that the question be
+  settled before one is written, and the ticket's scope refuses the skill either
+  way. The draft this replaces was re-derived from scratch, not adjusted: its 83
+  `analytics-agent` files were 86, its 63 directive lines were 49, its 218
+  `pupkeep` files counted the four vendored `web/vendor/*.mjs` it said it
+  excluded, and because it identified units by a sequential index no inherited
+  number — including its 10%/10% decision — could be carried over. Two
+  corrections to the draft were themselves wrong and are recorded in §6: 44 of
+  the 49 directives do sit in `tests/`, and an S pool larger than the directive
+  count is expected, not impossible, because adjacency is a window (63 S units
+  from 49 directives here).
 
 ## v1.14.0 — 2026-11-16
 
