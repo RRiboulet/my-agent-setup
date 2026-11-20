@@ -225,6 +225,7 @@ function makeCommentSink(text) {
   return {
     comments,
     spans,
+    lineOf,
     push(i, j, markerLength, kind) {
       const startLine = lineOf(i);
       const endLine = lineOf(Math.max(i, j - 1));
@@ -603,7 +604,7 @@ function scanPython(text) {
       const quote = quoteSeq[0];
       const quoteLen = quoteSeq.length;
       const fstring = /[fF]/.test(m[1] || '');
-      const startLine = sinkLineOf(text, i);
+      const startLine = sink.lineOf(i);
       const statementStart =
         onlyWhitespaceBefore(text, i) && depth === 0 && (prevSig === '' || prevSig === ':' || prevSig === ';');
       const bodyStart = i + prefixLen + quoteLen;
@@ -611,7 +612,7 @@ function scanPython(text) {
       if (statementStart) {
         docstrings.push({
           startLine,
-          endLine: sinkLineOf(text, Math.max(i, end - 1)),
+          endLine: sink.lineOf(Math.max(i, end - 1)),
           start: i,
           end,
           text: text.slice(bodyStart, Math.max(bodyStart, end - quoteLen)),
@@ -642,16 +643,6 @@ function scanPython(text) {
     docstrings,
     codeText: blankComments(text, sink.spans),
   };
-}
-
-const lineOfCache = new Map();
-function sinkLineOf(text, pos) {
-  let f = lineOfCache.get(text);
-  if (!f) {
-    f = lineLookup(text);
-    lineOfCache.set(text, f);
-  }
-  return f(pos);
 }
 
 // ---------------------------------------------------------------------------
