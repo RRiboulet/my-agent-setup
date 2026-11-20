@@ -331,6 +331,30 @@ therefore never names a model this machine cannot run without saying why.
 A `show-me-your-work` trail does not get its own reviewer. If a review is
 commissioned, hand the trail to that one reviewer alongside the diff.
 
+## Rules and enforcement
+
+| Rule | Level | Enforced by | Proof |
+|---|---|---|---|
+| A branch descends from origin/dev and carries only its own commits | test | `node tools/branch-base.mjs` | `tools/branch-base.test.mjs` |
+
+One row per rule, and the row names what fails when the rule is broken. This
+table is the single source of truth: no separate registry, and prose in this file
+is a rule only once a row here enforces it. The checker validates the shape —
+the four columns, an allowed level, a non-empty enforcer, a proof that exists,
+no duplicate rule, no prose row without `judgment: <reason>`:
+
+```bash
+node .pi/skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md
+```
+
+The branch row is the dogfood rule earned by the three recorded misses under
+"Branches" above: `tools/branch-base.mjs` fetches `origin/dev` and classifies the
+branch, `tools/branch-base.test.mjs` builds the fixture repositories, and both
+run in `prove-it-works` and in CI. Its four classifications (`correct`,
+`behind-dev`, `foreign-commits`, `wrong-base`) are documented in the script's
+header. The table format and the checker's `--json` contract are in
+`.pi/skills/prevent-recurrence/references/rule-table.md`.
+
 ## Tests
 
 ```bash
@@ -338,6 +362,8 @@ bash .pi/extensions/subagent/test/setup-deps.sh              # once: link pi's p
 node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts
 (cd .pi/extensions/opencode-go-provider && node --test)  # provider package tests (separate tree)
 node --test .pi/skills/prevent-recurrence/scripts/test/*.test.mjs  # rule-table checker
+node --test tools/branch-base.test.mjs                   # branch-base check tests
+node tools/branch-base.mjs                               # the branch-base rule; must exit 0
 ```
 
 Run it with `bash` (or `sh`), not as `./setup-deps.sh` — see "Line endings"

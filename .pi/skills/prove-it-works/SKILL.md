@@ -26,10 +26,25 @@ description: "Prove a code change works before claiming it is done: verify again
 
 In this repository the contract is `AGENTS.md` → **Tests**: the subagent suite
 (`node --test .pi/extensions/subagent/test/*.test.ts`, after
-`bash .pi/extensions/subagent/test/setup-deps.sh`) and, when
+`bash .pi/extensions/subagent/test/setup-deps.sh`), the rule-table checker, and
+`tools/branch-base.test.mjs`; and, when
 `.pi/extensions/opencode-go-provider/` changed, its own separate
 `node --test` run. There is no `.agent/quality.yaml`, and AGENTS.md is where
 those commands come from.
+
+The branch-base rule is its own gate step, and it comes **before committing**
+because that is the cheap moment to fix it. Fetch `origin` first — the check
+fetches `origin/dev` itself, but a stale local `dev` is exactly the false alarm
+this rule exists to prevent — then run the check, which must exit 0:
+
+```bash
+git fetch origin
+node tools/branch-base.mjs    # must exit 0
+```
+
+Exit 1 is `behind-dev`, `foreign-commits` or `wrong-base`, and the line names
+the rebase that fixes it; exit 2 means the check could not run (no `origin/dev`),
+which is not a pass. Do not proceed on anything but 0.
 
 ## 3. Run it
 

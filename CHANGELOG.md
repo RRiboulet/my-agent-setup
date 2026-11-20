@@ -35,6 +35,29 @@ Added:
   the moment the run settles and the snapshot is otherwise the only readable
   trace left.
 
+- **The branch-base rule is a check now, not a review round.**
+  `tools/branch-base.mjs` fetches `origin/dev` and classifies the branch in one
+  line: `correct` (the branch's own oldest commit sits directly on the current
+  `origin/dev`), `behind-dev` (no commits of its own yet, so it gets the rebase
+  line rather than a base failure), `foreign-commits` (it reaches the dev tip
+  through a merge while its oldest own commit sits on an older dev, or it
+  carries another branch's commits), and `wrong-base` (it never descends from
+  `origin/dev` at all — the branch-off-`main` mistake — with the branch point
+  named on the line). Exit 0 only for `correct`, 1 with the rebase that fixes it
+  otherwise, 2 when there is no `origin/dev` to compare against, which is a
+  check that could not run and never a pass. This rule has three recorded misses
+  in `AGENTS.md`, every one caught by a reviewer; `prove-it-works` now runs the
+  check before a commit, and a new `.github/workflows/checks.yml` runs it on
+  every pull request into `dev` and push to `dev` alongside the subagent,
+  provider, rule-table and branch-base test trees — full history, the pull
+  request's head commit rather than the merge commit, and pi installed globally
+  first, because `setup-deps.sh` links the globally installed packages and a
+  clean runner has none. The rule is the first row of `AGENTS.md`'s new "Rules
+  and enforcement" table, so the rule-table checker validates the rule that
+  produced it. Stated in the script's header rather than papered over: a branch
+  stacked on an *unmerged* feature branch is invisible while that base is
+  unmerged, because its oldest commit still sits on `origin/dev`.
+
 Maintenance:
 
 - **`lifecycle.test.ts` is nine topic files now, so its waits overlap and the
