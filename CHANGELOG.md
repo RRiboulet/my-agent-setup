@@ -83,6 +83,30 @@ Fixed:
 
 Maintenance:
 
+- **Four lifecycle assertions no longer read the completion message on the
+  statement after the status.** `settleRun` writes the run's terminal status
+  (`await persist()`) and only then notifies (`await notifyCompletion`), so the
+  status is observable before `sendMessage` has been called: the two are
+  separate observables, and asserting one immediately after the other assumes a
+  simultaneity the product never promises. That shape failed the `dev` gate in
+  CI run 44714766416 (attempt 1, `lifecycle-interrupt.test.ts:275`,
+  "and the run reports its completion normally  0 !== 1"), on the identical tree
+  that had passed on the pull request minutes earlier and passed again on
+  attempt 2 in 48 s. The failing test took 1016.9 ms, the same as a green run, so
+  it was not a slow machine: the record it read was already fully correct
+  (`completed`, the child's output, `interrupts: 1`) with no message recorded
+  yet. The four sites — three in `lifecycle-result.test.ts` and one in
+  `lifecycle-interrupt.test.ts` — now wait for the message with
+  `waitForCompletionMessage`, which names the status and the record if no
+  message ever arrives, so a run that stops notifying still fails and says
+  which half is missing. No assertion was relaxed: each still requires exactly
+  one message, or the one message's content. Not reproduced locally — that file
+  passed 20/20 runs, and 60 replays of the failing sequence under parallel load
+  never saw the gap — which is why the fix is aimed at the ordering the code
+  proves rather than at a timing measured here; making the notification 50 ms
+  late in the product reproduced the CI's exact `0 !== 1` with the old shape and
+  left the new shape green.
+
 - **`lifecycle.test.ts` is nine topic files now, so its waits overlap and the
   suite's 8-lane floor is no longer dominated by one file.** It was 2,473 lines
   with 89 tests, and it cost 97.3 s of wall clock on its own while using 4% CPU:

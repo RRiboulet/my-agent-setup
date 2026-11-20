@@ -13,7 +13,7 @@ import { test } from "node:test";
 
 import { type RunRecord } from "../index.ts";
 import { waitFor } from "./helpers.ts";
-import { activitySnapshot, withHarness } from "./lifecycle-harness.ts";
+import { activitySnapshot, waitForCompletionMessage, withHarness } from "./lifecycle-harness.ts";
 
 test("subagent_interrupt sends Escape to the child's pane and nothing else", async () => {
 	await withHarness({ interruptConfirmMs: "300" }, async (h) => {
@@ -268,6 +268,10 @@ test("a later result still finalizes an interrupted run", async () => {
 			finishedAt: Date.now(),
 		});
 		await waitFor(async () => (await h.readRuns())[0].status === "completed");
+		// The completion message is a separate observable from the persisted status
+		// (settleRun persists, then notifies), so wait for it instead of assuming it
+		// landed on the same tick. See waitForCompletionMessage.
+		await waitForCompletionMessage(h);
 		const finalized = (await h.readRuns())[0];
 		assert.equal(finalized.output, "corrected answer");
 		assert.ok(finalized.finishedAt);

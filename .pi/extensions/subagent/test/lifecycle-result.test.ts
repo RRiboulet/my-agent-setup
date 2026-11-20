@@ -11,7 +11,7 @@ import { test } from "node:test";
 
 import { type RunRecord } from "../index.ts";
 import { waitFor } from "./helpers.ts";
-import { waitForRunStatus, withHarness, writeChildSession } from "./lifecycle-harness.ts";
+import { waitForCompletionMessage, waitForRunStatus, withHarness, writeChildSession } from "./lifecycle-harness.ts";
 
 test("a child result finalizes the run and notifies the main session", async () => {
 	await withHarness(undefined, async (h) => {
@@ -33,7 +33,7 @@ test("a child result finalizes the run and notifies the main session", async () 
 		assert.equal(finalized.model, "child/model");
 		assert.ok(finalized.finishedAt);
 
-		const notification = h.messages.at(-1);
+		const notification = await waitForCompletionMessage(h);
 		assert.equal(notification?.message.customType, "subagent-result");
 		// No options at all: neither `triggerTurn` nor `deliverAs`, so pi appends the
 		// message rather than starting or queueing a turn. See the dedicated test
@@ -59,7 +59,8 @@ test("a failed child result keeps the error visible", async () => {
 
 		await waitFor(async () => (await h.readRuns())[0].status === "failed");
 		assert.match((await h.readRuns())[0].error ?? "", /provider exploded/);
-		assert.ok(String(h.messages.at(-1)?.message.content).includes("provider exploded"));
+		const notification = await waitForCompletionMessage(h);
+		assert.ok(String(notification.message.content).includes("provider exploded"));
 	});
 });
 
@@ -101,6 +102,9 @@ test("a run that finishes no longer wakes the main agent", async () => {
 		const run = (await h.call("subagent", { task: "quiet finish" })).details as unknown as RunRecord;
 		await h.writeResult(run, { version: 1, status: "completed", output: "ok", finishedAt: Date.now() });
 		await waitFor(async () => (await h.readRuns())[0].status === "completed");
+		// settleRun persists the status before notifyCompletion sends, so the status
+		// being visible does not mean the message has been recorded yet.
+		await waitForCompletionMessage(h);
 
 		assert.equal(h.messages.length, 1, "the model still learns of the completion");
 		assert.deepEqual(h.messages[0]?.options, undefined, "no deliverAs and no triggerTurn: pi must not start or queue a turn");
