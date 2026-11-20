@@ -79,6 +79,9 @@ that is vague or hyped without evidence.
   git merge-base --is-ancestor dev HEAD    # must succeed
   git log --oneline dev..HEAD              # must list ONLY this change's commits
   ```
+- `node tools/branch-base.mjs` runs both checks plus the stacked-branch case
+  against a freshly fetched `origin/dev` and is what CI runs; a nonzero exit is
+  the same red build, so do not override it with the hand commands.
 - A branch legitimately based on another unmerged feature branch still shows
   foreign commits in `git log dev..HEAD`. Subtract the base explicitly
   (`git log dev..feature-a`) or rebase onto `dev` first.

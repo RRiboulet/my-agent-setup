@@ -50,6 +50,12 @@ compares against, and a local `dev` left over from before three PRs merged will
 happily list their commits as yours — the same false alarm as the bug it is meant
 to catch, and just as likely to be ignored.
 
+Those two commands are the manual fallback. `node tools/branch-base.mjs` runs the
+same checks plus the stacked-branch case, against a freshly fetched `origin/dev`,
+and prints one line naming the classification and the fix; it is what
+`prove-it-works` and CI run. Its row is the first in "Rules and enforcement"
+below.
+
 A branch legitimately based on **another unmerged feature branch** still shows
 foreign commits, and neither check can tell that apart from a mistake. Subtract
 the base branch explicitly (`git log dev..feature-a`) or rebase onto `dev` first.
@@ -263,9 +269,9 @@ Three repo rules win over those skill bodies, and the skills say so in place:
 
 ## Subagent tools
 
-The five management tools — `subagent_status`, `subagent_cancel`,
-`subagent_interrupt`, `subagent_resume`, `subagent_clean` — are **not declared**
-in this repo's sessions: `defaultTools: ["+tool_search"]` in
+The six management tools — `subagent_wait`, `subagent_status`,
+`subagent_cancel`, `subagent_interrupt`, `subagent_resume`, `subagent_clean` —
+are **not declared** in this repo's sessions: `defaultTools: ["+tool_search"]` in
 `~/.pi/agent/settings.json` puts them behind `tool_search` so their descriptions
 and schemas stop riding along on every request (measured: ~890 tokens a
 request). `subagent` itself stays declared.
@@ -275,9 +281,13 @@ So reach them in two steps:
 1. `tool_search` for the tool you want.
 2. Then call it, e.g. `subagent_status({ id })`.
 
-There is no blocking wait, so collecting a result means polling
-`subagent_status` — `subagent_status({ compact: true })` is the cheap
-one-line-per-run form, and the single-run path is the one that returns output.
+Start, then wait once: `subagent_wait({ id })` blocks until the run settles and
+returns its record — `subagent_wait({ ids })` waits for a whole fan-out, and a
+timed-out wait returns the current state rather than an error. Keep
+`subagent_status` for the live "what is it doing right now" question
+(`subagent_status({ compact: true })` is the cheap one-line-per-run form, and
+the single-run path is the one that returns output), not for collecting a result
+you could have waited on.
 
 ## Reviews: one per change, and only when asked
 
@@ -327,17 +337,80 @@ therefore never names a model this machine cannot run without saying why.
 A `show-me-your-work` trail does not get its own reviewer. If a review is
 commissioned, hand the trail to that one reviewer alongside the diff.
 
+## Rules and enforcement
+
+| Rule | Level | Enforced by | Proof |
+|---|---|---|---|
+| A branch descends from origin/dev and carries only its own commits | test | `node tools/branch-base.mjs` | `tools/branch-base.test.mjs` |
+
+One row per rule, and the row names what fails when the rule is broken. This
+table is the single source of truth: no separate registry, and prose in this file
+is a rule only once a row here enforces it. The checker validates the shape —
+the four columns, an allowed level, a non-empty enforcer, a proof that exists,
+no duplicate rule, no prose row without `judgment: <reason>`:
+
+```bash
+node .pi/skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md
+```
+
+The branch row is the dogfood rule earned by the three recorded misses under
+"Branches" above: `tools/branch-base.mjs` fetches `origin/dev` and classifies the
+branch, `tools/branch-base.test.mjs` builds the fixture repositories, and both
+run in `prove-it-works` and in CI. Its four classifications (`correct`,
+`behind-dev`, `foreign-commits`, `wrong-base`) are documented in the script's
+header. The table format and the checker's `--json` contract are in
+`.pi/skills/prevent-recurrence/references/rule-table.md`.
+
 ## Tests
 
 ```bash
 bash .pi/extensions/subagent/test/setup-deps.sh              # once: link pi's packages
-node --test .pi/extensions/subagent/test/*.test.ts
+node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts
 (cd .pi/extensions/opencode-go-provider && node --test)  # provider package tests (separate tree)
+node --test .pi/skills/prevent-recurrence/scripts/test/*.test.mjs  # rule-table checker
+node .pi/skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md  # the rule table; must exit 0
+node --test tools/branch-base.test.mjs                   # branch-base check tests
+node tools/branch-base.mjs                               # the branch-base rule; must exit 0
 ```
 
 Run it with `bash` (or `sh`), not as `./setup-deps.sh` — see "Line endings"
 below. Node runs the TypeScript directly; there is no build step. See
 `.pi/extensions/subagent/test/README.md` for what is and is not covered.
+
+**`--test-concurrency=8` is not optional.** Node defaults the file concurrency to
+`availableParallelism() - 1`, which is **1** on this 2-core host, so the
+"parallel" runner was running one file at a time: 184 s of wall clock for 67 s of
+CPU (36 %), which says the suite is wait-bound, not CPU-bound. Measured
+2026-11-16: 119-132 s with the flag at 8, and no further gain at 16 (132 s), so
+the number is fixed rather than derived from `nproc`.
+
+Raising it also exposed two tests that had only ever passed because nothing ran
+beside them, both fixed here: a `btw` viewer test that waited 8 s for a spawned
+`node` process to render (now 30 s), and a widget ticker that needed two 20 ms
+ticks inside 120 ms (now 500 ms). Both now assert the behaviour rather than the
+machine, which is the rule `helpers.ts` already states for its own poll bound. If
+you raise the concurrency and see a red run, suspect a missing or tight wait
+before you suspect the code.
+
+#### One heavy thing at a time on this host
+
+`cat /proc/loadavg` and `ps` before you time anything, and record the load average
+beside every number you keep. This host has 2 vCPUs and more than one agent
+session runs on it, so a benchmark grid, another session's suite or a `devc` call
+will take the load from 0.4 to 33 — and a measurement taken in that window is a
+measurement of someone else's work. It cuts both ways: a grid started while
+another session is timing makes *its* numbers meaningless, which is worse than
+being slow, because each side then spends an hour triaging a "flake" that was
+contention.
+
+Two rules follow. **Never compare two timings taken at different loads** — re-run
+the pair, or say the comparison cannot be made. And when the suite goes red under
+load, **run the failing file alone before calling it a bug**: every red we have had
+under contention was a wall-clock bound in a test rather than the code it tests —
+a viewer waiting on a spawned `node` process, a 20 ms ticker needing two ticks, a
+widget row read one ticker before it refreshed itself. Those bounds are widened
+now, but the lesson is general: suspect a missing or too-tight wait first, and
+check the load average before you suspect the product.
 
 #### Typechecking: deliberately none
 

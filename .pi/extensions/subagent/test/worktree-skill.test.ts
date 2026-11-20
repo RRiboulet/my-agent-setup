@@ -679,6 +679,34 @@ function liveTmux(root: string): LiveTmux {
 }
 
 /**
+ * The panes of `session`, polled until they report the paths the fixture asked
+ * for.
+ *
+ * `pane_current_path` is read from the pane's process, and tmux forks that
+ * process before the child has changed into `-c`. The first listing can
+ * therefore still report the server's own cwd - measured on a CI runner as
+ * both panes sitting at the scratch root - which would fail the fixture for a
+ * start-up race rather than for anything the recipe does. A little slack costs
+ * nothing on a host where the child has already chdir'd, because the first
+ * poll matches. The last listing is returned regardless, so the assertion that
+ * follows still reports the real state.
+ */
+async function settledPanePaths(tmux: LiveTmux, session: string, expected: string[]): Promise<string[]> {
+	const wanted = [...expected].sort().join("\n");
+	const deadline = Date.now() + 5_000;
+	let rows: string[] = [];
+	for (;;) {
+		rows = tmux
+			.panes()
+			.filter((pane) => pane.session === session)
+			.map((pane) => pane.panePath)
+			.sort();
+		if (rows.join("\n") === wanted || Date.now() > deadline) return rows;
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
+}
+
+/**
  * Whether a pane's reported cwd is the tree itself or inside it.
  *
  * A pane whose directory has since been removed is reported as `<path>
@@ -741,9 +769,11 @@ test("remove recipe: a live tmux server loses the tree's sessions and keeps the 
 		const targetRows = before.filter((pane) => pane.session === session);
 		assert.equal(targetRows.length, 2, `fixture: expected two rows for ${session}, got:\n${before.map((p) => `${p.session}\t${p.panePath}`).join("\n")}`);
 		assert.deepEqual(
-			targetRows.map((pane) => pane.panePath).sort(),
+			await settledPanePaths(tmux, session, [wt, sub]),
 			[wt, sub].sort(),
-			"fixture: both panes of the target session must be rooted inside the tree",
+			`fixture: both panes of the target session must be rooted inside the tree\n` +
+				`${tmux.run("-V").stdout.trim()}, lengths ${existsSync(wt)}/${existsSync(sub)}\n` +
+				JSON.stringify(tmux.panes()),
 		);
 		assert.deepEqual(
 			before.filter((pane) => pane.session === decoy).map((pane) => pane.panePath),
