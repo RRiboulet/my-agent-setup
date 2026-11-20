@@ -23,12 +23,17 @@ import { waitFor, withEnv, withTempAgentDir } from "./helpers.ts";
 
 export const SESSION_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";
 
+export interface CompletionMessage {
+	message: Record<string, unknown>;
+	options: Record<string, unknown> | undefined;
+}
+
 export interface Harness {
 	pi: Record<string, unknown>;
 	ctx: Record<string, unknown>;
 	tools: Map<string, Record<string, unknown>>;
 	execCalls: { command: string; args: string[] }[];
-	messages: { message: Record<string, unknown>; options: Record<string, unknown> | undefined }[];
+	messages: CompletionMessage[];
 	/** Every ctx.ui.notify call, so guard messages can be asserted. */
 	notifications: { message: string; type: string | undefined }[];
 	/** Make every tmux call against the run's pane fail as if the session were gone. */
@@ -117,7 +122,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const tools = new Map<string, Record<string, unknown>>();
 	const handlers = new Map<string, (...args: unknown[]) => unknown>();
 	const execCalls: { command: string; args: string[] }[] = [];
-	const messages: { message: Record<string, unknown>; options: Record<string, unknown> | undefined }[] = [];
+	const messages: CompletionMessage[] = [];
 	const notifications: { message: string; type: string | undefined }[] = [];
 	// Flipped by removeTarget() to simulate the user killing the tmux session (or
 	// the server dying) out from under a run.
@@ -406,6 +411,38 @@ export async function waitForRunStatus(h: Harness, status: string, note = ""): P
 	assert.fail(
 		`run never reached "${status}"${note ? ` (${note})` : ""}; last record=${JSON.stringify(last)}; ` +
 			`since the target was broken: ${panes} capture-pane, ${displays} display-message, ${h.execCalls.length} exec calls total`,
+	);
+}
+
+/**
+ * Wait for the completion message a settled run reports, and return it.
+ *
+ * The persisted status and the session transcript are two separate observables.
+ * `settleRun` writes the status first — `await persist()` — and calls
+ * `notifyCompletion` only afterwards, so a run can be observed as `completed`
+ * while `sendMessage` has not been called yet. A test that waits for the status
+ * and reads `messages` on the very next statement is asserting a simultaneity
+ * the product never promises: that shape flaked on `dev` in CI run 44714766416,
+ * with the status recorded correctly and `messages.length` still 0.
+ *
+ * Waits for the message rather than assuming it, and says which half is missing
+ * when it never arrives, so a run that genuinely stops notifying still fails and
+ * fails with the record rather than with a bare `0 !== 1`.
+ */
+export async function waitForCompletionMessage(h: Harness): Promise<CompletionMessage> {
+	const deadline = Date.now() + 30_000;
+	while (Date.now() < deadline) {
+		const first = h.messages[0];
+		if (first) return first;
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
+	// readRuns() lists runs in file order; these tests create one, so [0] is the
+	// run under test. Named for what it is rather than "last", which would be a
+	// trap for the first caller that has more than one.
+	const record = (await h.readRuns())[0];
+	assert.fail(
+		`the run reached "${record?.status}" but reported no completion message; the record=${JSON.stringify(record)}; ` +
+			`${h.execCalls.length} exec calls total`,
 	);
 }
 
