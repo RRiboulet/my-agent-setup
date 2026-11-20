@@ -274,7 +274,11 @@ architecture → type → lint → test → prose and has to say why every highe
 did not work. A lint is allowed only when the offending lines alone prove the
 violation, and an existing stock rule is tried first: the Python adapter in
 `references/python.md` covers Ruff `TID251` and the stock rules worth selecting,
-ast-grep, `import-linter`, and a project test. The check must fail at the
+ast-grep, `import-linter`, and a project test, and the JS/TS adapter in
+`references/js-ts.md` covers ESLint's `no-restricted-imports` and
+`no-restricted-syntax`, a local flat-config rule with suggestions,
+dependency-cruiser boundaries, typed linting through typescript-eslint, oxlint
+for the inner loop, and the suppression audit. The check must fail at the
 recorded bad revision and pass at the fixed one, with both commands and exit
 codes recorded in a proof file; existing violations may land behind a ratchet
 that only shrinks. The rule then gets a row in the target's `AGENTS.md`
