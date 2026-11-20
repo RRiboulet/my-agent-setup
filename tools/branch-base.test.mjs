@@ -102,8 +102,8 @@ function scratch(label) {
  * happens to sit inside one; the check then acts on the repository the test
  * means, and a plain directory with no repository above it still reads as one.
  */
-function run(cwd) {
-	const env = { ...ENV, GIT_CEILING_DIRECTORIES: os.tmpdir() };
+function run(cwd, overrides = {}) {
+	const env = { ...ENV, GIT_CEILING_DIRECTORIES: os.tmpdir(), ...overrides };
 	const result = spawnSync(process.execPath, [CLI], { cwd, encoding: "utf8", env, timeout: 60_000 });
 	return { code: result.status, stdout: result.stdout, stderr: result.stderr };
 }
@@ -225,8 +225,8 @@ test("a branch with no commits of its own that dev has moved past is behind-dev,
 	const result = run(repo.work);
 	assert.equal(result.code, 1, result.stdout + result.stderr);
 	const output = line(result);
-	assert.match(output, /^branch-base: behind-dev — not-started-yet has no commits of its own/);
-	assert.match(output, /next: git rebase origin\/dev \(or start again with git checkout -b <change-name> origin\/dev\)$/);
+	assert.match(output, /^branch-base: behind-dev — not-started-yet adds no commit of its own/);
+	assert.match(output, /next: git checkout -b <change-name> origin\/dev \(or git rebase origin\/dev to continue on this branch\)$/);
 	assert.doesNotMatch(output, /wrong-base/);
 });
 
@@ -273,4 +273,141 @@ test("an unknown option exits 2 with the usage", () => {
 	assert.equal(result.stdout, "");
 	assert.match(result.stderr, /unknown option: --json/);
 	assert.match(result.stderr, /usage: node tools\/branch-base\.mjs/);
+});
+
+// ---------------------------------------------------------------------------
+// Shapes a single "oldest commit" test cannot see (review findings 1-6)
+// ---------------------------------------------------------------------------
+
+test("a branch that merges another branch in is foreign-commits, not correct", () => {
+	const repo = scratch("multi-root");
+	git(repo.work, ["checkout", "-q", "-b", "feature-a"]);
+	commit(repo.work, "feat(a): own commit");
+	// feature-b is cut from the same dev tip, so every root of the range has
+	// origin/dev as its parent — the shape an only-the-oldest-commit test calls
+	// "correct" while the foreign commits ride along.
+	git(repo.work, ["checkout", "-q", "-b", "feature-b", "origin/dev"]);
+	commit(repo.work, "feat(b): foreign commit");
+	git(repo.work, ["checkout", "-q", "feature-a"]);
+	git(repo.work, ["merge", "-q", "--no-ff", "feature-b", "-m", "Merge feature-b"]);
+
+	const result = run(repo.work);
+	assert.equal(result.code, 1, result.stdout + result.stderr);
+	const output = line(result);
+	assert.match(output, /^branch-base: foreign-commits — feature-a carries 2 root commits in origin\/dev\.\.HEAD: /);
+	assert.match(output, /"feat\(a\): own commit"/);
+	assert.match(output, /"feat\(b\): foreign commit"/);
+	assert.match(output, /only one lineage may sit on origin\/dev/);
+	assert.match(output, /next: git log --oneline --graph origin\/dev\.\.HEAD/);
+});
+
+test("a failed fetch exits 2 instead of classifying against a stale origin\/dev", () => {
+	const repo = scratch("stale-fetch");
+	git(repo.work, ["checkout", "-q", "-b", "fresh"]);
+	commit(repo.work, "feat: own commit");
+	// dev moves on, then the remote becomes unreachable. The last known
+	// origin/dev still resolves, which is exactly why a stale base must not pass.
+	commit(repo.seed, "feat(dev): dev moves on");
+	git(repo.seed, ["push", "-q", "origin", "dev"]);
+	git(repo.work, ["remote", "set-url", "origin", path.join(repo.root, "gone.git")]);
+
+	const result = run(repo.work);
+	assert.equal(result.code, 2, result.stdout + result.stderr);
+	assert.equal(result.stdout, "");
+	assert.match(result.stderr, /^branch-base: cannot refresh origin\/dev: /);
+	assert.match(result.stderr, /may be stale, so this check cannot tell whether the base is right/);
+});
+
+test("a shallow clone exits 2 instead of calling a correct branch wrong-base", () => {
+	const repo = scratch("shallow");
+	git(repo.work, ["checkout", "-q", "-b", "shallow-me"]);
+	commit(repo.work, "feat: own commit");
+	git(repo.work, ["push", "-q", "origin", "shallow-me"]);
+
+	const clone = path.join(repo.root, "shallow-clone");
+	git(repo.root, ["clone", "-q", "--depth", "1", "-b", "shallow-me", `file://${repo.origin}`, clone]);
+
+	const result = run(clone);
+	assert.equal(result.code, 2, result.stdout + result.stderr);
+	assert.equal(result.stdout, "");
+	assert.match(result.stderr, /is a shallow clone, so its grafted history cannot say what descends from origin\/dev/);
+	assert.match(result.stderr, /git fetch --unshallow/);
+});
+
+test("a branch with no common ancestor is wrong-base and says so", () => {
+	const repo = scratch("unrelated");
+	git(repo.work, ["checkout", "-q", "--orphan", "rogue"]);
+	commit(repo.work, "feat: an unrelated root");
+
+	const result = run(repo.work);
+	assert.equal(result.code, 1, result.stdout + result.stderr);
+	const output = line(result);
+	assert.match(output, /^branch-base: wrong-base — rogue does not descend from origin\/dev/);
+	assert.match(output, /the branch point is no common ancestor with origin\/dev/);
+	assert.match(output, /next: git rebase --onto origin\/dev <base> rogue$/);
+});
+
+test("a branch whose commits dev already has is behind-dev without claiming they do not exist", () => {
+	const repo = scratch("merged");
+	git(repo.work, ["checkout", "-q", "-b", "already-merged"]);
+	commit(repo.work, "feat: about to be merged");
+	git(repo.work, ["push", "-q", "origin", "already-merged"]);
+	git(repo.seed, ["fetch", "-q", "origin"]);
+	git(repo.seed, ["merge", "-q", "--no-ff", "-m", "Merge branch 'already-merged'", "origin/already-merged"]);
+	git(repo.seed, ["push", "-q", "origin", "dev"]);
+
+	const result = run(repo.work);
+	assert.equal(result.code, 1, result.stdout + result.stderr);
+	const output = line(result);
+	assert.match(output, /^branch-base: behind-dev — already-merged adds no commit of its own/);
+	assert.match(output, /is already contained in origin\/dev/);
+	assert.doesNotMatch(output, /has no commits of its own/);
+});
+
+test("a detached HEAD with its own commits is correct and does not suggest pushing HEAD", () => {
+	const repo = scratch("detached");
+	git(repo.work, ["checkout", "-q", "-b", "detach-me"]);
+	commit(repo.work, "feat: own commit");
+	git(repo.work, ["checkout", "-q", "--detach"]);
+
+	const result = run(repo.work);
+	assert.equal(result.code, 0, result.stdout + result.stderr);
+	const output = line(result);
+	assert.match(output, /^branch-base: correct — HEAD \(detached\) descends from origin\/dev/);
+	assert.match(output, /git switch -c <change-name> to reattach/);
+	assert.doesNotMatch(output, /git push -u origin HEAD/);
+});
+
+// ---------------------------------------------------------------------------
+// Environment the check must not trust
+// ---------------------------------------------------------------------------
+
+test("an inherited GIT_DIR does not redirect the check to another repository", () => {
+	const repo = scratch("git-dir");
+	git(repo.work, ["checkout", "-q", "-b", "own-work"]);
+	commit(repo.work, "feat: own commit");
+	const elsewhere = scratch("git-dir-other");
+	git(elsewhere.work, ["checkout", "-q", "-b", "other-work"]);
+	commit(elsewhere.work, "feat: other commit");
+
+	const result = run(repo.work, { GIT_DIR: path.join(elsewhere.work, ".git") });
+	assert.equal(result.code, 0, result.stdout + result.stderr);
+	assert.match(line(result), /own-work descends from origin\/dev/);
+});
+
+test("a repository whose HEAD has no commit exits 2", () => {
+	const repo = scratch("unborn");
+	git(repo.work, ["symbolic-ref", "HEAD", "refs/heads/not-created-yet"]);
+
+	const result = run(repo.work);
+	assert.equal(result.code, 2, result.stdout + result.stderr);
+	assert.equal(result.stdout, "");
+	assert.match(result.stderr, /has no HEAD commit to check/);
+});
+
+test("an argument that is not an option exits 2", () => {
+	const result = spawnSync(process.execPath, [CLI, "unexpected"], { encoding: "utf8", env: ENV });
+	assert.equal(result.status, 2);
+	assert.equal(result.stdout, "");
+	assert.match(result.stderr, /takes no arguments, got unexpected/);
 });

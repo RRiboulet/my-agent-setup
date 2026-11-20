@@ -37,15 +37,18 @@ Added:
 
 - **The branch-base rule is a check now, not a review round.**
   `tools/branch-base.mjs` fetches `origin/dev` and classifies the branch in one
-  line: `correct` (the branch's own oldest commit sits directly on the current
-  `origin/dev`), `behind-dev` (no commits of its own yet, so it gets the rebase
-  line rather than a base failure), `foreign-commits` (it reaches the dev tip
-  through a merge while its oldest own commit sits on an older dev, or it
-  carries another branch's commits), and `wrong-base` (it never descends from
-  `origin/dev` at all — the branch-off-`main` mistake — with the branch point
-  named on the line). Exit 0 only for `correct`, 1 with the rebase that fixes it
-  otherwise, 2 when there is no `origin/dev` to compare against, which is a
-  check that could not run and never a pass. This rule has three recorded misses
+  line: `correct` (what the branch adds has exactly one root, and that root sits
+  on the current `origin/dev`), `behind-dev` (the dev tip already contains HEAD,
+  so it gets the start-again line rather than a base failure), `foreign-commits`
+  (the range starts on an older dev because dev was merged in instead of rebased
+  onto, or a merge brought a second lineage in — the shape a single
+  "oldest commit" test reported as `correct` while the foreign commits rode
+  along), and `wrong-base` (it never descends from `origin/dev` at all — the
+  branch-off-`main` mistake — with the branch point named on the line). Exit 0
+  only for `correct`, 1 with the fix otherwise, and 2 whenever the check could
+  not run, which is never a pass: no `origin/dev`, a fetch that failed (it would
+  otherwise classify against a stale base), a shallow clone whose grafted
+  history cannot decide ancestry, or a repository with no commit yet. This rule has three recorded misses
   in `AGENTS.md`, every one caught by a reviewer; `prove-it-works` now runs the
   check before a commit, and a new `.github/workflows/checks.yml` runs it on
   every pull request into `dev` and push to `dev` alongside the subagent,
@@ -55,8 +58,10 @@ Added:
   clean runner has none. The rule is the first row of `AGENTS.md`'s new "Rules
   and enforcement" table, so the rule-table checker validates the rule that
   produced it. Stated in the script's header rather than papered over: a branch
-  stacked on an *unmerged* feature branch is invisible while that base is
-  unmerged, because its oldest commit still sits on `origin/dev`.
+  stacked on an *unmerged* feature branch still reads `correct` while that base
+  is unmerged, because the range then has a single root on `origin/dev`; and a
+  commit committed on top of this branch's own is indistinguishable from its own
+  work, which the root count cannot see.
 
 Maintenance:
 

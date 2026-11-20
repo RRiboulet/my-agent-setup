@@ -50,6 +50,12 @@ compares against, and a local `dev` left over from before three PRs merged will
 happily list their commits as yours — the same false alarm as the bug it is meant
 to catch, and just as likely to be ignored.
 
+Those two commands are the manual fallback. `node tools/branch-base.mjs` runs the
+same checks plus the stacked-branch case, against a freshly fetched `origin/dev`,
+and prints one line naming the classification and the fix; it is what
+`prove-it-works` and CI run. Its row is the first in "Rules and enforcement"
+below.
+
 A branch legitimately based on **another unmerged feature branch** still shows
 foreign commits, and neither check can tell that apart from a mistake. Subtract
 the base branch explicitly (`git log dev..feature-a`) or rebase onto `dev` first.
@@ -362,6 +368,7 @@ bash .pi/extensions/subagent/test/setup-deps.sh              # once: link pi's p
 node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts
 (cd .pi/extensions/opencode-go-provider && node --test)  # provider package tests (separate tree)
 node --test .pi/skills/prevent-recurrence/scripts/test/*.test.mjs  # rule-table checker
+node .pi/skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md  # the rule table; must exit 0
 node --test tools/branch-base.test.mjs                   # branch-base check tests
 node tools/branch-base.mjs                               # the branch-base rule; must exit 0
 ```
