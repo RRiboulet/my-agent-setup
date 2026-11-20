@@ -436,9 +436,12 @@ export async function waitForCompletionMessage(h: Harness): Promise<CompletionMe
 		if (first) return first;
 		await new Promise((resolve) => setTimeout(resolve, 25));
 	}
-	const last = (await h.readRuns())[0];
+	// readRuns() lists runs in file order; these tests create one, so [0] is the
+	// run under test. Named for what it is rather than "last", which would be a
+	// trap for the first caller that has more than one.
+	const record = (await h.readRuns())[0];
 	assert.fail(
-		`the run reached "${last?.status}" but reported no completion message; last record=${JSON.stringify(last)}; ` +
+		`the run reached "${record?.status}" but reported no completion message; the record=${JSON.stringify(record)}; ` +
 			`${h.execCalls.length} exec calls total`,
 	);
 }
