@@ -63,6 +63,24 @@ Added:
   commit committed on top of this branch's own is indistinguishable from its own
   work, which the root count cannot see.
 
+Fixed:
+
+- **The worktree sweep no longer goes blind on a C-locale host.** The Remove
+  recipe reads `tmux list-panes -a` as two fields and used a tab as the
+  separator. tmux rewrites a tab in `-F` output to `_` when the *server* ran in
+  a non-UTF-8 locale - measured on the stock Ubuntu and Debian packages
+  (tmux 3.2a-3.6) whenever `LANG` and `LC_ALL` are unset - so `awk -F'\t'` saw
+  one field, matched no pane and killed nothing, after which the removal deleted
+  the tree under a live shell and reported success. The separator is `|` now: it
+  is printable in every locale, and a path containing one is pathological. Two
+  tests pin it, because a build that keeps the tab even in C (this host's tmux
+  3.4 does) cannot fail the live one: a static assertion that the recipe embeds
+  no control character, and a sweep against a server started with `LC_ALL=C`,
+  which fails on the stock packages before the fix with "a session rooted in the
+  removed tree survived the sweep". The same separator replaces the tab in the
+  fake-tmux fixture and in the live fixture's own listing, so neither harness can
+  pass by inheriting a UTF-8 locale either.
+
 Maintenance:
 
 - **`lifecycle.test.ts` is nine topic files now, so its waits overlap and the

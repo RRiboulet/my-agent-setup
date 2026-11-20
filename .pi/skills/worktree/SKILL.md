@@ -427,8 +427,14 @@ Stop any tmux sessions rooted in the tree first (by path, not by name), then
 remove. Three details in the sweep are load-bearing, each verified by breaking
 it:
 
-- **Tab-separated, not space-split**: a pane path or session name containing a
-  space makes `$2` match nothing - or the wrong session.
+- **A printable separator, not a control character**: a pane path or session
+  name containing a space makes `$2` match nothing - or the wrong session. A
+  tab is worse: tmux rewrites it to `_` when the server runs in a non-UTF-8
+  locale (measured on the stock Ubuntu and Debian packages, tmux 3.2a-3.6,
+  whenever `LANG` and `LC_ALL` are unset), so the separator vanishes and the
+  sweep silently matches nothing - the removal then deletes the tree from
+  under a live shell, which is the leak this whole block exists to prevent.
+  `|` survives every locale; a path containing `|` is pathological.
 - **The path goes in the environment, never `awk -v`**: `-v` interprets C-style
   escapes in its value, so a worktree path containing a backslash arrives as a
   different string, matches no pane, and leaks the session - so the removal on
@@ -457,8 +463,8 @@ SLUG="task-name"; : "${SLUG:?SLUG must be set}"; WT="$R/.worktrees/$SLUG"
 SOCKET="${PI_TMUX_SOCKET_DIR:-${TMPDIR:-/tmp}/pi-tmux-sockets}/pi.sock"
 
 # No tmux server is the normal case: tolerate the sweep, never the removal.
-tmux -S "$SOCKET" list-panes -a -F "#{session_name}"$'\t'"#{pane_current_path}" 2>/dev/null |
-  WT="$WT" awk -F'\t' '$2==ENVIRON["WT"] || index($2, ENVIRON["WT"] "/")==1 {print $1}' |
+tmux -S "$SOCKET" list-panes -a -F "#{session_name}|#{pane_current_path}" 2>/dev/null |
+  WT="$WT" awk -F'|' '$2==ENVIRON["WT"] || index($2, ENVIRON["WT"] "/")==1 {print $1}' |
   sort -u |
   while IFS= read -r s; do tmux -S "$SOCKET" kill-session -t "$s"; done || true
 
