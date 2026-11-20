@@ -15,9 +15,14 @@ cost — not something this adapter installs for you.
 
 Use when the class is "this module or member must not be used", and the import
 line alone proves it. `TID251` is `flake8-tidy-imports`' `banned-api`: it flags
-both `from app.legacy_http import fetch` and `import app.legacy_http` followed
-by attribute access (verified on Ruff 0.17.6). It does not follow aliases,
-`eval`, or `importlib`; the rule is for accidental use, not a security boundary.
+`from app.legacy_http import fetch`, `import app.legacy_http` followed by
+attribute access, and every aliased form of them - `import app.legacy_http as
+lh`, `from app.legacy_http import fetch as f`, `from app import legacy_http as
+lh`, and `from app.legacy_http import *` all exit 1 (verified on Ruff 0.17.6,
+one file per form). What it cannot see is indirection: `importlib.import_module`
+exits 0, and a re-export is flagged where the re-export happens, not at the
+consumers that import it from there. The rule is for accidental use, not a
+security boundary.
 
 The `msg` is the check: it names the replacement, so the diagnostic teaches
 instead of puzzling.
