@@ -1,7 +1,7 @@
 # 03: The per-checkout agent dir starts with the catalogue
 
 **Blocked by:** 01
-**Status:** ready
+**Status:** done - merged in #182 (2026-11-21)
 
 ## What to build
 

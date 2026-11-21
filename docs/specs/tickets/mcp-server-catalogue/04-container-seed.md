@@ -1,7 +1,7 @@
 # 04: A rebuilt container has the catalogue without a manual step
 
 **Blocked by:** 01
-**Status:** ready
+**Status:** done - merged in #182 (2026-11-21)
 
 ## What to build
 

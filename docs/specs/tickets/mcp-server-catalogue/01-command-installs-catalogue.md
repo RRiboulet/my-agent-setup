@@ -1,7 +1,7 @@
 # 01: One command installs the catalogue into an agent dir
 
 **Blocked by:** None (can start immediately)
-**Status:** ready
+**Status:** done - merged in #182 (2026-11-21); the Playwright entry's browser flags amended in #185
 
 ## What to build
 

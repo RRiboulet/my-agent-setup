@@ -1,7 +1,7 @@
 # 02: `/mcp-catalogue` installs the catalogue from inside a session
 
 **Blocked by:** 01
-**Status:** ready
+**Status:** done - merged in #182 (2026-11-21)
 
 ## What to build
 
