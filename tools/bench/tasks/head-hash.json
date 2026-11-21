@@ -1,6 +1,6 @@
 {
   "id": "head-hash",
-  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-fixture",
+  "repo": ".worktrees/bench-fixture",
   "timeoutMs": 120000,
   "prompt": "Run `git log -1 --format=%H` in this repository and reply with only the hash.",
   "check": {

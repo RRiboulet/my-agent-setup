@@ -78,6 +78,9 @@ jobs:
       - name: Skill index
         run: node tools/skills-index.mjs --check
 
+      - name: Bench runner tests
+        run: node --test tools/bench/run.test.mjs
+
       - name: MCP catalogue install tests
         run: node --test tools/mcp-catalogue.test.mjs
 
