@@ -248,6 +248,22 @@ Fixed:
   fake-tmux fixture and in the live fixture's own listing, so neither harness can
   pass by inheriting a UTF-8 locale either.
 
+- **A child rooted in a worktree is told which agent dir to use, before the
+  duplicate-extension failure costs another run.** The `subagent` tool has no
+  `env` parameter, so a child inherits the parent's `PI_CODING_AGENT_DIR` — which
+  here is the *shared* agent dir with this repo installed as a package. Rooted in
+  `.worktrees/<slug>`, pi then loads both that package and the worktree's own
+  `.pi/` and exits 1 on duplicate tool registration before any model call. The
+  fact that this host already has the fix (`bin/pi-agent-dir` gives the checkout
+  `~/.pi/agent-my-agent-setup`) was recorded but not connected to the `subagent`
+  tool, so the workaround used instead was `cwd` = the main checkout, which runs
+  the *main* checkout's extensions and skills — enough for file edits, wrong for
+  anything testing the branch. `AGENTS.md` now states the failure, the exact
+  invocation (`cd .worktrees/<slug> && PI_CODING_AGENT_DIR=~/.pi/agent-my-agent-setup
+  pi -p "<task>"`), and that this is how a child runs the branch's own skills;
+  `worktree/references/parallel.md` gained the same line beside its
+  package-copy paragraph, which previously described only the worse fallbacks.
+
 Maintenance:
 
 - **Four lifecycle assertions no longer read the completion message on the

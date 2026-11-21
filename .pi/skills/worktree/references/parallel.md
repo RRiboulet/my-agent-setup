@@ -70,7 +70,7 @@ copy, so the recipe above works. On a checkout without that fix, launch with
 `cwd` = the repository root and `cd` into the worktree inside each command
 instead, which keeps the child's discovery pointed at the main checkout.
 
-**The package copy is the one case that fix cannot cover.** If this repo is also
+**The package copy needs one more thing: the child's agent dir.** If this repo is also
 installed as a package on that host (the README's local-path install, or a
 `git:` one), the child discovers the package too, and the package is the *main
 checkout's* copy — a different file from the worktree's, because the worktree's
@@ -91,7 +91,16 @@ is a lossy workaround, not a dedupe. There is no launcher fix to wait for.
 On such a host, `bin/pi-agent-dir` is the fix: it gives the checkout a
 package-free agent dir of its own (the devcontainer's split, on a host) and
 `--shell` adds a `pi` function that selects it from inside the checkout or any
-worktree, so the tree's own copy is the only one loaded. Failing that, either
+worktree, so the tree's own copy is the only one loaded. A **child** does not go
+through that shell hook, so pass the dir explicitly — the same content the hook
+would choose:
+
+```bash
+cd .worktrees/<slug> && PI_CODING_AGENT_DIR=~/.pi/agent-my-agent-setup pi -p "<task>"
+```
+
+`~/.pi/agent-my-agent-setup` is the `--print` output on this host; another
+checkout has its own name, `~/.pi/agent-<main checkout directory name>`. Failing that, either
 uninstall the package there (every unrelated project then loses its extensions)
 or launch with `cwd` = the repository root and `cd` into the worktree inside each
 command (starts, but runs the main checkout's extensions, not the branch's).
