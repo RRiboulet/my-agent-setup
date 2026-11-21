@@ -7,7 +7,7 @@
  * tells it to) sees no filtering at all. The failure then arrives much later as
  * `No API key found for <provider>` from a subagent, after the plan has already
  * named the model. The judge has the same problem one step earlier: asking it
- * without an OpenRouter credential spends a round trip to learn what pi already
+ * without an OpenCode credential spends a round trip to learn what pi already
  * knows.
  *
  * So the policy's providers are checked up front and the result is data:
@@ -90,10 +90,13 @@ export function authSourceFromRegistry(
 /** The environment variable pi reads for a provider whose key is not in auth.json. */
 export const PROVIDER_ENV_VARS: Readonly<Record<string, string>> = {
 	openrouter: "OPENROUTER_API_KEY",
+	// The judge runs on OpenCode Zen, the reviewers on the Go endpoint; one
+	// OpenCode key authenticates both, so `opencode-go` costs no extra credential.
+	opencode: "OPENCODE_API_KEY",
 	"opencode-go": "OPENCODE_API_KEY",
 };
 
-/** `OPENROUTER_API_KEY` for `openrouter`, `OPENCODE_API_KEY` for `opencode-go`, and a
+/** `OPENROUTER_API_KEY` for `openrouter`, `OPENCODE_API_KEY` for either OpenCode provider, and a
  * predictable fallback for anything else. */
 export function providerEnvVar(provider: string): string {
 	const known = PROVIDER_ENV_VARS[provider];
