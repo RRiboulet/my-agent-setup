@@ -6,6 +6,24 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
+- **The implementation loop is in `implement`, where it is already in context,
+  and `tdd` is small enough to load on a whim.** Measured earlier: across six
+  real runs of one task, `tdd`'s description changed the order (3/3 wrote the
+  test first with it available, 0/3 without) while the 4.6 KB body was opened in
+  only one of three. So the body was doing little and the pointer was doing the
+  work. Three changes follow from that. `tdd/SKILL.md` drops from 4,607 B to
+  2,902: the seam detail moves to `references/seams.md`, the anti-pattern list
+  and the mocking boundary to `references/anti-patterns.md`, and the body keeps
+  the loop, the two-imagined-edits test, the exceptions and the report. The loop
+  itself is now also in `implement` section 4, so a unit build has it without
+  loading anything, and `coding-skills.test.ts` compares the two copies byte for
+  byte between `tdd-loop` markers, so they cannot drift. `prove-it-works` gains
+  the consequence that makes the body matter: revert the new behavior in one
+  edit, confirm the covering test fails, restore and re-run, and report the test
+  that failed - a change with no test that can fail is `not_run`, never `passed`.
+  `tdd`'s body carries a 3,000 B cap in the same test file so it cannot grow
+  back.
+
 - **The README says which skills you start and which the agent starts, and it
   cannot drift.** The inventory was 24 rows of 25 skills, five of them labelled
   `User-invoked /skill:<name>:` and the rest unlabelled, so "unlabelled means

@@ -65,6 +65,11 @@ node .pi/skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md  # mus
 - On failure, fix the root cause (load the `diagnosing-bugs` skill if it is not obvious) and re-run the affected checks.
 - Classify each failure as caused by the change, pre-existing, or environmental. When unsure, check the base revision in a separate worktree; never stash or discard the user's work to find out. Pre-existing failures are reported, never hidden, and never excuse a new regression.
 - Never delete, skip, or weaken a valid test, lower a threshold, or add a suppression to get green.
+- **Prove the change is covered, not just green.** Revert the new behavior in one
+  edit — flip the condition, return the old value, drop the effect — run the test
+  that covers it, and confirm it fails; then restore and re-run. Report the test
+  name and the failure it produced. A change with no test that can fail is
+  `not_run` with the reason, never `passed`.
 
 ## 4. Check the final diff — hygiene, not a review
 

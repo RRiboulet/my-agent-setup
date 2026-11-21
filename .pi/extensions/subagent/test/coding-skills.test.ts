@@ -327,12 +327,25 @@ test("every references/*.md is reachable from its SKILL.md", () => {
 		const skillRoot = path.join(SKILLS_ROOT, dir);
 		const refRoot = path.join(skillRoot, "references");
 		if (!statSync(refRoot, { throwIfNoEntry: false })) continue;
-		const text = readFileSync(path.join(skillRoot, "SKILL.md"), "utf8").replace(/```[\s\S]*?```/g, "");
-		const linked = new Set(
-			[...text.matchAll(/\]\(([^)\s]+)\)/g)].map(([, target]) => target.split("#")[0].replace(/^\.\//, "")),
-		);
+		// Reachable, not merely linked: SKILL.md may point at one reference that
+		// points at the next, and the file is still one an agent can find. Walk the
+		// closure, fenced code stripped, from SKILL.md through every markdown file.
+		const seen = new Set<string>();
+		const queue = ["SKILL.md"];
+		while (queue.length > 0) {
+			const rel = queue.shift() as string;
+			if (seen.has(rel)) continue;
+			seen.add(rel);
+			const file = path.join(skillRoot, rel);
+			if (!statSync(file, { throwIfNoEntry: false })) continue;
+			const text = readFileSync(file, "utf8").replace(/```[\s\S]*?```/g, "");
+			for (const [, target] of text.matchAll(/\]\(([^)\s]+)\)/g)) {
+				const clean = target.split("#")[0].replace(/^\.\//, "");
+				if (clean.endsWith(".md") && !clean.includes("://")) queue.push(path.posix.normalize(path.posix.join(path.dirname(rel), clean)));
+			}
+		}
 		for (const entry of markdownFilesUnder(refRoot)) {
-			if (!linked.has(`references/${entry}`)) orphans.push(`.pi/skills/${dir}/references/${entry}`);
+			if (!seen.has(`references/${entry}`)) orphans.push(`.pi/skills/${dir}/references/${entry}`);
 		}
 	}
 	assert.deepEqual(orphans, [], `reference files no SKILL.md links to:${report(orphans)}`);
@@ -351,4 +364,43 @@ test("the split skill bodies stay within their line budget", () => {
 		if (lines > budget) over.push(`.pi/skills/${dir}/SKILL.md: ${lines} lines > ${budget}`);
 	}
 	assert.deepEqual(over, [], `split bodies over budget:${report(over)}`);
+});
+
+// --- The implementation loop, and the size of the skill that owns it --------
+//
+// The loop lives in two files on purpose. `tdd` owns it, and `implement` is
+// always in context while a unit is built, so putting the loop there means the
+// agent has it without loading anything. Two copies drift, so they are compared
+// here byte for byte - markers included, which also catches one copy being
+// edited without the other.
+
+const LOOP_BEGIN = "<!-- tdd-loop:begin";
+const LOOP_END = "<!-- tdd-loop:end -->";
+
+function loopBlock(dir: string): string {
+	const text = readFileSync(path.join(SKILLS_ROOT, dir, "SKILL.md"), "utf8");
+	const start = text.indexOf(LOOP_BEGIN);
+	const end = text.indexOf(LOOP_END);
+	assert.notEqual(start, -1, `${dir}/SKILL.md has no tdd-loop block`);
+	assert.notEqual(end, -1, `${dir}/SKILL.md has an unterminated tdd-loop block`);
+	assert.equal(text.split(LOOP_BEGIN).length - 1, 1, `${dir}/SKILL.md has one loop block`);
+	return text.slice(start, end + LOOP_END.length);
+}
+
+test("the implementation loop is identical in tdd and implement", () => {
+	const inTdd = loopBlock("tdd");
+	const inImplement = loopBlock("implement");
+	assert.equal(inImplement, inTdd, "edit both copies: .pi/skills/tdd/SKILL.md and .pi/skills/implement/SKILL.md");
+	// A block that lost its steps would still be "identical".
+	for (const step of ["**Red.**", "**Watch it fail for the right reason.**", "**Green.**", "**Widen.**", "**Tidy.**"]) {
+		assert.ok(inTdd.includes(step), `the loop must keep its ${step} step`);
+	}
+});
+
+test("tdd's own body stays small enough to load on a whim", () => {
+	// Measured 2026-11-21: 4,607 B before the split, 2,864 after moving the seams
+	// and anti-pattern detail into references. The cap keeps a future edit from
+	// growing it back - loading a method is only worth it while it is cheap.
+	const bytes = readFileSync(path.join(SKILLS_ROOT, "tdd", "SKILL.md")).length;
+	assert.ok(bytes <= 3000, `.pi/skills/tdd/SKILL.md is ${bytes} B; the cap is 3000 - move detail to references/`);
 });
