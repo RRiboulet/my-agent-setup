@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.15.1 — 2026-11-21
+
 Fixed:
 
 - **`node tools/branch-base.mjs` no longer goes red on `dev` itself when a push
