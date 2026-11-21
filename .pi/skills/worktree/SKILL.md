@@ -1,6 +1,6 @@
 ---
 name: worktree
-description: "Create, list, open, review, and remove git worktrees (linked working trees) for independent tasks. Use when a task needs an isolated working tree/branch without disturbing the current checkout, or when parallel tasks need separate checkouts."
+description: "Create, list, open, review, and remove git worktrees (linked working trees) for independent tasks. Use when: a task needs an isolated working tree or branch without disturbing the current checkout; or parallel tasks need separate checkouts."
 ---
 
 # Git worktrees for independent tasks

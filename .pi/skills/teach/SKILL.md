@@ -1,6 +1,6 @@
 ---
 name: teach
-description: "Teach the user a topic across several sessions in a stateful workspace of short HTML lessons grounded in cited sources, reference sheets and learning records. Use when the learning is the project — a language, a framework, an unfamiliar codebase, a certification — not for one explanation in passing."
+description: "User-invoked /skill:teach: teach a topic across sessions in a workspace of lessons and records, when the learning is the project, not one explanation."
 disable-model-invocation: true
 ---
 

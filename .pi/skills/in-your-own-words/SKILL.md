@@ -1,6 +1,6 @@
 ---
 name: in-your-own-words
-description: "Play back the user's goal, the observable success condition, scope, and risky assumptions before starting non-trivial work, so the right problem gets solved. Use when: a request changes behavior, spans several files or messages, is ambiguous, involves state transitions, retries, or migrations; before writing a spec, tickets, or a review; or when the user asks you to restate what they want."
+description: "Play the goal, done-when, scope and risky assumptions back before non-trivial work; ask about decisions, never facts. Use when: a request is ambiguous, spans several files or messages, or involves state transitions, retries or migrations."
 ---
 
 <!-- Adapted from RRiboulet/agent-coding-skills; MIT notices for the underlying

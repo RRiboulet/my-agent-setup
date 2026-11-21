@@ -1,6 +1,6 @@
 ---
 name: implement
-description: "Implement a spec, ticket, ticket set, or agreed plan end to end: play back the goal, build in small verified units, prove the result, and stop there unless a review was asked for."
+description: "User-invoked /skill:implement: take a spec, ticket, ticket set or plan end to end in small verified units."
 disable-model-invocation: true
 ---
 

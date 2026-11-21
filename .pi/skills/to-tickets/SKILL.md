@@ -1,6 +1,6 @@
 ---
 name: to-tickets
-description: "Break a spec, plan, or the current conversation into tracer-bullet tickets: thin vertical slices with explicit blocked-by edges, each sized for one session."
+description: "User-invoked /skill:to-tickets: break a spec or plan into tracer-bullet tickets with explicit blocked-by edges."
 disable-model-invocation: true
 ---
 

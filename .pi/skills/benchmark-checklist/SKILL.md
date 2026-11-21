@@ -1,6 +1,6 @@
 ---
 name: benchmark-checklist
-description: "Vet a performance measurement (limiter, tuning, physical limits, errors, repeatability, relevance, and whether the work actually happened) before reporting or acting on it. Use when: running a benchmark, reporting a speedup or regression you measured, comparing libraries or configurations on speed, or building a performance test harness."
+description: "Vet a performance measurement before reporting or acting on it. Use when: running a benchmark; reporting a speedup or regression; comparing libraries or configurations on speed; or building a performance test harness."
 ---
 
 <!-- Adapted from RRiboulet/agent-coding-skills; MIT notices for the underlying

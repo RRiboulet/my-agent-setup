@@ -1,6 +1,6 @@
 ---
 name: prevent-recurrence
-description: "Turn a repeated correction into an enforced check at the highest level that works — architecture, type, lint, test, then prose — prove it fails on the recorded mistake and passes on the fix, and record the rule with its enforcer in the repository's 'Rules and enforcement' table. Use when: the same mistake class has been corrected twice; a review, revert or fix commit shows a known pattern coming back; or a correction needs to stop a class rather than one instance. Never add a suppression to make the new check pass, and never commit, push, open a pull request, or start a review."
+description: "Turn a repeated correction into an enforced check that fails without it. Use when: the same mistake class is corrected twice; a review, revert or fix shows a known pattern coming back; or a correction needs to stop a class, not one instance."
 ---
 
 <!-- Adapted from pstack's /correct and principle-encode-lessons-in-structure;

@@ -1,6 +1,6 @@
 ---
 name: writing-for-agents
-description: "Writing the documents an agent consumes — skills, AGENTS.md and CLAUDE.md, and docs reached by a pointer. Use when: writing or editing a skill, or changing a rule or pointer in AGENTS.md or CLAUDE.md."
+description: "Writing the documents an agent consumes — skills, AGENTS.md and CLAUDE.md, and docs reached by a pointer. Use when: writing or editing a skill; or changing a rule or pointer in AGENTS.md or CLAUDE.md."
 ---
 
 <!-- Ported from mattpocock/skills `skills/productivity/writing-for-agents` (with

@@ -1,6 +1,6 @@
 ---
 name: prove-it-works
-description: "Prove a code change works before claiming it is done: verify against the real artifact rather than a proxy, run the repository's quality gate, check the final diff for scope and hygiene, and report evidence with honest check statuses. Use when: finishing any coding task, before committing or opening a PR, after addressing review feedback, or when asked to validate, verify, or check changes."
+description: "Prove a code change works by verifying the real artifact and reporting evidence. Use when: finishing any coding task; before committing or opening a pull request; after addressing review feedback; or when asked to verify changes."
 ---
 
 <!-- Adapted from RRiboulet/agent-coding-skills; MIT notices for the underlying
