@@ -246,21 +246,30 @@ than waiting to be told:
   repeat: `prevent-recurrence`. It chooses the highest level that can carry the
   rule, proves it at the bad and good revision, and records the row; it does not
   commission another review.
+- Writing or editing a skill, or changing a rule or pointer in `AGENTS.md`:
+  `writing-for-agents`.
 
 Only the user starts the five user-invoked entry points, which pi spells
 `/skill:<name>`: `/skill:to-spec`, `/skill:to-tickets`, `/skill:implement`,
 `/skill:handoff`, `/skill:teach`. Suggest them when they fit; never start them
 yourself.
 
-`grilling` and `teach` are ported straight from
+`grilling`, `teach` and `writing-for-agents` are ported straight from
 [mattpocock/skills](https://github.com/mattpocock/skills) rather than through that
 stack, and `licenses/NOTICE.md` records them separately. `grilling` therefore
-sits in the trigger list above although it is not one of the twelve. It is
-model-invoked (so it is advertised by its description, and `/skill:grilling`
-still works). `teach` is user-invoked and stateful: it builds a
+sits in the trigger list above although it is not one of the twelve adapted
+skills. It is model-invoked (so it is advertised by its description, and
+`/skill:grilling` still works). `teach` is user-invoked and stateful: it builds a
 teaching workspace outside any project checkout — never in this one — and the
 course is continued by starting a session in that directory and asking for the
 next lesson, or by `/skill:handoff` out of the session you are in.
+
+`writing-for-agents` is model-invoked too, and it is the rulebook for the prose
+this repository and its projects hand to an agent: skill bodies and
+descriptions, `AGENTS.md` bullets, and the pointers that reach a `references/`
+file. Load it before writing or reshaping any of those, and before adding a
+rule here. `references/skill-mechanics.md` covers the skill-specific part —
+frontmatter, the model-invoked vs user-invoked choice, and router skills.
 
 `prevent-recurrence` is ours: the correction-to-check loop, the ordered ladder,
 the rule table, the ratchet and "the diagnostic names the fix" come from pstack's
