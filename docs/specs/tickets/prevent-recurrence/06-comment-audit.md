@@ -1,7 +1,7 @@
 # 06: The comment question has an evidence-backed answer
 
 **Blocked by:** None (can start immediately)
-**Status:** ready
+**Status:** done - merged in #177 (2026-11-21)
 
 ## What to build
 

@@ -1,7 +1,7 @@
 # 02: The branch-base rule is enforced by a check, not a reviewer
 
 **Blocked by:** 01
-**Status:** ready
+**Status:** done - merged in #172 (2026-11-20)
 
 ## What to build
 

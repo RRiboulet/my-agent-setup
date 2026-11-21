@@ -1,7 +1,7 @@
 # 05: The four-week experiment branch exists with its own policy and log
 
 **Blocked by:** 03
-**Status:** ready
+**Status:** done - the branch is `exp/prevent-recurrence`; the window opened 2026-11-21 and closes 2026-12-19
 
 ## What to build
 

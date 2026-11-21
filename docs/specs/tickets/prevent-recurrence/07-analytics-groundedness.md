@@ -1,7 +1,7 @@
 # 07: analytics-agent's groundedness repeat is converted end to end
 
 **Blocked by:** 01, 03, 05
-**Status:** ready
+**Status:** done - conversion committed locally in `analytics-agent` (`0e7a9b1`), log row on `exp/prevent-recurrence`
 
 ## What to build
 
