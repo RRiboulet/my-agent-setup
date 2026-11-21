@@ -1,6 +1,6 @@
 ---
 name: tdd
-description: "Test-first development: make the behavior executable as a failing test at a public seam, then write the smallest code that passes, one vertical slice at a time. Use when: fixing a bug that has a practical test path; adding business logic, parsers, transformations, state transitions, retry or idempotency behavior; changing a public API; or when the user asks for TDD, red-green, a failing test, or a regression test."
+description: "The default implementation style for new or changed behavior: failing test at a public seam first, then the smallest code that passes. Use when: any behavior change, a bug with a test path, or the user says TDD or red-green."
 ---
 
 <!-- Adapted from RRiboulet/agent-coding-skills; MIT notices for the underlying
@@ -8,7 +8,7 @@ description: "Test-first development: make the behavior executable as a failing 
 
 # Test-driven development
 
-Make the behavior executable before changing production code. A test earns its place when it fails if the behavior breaks and keeps passing when only the internals change.
+This is the default implementation style for any new or changed behavior: make the behavior executable before changing production code. A test earns its place when it fails if the behavior breaks and keeps passing when only the internals change.
 
 ## Seams: where tests go
 
@@ -49,7 +49,7 @@ Mock only at system boundaries: external APIs, time, randomness, and sometimes t
 
 ## When a failing test is impractical
 
-Prefer no new test to a bad one: one that mostly tests mocks, encodes implementation details, depends on timing or global state, or needs heavy infrastructure for a small fix. Generated code, visual-only changes, and code with no practical seam are legitimate exceptions. Use the closest executable check instead, such as a targeted script, a CLI or HTTP call, or a log assertion, and say why.
+Prefer no new test to a bad one: one that mostly tests mocks, encodes implementation details, depends on timing or global state, or needs heavy infrastructure for a small fix. Generated code, visual-only changes, code with no practical seam, no behavior at all (a typo, a comment, a private rename, a release note), and behavior an existing test already covers are legitimate exceptions. Use the closest executable check instead, such as a targeted script, a CLI or HTTP call, or a log assertion, and name the exception in one line in the report.
 
 ## Report
 

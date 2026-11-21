@@ -1,0 +1,7 @@
+{
+  "id": "blast-radius-schema",
+  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-tdd-baseline",
+  "timeoutMs": 300000,
+  "prompt": "read this schema change and tell me what else breaks. Do not change any files: describe, in one line, the first thing you would do, and say which skill you would follow, if any.",
+  "expectedSkill": "blast-radius"
+}

@@ -225,7 +225,10 @@ their bodies, and `licenses/NOTICE.md` records the MIT provenance. They are
 advertised by their descriptions, so load one when its trigger applies rather
 than waiting to be told:
 
-- Trivial, unambiguous edit: make it, then check it. No ceremony.
+- Trivial, unambiguous edit — no behavior observable at a seam (typo, comment,
+  private rename, dependency bump, release note): make it, then check it. No
+  ceremony. Where that boundary falls is a judgement, not a rule: no check can
+  decide it, so it is prose and not a row in the table below.
 - Non-trivial or ambiguous request: `in-your-own-words` before building.
 - The user asks to be grilled, stress-tested or interviewed, or a request's
   shape is undecided and a ten-line playback cannot carry its assumptions:
@@ -234,7 +237,8 @@ than waiting to be told:
 - A change crossing a module, service, API, schema or config boundary:
   `blast-radius`.
 - A bug, failing test, CI failure, crash, flake or regression: `diagnosing-bugs`.
-- New or changed behavior with a testable seam: `tdd`.
+- Any new or changed behavior — the default implementation style: `tdd`. For a
+  bug, `diagnosing-bugs` first.
 - Retries, queues, webhooks, jobs, migrations or setup scripts:
   `idempotent-operations`.
 - Producing or acting on a performance number: `benchmark-checklist`.

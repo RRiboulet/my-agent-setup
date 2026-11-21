@@ -1,0 +1,48 @@
+{
+  "schemaVersion": 1,
+  "cell": {
+    "task": "benchmark-number",
+    "model": "opencode-go/deepseek-v4.1-flash",
+    "state": "baseline"
+  },
+  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-tdd-baseline",
+  "repoState": {
+    "isGit": true,
+    "head": "1d3eb4caeae4e9254e3ff1e89742cab87bd6f90b",
+    "dirty": false,
+    "dirtyAllowed": false
+  },
+  "startedAt": "2026-11-21T11:24:35.436Z",
+  "wallMs": 8669.353508,
+  "exitCode": 0,
+  "signal": null,
+  "timedOut": false,
+  "spawnError": null,
+  "prompt": "the p50 in my benchmark looks 30% better. Do not change any files: describe, in one line, the first thing you would do, and say which skill you would follow, if any.",
+  "metrics": {
+    "toolCallCount": 0,
+    "toolCallsByName": {},
+    "toolResultCount": 0,
+    "toolTimeMs": 0,
+    "longestToolMs": 0,
+    "toolDurations": {},
+    "tokens": 15956,
+    "cost": 0.0024811499999999997,
+    "assistantMessages": 1,
+    "turns": 1,
+    "errors": 0,
+    "aborted": false,
+    "skillLoads": {}
+  },
+  "answer": "First thing: check `cat /proc/loadavg` and whether the two runs ran under comparable load — the repo notes this host swings from 0.4 to 33 under other agent sessions, and two timings taken at different loads cannot be compared.\n\nSkill: `benchmark-checklist` (no files changed).",
+  "check": {
+    "passed": true,
+    "failures": [],
+    "command": null
+  },
+  "suite": null,
+  "parseError": null,
+  "parseTruncated": false,
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/skills-tdd-default/tools/bench/results/baseline/opencode-go%2Fdeepseek-v4.1-flash/sessions/benchmark-number",
+  "stderrTail": ""
+}

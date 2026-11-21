@@ -35,7 +35,7 @@ prescribes. Parallel sub-agents only on request, and ask before launching one.
 
 ## 4. Build each unit
 
-- New or changed behavior with a testable seam: load the `tdd` skill and build at the seams the spec agreed.
+- Any new or changed behavior: for the unit's implementation, load the `tdd` skill and build at the seams the spec agreed. If it does not apply, name the exception the skill lists and why.
 - A bug, failing test, or unexpected behavior: load the `diagnosing-bugs` skill.
 - The user corrects the same thing twice: the second correction is evidence of a class, not a request for a third edit. Load the `prevent-recurrence` skill and turn it into a check before the next unit; do not wait for a review to say it a third time.
 - Run focused tests and type or lint checks on what changed after each unit. Never start the next unit on red.
