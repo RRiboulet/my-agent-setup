@@ -21,8 +21,9 @@ adapter installs for you.
 Use when the class is "this module or member must not be imported", and the
 import line alone proves it. It matches the **specifier string** — no
 resolution, no `paths` from `tsconfig.json`, no type information — so a relative
-import needs its own entry, and a package subpath is as visible as a package
-name.
+import needs its own entry. An entry matches the exact specifier it names:
+banning `@app/legacy-http` does not cover `@app/legacy-http/sub`, which needs its
+own entry or the `patterns` group below.
 
 ```js
 // eslint.config.js
@@ -305,9 +306,10 @@ Three limits, each verified:
 - **Drop `hasSuggestions: true` and ESLint 10 exits 2**, not 1, with
   `Error: Rules with suggestions must set the meta.hasSuggestions property to true`.
   A crash is not a diagnostic: the rule must declare it.
-- **`--fix` never applies a suggestion.** Both `--fix` and
-  `--fix-type suggestion` leave the file unchanged and still exit 1; suggestions
-  are applied by an editor, so CI cannot rely on the fix landing.
+- **`--fix` never applies a suggestion.** `--fix` on a suggestion-bearing finding
+  leaves the file unchanged and still exits 1; `--fix-type suggestion` on its own
+  exits 2, because ESLint requires `--fix` or `--fix-dry-run` beside it.
+  Suggestions are applied by an editor, so CI cannot rely on the fix landing.
 - **A suggestion replaces one node and cannot add an import.** The replacement
   above is only correct after `databaseUrl` is imported, which is why
   `useAccessor` says so in words. When the replacement needs an import, keep the
@@ -644,8 +646,9 @@ npx eslint -c comments.config.js supp-examples/supp-described.ts             # e
 
 The audit pass is its own config here so the plugin can be added without
 changing the project's main one; the rule it suppresses is the `no-restricted-syntax`
-ban above, and the third file has the same described directive on a line that
-needs no suppression (that is what the core flag catches):
+ban above. `supp-unused.ts` is the case the *core* flag catches — a described
+directive left on a line that no longer needs it — while `supp-described.ts` is
+the good revision under this config, where the directive is needed and says why:
 
 ```js
 // comments.config.js
@@ -746,9 +749,12 @@ npx oxlint --report-unused-disable-directives --deny-warnings <path>        # er
 ```
 
 It also carries `typescript/ban-ts-comment`, which flags a bare `@ts-ignore` and
-suggests `@ts-expect-error` (verified, exit 1). Across the whole tree, `tsc
---noEmit` for `TS2578` plus `--report-unused-disable-directives` for
-`eslint-disable` is the audit; no extra tool is needed for either.
+suggests `@ts-expect-error` — but not by default: with no `.oxlintrc.json` entry
+the same file exits 0, and `typescript/ban-ts-comment: "error"` is what makes it
+exit 1 with `Use "@ts-expect-error" instead of @ts-ignore` (both observed).
+Across the whole tree, `tsc --noEmit` for `TS2578` plus
+`--report-unused-disable-directives` for `eslint-disable` is the audit; no extra
+tool is needed for either.
 
 ## Choosing between them
 
@@ -758,15 +764,20 @@ suggests `@ts-expect-error` (verified, exit 1). Across the whole tree, `tsc
 | `no-restricted-syntax` | lint | a locally recognizable form must not appear, and no import distinguishes it | `npx eslint <path>` |
 | Local flat-config rule | lint | the message must name the canonical file or symbol, or a suggestion is part of the fix | `npx eslint <path>` |
 | `dependency-cruiser` | architecture | one module tree must not import another; direction is the rule | `npx depcruise src` |
-| typescript-eslint typed rule | lint (typed) | the program knows it is wrong and the line does not — floating or misused promises | `npx eslint <path>` |
-| oxlint | lint, inner loop | the same rules, faster, while editing — never the typed gate | `npx oxlint [--type-aware] <path>` |
+| typescript-eslint typed rule | lint | the program knows it is wrong and the line does not — floating or misused promises | `npx eslint <path>` |
+| oxlint | lint | the same rules, faster, while editing — never the typed gate | `npx oxlint [--type-aware] <path>` |
 | Project test | test | behavior, runtime state, or dataflow decides the class | the project's test command |
+
+Levels are the checker's five words — `architecture`, `type`, `lint`, `test`,
+`prose` — so a row copied from this table into a target repository's table
+validates. The typed-versus-inner-loop distinction belongs in the "Use when"
+column, not in the level: only `lint` is a level, and crediting a typed rule to
+the syntax pass is exactly the mistake the level column exists to prevent.
 
 A message that names only the rule will be worked around. Name the replacement in
 the `message` (`no-restricted-*`), the rule name plus `comment`
 (dependency-cruiser), `meta.messages` (local rule), or the assertion message
-(test). That naming is part of the check, and the level column is what stops a
-typed rule from being credited to the syntax pass.
+(test). That naming is part of the check.
 
 ## Versions this was verified against
 
