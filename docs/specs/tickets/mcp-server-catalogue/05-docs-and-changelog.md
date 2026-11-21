@@ -1,7 +1,7 @@
 # 05: The README tells a colleague how to get the catalogue, and the changelog records it
 
 **Blocked by:** 01, 03, 04
-**Status:** ready
+**Status:** done - merged in #182 (2026-11-21); the Playwright browser-install step added in #185
 
 ## What to build
 
