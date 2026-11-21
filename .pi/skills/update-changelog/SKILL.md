@@ -1,6 +1,6 @@
 ---
 name: update-changelog
-description: "Read this skill before updating changelogs"
+description: "Update the repository's changelog correctly. Use when: updating CHANGELOG.md or CHANGELOG; preparing a release."
 ---
 
 <!-- VENDORED, NOT OURS.

@@ -1,6 +1,6 @@
 ---
 name: diagnosing-bugs
-description: "Diagnosis discipline for bugs, failing tests, CI failures, crashes, flaky behavior, and performance regressions: build a tight red-capable feedback loop first, reproduce and minimise, test ranked hypotheses, then fix the root cause with a regression test. Use when: something is broken, throwing, failing, flaky, or slow; the user says diagnose or debug this; or an earlier fix attempt did not work."
+description: "Diagnose to a confirmed root cause and a regression test, via a tight feedback loop and ranked hypotheses. Use when: something is broken, failing, flaky or slow; the user says diagnose or debug; or an earlier fix attempt did not work."
 ---
 
 <!-- Adapted from RRiboulet/agent-coding-skills; MIT notices for the underlying

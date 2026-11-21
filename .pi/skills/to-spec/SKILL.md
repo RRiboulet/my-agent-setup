@@ -1,6 +1,6 @@
 ---
 name: to-spec
-description: "Turn the current conversation and codebase understanding into a written spec with test seams and acceptance criteria, without re-interviewing you."
+description: "User-invoked /skill:to-spec: write a spec with test seams and acceptance criteria from the current conversation."
 disable-model-invocation: true
 ---
 

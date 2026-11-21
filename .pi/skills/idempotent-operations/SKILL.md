@@ -1,6 +1,6 @@
 ---
 name: idempotent-operations
-description: "Design state-changing operations so they converge to the same end state no matter how many times they run or where a previous run stopped. Use when: writing or reviewing retries, queue or event consumers, webhooks, scheduled or background jobs, CLI or lifecycle commands, deploy or setup scripts, data migrations, or anything that must survive crashes and restarts."
+description: "Design state-changing operations so they converge however many times they run. Use when: writing retries, queues, webhooks, jobs, commands, scripts or migrations, or anything that must survive crashes and restarts."
 ---
 
 <!-- Adapted from RRiboulet/agent-coding-skills; MIT notices for the underlying

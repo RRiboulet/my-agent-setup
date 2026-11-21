@@ -1,6 +1,6 @@
 ---
 name: commit
-description: "Read this skill before making git commits"
+description: "Make a git commit following this repo's format and branch rules. Use when: committing current changes."
 ---
 
 <!-- VENDORED, NOT OURS.

@@ -1,6 +1,6 @@
 ---
 name: add-model
-description: "Read this skill before manually adding or fixing a model in the opencode-go provider (thinking levels, reasoning, metadata)"
+description: "Add or fix a model in the opencode-go provider. Use when: a model is missing or stale; shows as non-reasoning; or has wrong or missing thinking levels."
 ---
 
 # Manually adding / fixing a model in the opencode-go provider
