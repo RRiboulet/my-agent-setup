@@ -19,8 +19,12 @@ tickets:
 # what is defined
 node tools/bench/run.mjs --list
 
-# the cells, without spending a token
+# the cells, without spending a token (resolves and validates the repos, so the
+# fixture worktrees have to exist; --list is the view that does not need them)
 node tools/bench/run.mjs --state baseline --tasks head-hash,devc-ls --models deepseek-v4.1-flash --dry-run
+
+# the same recorded task set, pointed at another clean checkout
+node tools/bench/run.mjs --state baseline --tasks head-hash --models deepseek-v4.1-flash --repo /path/to/a/clean/checkout
 
 # one task, one model, real run
 node tools/bench/run.mjs --state baseline --tasks head-hash --models deepseek-v4.1-flash
@@ -45,7 +49,7 @@ two states on the same base when comparing.
 ```json
 {
   "id": "head-hash",
-  "repo": "/path/to/a/clean/checkout",
+  "repo": ".worktrees/bench-fixture",
   "timeoutMs": 120000,
   "prompt": "Run `git log -1 --format=%H` and reply with only the hash.",
   "check": { "expectAnswerContains": ["{{gitHead}}"] }
@@ -61,6 +65,38 @@ The check is data, not a harness error: a failed check is recorded and the
 runner exits 0. A missing task, a dirty repo, or a spawn failure is an error and
 the runner exits 1.
 
+#### Where a task runs
+
+`repo` is the workspace the cell runs in, and it is recorded **relative to the
+repository root** in every file under `tasks/`: `.worktrees/bench-fixture` and
+`.worktrees/bench-tdd-baseline` for the twelve harness scenarios, and `.` for the
+two `devc` ones, whose prompt reads nothing from the workspace. The relative form
+is deliberate: an absolute path to one machine's agent directory made the whole
+recorded set unrunnable anywhere else, while a relative one resolves to the same
+place in any checkout of this repository. Absolute paths are still accepted for a
+workspace genuinely outside this repository.
+
+The resolution order, in one place, is:
+
+1. `--repo <path>` when given — resolved against the directory you run from, and
+   it wins over every task's own field, relative or absolute.
+2. Otherwise the task's `repo` as written: absolute used as-is, relative resolved
+   against the repository root (the directory holding `tools/`).
+3. `--list` and `--dry-run` show the result of that order, so what you see is
+   where the cell will run.
+
+Every cell records the resolved path in `repo`, alongside `repoConfigured` (the
+task file's own value) and `repoOverride` (the flag, or `null`), so a result file
+says where it ran and whether one flag put every task there.
+
+`--list` is the catalogue view: it prints each task's effective repo and exits
+without touching the filesystem, so it works before the fixture worktrees exist.
+`--dry-run` resolves *and validates*, because it is the same preflight a real run
+uses: a repo that does not exist, is not inside a git work tree, or is dirty
+without `--allow-dirty` fails the whole invocation **before any cell starts**,
+listing every offending task with its fix. A cell is never silently skipped — a
+task dropped from a run would silently drop out of the comparison.
+
 ### Isolation
 
 A task must be **read-only**. The runner does not create a worktree per cell, so
@@ -68,15 +104,18 @@ a task that edits its repo leaves the next cell dirty and the comparison
 worthless. The runner refuses a dirty repo unless `--allow-dirty` (or the task
 sets `"allowDirty": true`, which is recorded).
 
-Use a clean checkout — a detached fixture worktree works:
+Use a clean checkout — a detached fixture worktree works, and the recorded set
+already names it relative to the repository root:
 
 ```bash
 git worktree add --detach .worktrees/bench-fixture origin/dev
+git worktree add --detach .worktrees/bench-tdd-baseline <ref>
 ```
 
-The harness itself is whatever `pi` loads from the agent configuration; `--repo`
-is only the workspace the task runs in. Do not point tasks at the checkout you
-are editing.
+The harness itself is whatever `pi` loads from the agent configuration; the task's
+`repo` is only the workspace the task runs in. Do not point tasks at the checkout
+you are editing: pass `--repo <path>` for a different clean checkout, or
+`--allow-dirty` when the workspace is legitimately open in another session.
 
 ### Models
 
@@ -125,5 +164,10 @@ ticket 04.
 ## Tests
 
 ```bash
+node --test tools/bench/run.test.mjs
 node --test .pi/extensions/subagent/test/bench.test.ts
 ```
+
+The first covers workspace resolution and the refusal cases through the CLI with
+`--list` and `--dry-run`, so it spends no tokens and needs no fixture worktree;
+the second covers the task loader, the event summariser and the suite parser.

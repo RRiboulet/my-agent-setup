@@ -28,6 +28,27 @@ Fixed:
   detached pull-request checkout is pinned to its current behaviour by its own
   test alongside the race reproduction.
 
+- **The bench runner's workspace is resolved instead of hardcoded, and `--repo`
+  exists.** All 14 `tools/bench/tasks/*.json` files carried an absolute path under
+  one machine's agent directory as their `repo`, so the recorded set ran nowhere
+  else — it failed with "not a git work tree" in this repository's own container
+  and on CI — and `tools/bench/README.md` promised a `--repo` override that
+  `run.mjs`'s `parseArgs` never had. The tasks now record `.worktrees/bench-fixture`,
+  `.worktrees/bench-tdd-baseline` or `.` (the two `devc` scenarios, whose prompt
+  reads nothing from the workspace), resolved against the repository root, so the
+  set is portable without a flag; absolute paths are still accepted, and
+  `--repo <path>` wins over both so one recorded set can be pointed at any clean
+  checkout. The resolved path is recorded on every cell, beside `repoConfigured`
+  (what the file said) and `repoOverride` (the flag, or `null`). A repo that does
+  not exist, is not inside a git work tree, or is dirty without `--allow-dirty`
+  now fails the whole invocation before the first token is spent, listing every
+  offending task with its fix — previously a non-git repo was quietly recorded as
+  `isGit: false` and the cell ran anyway. `tools/bench/run.test.mjs` pins the
+  resolution order and the refusals through the CLI with `--list` and `--dry-run`,
+  so the gate spends no tokens; it is listed in `AGENTS.md`'s Tests block and run
+  as its own `checks.yml` step, which `checks-parity.test.ts` requires in both
+  directions.
+
 ## v1.15.0 — 2026-11-21
 
 Added:

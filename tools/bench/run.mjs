@@ -17,12 +17,23 @@
 //     state and the run is not comparable. The README says this plainly.
 //   - Check failures are data, not harness errors: the runner exits 0 when
 //     every cell executed, and the result file says whether the check passed.
+//   - The workspace is resolved, never assumed: a task's `repo` may be relative
+//     to the repository root, and `--repo <path>` overrides it for one run. The
+//     recorded tasks use the relative form so the set runs on any checkout; the
+//     flag exists so one recorded set can be compared against two checkouts, and
+//     it wins whenever both are present (see lib/tasks.mjs). Every cell records
+//     the resolved path, plus `repoConfigured` and `repoOverride`, so a result
+//     file says where it ran and whether a flag put it there.
+//   - A workspace that cannot be run is an error, not a skipped cell: before the
+//     first token is spent, every selected task's repo is resolved and checked
+//     (exists, inside a git work tree, clean unless allowed). One bad repo fails
+//     the invocation and names each offending task and its fix.
 
 import fs from "node:fs";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { summarizeEvents, parseJsonlTolerant } from "./lib/events.mjs";
-import { loadTasks, selectTasks, renderPrompt } from "./lib/tasks.mjs";
+import { loadTasks, selectTasks, renderPrompt, resolveTaskRepos, REPO_ROOT } from "./lib/tasks.mjs";
 import { skillsInToolCall } from "./skills.mjs";
 import { suiteFromAnswer } from "./lib/suite.mjs";
 
@@ -41,6 +52,8 @@ function usage() {
   --tasks <all|id,id>     task ids, default all
   --models <ids>          comma-separated; a bare id gets the opencode-go provider
   --state <label>         baseline or changed; required, it names the harness state
+  --repo <path>           run every task in this workspace instead of each task's
+                          own "repo" (resolved against your cwd); --repo wins
   --out <dir>             result root, default tools/bench/results
   --timeout <ms>          override every task's timeout
   --force                 overwrite an existing cell
@@ -64,6 +77,7 @@ function parseArgs(argv) {
       case "--tasks": args.tasks = next(); break;
       case "--models": args.models = next(); break;
       case "--state": args.state = next(); break;
+      case "--repo": args.repo = next(); break;
       case "--out": args.out = path.resolve(next()); break;
       case "--timeout": args.timeout = Number(next()); break;
       case "--force": args.force = true; break;
@@ -107,6 +121,53 @@ function repoState(repo) {
     .map((line) => line.trim())
     .filter(Boolean);
   return { isGit: true, head, dirty: changes.length > 0, changes };
+}
+
+/**
+ * Why a task's workspace cannot be run, or null when it can. The fix is named
+ * with the problem: a task file exists to be edited, so "repo is wrong" alone
+ * would leave the reader guessing between the flag, the field and a fixture that
+ * was never created.
+ */
+function repoProblem(task, { allowDirty }) {
+  const repo = task.repo;
+  const taskPath = path.relative(REPO_ROOT, task.file) || task.id;
+  const fix = `pass --repo <path> for a checkout that has it, or fix "repo" in ${taskPath}`;
+
+  if (!fs.existsSync(repo)) {
+    return `${repo} does not exist. Fix: create it (\`git worktree add --detach ${repo} <ref>\`), ${fix}`;
+  }
+  if (!fs.statSync(repo).isDirectory()) {
+    return `${repo} is not a directory. Fix: ${fix}`;
+  }
+  const state = repoState(repo);
+  if (!state.isGit) {
+    return `${repo} is not inside a git work tree. Fix: ${fix}, or create the fixture with \`git worktree add --detach ${repo} <ref>\``;
+  }
+  if (state.dirty && !allowDirty && !task.allowDirty) {
+    const shown = state.changes.slice(0, 3).join(", ");
+    const more = state.changes.length > 3 ? `, +${state.changes.length - 3} more` : "";
+    return `${repo} is dirty (${shown}${more}). Fix: commit or stash those changes, ${fix}, or pass --allow-dirty`;
+  }
+  return null;
+}
+
+/**
+ * Resolve every selected task's workspace before the first token is spent, and
+ * refuse the whole invocation if any of them cannot run. Per-cell skipping would
+ * silently drop a task from the comparison, so this fails loudly and lists every
+ * offending task at once rather than one per run.
+ */
+function preflightRepos(tasks, { allowDirty }) {
+  const problems = [];
+  for (const task of tasks) {
+    const problem = repoProblem(task, { allowDirty });
+    if (problem) problems.push(`${task.id}: ${problem}`);
+  }
+  if (problems.length === 0) return;
+  throw new Error(
+    `${problems.length} task repo(s) cannot run, so no cell was started:\n  ${problems.join("\n  ")}`,
+  );
 }
 
 function taskVars(task) {
@@ -279,7 +340,12 @@ async function runCell({ task, model, state, outRoot, force, allowDirty, timeout
   const record = {
     schemaVersion: 1,
     cell: { task: task.id, model, state },
+    // The resolved workspace this cell actually ran in, and how it was chosen:
+    // `repoConfigured` is the task file's own value, `repoOverride` the flag
+    // when one was given. A result file therefore says where it ran.
     repo: task.repo,
+    repoConfigured: task.repoConfigured,
+    repoOverride: task.repoOverride ?? null,
     repoState: {
       isGit: repo.isGit,
       head: repo.head,
@@ -351,7 +417,9 @@ async function main() {
     return;
   }
   if (args.list) {
-    for (const task of loadTasks(path.join(BENCH_DIR, "tasks"))) {
+    // The catalogue view: the effective repo (so `--repo` shows up here), and
+    // nothing touched on disk, so this prints before any fixture exists.
+    for (const task of resolveTaskRepos(loadTasks(path.join(BENCH_DIR, "tasks")), { repoOverride: args.repo })) {
       console.log(`${task.id}\t${task.repo}\t${task.timeoutMs} ms`);
     }
     console.log(`models\t${normalizeModels(args.models).join(", ")}`);
@@ -363,9 +431,12 @@ async function main() {
   if (args.timeout !== undefined && (!Number.isFinite(args.timeout) || args.timeout <= 0)) {
     throw new Error("--timeout must be a positive number of milliseconds");
   }
-  const tasks = selectTasks(loadTasks(path.join(BENCH_DIR, "tasks")), args.tasks);
+  const tasks = resolveTaskRepos(selectTasks(loadTasks(path.join(BENCH_DIR, "tasks")), args.tasks), {
+    repoOverride: args.repo,
+  });
   const models = normalizeModels(args.models);
   if (models.length === 0) throw new Error("--models selected no models");
+  preflightRepos(tasks, { allowDirty: Boolean(args.allowDirty) });
   const cells = tasks.flatMap((task) => models.map((model) => ({ task, model })));
 
   if (args.dryRun) {
