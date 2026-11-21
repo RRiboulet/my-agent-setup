@@ -259,8 +259,12 @@ Fixed:
   tool, so the workaround used instead was `cwd` = the main checkout, which runs
   the *main* checkout's extensions and skills — enough for file edits, wrong for
   anything testing the branch. `AGENTS.md` now states the failure, the exact
-  invocation (`cd .worktrees/<slug> && PI_CODING_AGENT_DIR=~/.pi/agent-my-agent-setup
-  pi -p "<task>"`), and that this is how a child runs the branch's own skills;
+  invocation (`PI_CODING_AGENT_DIR="$(bin/pi-agent-dir --print)" pi -p "<task>"`
+  from inside the worktree), and that this is how a child runs the branch's own
+  skills. The path is resolved, never written: `devcontainer-agent-dir.test.ts`
+  allows the literal in `devcontainer.json` only, so a copied directory name in a
+  tracked doc fails the suite — which is how the first version of this entry
+  landed red and had to be corrected;
   `worktree/references/parallel.md` gained the same line beside its
   package-copy paragraph, which previously described only the worse fallbacks.
 

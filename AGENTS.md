@@ -299,8 +299,8 @@ Three repo rules win over those skill bodies, and the skills say so in place:
 ## Subagent tools
 
 **A child may run inside a worktree, and on this host it must be told which agent
-dir to use.** `bin/pi-agent-dir` has given this checkout a package-free agent dir
-(`~/.pi/agent-my-agent-setup`, a sibling of the shared one). A child rooted in
+dir to use.** `bin/pi-agent-dir` has given this checkout a package-free agent dir of its own,
+a sibling of the shared one (`bin/pi-agent-dir --print` names it). A child rooted in
 `.worktrees/<slug>` inherits `PI_CODING_AGENT_DIR` from you, which is the *shared*
 dir with this repo installed as a package — so pi loads both that package and the
 worktree's own `.pi/`, and exits 1 on duplicate tool registration before any model
@@ -314,7 +314,7 @@ Pass the per-project dir instead, and the worktree's copy is the only one loaded
 which also means the child runs the branch's code and the branch's skills:
 
 ```bash
-cd .worktrees/<slug> && PI_CODING_AGENT_DIR=~/.pi/agent-my-agent-setup pi -p "<task>"
+cd .worktrees/<slug> && PI_CODING_AGENT_DIR="$(bin/pi-agent-dir --print)" pi -p "<task>"
 ```
 
 The `subagent` tool has no env argument, so for a child that must live in a
