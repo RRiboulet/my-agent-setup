@@ -6,6 +6,25 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
+- **The README says which skills you start and which the agent starts, and it
+  cannot drift.** The inventory was 24 rows of 25 skills, five of them labelled
+  `User-invoked /skill:<name>:` and the rest unlabelled, so "unlabelled means
+  model-invoked" was a convention a reader had to infer and `add-model` was
+  missing entirely. The README now has a **Skills and how they are invoked**
+  section that states the axis and the two rules that follow — user-invoked
+  orchestrates and may load model-invoked skills but never starts another
+  user-invoked one; model-invoked is reached by the agent when its description
+  matches, and costs its description in context every turn — followed by two
+  tables, 5 user-invoked and 20 model-invoked, each row linking to the skill and
+  carrying its trigger text. The tables are generated from the frontmatter by
+  `tools/skills-index.mjs --write` (stdlib only, `--check` for the gate), and
+  `skills-index.test.ts` fails when the README and the skills disagree in either
+  direction: editing the README by hand or a description without re-rendering
+  are both red. The layout follows mattpocock/skills' `## Reference` split by
+  who-can-invoke, with pstack's "use it when" column doing the work in each row.
+  The Contents table gains the missing `add-model` row and a legend pointing at
+  the new section; the Tests gate gains `node tools/skills-index.mjs --check`.
+
 - **`writing-for-agents` is ported, and `worktree` stops being one 32 KB read.** The
   port is MIT material from mattpocock/skills at the commit already pinned in
   `licenses/NOTICE.md`, model-invoked because the trigger — writing or editing a
