@@ -1,4 +1,4 @@
-// Guards for the coding skill stack adapted from agent-coding-skills, the two
+// Guards for the coding skill stack adapted from agent-coding-skills, the
 // skills ported straight from mattpocock/skills, and this repository's own
 // prevent-recurrence skill.
 //
@@ -37,7 +37,7 @@ const ADAPTED = [
 // Ported straight from mattpocock/skills rather than through that stack, so they
 // are classified separately in licenses/NOTICE.md while getting the same shape
 // checks.
-const PORTED = ["grilling", "teach"];
+const PORTED = ["grilling", "teach", "writing-for-agents"];
 
 // This repository's own skills. They carry no upstream classification, but a
 // missing description or a dead reference breaks them the same way.

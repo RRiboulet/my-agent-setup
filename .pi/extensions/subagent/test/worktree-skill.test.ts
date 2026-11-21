@@ -22,9 +22,9 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 
-import { blocks, REPO_ROOT, recipe, retarget, runScript, scratchRepo } from "./worktree-recipes.ts";
+import { blocks, readSkill, REPO_ROOT, recipe, retarget, runScript, scratchRepo } from "./worktree-recipes.ts";
 
-const SKILL = readFileSync(path.join(REPO_ROOT, ".pi/skills/worktree/SKILL.md"), "utf8");
+const SKILL = readSkill();
 const GITIGNORE = readFileSync(path.join(REPO_ROOT, ".gitignore"), "utf8");
 
 /** Number of linked worktrees (main checkout excluded) in a `--porcelain` listing. */
@@ -258,16 +258,19 @@ test("worktree skill: git clean advice names the form that actually deletes", ()
 });
 
 test("worktree skill: the subagent recipe resolves the worktree root", () => {
-	const openBlock = SKILL.slice(SKILL.indexOf("## Open"), SKILL.indexOf("## Review"));
+	// The delegation recipe moved to `references/parallel.md` when the skill was
+	// split, so the slice is its own section rather than the old `## Open` one.
+	const delegation = SKILL.slice(SKILL.indexOf("## Delegating to a subagent rooted in a worktree"));
+	assert.notEqual(delegation, "", "the delegation section must still exist");
 	// A hardcoded /workspace pins the recipe to one machine's clone, and a
 	// worktree cwd is what surfaced the extension flag conflict below.
-	assert.ok(!/cwd: "\/workspace/.test(openBlock), "the subagent cwd must not hardcode /workspace");
+	assert.ok(!/cwd: "\/workspace/.test(SKILL), "the subagent cwd must not hardcode /workspace");
 	assert.ok(
-		openBlock.includes("--path-format=absolute --git-common-dir"),
+		delegation.includes("--path-format=absolute --git-common-dir"),
 		"the recipe must resolve the root the way every other recipe does",
 	);
-	assert.ok(openBlock.includes('echo "$WT"'), "the recipe must print the resolved path to pass as cwd");
-	assert.ok(openBlock.includes('cwd: "<the path printed above>"'), "the expanded path is what cwd takes");
+	assert.ok(delegation.includes('echo "$WT"'), "the recipe must print the resolved path to pass as cwd");
+	assert.ok(delegation.includes('cwd: "<the path printed above>"'), "the expanded path is what cwd takes");
 });
 
 test("worktree skill: names the extension conflict a worktree cwd used to cause", () => {

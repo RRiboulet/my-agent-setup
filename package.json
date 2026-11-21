@@ -47,7 +47,8 @@
       ".pi/skills/to-spec",
       ".pi/skills/to-tickets",
       ".pi/skills/update-changelog",
-      ".pi/skills/worktree"
+      ".pi/skills/worktree",
+      ".pi/skills/writing-for-agents"
     ]
   }
 }

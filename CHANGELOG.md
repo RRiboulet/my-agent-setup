@@ -6,6 +6,42 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
+- **`writing-for-agents` is ported, and `worktree` stops being one 32 KB read.** The
+  port is MIT material from mattpocock/skills at the commit already pinned in
+  `licenses/NOTICE.md`, model-invoked because the trigger — writing or editing a
+  skill, or changing a rule or pointer in `AGENTS.md` — is something the agent
+  notices mid-task. Its description is rewritten in the house form (202 B, what it
+  does then the trigger branches), its `SKILL-MECHANICS.md` moves to
+  `references/skill-mechanics.md` to match the other skills and to be covered by
+  the "every `references/*.md` is linked" assertion this branch's ticket adds, and
+  upstream's `agents/openai.yaml` is not installed because pi does not read it.
+  The body is upstream's text apart from a title heading. It is registered in the
+  `pi` manifest, the README table, `licenses/NOTICE.md` and
+  `coding-skills.test.ts`'s `PORTED` list, and it has a bullet in `AGENTS.md`'s
+  trigger list. Its role is split from `prevent-recurrence` in both bodies: that
+  skill decides which level a lesson lands on and records the row; this one
+  decides how the line is worded.
+
+  `worktree` becomes a 147-line `SKILL.md` and three grouped references —
+  `lifecycle.md` (create, list, open, remove), `review-repair.md` (inspect, test,
+  `git worktree repair`) and `parallel.md` (one branch per worktree, subagent
+  `cwd`, and the duplicate-extension failure a child rooted in a worktree hits).
+  The loaded file is 8,483 B where it was 32,235, and `worktree` was 41 of 241
+  skill loads in the last 242 sessions, so it was 47.8% of all loaded skill
+  bytes. The split is checked mechanically: all 12 original headings are present,
+  and all 22 code blocks are byte-identical. Three pointers that crossed a file
+  boundary now name their anchor (`lifecycle.md` § Create, `review-repair.md` §
+  Review, `lifecycle.md` § Remove) instead of saying "above".
+
+  Ticket 05 is re-scoped from "23 skills become ~15" to "consistent, concise,
+  correctly triggered": the measured load is 241 across 242 sessions, so the
+  dormancy the prune assumed is not there, and every zero-load skill has a
+  workflow reference that keeps it. The count is an output (25). The remainder —
+  the `add-model` split at line-level boundaries, the 250 B/150 B description cap
+  with its four new test assertions, and making `tdd` the stated default
+  implementation style instead of a seam-gated option — is recorded on the
+  ticket with its acceptance criteria.
+
 - **`subagent_wait` replaces polling a subagent's status with a single wait.
   #163** The session baseline recorded 681 `subagent_status` calls against 39
   `subagent` starts — 17 model turns per run asking "done yet?", each one

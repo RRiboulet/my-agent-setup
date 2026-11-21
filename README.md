@@ -240,6 +240,7 @@ default when it does not, and the `opencode-go` credential itself still serves
 | `.pi/skills/implement/` | User-invoked `/skill:implement`: builds a spec or ticket end to end through the skills above |
 | `.pi/skills/handoff/` | User-invoked `/skill:handoff`: writes a handoff document a fresh session can continue from |
 | `.pi/skills/teach/` | User-invoked `/skill:teach`: teaches a topic across sessions in a stateful workspace of short cited HTML lessons, reference sheets, vetted resources, a glossary and ADR-style learning records. **Ported** from mattpocock/skills `skills/productivity/teach`, with the workspace kept out of any project checkout and the glossary format linked instead of orphaned |
+| `.pi/skills/writing-for-agents/` | How to write any document an agent consumes — context pointers, the two loads, the information hierarchy, steps and completion criteria, splitting, leading words and pruning — plus `references/skill-mechanics.md` for the skill-specific branch. **Ported** from mattpocock/skills `skills/productivity/writing-for-agents`, with upstream's `agents/openai.yaml` not carried over |
 | `.pi/skills/devcontainer/` | Drive a project's devcontainer from a headless host: `devc` (`devcontainer up` + `exec`), the rule that an agent must never run the attaching form, long-build and long-server recipes, the volume/uid/port rules that prevent damage, and a symptom→fix table. **Ours** |
 | `.pi/skills/github/` | gh CLI usage: PRs, CI runs, `gh api`, structured JSON. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/github/SKILL.md`, with four local adaptations — this repo's `GH_CONFIG_DIR` auth setup, the AGENTS.md squash workflow, the token rule, and the credential-helper note |
 | `.pi/skills/librarian/` | Caches and refreshes remote git repos under the pi agent dir (`<agent dir>/cache/checkouts/<host>/<org>/<repo>`) with partial clones, so repeated references reuse a stable local checkout. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/librarian/`, with the cache root moved from `~/.cache/checkouts` to the persistent agent dir and the script invoked by skill-relative path |
@@ -262,11 +263,13 @@ under the persistent agent dir instead of `/tmp`. The stack adapts MIT material
 from mattpocock/skills and cursor/plugins `pstack`; their notices and the
 per-skill provenance are in [`licenses/NOTICE.md`](licenses/NOTICE.md).
 
-`grilling` and `teach` are ported from mattpocock/skills directly, and the notice
-records them separately. `grilling` joins the trigger list in `AGENTS.md` as the
-full design-tree interview — `in-your-own-words` remains the cheap default — and
-`teach` is the fifth user-invoked entry point, which builds a teaching workspace
-outside any project checkout.
+`grilling`, `teach` and `writing-for-agents` are ported from mattpocock/skills
+directly, and the notice records them separately. `grilling` joins the trigger
+list in `AGENTS.md` as the full design-tree interview — `in-your-own-words`
+remains the cheap default — and `teach` is the fifth user-invoked entry point,
+which builds a teaching workspace outside any project checkout.
+`writing-for-agents` joins that trigger list too: it is the reference for writing
+a skill, an `AGENTS.md` line or any other document an agent reads.
 
 `prevent-recurrence` is the model-invoked answer to a correction that came back.
 It classifies the mistake from the fix commits and review comments, then walks
