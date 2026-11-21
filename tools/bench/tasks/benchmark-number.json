@@ -1,0 +1,7 @@
+{
+  "id": "benchmark-number",
+  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-tdd-baseline",
+  "timeoutMs": 300000,
+  "prompt": "the p50 in my benchmark looks 30% better. Do not change any files: describe, in one line, the first thing you would do, and say which skill you would follow, if any.",
+  "expectedSkill": "benchmark-checklist"
+}

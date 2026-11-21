@@ -1,6 +1,6 @@
 ---
 name: devcontainer
-description: "Work inside a project's devcontainer from a headless host with `devc` (devcontainer up + exec, tmux, no editor). Use when running commands inside a project container, when a container build, dev server or database misbehaves, or when the user asks to open, reopen, rebuild, stop or diagnose a project's devcontainer."
+description: "Work inside a project's devcontainer from a headless host with `devc`. Use when: running commands inside a project container; a container build, dev server or database misbehaves; or the user asks to open, rebuild, stop or diagnose a devcontainer."
 ---
 
 # devcontainers with `devc`

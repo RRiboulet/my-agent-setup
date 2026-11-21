@@ -1,6 +1,6 @@
 ---
 name: grilling
-description: "Interview the user relentlessly, in rounds, about a plan, decision, or idea until every branch of the design tree is settled. Use when: the user asks to be grilled, stress-tested or interrogated about something they are about to do, or says a plan needs poking at; or a request's shape is undecided and a ten-line playback cannot carry its assumptions. For the quick pass instead, use in-your-own-words."
+description: "Interview the user relentlessly, in rounds, until every branch of the design tree is settled. Use when: the user asks to be grilled or stress-tested; a plan needs poking at; or a request's shape outruns a ten-line playback."
 ---
 
 <!-- Adapted from mattpocock/skills `skills/productivity/grilling`; the MIT notice

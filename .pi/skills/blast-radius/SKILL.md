@@ -1,6 +1,6 @@
 ---
 name: blast-radius
-description: "Find what a change could break beyond its own diff, and prove the one fact it is safe because of by running real code. Use when: a change crosses a module boundary; alters a public function, type, API, schema, wire format, config key, or environment variable; touches persistence, caching, queues, retries, or concurrency; is expected to touch more than about five files; or the user asks 'what could this break' or for the blast radius. Skip for localized edits."
+description: "Find what a change could break beyond its diff. Use when: it crosses a module boundary; alters a public API, schema, wire format, config or env var; touches persistence, caching, retries or concurrency; spans many files; or the user asks what breaks."
 ---
 
 <!-- Adapted from RRiboulet/agent-coding-skills; MIT notices for the underlying

@@ -1,6 +1,6 @@
 ---
 name: prove-it-works
-description: "Prove a code change works before claiming it is done: verify against the real artifact rather than a proxy, run the repository's quality gate, check the final diff for scope and hygiene, and report evidence with honest check statuses. Use when: finishing any coding task, before committing or opening a PR, after addressing review feedback, or when asked to validate, verify, or check changes."
+description: "Prove a code change works by verifying the real artifact and reporting evidence. Use when: finishing any coding task; before committing or opening a pull request; after addressing review feedback; or when asked to verify changes."
 ---
 
 <!-- Adapted from RRiboulet/agent-coding-skills; MIT notices for the underlying
@@ -26,10 +26,37 @@ description: "Prove a code change works before claiming it is done: verify again
 
 In this repository the contract is `AGENTS.md` → **Tests**: the subagent suite
 (`node --test .pi/extensions/subagent/test/*.test.ts`, after
-`bash .pi/extensions/subagent/test/setup-deps.sh`) and, when
+`bash .pi/extensions/subagent/test/setup-deps.sh`), the rule-table checker, and
+`tools/branch-base.test.mjs`; and, when
 `.pi/extensions/opencode-go-provider/` changed, its own separate
 `node --test` run. There is no `.agent/quality.yaml`, and AGENTS.md is where
 those commands come from.
+
+The branch-base rule is its own gate step, and it comes **before committing**
+because that is the cheap moment to fix it. The check fetches `origin/dev` itself
+against an explicit refspec, so a stale local `dev` cannot mislead it; run it
+from the repository or a linked worktree, and it must exit 0:
+
+```bash
+node tools/branch-base.mjs    # must exit 0
+```
+
+Exit 1 is `behind-dev`, `foreign-commits` or `wrong-base`, and the line names
+the rebase that fixes it. Exit 2 means the check could not run, which is not a
+pass: no `origin/dev`, a fetch that failed (it would otherwise classify against
+a stale base), a shallow clone whose grafted history cannot decide ancestry, or
+a repository with no commit yet. Fix the environment and run it again; do not
+proceed on anything but 0.
+
+When the change adds or updates a rule in the repository's `AGENTS.md` under
+**Rules and enforcement**, load the `prevent-recurrence` skill and run the table
+checker as part of the gate. A new row needs a check that failed at the bad
+revision and passes at the good one; a row without that is a claim, not a rule.
+In this repository the canonical checker is:
+
+```bash
+node .pi/skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md  # must exit 0
+```
 
 ## 3. Run it
 
@@ -38,6 +65,11 @@ those commands come from.
 - On failure, fix the root cause (load the `diagnosing-bugs` skill if it is not obvious) and re-run the affected checks.
 - Classify each failure as caused by the change, pre-existing, or environmental. When unsure, check the base revision in a separate worktree; never stash or discard the user's work to find out. Pre-existing failures are reported, never hidden, and never excuse a new regression.
 - Never delete, skip, or weaken a valid test, lower a threshold, or add a suppression to get green.
+- **Prove the change is covered, not just green.** Revert the new behavior in one
+  edit — flip the condition, return the old value, drop the effect — run the test
+  that covers it, and confirm it fails; then restore and re-run. Report the test
+  name and the failure it produced. A change with no test that can fail is
+  `not_run` with the reason, never `passed`.
 
 ## 4. Check the final diff — hygiene, not a review
 

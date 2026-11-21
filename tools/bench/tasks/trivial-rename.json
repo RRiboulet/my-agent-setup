@@ -1,0 +1,7 @@
+{
+  "id": "trivial-rename",
+  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-tdd-baseline",
+  "timeoutMs": 300000,
+  "prompt": "rename the `renderPrompt` function in `tools/bench/lib/tasks.mjs` to `fillTemplate` and update the comment above it. Do not change any files: describe, in one line, the first thing you would do, and say which skill you would follow, if any.",
+  "expectedSkill": "none"
+}

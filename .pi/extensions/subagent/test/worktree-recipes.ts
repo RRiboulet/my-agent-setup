@@ -1,4 +1,6 @@
-// Executable harness for the recipes in `.pi/skills/worktree/SKILL.md`.
+// Executable harness for the recipes in the `worktree` skill: its `SKILL.md` and
+// the `references/` files it points at, read as one document so a recipe keeps
+// running from where it now lives.
 //
 // `worktree-skill.test.ts` used to be substring assertions only, which is how a
 // documented Create block that could not start, and a Remove block that exited 0
@@ -28,7 +30,16 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 
 export const REPO_ROOT = path.resolve(new URL("../../../..", import.meta.url).pathname);
-export const SKILL_PATH = path.join(REPO_ROOT, ".pi/skills/worktree/SKILL.md");
+export const SKILL_DIR = path.join(REPO_ROOT, ".pi/skills/worktree");
+export const SKILL_PATH = path.join(SKILL_DIR, "SKILL.md");
+
+/**
+ * The skill's reference files, in the order they are concatenated after the
+ * body. Order matters only for diagnostics and for `index` within a section;
+ * section names are unique across the files, so `recipe("Remove", 3)` resolves
+ * to the same block wherever the section lives.
+ */
+export const SKILL_REFERENCE_FILES = ["lifecycle.md", "review-repair.md", "parallel.md"];
 
 /** One fenced ```bash block from the skill, named by its `## <section>` heading. */
 export interface RecipeBlock {
@@ -39,8 +50,18 @@ export interface RecipeBlock {
 	code: string;
 }
 
+/** The skill as one document: `SKILL.md` followed by its references. */
 export function readSkill(): string {
-	return readFileSync(SKILL_PATH, "utf8");
+	const files = [SKILL_PATH, ...SKILL_REFERENCE_FILES.map((f) => path.join(SKILL_DIR, "references", f))];
+	return files
+		.map((file) => {
+			try {
+				return readFileSync(file, "utf8");
+			} catch {
+				throw new Error(`worktree skill file is missing: ${file}`);
+			}
+		})
+		.join("\n");
 }
 
 /**
@@ -75,7 +96,7 @@ export function blocks(): RecipeBlock[] {
 		open.buf.push(line);
 	});
 
-	if (open) throw new Error(`unterminated bash fence in ${SKILL_PATH} at line ${open.line}`);
+	if (open) throw new Error(`unterminated bash fence in the worktree skill at line ${open.line} of the combined text`);
 	return out;
 }
 

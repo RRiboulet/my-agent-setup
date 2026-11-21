@@ -4,13 +4,16 @@ The twelve coding skills under `.pi/skills/` (`in-your-own-words`,
 `blast-radius`, `tdd`, `diagnosing-bugs`, `prove-it-works`,
 `idempotent-operations`, `benchmark-checklist`, `show-me-your-work`,
 `to-spec`, `to-tickets`, `implement`, `handoff`) were adapted from
-<https://github.com/RRiboulet/agent-coding-skills> at commit `25deecd`. Two more
-skills, `grilling` and `teach`, were adapted straight from mattpocock/skills
-rather than through that stack; they are listed below with the rest. All of them
-are maintained here as this repository's own skills; there is no refresh
+<https://github.com/RRiboulet/agent-coding-skills> at commit `25deecd`. Three more
+skills, `grilling`, `teach` and `writing-for-agents`, were adapted straight from
+mattpocock/skills rather than through that stack; they are listed below with the
+rest.
+`prevent-recurrence` is this repository's own, adapted from pstack's `/correct`
+and `principle-encode-lessons-in-structure` at the commit pinned below. All of
+them are maintained here as this repository's own skills; there is no refresh
 mechanism and no upstream to track.
 
-That repository adapts material from two MIT-licensed projects. Their license
+The adapted material comes from two MIT-licensed projects. Their license
 texts are kept beside this file, and the sources are listed per skill below.
 
 | Upstream | Copyright | Pinned commit | License |
@@ -28,6 +31,7 @@ Paths are relative to each upstream repository at the pinned commit.
 | `blast-radius` | pstack `skills/blast-radius` |
 | `tdd` | Matt `skills/engineering/tdd` (with `tests.md`, `mocking.md`); pstack `skills/tdd` |
 | `diagnosing-bugs` | Matt `skills/engineering/diagnosing-bugs` (with `scripts/hitl-loop.template.sh`); pstack `skills/principle-fix-root-causes` |
+| `prevent-recurrence` | pstack `skills/correct`, `skills/principle-encode-lessons-in-structure` |
 | `prove-it-works` | pstack `skills/principle-prove-it-works` |
 | `idempotent-operations` | pstack `skills/principle-make-operations-idempotent` |
 | `benchmark-checklist` | pstack `skills/benchmark-checklist` |
@@ -38,6 +42,7 @@ Paths are relative to each upstream repository at the pinned commit.
 | `handoff` | Matt `skills/productivity/handoff` |
 | `grilling` | Matt `skills/productivity/grilling` (with `skills/productivity/grill-me`, the user-invoked wrapper, folded into its "Where this sits" section rather than shipped as a second skill) |
 | `teach` | Matt `skills/productivity/teach` (with `MISSION-FORMAT.md`, `LEARNING-RECORD-FORMAT.md`, `RESOURCES-FORMAT.md`, `GLOSSARY-FORMAT.md`) |
+| `writing-for-agents` | Matt `skills/productivity/writing-for-agents` (with `references/skill-mechanics.md`) |
 
 ## What changed on the way in
 
@@ -59,6 +64,17 @@ The skills were edited to fit this repository rather than kept as copies:
   `AGENTS.md` (there is no `.agent/quality.yaml`); `handoff` writes under the
   persistent agent dir instead of `/tmp` and is disambiguated from the `subagent`
   tool's context-handoff modes.
+- **`prevent-recurrence` is model-invoked, and its table has a checker.**
+  pstack's `/correct` and `principle-encode-lessons-in-structure` are
+  user-invoked; here a repeated correction is something the agent notices, so the
+  skill is advertised by its description and `/skill:prevent-recurrence` still
+  works. The ordered ladder, the rule table, the ratchet, and "the diagnostic
+  names the fix" are pstack's. Added here: a deterministic Node-stdlib checker
+  for the rule table, the lint-locality question that sends semantic rules to a
+  type or a test, and the hard stop before committing and reviewing. A lesson
+  that needs judgment does not become a lint that guesses: it stays prose with a
+  `judgment: <reason>` row and an example of the failure mode, which is the
+  boundary `principle-encode-lessons-in-structure` draws.
 - **`grilling` merged the family.** Upstream splits the same interview into a
   model-invoked `grilling` and a user-invoked `grill-me` wrapper whose whole body
   is "call `grilling`". Here there is one skill: pi runs user-invoked skills as
@@ -82,6 +98,17 @@ The skills were edited to fit this repository rather than kept as copies:
   the gaps the skill's own docs admit (no scheduling, no exit criteria, no
   assessment step) are stated in "Honest limits" instead of being left for the
   user to discover.
+- **`writing-for-agents` keeps upstream's body, moves its mechanics file, and
+  drops its harness adapter.** The body is upstream's text and so is the
+  mechanics file, apart from a top-level title heading (the only skill here
+  without one) — relocated to `references/skill-mechanics.md` (upstream
+  keeps it beside `SKILL.md`) to match `prevent-recurrence/references/` and
+  `tdd/references/`, and so the skill test's "every `references/*.md` is linked"
+  assertion covers it. The
+  `description` is rewritten in this repository's house form (what it does, then
+  the trigger branches) so it advertises itself like the other model-invoked
+  skills here, and upstream's `agents/openai.yaml` — another harness's interface
+  metadata, which pi does not read — is not installed.
 - **Executable bits.** `diagnosing-bugs/scripts/hitl-loop.template.sh` and
   `show-me-your-work/scripts/log.sh` are executable here; upstream ships them
   mode 100644 while its own `validate.py` requires the bit, so its quality gate

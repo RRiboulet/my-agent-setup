@@ -154,7 +154,8 @@ export interface JudgeConfig {
 
 /**
  * The shipped reviewer policy: three capability bands over one provider,
- * `opencode-go`, with the judge above it on `openrouter`. This is the built-in
+ * `opencode-go`, with the judge above it on `opencode` (`jev-1.13-free`, the free
+ * tier of the same System One judge the account already reaches). This is the built-in
  * policy as well as the template, so installing the package is enough to get
  * a real Choice — no config file, no copy step. `review-triage.example.json`
  * carries the same list for a human to copy and edit; a test pins the two
@@ -272,8 +273,8 @@ export const DEFAULT_CONFIG: TriageConfig = {
 	enabled: true,
 	tool: true,
 	judge: {
-		provider: "openrouter",
-		model: "typesafe/jev-1.13",
+		provider: "opencode",
+		model: "jev-1.13-free",
 		timeoutMs: 8_000,
 	},
 	candidates: DEFAULT_CANDIDATES.map((candidate) => ({ ...candidate })),

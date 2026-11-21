@@ -52,7 +52,7 @@ export async function withTempAgentDir<T>(fn: (agentDir: string) => Promise<T>):
  * default turned "the machine was busy" into a red suite several times over. These
  * waits take well under a second in practice; a 30s bound only fires for a real
  * break. Tests that can tell "slow" from "broken" should assert the poll count too
- * (see waitForRunStatus in lifecycle.test.ts).
+ * (see waitForRunStatus in lifecycle-harness.ts).
  */
 export async function waitFor(predicate: () => boolean | Promise<boolean>, timeoutMs = 30_000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;

@@ -1085,3 +1085,28 @@ test("the palette fallback ranks by messages when nothing cost or used tokens", 
 		assert.deepEqual(choosePaletteFromLast30Days(range).orderedModels, ["anthropic/vendor/bar", "openrouter/vendor/foo"]);
 	});
 });
+
+test("the view fits 80x24 and shows a daily table, not the heatmap", async () => {
+	await withFixtureDir(async (dir) => {
+		const sessions = path.join(dir, "sessions", "--tmp-fixture--");
+		await writeSession(path.join(sessions, `${stamp()}_a.jsonl`), [
+			header("a"),
+			MODEL_CHANGE,
+			assistant({ totalTokens: 100, cost: 0.1 }),
+			assistant({ totalTokens: 300, cost: 0.3 }),
+		]);
+		const data = await computeBreakdown(undefined, undefined, { roots: defaultSessionRoots(dir) });
+		const rendered = new BreakdownComponent(
+			data,
+			{ terminal: { rows: 24 }, requestRender() {} } as never,
+			() => {},
+		).render(80);
+
+		assert.ok(rendered.length <= 23, `24 rows must not overflow, got ${rendered.length}`);
+		assert.ok(rendered[0]!.includes("Session breakdown"), "the header survives the budget");
+		assert.ok(rendered.some((line) => line.includes("range")), "the key hints survive the budget");
+		assert.ok(rendered.some((line) => line.includes("top model")), "the daily table header is drawn");
+		assert.ok(rendered.some((line) => line.includes("Last 30 days")), "the summary names the selected range");
+		assert.ok(!rendered.some((line) => line.includes("█")), "the heatmap is gone");
+	});
+});

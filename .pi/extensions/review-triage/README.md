@@ -128,14 +128,16 @@ validation-result / risk-signal / limitation), `provenance`, `snapshot`,
 ## Configuration
 
 `~/.pi/agent/review-triage.json`, all fields optional. The built-in defaults
-**are** this repository's policy: judge `openrouter`/`typesafe/jev-1.13` and the
+**are** this repository's policy: judge `opencode`/`jev-1.13-free` and the
 three `opencode-go` reviewer bands, so installing the package is enough and an
 unconfigured project gets the repo's judge and tiers. A config file is only
 needed to *change* something. The judge model can also be set with
 `PI_REVIEW_TRIAGE_JUDGE_PROVIDER` / `PI_REVIEW_TRIAGE_JUDGE_MODEL`,
 `PI_REVIEW_TRIAGE_OFF` / `PI_REVIEW_TRIAGE_ENABLED` override `enabled`, and a
-`.env` beside this file is read for `OPENROUTER_API_KEY` so a key that never
-reached `auth.json` still works.
+`.env` beside this file is read for `OPENCODE_API_KEY` so a key that never
+reached `auth.json` still works. The judge and the reviewers share that one
+OpenCode key: the free Jev classifier is served by OpenCode Zen (`opencode`),
+the reviewers by the Go endpoint (`opencode-go`).
 
 `review-triage.example.json` beside this file is the same policy written out for
 a human to copy to `~/.pi/agent/review-triage.json` (or
@@ -145,7 +147,7 @@ the built-in defaults together so they cannot drift.
 
 A test also pins what a repository can know about the shipped policy: every
 candidate's provider is `opencode-go`, the judge is
-`openrouter`/`typesafe/jev-1.13`, a stated `cost` agrees with the opencode-go
+`opencode`/`jev-1.13-free`, a stated `cost` agrees with the opencode-go
 catalogue, and every band has a candidate
 (`.pi/extensions/subagent/test/review-triage.test.ts`). Whether a provider has
 credentials is a property of the machine, not the repository, so that is checked

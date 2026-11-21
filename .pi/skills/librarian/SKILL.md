@@ -1,6 +1,6 @@
 ---
 name: librarian
-description: "Cache and refresh remote git repositories under the pi agent dir so later references reuse a local checkout. Use when the user points you to a remote git repository as reference, or you encounter one through other means."
+description: "Cache and refresh remote git repositories under the pi agent dir so later references reuse a local checkout. Use when: the user points you to a remote git repository as reference; or you encounter one through other means."
 license: Apache-2.0
 ---
 

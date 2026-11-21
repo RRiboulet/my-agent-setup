@@ -1,6 +1,6 @@
 ---
 name: implement
-description: "Implement a spec, ticket, ticket set, or agreed plan end to end: play back the goal, build in small verified units, prove the result, and stop there unless a review was asked for."
+description: "User-invoked /skill:implement: take a spec, ticket, ticket set or plan end to end in small verified units."
 disable-model-invocation: true
 ---
 
@@ -35,8 +35,24 @@ prescribes. Parallel sub-agents only on request, and ask before launching one.
 
 ## 4. Build each unit
 
-- New or changed behavior with a testable seam: load the `tdd` skill and build at the seams the spec agreed.
+- Any new or changed behavior: build at the seams the spec agreed, in the loop
+  below. Load the `tdd` skill when a test needs judging or the seam is unclear;
+  if the loop does not apply, name the exception that skill lists and why.
+
+<!-- tdd-loop:begin - keep this block identical in .pi/skills/tdd/SKILL.md and .pi/skills/implement/SKILL.md; coding-skills.test.ts compares them -->
+One vertical slice per cycle: one behavior, one test, the minimal code, repeat.
+
+1. **Red.** Write the smallest test for one behavior, with the expected value
+   taken from an independent source: the requirement, a worked example, a
+   known-good literal.
+2. **Watch it fail for the right reason.** If it passes, or fails for an unrelated
+   reason such as an import error, fix the test before touching production code.
+3. **Green.** Write only enough code to pass. No speculative features.
+4. **Widen.** Run the focused test, then the surrounding suite.
+5. **Tidy.** Refactor only with tests green, and only what this change needs.
+<!-- tdd-loop:end -->
 - A bug, failing test, or unexpected behavior: load the `diagnosing-bugs` skill.
+- The user corrects the same thing twice: the second correction is evidence of a class, not a request for a third edit. Load the `prevent-recurrence` skill and turn it into a check before the next unit; do not wait for a review to say it a third time.
 - Run focused tests and type or lint checks on what changed after each unit. Never start the next unit on red.
 - Do not redesign mid-flight. If the spec turns out wrong or incomplete, stop and surface the conflict with a recommendation instead of silently deviating.
 - For long or unattended runs, load the `show-me-your-work` skill and log each non-obvious decision as you make it.

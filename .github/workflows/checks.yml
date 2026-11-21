@@ -1,0 +1,88 @@
+# The gate, run the way AGENTS.md → "Tests" runs it.
+#
+# This is the branch-base rule's second enforcer (R14): a branch must descend
+# from the current origin/dev and carry only its own commits. It runs on every
+# pull request into dev and on every push to dev, so the fourth wrong-base
+# mistake is a red build instead of a review comment.
+#
+# Why each step is here rather than left to a convention:
+#
+# - `fetch-depth: 0` and `ref: <head sha>`: the checks need real history, and a
+#   pull request must be checked at its head commit, not at the merge commit
+#   GitHub would otherwise check out (that commit has two parents and is not
+#   what merges).
+# - Installing pi first: setup-deps.sh links the *globally installed* pi
+#   packages into node_modules, and a clean runner has no pi. Same command as
+#   .devcontainer/Dockerfile, so CI and the container track the same release.
+# - `git fetch origin dev`: the branch-base check compares against origin/dev.
+# - Every test tree, its own step, so a failure names which gate is red.
+
+name: checks
+
+"on":
+  pull_request:
+    branches: [dev]
+  push:
+    branches: [dev]
+
+permissions:
+  contents: read
+
+concurrency:
+  # A superseded run on the same PR tells nobody anything; the branch's own push
+  # is left alone so a dev build is never cancelled mid-flight.
+  group: checks-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out the commit under test
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.ref_name }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # The subagent suite imports pi's packages, and setup-deps.sh links the
+      # globally installed ones (`npm root -g`). Without this the link step
+      # fails on a clean runner, which is why it is not a local-only concern.
+      - name: Install pi globally
+        run: npm install -g --no-audit --no-fund @earendil-works/pi-coding-agent@latest
+
+      - name: Fetch the integration branch
+        run: git fetch origin dev
+
+      - name: Link pi's packages into node_modules
+        run: bash .pi/extensions/subagent/test/setup-deps.sh
+
+      - name: Subagent and tool tests
+        run: node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts
+
+      - name: Provider tests
+        run: cd .pi/extensions/opencode-go-provider && node --test
+
+      - name: Rule-table checker tests
+        run: node --test .pi/skills/prevent-recurrence/scripts/test/*.test.mjs
+
+      - name: Rule table is valid
+        run: node .pi/skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md
+
+      - name: Skill index
+        run: node tools/skills-index.mjs --check
+
+      - name: MCP catalogue install tests
+        run: node --test tools/mcp-catalogue.test.mjs
+
+      - name: Branch-base check tests
+        run: node --test tools/branch-base.test.mjs
+
+      - name: Branch base
+        run: node tools/branch-base.mjs

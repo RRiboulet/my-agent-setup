@@ -22,9 +22,9 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 
-import { blocks, REPO_ROOT, recipe, retarget, runScript, scratchRepo } from "./worktree-recipes.ts";
+import { blocks, readSkill, REPO_ROOT, recipe, retarget, runScript, scratchRepo } from "./worktree-recipes.ts";
 
-const SKILL = readFileSync(path.join(REPO_ROOT, ".pi/skills/worktree/SKILL.md"), "utf8");
+const SKILL = readSkill();
 const GITIGNORE = readFileSync(path.join(REPO_ROOT, ".gitignore"), "utf8");
 
 /** Number of linked worktrees (main checkout excluded) in a `--porcelain` listing. */
@@ -51,7 +51,7 @@ interface FakeTmux {
  *
  * It is faithful where the sweep's two bugs live:
  *
- * - `list-panes` emits **one row per pane**, tab-separated in the order the
+ * - `list-panes` emits **one row per pane**, pipe-separated in the order the
  *   recipe's own `-F` format names the fields (the fake checks that the format
  *   still asks for both placeholders, then answers from a fixture), so a session
  *   with two panes appears twice - which is what `tmux list-panes -a` really
@@ -69,7 +69,7 @@ async function fakeTmux(panes: Array<{ session: string; panePath: string }>): Pr
 	const log = path.join(dir, "kills.log");
 	const killed = path.join(dir, "killed.txt");
 	await mkdir(bin);
-	await writeFile(listing, panes.map((p) => `${p.session}\t${p.panePath}`).join("\n") + "\n");
+	await writeFile(listing, panes.map((p) => `${p.session}|${p.panePath}`).join("\n") + "\n");
 
 	// One row per pane, in the order the recipe's format names the fields. Kept
 	// in Node rather than substituted from the recipe's `-F` string so the
@@ -200,8 +200,11 @@ test("worktree skill: removal never runs the force delete unconditionally", () =
 	assert.ok(!/^git worktree remove -f/m.test(SKILL), "the force removal must stay commented out");
 	assert.ok(SKILL.includes('worktree remove "$WT"'), "must try the safe removal first");
 	assert.ok(SKILL.includes("kill-session"), "removal must stop tmux sessions rooted in the tree");
-	// A space in the repo root makes `$2` match nothing, leaking the session.
-	assert.ok(SKILL.includes("awk -F'\\t'"), "session sweep must split on a tab, not a space");
+	// A space in the repo root makes `$2` match nothing, leaking the session; so
+	// does a tab, because tmux rewrites it to `_` when the server runs in a
+	// non-UTF-8 locale. The separator must be a printable character.
+	assert.ok(SKILL.includes("awk -F'|'"), "session sweep must split on a printable separator, never a control character");
+	assert.ok(!/list-panes[^\n]*\$'\\t'/.test(SKILL), "the sweep's -F format must not embed a tab");
 	assert.ok(SKILL.includes("prune -n"), "removal must dry-run prune");
 });
 
@@ -255,16 +258,19 @@ test("worktree skill: git clean advice names the form that actually deletes", ()
 });
 
 test("worktree skill: the subagent recipe resolves the worktree root", () => {
-	const openBlock = SKILL.slice(SKILL.indexOf("## Open"), SKILL.indexOf("## Review"));
+	// The delegation recipe moved to `references/parallel.md` when the skill was
+	// split, so the slice is its own section rather than the old `## Open` one.
+	const delegation = SKILL.slice(SKILL.indexOf("## Delegating to a subagent rooted in a worktree"));
+	assert.notEqual(delegation, "", "the delegation section must still exist");
 	// A hardcoded /workspace pins the recipe to one machine's clone, and a
 	// worktree cwd is what surfaced the extension flag conflict below.
-	assert.ok(!/cwd: "\/workspace/.test(openBlock), "the subagent cwd must not hardcode /workspace");
+	assert.ok(!/cwd: "\/workspace/.test(SKILL), "the subagent cwd must not hardcode /workspace");
 	assert.ok(
-		openBlock.includes("--path-format=absolute --git-common-dir"),
+		delegation.includes("--path-format=absolute --git-common-dir"),
 		"the recipe must resolve the root the way every other recipe does",
 	);
-	assert.ok(openBlock.includes('echo "$WT"'), "the recipe must print the resolved path to pass as cwd");
-	assert.ok(openBlock.includes('cwd: "<the path printed above>"'), "the expanded path is what cwd takes");
+	assert.ok(delegation.includes('echo "$WT"'), "the recipe must print the resolved path to pass as cwd");
+	assert.ok(delegation.includes('cwd: "<the path printed above>"'), "the expanded path is what cwd takes");
 });
 
 test("worktree skill: names the extension conflict a worktree cwd used to cause", () => {
@@ -624,7 +630,7 @@ test("remove recipe: kills each session rooted in the tree once, even with a bac
  * The sweep's own listing format, spelled the way the recipe spells it: one row
  * per *pane*, `#{session_name}` then `#{pane_current_path}`, tab-separated.
  */
-const LIVE_PANE_FORMAT = "#{session_name}\t#{pane_current_path}";
+const LIVE_PANE_FORMAT = "#{session_name}|#{pane_current_path}";
 
 interface LiveTmux {
 	/** `tmux -S <socket> <args>`, captured rather than thrown. */
@@ -643,7 +649,7 @@ interface LiveTmux {
  *
  * No TTY: everything is created detached.
  */
-function liveTmux(root: string): LiveTmux {
+function liveTmux(root: string, extraEnv: Record<string, string> = {}): LiveTmux {
 	const socket = path.join(root, "tmux-sockets", "pi.sock");
 	mkdirSync(path.dirname(socket), { recursive: true });
 
@@ -654,6 +660,7 @@ function liveTmux(root: string): LiveTmux {
 			cwd: root,
 			encoding: "utf8",
 			timeout: 10_000,
+			env: { ...process.env, ...extraEnv },
 		});
 		if (result.error) throw result.error;
 		return { status: result.status, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
@@ -668,7 +675,7 @@ function liveTmux(root: string): LiveTmux {
 				.split("\n")
 				.filter((line) => line !== "")
 				.map((line) => {
-					const [session, panePath] = line.split("\t");
+					const [session, panePath] = line.split("|");
 					return { session, panePath };
 				});
 		},
@@ -676,6 +683,34 @@ function liveTmux(root: string): LiveTmux {
 			run("kill-server");
 		},
 	};
+}
+
+/**
+ * The panes of `session`, polled until they report the paths the fixture asked
+ * for.
+ *
+ * `pane_current_path` is read from the pane's process, and tmux forks that
+ * process before the child has changed into `-c`. The first listing can
+ * therefore still report the server's own cwd - measured on a CI runner as
+ * both panes sitting at the scratch root - which would fail the fixture for a
+ * start-up race rather than for anything the recipe does. A little slack costs
+ * nothing on a host where the child has already chdir'd, because the first
+ * poll matches. The last listing is returned regardless, so the assertion that
+ * follows still reports the real state.
+ */
+async function settledPanePaths(tmux: LiveTmux, session: string, expected: string[]): Promise<string[]> {
+	const wanted = [...expected].sort().join("\n");
+	const deadline = Date.now() + 5_000;
+	let rows: string[] = [];
+	for (;;) {
+		rows = tmux
+			.panes()
+			.filter((pane) => pane.session === session)
+			.map((pane) => pane.panePath)
+			.sort();
+		if (rows.join("\n") === wanted || Date.now() > deadline) return rows;
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
 }
 
 /**
@@ -741,9 +776,11 @@ test("remove recipe: a live tmux server loses the tree's sessions and keeps the 
 		const targetRows = before.filter((pane) => pane.session === session);
 		assert.equal(targetRows.length, 2, `fixture: expected two rows for ${session}, got:\n${before.map((p) => `${p.session}\t${p.panePath}`).join("\n")}`);
 		assert.deepEqual(
-			targetRows.map((pane) => pane.panePath).sort(),
+			await settledPanePaths(tmux, session, [wt, sub]),
 			[wt, sub].sort(),
-			"fixture: both panes of the target session must be rooted inside the tree",
+			`fixture: both panes of the target session must be rooted inside the tree\n` +
+				`${tmux.run("-V").stdout.trim()}, lengths ${existsSync(wt)}/${existsSync(sub)}\n` +
+				JSON.stringify(tmux.panes()),
 		);
 		assert.deepEqual(
 			before.filter((pane) => pane.session === decoy).map((pane) => pane.panePath),
@@ -785,6 +822,59 @@ test("remove recipe: a live tmux server loses the tree's sessions and keeps the 
 		tmux.stop();
 		const sessions = tmux.run("list-sessions");
 		assert.equal(sessions.status, 1, `live tmux: kill-server left a server behind:\n${sessions.stdout}`);
+		await repo.cleanup();
+	}
+});
+
+test("remove recipe: the sweep finds a session on a server started in the C locale", async (t) => {
+	// A tmux server started in a non-UTF-8 locale rewrites a tab in `-F` output to
+	// `_` (measured on the stock Ubuntu and Debian packages, tmux 3.2a-3.6). The
+	// sweep used a tab as its field separator, so on such a server `awk -F'\t'`
+	// matched nothing, no session was killed, and Remove deleted the tree under a
+	// live shell without saying so.
+	//
+	// The locale is forced here rather than inherited, so the case is exercised on
+	// every host. A tmux build that keeps the tab even in C still passes this test
+	// before the fix - the static assertion above is what catches the separator
+	// itself, and this one catches the behaviour wherever the build rewrites it.
+	const probe = spawnSync("tmux", ["-V"], { encoding: "utf8" });
+	if (probe.error || probe.status !== 0) {
+		t.skip("tmux is not installed on this host, so the live sweep coverage did not run");
+		return;
+	}
+
+	const repo = await scratchRepo({ rootPrefix: "worktree-skill-c-locale-" });
+	const slug = "c-locale-sweep";
+	const wt = repo.pathOf(slug);
+	const session = `pi-wt-${slug}`;
+	const decoy = "pi-unrelated";
+	const tmux = liveTmux(repo.root, { LANG: "C", LC_ALL: "C" });
+	try {
+		repo.git("worktree", "add", "-q", wt, "-b", slug, "origin/dev");
+		assert.equal(tmux.run("new", "-d", "-s", session, "-c", wt).status, 0, "fixture: new-session");
+		assert.equal(tmux.run("new", "-d", "-s", decoy, "-c", repo.root).status, 0, "fixture: decoy session");
+
+		const sessions = () =>
+			tmux
+				.run("list-sessions", "-F", "#{session_name}")
+				.stdout.split("\n")
+				.filter((line) => line !== "")
+				.sort();
+		assert.deepEqual(sessions(), [decoy, session].sort(), "fixture: both sessions must exist before the sweep");
+
+		const result = runScript(retarget(recipe("Remove", 0), { SLUG: slug }), {
+			cwd: repo.main,
+			env: isolatedTmux(repo),
+		});
+
+		assert.equal(result.status, 0, `remove failed:\n${result.stderr}`);
+		assert.deepEqual(
+			sessions(),
+			[decoy],
+			"a session rooted in the removed tree survived the sweep: the field separator did not survive this locale",
+		);
+	} finally {
+		tmux.stop();
 		await repo.cleanup();
 	}
 });

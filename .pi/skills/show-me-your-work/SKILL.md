@@ -1,6 +1,6 @@
 ---
 name: show-me-your-work
-description: "Keep an append-only decision trail (a TSV log with one row per decision: what, why, evidence, result) for a large task the user left running unattended for a long time, audit it before handing back, and report what still needs their eyes. Use when: the user asks for a decision log, or one run is large enough that they step away and come back to judge it from the trail. Not for ordinary supervised changes — prove-it-works covers those."
+description: "Keep an append-only decision trail for a task the user left running unattended, audit it, and report what still needs their eyes. Use when: the user asks for a decision log; or a run is long and unsupervised enough to be judged from the trail."
 ---
 
 <!-- Adapted from RRiboulet/agent-coding-skills; MIT notices for the underlying

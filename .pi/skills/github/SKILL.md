@@ -1,6 +1,6 @@
 ---
 name: github
-description: "Interact with GitHub using the `gh` CLI. Use `gh issue`, `gh pr`, `gh run`, and `gh api` for issues, PRs, CI runs, and advanced queries. Read this skill before running gh in this repo."
+description: "Work with GitHub through the `gh` CLI. Use when: issues, pull requests, CI runs or releases; or any `gh` command in this repository."
 ---
 
 <!-- VENDORED, NOT OURS.

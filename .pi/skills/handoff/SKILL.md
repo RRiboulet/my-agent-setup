@@ -1,6 +1,6 @@
 ---
 name: handoff
-description: "Compact the current session into a handoff document, saved outside the workspace, that a fresh agent in any harness can continue from."
+description: "User-invoked /skill:handoff: write a handoff document a fresh agent in any harness can continue from."
 disable-model-invocation: true
 ---
 

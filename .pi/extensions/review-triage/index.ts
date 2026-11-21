@@ -12,7 +12,7 @@
  * "we skipped review here" is auditable after the fact rather than invisible.
  *
  * Config: ~/.pi/agent/review-triage.json (all fields optional).
- * Judge:  a pi classifier model, `openrouter` / `typesafe/jev-1.13` by default.
+ * Judge:  a pi classifier model, `opencode` / `jev-1.13-free` by default.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";

@@ -25,7 +25,7 @@
 
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, test } from "node:test";
@@ -36,8 +36,10 @@ const SCRIPT = path.join(REPO_ROOT, "bin/pi-agent-dir");
 type Sandbox = { root: string; home: string; agentRoot: string; base: string; repo: string; worktree: string; rc: string };
 
 const sandboxes: Sandbox[] = [];
+const scratchDirs: string[] = [];
 after(() => {
 	for (const box of sandboxes) rmSync(box.root, { recursive: true, force: true });
+	for (const dir of scratchDirs) rmSync(dir, { recursive: true, force: true });
 });
 
 function git(cwd: string, ...args: string[]): string {
@@ -78,15 +80,42 @@ function sandbox(): Sandbox {
 	return box;
 }
 
-function run(box: Sandbox, ...args: string[]) {
-	return spawnSync(SCRIPT, args, {
+function runScript(script: string, box: Sandbox, ...args: string[]) {
+	return spawnSync(script, args, {
 		encoding: "utf8",
 		env: { ...process.env, HOME: box.home, PI_SHELL_RC: box.rc },
 	});
 }
 
+function run(box: Sandbox, ...args: string[]) {
+	return runScript(SCRIPT, box, ...args);
+}
+
 /** The dir the script must produce for a sandbox: derived, never hard-coded. */
 const expectedDir = (box: Sandbox) => path.join(box.agentRoot, `agent-${path.basename(box.repo)}`);
+
+/** The catalogue this package ships, which the seed step copies from. */
+const catalogue = () =>
+	JSON.parse(readFileSync(path.join(REPO_ROOT, "mcp", "catalogue.json"), "utf8")) as {
+		mcpServers: Record<string, { enabled?: boolean; exposure?: string }>;
+	};
+
+/**
+ * A copy of the script with its own catalogue module, for the one case the real
+ * checkout cannot supply: a catalogue that cannot be read. The module resolves
+ * `mcp/catalogue.json` relative to *its own* location, so the only way to break
+ * it for one run is a copied tree — the alternative, editing the repo's
+ * catalogue, is the file the other tests assert against.
+ */
+function scriptWithBrokenCatalogue(how: "missing" | "invalid"): string {
+	const root = mkdtempSync(path.join(tmpdir(), "pi-agent-dir-cli-"));
+	scratchDirs.push(root);
+	for (const dir of ["bin", "tools", "mcp"]) mkdirSync(path.join(root, dir), { recursive: true });
+	copyFileSync(SCRIPT, path.join(root, "bin", "pi-agent-dir"));
+	copyFileSync(path.join(REPO_ROOT, "tools", "mcp-catalogue.mjs"), path.join(root, "tools", "mcp-catalogue.mjs"));
+	if (how === "invalid") writeFileSync(path.join(root, "mcp", "catalogue.json"), "{ not json\n");
+	return path.join(root, "bin", "pi-agent-dir");
+}
 
 test("creates the per-project agent dir without packages and trusts the checkout", () => {
 	const box = sandbox();
@@ -179,6 +208,149 @@ test("--check fails while a package is still listed, and passes after the script
 	assert.equal(run(box, "--project", box.repo).status, 0);
 	const checked = run(box, "--check", "--project", box.repo);
 	assert.equal(checked.status, 0, checked.stderr);
+});
+
+// --- the MCP catalogue seed (spec R5, host half) ----------------------------
+//
+// Seeding and installing are deliberately different semantics: this step runs
+// unattended on every invocation, so it may only ever *create* the file. An
+// entry someone deleted has to stay deleted, which is why a pre-existing file is
+// asserted byte for byte rather than field by field.
+
+test("a fresh agent dir starts with the catalogue, every server disabled", () => {
+	const box = sandbox();
+	const result = run(box, "--project", box.repo);
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(result.stdout.trim(), expectedDir(box), "the script's stdout is the dir, never the module's report");
+
+	const seeded = JSON.parse(readFileSync(path.join(expectedDir(box), "mcp.json"), "utf8")) as {
+		mcpServers: Record<string, { enabled?: boolean; exposure?: string }>;
+	};
+	const names = Object.keys(catalogue().mcpServers);
+	assert.ok(names.length > 0, "the catalogue must ship at least one server");
+	assert.deepEqual(Object.keys(seeded.mcpServers).sort(), [...names].sort(), "every catalogue server, seeded");
+	for (const name of names) {
+		assert.equal(seeded.mcpServers[name]?.enabled, false, `${name} must seed disabled: nothing may connect on its own`);
+		assert.equal(seeded.mcpServers[name]?.exposure, "codemode", `${name} must state its exposure rather than inherit a default`);
+	}
+	assert.match(result.stderr, /created {2}.*mcp\.json/u, "the seeding note belongs on stderr, beside the settings note");
+});
+
+test("an existing mcp.json is the project's own: neither merged into nor rewritten", () => {
+	const box = sandbox();
+	const dir = expectedDir(box);
+	mkdirSync(dir, { recursive: true });
+	// Hand-written on purpose, and deliberately not what the catalogue says: one
+	// catalogue name absent (Playwright, deleted), `figma` switched on by the
+	// person using the dir, an unrelated server of their own, and indentation the
+	// module would not have produced. Any of these coming back means the step
+	// merged instead of seeding.
+	const edited = [
+		"{",
+		'    "mcpServers": {',
+		'        "figma": { "url": "https://mcp.figma.com/mcp", "enabled": true, "exposure": "direct" },',
+		'        "mine": { "command": "my-own-server", "enabled": true, "exposure": "codemode" }',
+		"    }",
+		"}",
+		"",
+	].join("\n");
+	writeFileSync(path.join(dir, "mcp.json"), edited);
+
+	const result = run(box, "--project", box.repo);
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(readFileSync(path.join(dir, "mcp.json"), "utf8"), edited);
+	assert.doesNotMatch(result.stderr, /mcp\.json/u, "the file exists: there is nothing to report about it");
+});
+
+test("a re-run changes nothing, and says nothing about the catalogue", () => {
+	const box = sandbox();
+	const dir = expectedDir(box);
+	assert.equal(run(box, "--project", box.repo).status, 0);
+	const seeded = readFileSync(path.join(dir, "mcp.json"), "utf8");
+
+	const second = run(box, "--project", box.repo);
+	assert.equal(second.status, 0, second.stderr);
+	assert.equal(readFileSync(path.join(dir, "mcp.json"), "utf8"), seeded);
+	assert.doesNotMatch(second.stderr, /mcp/iu, "a kept catalogue file is the expected state of a re-run, not a report");
+
+	// Deleting an entry is how a project opts out of one server, so the next run
+	// must not put it back. The name is asserted against the catalogue first, so a
+	// renamed entry fails here with a reason instead of quietly passing.
+	assert.ok(Object.hasOwn(catalogue().mcpServers, "playwright"), "the catalogue still ships playwright");
+	const withoutPlaywright = seeded.replace(/,\n {4}"playwright": \{[\s\S]*?\n {4}\}/u, "");
+	assert.notEqual(withoutPlaywright, seeded, "the edit must actually remove the entry");
+	writeFileSync(path.join(dir, "mcp.json"), withoutPlaywright);
+	assert.equal(run(box, "--project", box.repo).status, 0);
+	assert.equal(readFileSync(path.join(dir, "mcp.json"), "utf8"), withoutPlaywright);
+});
+
+test("--check reports the catalogue, and warns rather than failing when it is absent", () => {
+	const box = sandbox();
+	const dir = expectedDir(box);
+	assert.equal(run(box, "--project", box.repo).status, 0);
+
+	const checked = run(box, "--check", "--project", box.repo);
+	assert.equal(checked.status, 0, checked.stderr);
+	assert.match(checked.stdout, new RegExp(`^catalogue: ${dir}/mcp\\.json$`, "mu"));
+
+	// Legitimately deletable — the dir works without it and nothing connects — so
+	// its absence is a WARN like the missing shell hook, not a FAIL like a dir
+	// that would load no extensions.
+	rmSync(path.join(dir, "mcp.json"));
+	const missing = run(box, "--check", "--project", box.repo);
+	assert.equal(missing.status, 0, "no catalogue is not a broken agent dir");
+	assert.match(missing.stderr, /WARN no .*mcp\.json/u);
+	assert.doesNotMatch(missing.stdout, /^catalogue:/mu);
+});
+
+test("--check refuses to bless a catalogue file that does not parse", () => {
+	const box = sandbox();
+	const dir = expectedDir(box);
+	assert.equal(run(box, "--project", box.repo).status, 0);
+
+	// A 0-byte file is what an interrupted write leaves behind, and it used to print
+	// `catalogue:` like any other: seeding is `--if-missing`, so the seed step never
+	// touches a file that exists and the broken one survives every re-run, while pi
+	// reports the parse error in every session that reads it.
+	writeFileSync(path.join(dir, "mcp.json"), "");
+	const empty = run(box, "--check", "--project", box.repo);
+	assert.equal(empty.status, 0, "a broken catalogue does not make the dir unusable: WARN, not FAIL");
+	assert.match(empty.stderr, /WARN .*mcp\.json exists but is not valid JSON/u);
+	assert.doesNotMatch(empty.stdout, /^catalogue:/mu, "a file that does not parse is not a catalogue");
+
+	// The verdict is the parse, not the size: text that is neither empty nor JSON
+	// takes the same line.
+	writeFileSync(path.join(dir, "mcp.json"), "{ not json\n");
+	const garbage = run(box, "--check", "--project", box.repo);
+	assert.equal(garbage.status, 0);
+	assert.match(garbage.stderr, /WARN .*mcp\.json exists but is not valid JSON/u);
+	assert.doesNotMatch(garbage.stdout, /^catalogue:/mu);
+});
+
+test("a seed step that cannot run does not abort the rest of the seeding", () => {
+	for (const how of ["missing", "invalid"] as const) {
+		const box = sandbox();
+		const script = scriptWithBrokenCatalogue(how);
+
+		const result = runScript(script, box, "--project", box.repo);
+		assert.equal(result.status, 0, `${how} catalogue: ${result.stderr}`);
+		assert.equal(result.stdout.trim(), expectedDir(box));
+
+		// Everything seeded after this step's position is still seeded: aborting
+		// here would cost the settings, credentials and trust that make the dir
+		// usable at all.
+		const dir = expectedDir(box);
+		const settings = JSON.parse(readFileSync(path.join(dir, "settings.json"), "utf8")) as { packages?: unknown };
+		assert.equal(settings.packages, undefined, `${how} catalogue: settings are still seeded`);
+		assert.equal(readFileSync(path.join(dir, "auth.json"), "utf8"), '{"key":"seed"}\n');
+		assert.deepEqual(JSON.parse(readFileSync(path.join(dir, "trust.json"), "utf8")), { [box.repo]: true });
+
+		// Nothing half-written stands in for the catalogue: the file is absent, so a
+		// later run with a working catalogue can still seed it.
+		assert.equal(existsSync(path.join(dir, "mcp.json")), false);
+		assert.match(result.stderr, /warning: could not seed .*mcp\.json from the catalogue/u);
+		assert.match(result.stderr, /mcp-catalogue:/u, "the module's own reason is reported, not swallowed");
+	}
 });
 
 test("the declared dir is named after the project, not the checkout directory", () => {

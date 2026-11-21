@@ -50,6 +50,12 @@ compares against, and a local `dev` left over from before three PRs merged will
 happily list their commits as yours — the same false alarm as the bug it is meant
 to catch, and just as likely to be ignored.
 
+Those two commands are the manual fallback. `node tools/branch-base.mjs` runs the
+same checks plus the stacked-branch case, against a freshly fetched `origin/dev`,
+and prints one line naming the classification and the fix; it is what
+`prove-it-works` and CI run. Its row is the first in "Rules and enforcement"
+below.
+
 A branch legitimately based on **another unmerged feature branch** still shows
 foreign commits, and neither check can tell that apart from a mistake. Subtract
 the base branch explicitly (`git log dev..feature-a`) or rebase onto `dev` first.
@@ -219,7 +225,10 @@ their bodies, and `licenses/NOTICE.md` records the MIT provenance. They are
 advertised by their descriptions, so load one when its trigger applies rather
 than waiting to be told:
 
-- Trivial, unambiguous edit: make it, then check it. No ceremony.
+- Trivial, unambiguous edit — no behavior observable at a seam (typo, comment,
+  private rename, dependency bump, release note): make it, then check it. No
+  ceremony. Where that boundary falls is a judgement, not a rule: no check can
+  decide it, so it is prose and not a row in the table below.
 - Non-trivial or ambiguous request: `in-your-own-words` before building.
 - The user asks to be grilled, stress-tested or interviewed, or a request's
   shape is undecided and a ten-line playback cannot carry its assumptions:
@@ -228,29 +237,58 @@ than waiting to be told:
 - A change crossing a module, service, API, schema or config boundary:
   `blast-radius`.
 - A bug, failing test, CI failure, crash, flake or regression: `diagnosing-bugs`.
-- New or changed behavior with a testable seam: `tdd`.
+- Any new or changed behavior — the default implementation style: `tdd`. For a
+  bug, `diagnosing-bugs` first. A rename, comment, typo or release note is not
+  behavior: skip `tdd` there, as `tdd`'s own description says.
 - Retries, queues, webhooks, jobs, migrations or setup scripts:
   `idempotent-operations`.
 - Producing or acting on a performance number: `benchmark-checklist`.
 - A **big task left unsupervised for a long time** — hours of work the user did
   not watch and will judge afterwards: `show-me-your-work`. Not for ordinary
   sessions.
-- Before saying work is done: `prove-it-works`.
+- Before saying work is done: `prove-it-works`. It asks for one thing no gate
+  can: **name the test that fails when this change is reverted.** Revert the
+  behavior in one edit, watch that test fail, restore, re-run. If no test can
+  fail, the change is `not_run`, never `passed`.
+- The same mistake class corrected a second time, or a review that calls a fix a
+  repeat: `prevent-recurrence`. It chooses the highest level that can carry the
+  rule, proves it at the bad and good revision, and records the row; it does not
+  commission another review.
+- Writing or editing a skill, or changing a rule or pointer in `AGENTS.md`:
+  `writing-for-agents`.
 
 Only the user starts the five user-invoked entry points, which pi spells
 `/skill:<name>`: `/skill:to-spec`, `/skill:to-tickets`, `/skill:implement`,
 `/skill:handoff`, `/skill:teach`. Suggest them when they fit; never start them
 yourself.
 
-`grilling` and `teach` are ported straight from
+`grilling`, `teach` and `writing-for-agents` are ported straight from
 [mattpocock/skills](https://github.com/mattpocock/skills) rather than through that
 stack, and `licenses/NOTICE.md` records them separately. `grilling` therefore
-sits in the trigger list above although it is not one of the twelve. It is
-model-invoked (so it is advertised by its description, and `/skill:grilling`
-still works). `teach` is user-invoked and stateful: it builds a
+sits in the trigger list above although it is not one of the twelve adapted
+skills. It is model-invoked (so it is advertised by its description, and
+`/skill:grilling` still works). `teach` is user-invoked and stateful: it builds a
 teaching workspace outside any project checkout — never in this one — and the
 course is continued by starting a session in that directory and asking for the
 next lesson, or by `/skill:handoff` out of the session you are in.
+
+`writing-for-agents` is model-invoked too, and it is the rulebook for the prose
+this repository and its projects hand to an agent: skill bodies and
+descriptions, `AGENTS.md` bullets, and the pointers that reach a `references/`
+file. Load it before writing or reshaping any of those, and before adding a
+rule here. `references/skill-mechanics.md` covers the skill-specific part —
+frontmatter, the model-invoked vs user-invoked choice, and router skills.
+
+`prevent-recurrence` is ours: the correction-to-check loop, the ordered ladder,
+the rule table, the ratchet and "the diagnostic names the fix" come from pstack's
+`/correct`; the judgment boundary — when a lesson cannot be encoded, make the
+instruction more prominent and show the failure mode — comes from
+`principle-encode-lessons-in-structure`. The static checker for the table and
+the lint-locality test are added here. It is model-invoked because a repeated
+correction is something the agent can notice, and `/skill:prevent-recurrence`
+still works. Its Python recipes are in `references/python.md`. It ends at the
+check, the proof and the row; committing and reviewing stay with the existing
+skills and the review policy below.
 
 Three repo rules win over those skill bodies, and the skills say so in place:
 
@@ -263,9 +301,35 @@ Three repo rules win over those skill bodies, and the skills say so in place:
 
 ## Subagent tools
 
-The five management tools — `subagent_status`, `subagent_cancel`,
-`subagent_interrupt`, `subagent_resume`, `subagent_clean` — are **not declared**
-in this repo's sessions: `defaultTools: ["+tool_search"]` in
+**A child may run inside a worktree, and on this host it must be told which agent
+dir to use.** `bin/pi-agent-dir` has given this checkout a package-free agent dir of its own,
+a sibling of the shared one (`bin/pi-agent-dir --print` names it). A child rooted in
+`.worktrees/<slug>` inherits `PI_CODING_AGENT_DIR` from you, which is the *shared*
+dir with this repo installed as a package — so pi loads both that package and the
+worktree's own `.pi/`, and exits 1 on duplicate tool registration before any model
+call:
+
+```
+Tool "update_goal" conflicts with .../.worktrees/<slug>/.pi/extensions/goal.ts
+```
+
+Pass the per-project dir instead, and the worktree's copy is the only one loaded —
+which also means the child runs the branch's code and the branch's skills:
+
+```bash
+cd .worktrees/<slug> && PI_CODING_AGENT_DIR="$(bin/pi-agent-dir --print)" pi -p "<task>"
+```
+
+The `subagent` tool has no env argument, so for a child that must live in a
+worktree, run it this way (or `pi --attach-subagent` into an existing session)
+rather than through `subagent({ cwd })`. Launching with `cwd` = the main checkout
+and `cd`-ing inside each command is the fallback: it starts, but it runs the main
+checkout's extensions and skills, not the branch's — which is enough for file
+edits and wrong for anything that tests the branch itself.
+
+The six management tools — `subagent_wait`, `subagent_status`,
+`subagent_cancel`, `subagent_interrupt`, `subagent_resume`, `subagent_clean` —
+are **not declared** in this repo's sessions: `defaultTools: ["+tool_search"]` in
 `~/.pi/agent/settings.json` puts them behind `tool_search` so their descriptions
 and schemas stop riding along on every request (measured: ~890 tokens a
 request). `subagent` itself stays declared.
@@ -275,9 +339,13 @@ So reach them in two steps:
 1. `tool_search` for the tool you want.
 2. Then call it, e.g. `subagent_status({ id })`.
 
-There is no blocking wait, so collecting a result means polling
-`subagent_status` — `subagent_status({ compact: true })` is the cheap
-one-line-per-run form, and the single-run path is the one that returns output.
+Start, then wait once: `subagent_wait({ id })` blocks until the run settles and
+returns its record — `subagent_wait({ ids })` waits for a whole fan-out, and a
+timed-out wait returns the current state rather than an error. Keep
+`subagent_status` for the live "what is it doing right now" question
+(`subagent_status({ compact: true })` is the cheap one-line-per-run form, and
+the single-run path is the one that returns output), not for collecting a result
+you could have waited on.
 
 ## Reviews: one per change, and only when asked
 
@@ -313,7 +381,8 @@ config lacks, add it to the config first. Which model sits in which capability
 band is a human judgement, not the agent's.
 
 Every candidate must name `opencode-go`, the provider this machine actually
-authenticates; the judge is the only model on another provider (`openrouter`).
+authenticates; the judge is the only model on another provider (`opencode`,
+OpenCode Zen, for the free `jev-1.13-free` classifier — same `OPENCODE_API_KEY`).
 The policy is built into `.pi/extensions/review-triage/config.ts`, so installing
 the package is enough, and the same policy is written out for editing as
 `.pi/extensions/review-triage/review-triage.example.json`; a test fails if a
@@ -327,17 +396,90 @@ therefore never names a model this machine cannot run without saying why.
 A `show-me-your-work` trail does not get its own reviewer. If a review is
 commissioned, hand the trail to that one reviewer alongside the diff.
 
+## Rules and enforcement
+
+| Rule | Level | Enforced by | Proof |
+|---|---|---|---|
+| A branch descends from origin/dev and carries only its own commits | test | `node tools/branch-base.mjs` | `tools/branch-base.test.mjs` |
+
+One row per rule, and the row names what fails when the rule is broken. This
+table is the single source of truth: no separate registry, and prose in this file
+is a rule only once a row here enforces it. The checker validates the shape —
+the four columns, an allowed level, a non-empty enforcer, a proof that exists,
+no duplicate rule, no prose row without `judgment: <reason>`:
+
+```bash
+node .pi/skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md
+```
+
+The branch row is the dogfood rule earned by the three recorded misses under
+"Branches" above: `tools/branch-base.mjs` fetches `origin/dev` and classifies the
+branch, `tools/branch-base.test.mjs` builds the fixture repositories, and both
+run in `prove-it-works` and in CI. Its four classifications (`correct`,
+`behind-dev`, `foreign-commits`, `wrong-base`) are documented in the script's
+header. The table format and the checker's `--json` contract are in
+`.pi/skills/prevent-recurrence/references/rule-table.md`.
+
 ## Tests
 
 ```bash
 bash .pi/extensions/subagent/test/setup-deps.sh              # once: link pi's packages
-node --test .pi/extensions/subagent/test/*.test.ts
+node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts
 (cd .pi/extensions/opencode-go-provider && node --test)  # provider package tests (separate tree)
+node --test .pi/skills/prevent-recurrence/scripts/test/*.test.mjs  # rule-table checker
+node .pi/skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md  # the rule table; must exit 0
+node tools/skills-index.mjs --check                     # the README's skill index; must exit 0
+node --test tools/mcp-catalogue.test.mjs                 # catalogue install tests
+node --test tools/branch-base.test.mjs                   # branch-base check tests
+node tools/branch-base.mjs                               # the branch-base rule; must exit 0
 ```
+
+Green is necessary, not sufficient: a gate proves the suite passes, not that it
+covers what you changed. Before reporting a behavior change as done, revert it in
+one edit and confirm the test that covers it goes red; restore and re-run. Report
+the test that failed. Measured on one task: the check appeared only in runs that
+had read `prove-it-works`, and a model that never opens a skill body never
+performed it. So it is written here, in context every turn, as well as in that
+skill.
 
 Run it with `bash` (or `sh`), not as `./setup-deps.sh` — see "Line endings"
 below. Node runs the TypeScript directly; there is no build step. See
 `.pi/extensions/subagent/test/README.md` for what is and is not covered.
+
+**`--test-concurrency=8` is not optional.** Node defaults the file concurrency to
+`availableParallelism() - 1`, which is **1** on this 2-core host, so the
+"parallel" runner was running one file at a time: 184 s of wall clock for 67 s of
+CPU (36 %), which says the suite is wait-bound, not CPU-bound. Measured
+2026-11-16: 119-132 s with the flag at 8, and no further gain at 16 (132 s), so
+the number is fixed rather than derived from `nproc`.
+
+Raising it also exposed two tests that had only ever passed because nothing ran
+beside them, both fixed here: a `btw` viewer test that waited 8 s for a spawned
+`node` process to render (now 30 s), and a widget ticker that needed two 20 ms
+ticks inside 120 ms (now 500 ms). Both now assert the behaviour rather than the
+machine, which is the rule `helpers.ts` already states for its own poll bound. If
+you raise the concurrency and see a red run, suspect a missing or tight wait
+before you suspect the code.
+
+#### One heavy thing at a time on this host
+
+`cat /proc/loadavg` and `ps` before you time anything, and record the load average
+beside every number you keep. This host has 2 vCPUs and more than one agent
+session runs on it, so a benchmark grid, another session's suite or a `devc` call
+will take the load from 0.4 to 33 — and a measurement taken in that window is a
+measurement of someone else's work. It cuts both ways: a grid started while
+another session is timing makes *its* numbers meaningless, which is worse than
+being slow, because each side then spends an hour triaging a "flake" that was
+contention.
+
+Two rules follow. **Never compare two timings taken at different loads** — re-run
+the pair, or say the comparison cannot be made. And when the suite goes red under
+load, **run the failing file alone before calling it a bug**: every red we have had
+under contention was a wall-clock bound in a test rather than the code it tests —
+a viewer waiting on a spawned `node` process, a 20 ms ticker needing two ticks, a
+widget row read one ticker before it refreshed itself. Those bounds are widened
+now, but the lesson is general: suspect a missing or too-tight wait first, and
+check the load average before you suspect the product.
 
 #### Typechecking: deliberately none
 

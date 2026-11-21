@@ -4,6 +4,475 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.15.0 — 2026-11-21
+
+Added:
+
+- **The implementation loop is in `implement`, where it is already in context,
+  and `tdd` is small enough to load on a whim.** Measured earlier: across six
+  real runs of one task, `tdd`'s description changed the order (3/3 wrote the
+  test first with it available, 0/3 without) while the 4.6 KB body was opened in
+  only one of three. So the body was doing little and the pointer was doing the
+  work. Three changes follow from that. `tdd/SKILL.md` drops from 4,607 B to
+  2,902: the seam detail moves to `references/seams.md`, the anti-pattern list
+  and the mocking boundary to `references/anti-patterns.md`, and the body keeps
+  the loop, the two-imagined-edits test, the exceptions and the report. The loop
+  itself is now also in `implement` section 4, so a unit build has it without
+  loading anything, and `coding-skills.test.ts` compares the two copies byte for
+  byte between `tdd-loop` markers, so they cannot drift. `prove-it-works` gains
+  the consequence that makes the body matter: revert the new behavior in one
+  edit, confirm the covering test fails, restore and re-run, and report the test
+  that failed - a change with no test that can fail is `not_run`, never `passed`.
+  `tdd`'s body carries a 3,000 B cap in the same test file so it cannot grow
+  back.
+
+- **The README says which skills you start and which the agent starts, and it
+  cannot drift.** The inventory was 24 rows of 25 skills, five of them labelled
+  `User-invoked /skill:<name>:` and the rest unlabelled, so "unlabelled means
+  model-invoked" was a convention a reader had to infer and `add-model` was
+  missing entirely. The README now has a **Skills and how they are invoked**
+  section that states the axis and the two rules that follow — user-invoked
+  orchestrates and may load model-invoked skills but never starts another
+  user-invoked one; model-invoked is reached by the agent when its description
+  matches, and costs its description in context every turn — followed by two
+  tables, 5 user-invoked and 20 model-invoked, each row linking to the skill and
+  carrying its trigger text. The tables are generated from the frontmatter by
+  `tools/skills-index.mjs --write` (stdlib only, `--check` for the gate), and
+  `skills-index.test.ts` fails when the README and the skills disagree in either
+  direction: editing the README by hand or a description without re-rendering
+  are both red. The layout follows mattpocock/skills' `## Reference` split by
+  who-can-invoke, with pstack's "use it when" column doing the work in each row.
+  The Contents table gains the missing `add-model` row and a legend pointing at
+  the new section; the Tests gate gains `node tools/skills-index.mjs --check`.
+
+- **`writing-for-agents` is ported, and `worktree` stops being one 32 KB read.** The
+  port is MIT material from mattpocock/skills at the commit already pinned in
+  `licenses/NOTICE.md`, model-invoked because the trigger — writing or editing a
+  skill, or changing a rule or pointer in `AGENTS.md` — is something the agent
+  notices mid-task. Its description is rewritten in the house form (202 B, what it
+  does then the trigger branches), its `SKILL-MECHANICS.md` moves to
+  `references/skill-mechanics.md` to match the other skills and to be covered by
+  the "every `references/*.md` is linked" assertion this branch's ticket adds, and
+  upstream's `agents/openai.yaml` is not installed because pi does not read it.
+  The body is upstream's text apart from a title heading. It is registered in the
+  `pi` manifest, the README table, `licenses/NOTICE.md` and
+  `coding-skills.test.ts`'s `PORTED` list, and it has a bullet in `AGENTS.md`'s
+  trigger list. Its role is split from `prevent-recurrence` in both bodies: that
+  skill decides which level a lesson lands on and records the row; this one
+  decides how the line is worded.
+
+  `worktree` becomes a 147-line `SKILL.md` and three grouped references —
+  `lifecycle.md` (create, list, open, remove), `review-repair.md` (inspect, test,
+  `git worktree repair`) and `parallel.md` (one branch per worktree, subagent
+  `cwd`, and the duplicate-extension failure a child rooted in a worktree hits).
+  The loaded file is 8,483 B where it was 32,235, and `worktree` was 41 of 241
+  skill loads in the last 242 sessions, so it was 47.8% of all loaded skill
+  bytes. The split is checked mechanically: all 12 original headings are present,
+  and all 22 code blocks are byte-identical. Three pointers that crossed a file
+  boundary now name their anchor (`lifecycle.md` § Create, `review-repair.md` §
+  Review, `lifecycle.md` § Remove) instead of saying "above".
+
+  Ticket 05 is re-scoped from "23 skills become ~15" to "consistent, concise,
+  correctly triggered": the measured load is 241 across 242 sessions, so the
+  dormancy the prune assumed is not there, and every zero-load skill has a
+  workflow reference that keeps it. The count is an output (25). The remainder —
+  the `add-model` split at line-level boundaries, the 250 B/150 B description cap
+  with its four new test assertions, and making `tdd` the stated default
+  implementation style instead of a seam-gated option — is recorded on the
+  ticket with its acceptance criteria.
+
+- **`subagent_wait` replaces polling a subagent's status with a single wait.
+  #163** The session baseline recorded 681 `subagent_status` calls against 39
+  `subagent` starts — 17 model turns per run asking "done yet?", each one
+  context the parent pays for. The new management tool blocks once: with `id`
+  it resolves when the run reaches a terminal state and returns the same record
+  `subagent_status` returns; with `ids` it waits out a whole fan-out and returns
+  every settled run plus the still-running ones; on timeout it returns the
+  current record plus the latest pane, never an error, with a run still queued
+  reported as `queued` and every failed-to-start, cancelled, dead or
+  interrupted run returned at once. If the session ends first, the wait says so
+  (`details.ended`) and returns the live record; it never calls a run settled
+  because shutdown killed it, including under `PI_SUBAGENT_KILL_ON_SHUTDOWN`.
+  A `timeoutMs` above 2^31-1 is clamped, because `setTimeout` would otherwise
+  fire after 1 ms. It adds no second poll loop: waiters are resolved by the
+  terminal transitions the existing settle watcher (and cancel, interrupt,
+  shutdown) already drive, so a result lands within the 500 ms
+  watcher tick. The tool descriptions and `AGENTS.md` now teach "start, then
+  wait once" — `subagent_status` keeps the live what-is-it-doing-now question —
+  and `subagent-wait.test.ts` pins the acceptance: a scripted three-child
+  fan-out records exactly 3 starts, 1 wait and zero status calls. A fan-out
+  wait returns a settled run's output but not its pane — a dead TUI frame full
+  of spinner remnants once the child is gone — so three children no longer add
+  three panes to the parent's context; only a still-running or interrupted run
+  carries a pane, the same rule the status list uses, and the record keeps the
+  last snapshot for `subagent_status({ id })`. A failed run whose result file is
+  unusable now carries that pane inside its error, because the session is reaped
+  the moment the run settles and the snapshot is otherwise the only readable
+  trace left.
+
+- **The branch-base rule is a check now, not a review round.**
+  `tools/branch-base.mjs` fetches `origin/dev` and classifies the branch in one
+  line: `correct` (what the branch adds has exactly one root, and that root sits
+  on the current `origin/dev`), `behind-dev` (the dev tip already contains HEAD,
+  so it gets the start-again line rather than a base failure), `foreign-commits`
+  (the range starts on an older dev because dev was merged in instead of rebased
+  onto, or a merge brought a second lineage in — the shape a single
+  "oldest commit" test reported as `correct` while the foreign commits rode
+  along), and `wrong-base` (it never descends from `origin/dev` at all — the
+  branch-off-`main` mistake — with the branch point named on the line). Exit 0
+  only for `correct`, 1 with the fix otherwise, and 2 whenever the check could
+  not run, which is never a pass: no `origin/dev`, a fetch that failed (it would
+  otherwise classify against a stale base), a shallow clone whose grafted
+  history cannot decide ancestry, or a repository with no commit yet. This rule has three recorded misses
+  in `AGENTS.md`, every one caught by a reviewer; `prove-it-works` now runs the
+  check before a commit, and a new `.github/workflows/checks.yml` runs it on
+  every pull request into `dev` and push to `dev` alongside the subagent,
+  provider, rule-table and branch-base test trees — full history, the pull
+  request's head commit rather than the merge commit, and pi installed globally
+  first, because `setup-deps.sh` links the globally installed packages and a
+  clean runner has none. The rule is the first row of `AGENTS.md`'s new "Rules
+  and enforcement" table, so the rule-table checker validates the rule that
+  produced it. Stated in the script's header rather than papered over: a branch
+  stacked on an *unmerged* feature branch still reads `correct` while that base
+  is unmerged, because the range then has a single root on `origin/dev`; and a
+  commit committed on top of this branch's own is indistinguishable from its own
+  work, which the root count cannot see.
+
+- **`prevent-recurrence` is a loadable skill now, with the Python adapter its
+  first conversion needs.** The scaffold that shipped with the checker was
+  deliberately hidden from model selection: an advertised skill with no process
+  behind it is worse than an absent one. This change writes the process. The
+  description advertises the second correction of one mistake class; the body
+  pins the inputs (conversation, review comment, revert, fix commit, or bad and
+  good snippets), the ordered ladder — architecture, type, lint, test, prose —
+  with a required reason why every higher rung did not work, the question that
+  sends a semantic rule to a type or a test instead of a brittle lint,
+  existing-tool-first, the bad-and-good proof with both commands and exit codes,
+  the shrinking ratchet, the no-suppression rule, and the stop before committing
+  or starting a review. It ends with a fixed report: rule, evidence, level, why
+  not higher, check, proof, ratchet, table row, checker result, open work. The
+  Python adapter is `references/python.md`: Ruff `TID251` with a `msg` that names
+  the replacement, the stock rules worth selecting first (`S110`, `BLE001`,
+  `B006`, `RUF006`, `PGH003`, `RUF100`), ast-grep with `message`, `note`, `fix`
+  and `sg test`, `import-linter` contracts, and a project test as the fallback.
+  Every recipe has a worked bad and good example and the exact command; they
+  were run on 2026-11-20 with Ruff 0.17.6, ast-grep 0.51.3, import-linter 2.17
+  and Python 3.12.3 in a scratch venv only — this repository still consumes no
+  Python or npm package. The dry run on a `/tmp` fixture records the whole path:
+  `TID251` exits 1 on the bad revision and 0 on the fix, the row validates, and
+  the checker exits 0; the transcript is
+  `docs/experiments/prevent-recurrence-dry-run.md`. The checker itself is the
+  canonical `scripts/rule-table.mjs`, unchanged; a project vendors it under
+  `tools/` and records the contract version and hash beside it. The four-week
+  branch experiment is ticket 05 and is not in this change. `diagnosing-bugs`,
+  `implement` and `prove-it-works` now name the skill at their trigger, the
+  `coding-skills` test checks its frontmatter and links with the other skills,
+  and README, `AGENTS.md` and `licenses/NOTICE.md` advertise and credit it (the
+  package manifest already listed it).
+
+- **The skill's JS/TS adapter lands too, every recipe run rather than
+  remembered.** `references/js-ts.md` carries the half of the stack a JavaScript
+  or TypeScript repository needs, in the Python adapter's shape and with the same
+  command-plus-exit-code discipline: `no-restricted-imports` and
+  `no-restricted-syntax` for zero-code bans whose message names the replacement;
+  a local flat-config rule (`meta.messages`, `meta.hasSuggestions`, `suggest`)
+  for the case where the diagnostic must name the canonical file or symbol;
+  dependency-cruiser for the module direction a line cannot prove;
+  typescript-eslint's `no-floating-promises` and `no-misused-promises` for the
+  root causes a syntax rule cannot see, with the project-service requirement
+  spelled out; oxlint for the inner loop and, explicitly, what it cannot yet
+  carry; and the `eslint-disable` / `@ts-ignore` / `@ts-expect-error` audit.
+  Everything was run on 2026-11-20 against two scratch projects under `/tmp` —
+  ESLint 10.15.0 and `@eslint/js` 10.0.1, typescript-eslint 8.73.0 on TypeScript
+  6.0.3, oxlint 1.94.0 with `oxlint-tsgolint` 7.0.2007, dependency-cruiser 18.8.0,
+  `@eslint-community/eslint-plugin-eslint-comments` 4.8.1 on Node 24.22.2 — with
+  the bad and good exit codes recorded for every recipe (exit 1 at the bad
+  revision, 0 at the good one, above). The limits are stated with the passing run as evidence, not
+  as prose: `no-restricted-imports` does not catch an inline `import("…")` type;
+  `--fix` never applies a `suggest` (both `--fix` and `--fix-type suggestion`
+  leave the file unchanged), and dropping `meta.hasSuggestions` makes ESLint 10
+  exit 2 instead of reporting; oxlint 1.94.0 rejects `no-restricted-syntax`
+  outright, exits 0 on a floating-promise file when `--type-aware` is omitted
+  (so the fast pass is not the typed gate), and surfaces no suggestions;
+  dependency-cruiser's console reporter prints the rule name but not its
+  `comment`, which is why the name carries the fix; and TypeScript 7.0.2 makes
+  typescript-eslint 8.73.0 exit 2 with the message that tells you to run it on
+  the TS 6 API, which is why the runs pin 6.0.3. `SKILL.md` and the README name
+  the new reference. No dependency is added to this repository: the examples are
+  scratch projects, the manifest is unchanged, and the harness still consumes no
+  npm packages.
+
+- **The MCP servers this package uses are a catalogue now, installed by one
+  command and off until a project asks for them.** `pi install` shipped this
+  package's extensions and skills and none of its MCP servers, because the `pi`
+  manifest has no MCP key and pi reads MCP configuration only from
+  `<agent dir>/mcp.json` and a trusted project's `.pi/mcp.json`. A colleague
+  therefore got the operator's setup minus Figma and Playwright, and the obvious
+  cure — `pi mcp add` on each machine — cannot write a *disabled* entry, so it
+  switched both on in every project at once, with an OAuth prompt and two
+  background processes attached. `mcp/catalogue.json` is now the one list
+  (Figma over streamable HTTP with Figma's `oauth.clientName` compatibility
+  value, Playwright through `npx -y @playwright/mcp@latest`), every entry
+  `"enabled": false` with an explicit `"exposure": "codemode"` and no `auth`;
+  `tools/mcp-catalogue.mjs` is the one merge; and it has two surfaces over it —
+  `bin/mcp-catalogue` for a setup script or a container, `/mcp-catalogue` inside
+  a session. The merge is add-only: a name already in the file, pinned or edited,
+  is left byte-identical and reported as skipped, the entries are spliced into
+  the existing text rather than re-serialised so unrelated keys, key order and
+  indentation survive, and a second run reports nothing added and changes
+  nothing. Seeding is deliberately the other semantic: `--if-missing` creates the
+  file only when it is absent and never merges, which is what `bin/pi-agent-dir`
+  (whose `--check` now reports the catalogue) and this repo's `postCreate.sh` use
+  on a fresh dir or volume, so an entry deleted on purpose is not resurrected by
+  a rebuild. Nothing connects until a project opts in: a trusted project's
+  `.pi/mcp.json` carrying only `{"figma": {"enabled": true}}`, or `/mcp` →
+  *Enable in this project*, which writes the same override — measured with
+  `pi mcp list` in a temp agent dir, which listed both as `disabled (codemode,
+  global)` and exited 0 without contacting either. The README gains an "MCP
+  servers" section covering that recipe, worktrees, which agent dirs seed
+  themselves, adding a server, the Figma `clientName` note and the Playwright
+  pin, and it no longer refers to a `$(pi agent dir)` command that does not exist
+  (`pi --help` lists no `agent` subcommand; the dir is `PI_CODING_AGENT_DIR`,
+  else `~/.pi/agent`). No setting, no server registration and no credential is
+  added by any of it.
+
+- **The CI gate runs the README's skill-index check, and a test holds the gate
+  list to `AGENTS.md`'s `## Tests` block so a listed check cannot go unrun.**
+  `node tools/skills-index.mjs --check` was named in the Tests block — the list
+  a session actually runs — and above, in this section, but had no step in
+  `.github/workflows/checks.yml`, so the generated skill index could go stale on
+  a branch whose local suite was green. The workflow's own comment claiming to
+  be "the gate, run the way AGENTS.md → 'Tests' runs it" is exactly what missed
+  it: prose about parity is not parity. It is now a `Skill index` step, in the
+  position `AGENTS.md` orders it. `checks-parity.test.ts` compares the two lists
+  in both directions and in order — every gate `AGENTS.md` names must appear as
+  a `run:` step, and every `run:` step must be a gate `AGENTS.md` names — so
+  adding one without the other is red. The three environment-prep commands
+  (installing pi, fetching `origin/dev`, and linking pi's packages through
+  `setup-deps.sh`, which `AGENTS.md` annotates `once`) are enumerated in the
+  test as prep rather than inferred from a step's name, and the checkout and
+  Node setup are `uses:` steps with no command at all, so a new `run:` step has
+  to be classified by hand before it can pass.
+
+Fixed:
+
+- **The Playwright catalogue entry asks for Chromium and headless, so a real
+  action works on the hosts pi runs on.** The bare `npx -y @playwright/mcp@latest`
+  launch connected and listed its 25 tools, and then failed every call twice
+  over: the server's default browser is the `chrome` channel, which Playwright
+  cannot install on arm64 (`ERROR: not supported on Linux Arm64`), and its
+  default is headed, which has no window on an agent host with no `DISPLAY`.
+  Measured here on an arm64 host: with the flags added, `browser_navigate` to
+  `https://example.com` returned the page and its snapshot, and a pi session
+  driving it through codemode reported the real page title. The catalogue now
+  passes `--browser chromium --headless`, and the README carries the one-time
+  per-machine step that makes them work — `playwright install chromium` through
+  the same Playwright version the server ships, plus `install-deps` for the
+  system libraries — and states that a change to the catalogue's arguments does
+  not reach an entry someone already has, because the merge is add-only.
+- **The worktree sweep no longer goes blind on a C-locale host.** The Remove
+  recipe reads `tmux list-panes -a` as two fields and used a tab as the
+  separator. tmux rewrites a tab in `-F` output to `_` when the *server* ran in
+  a non-UTF-8 locale - measured on the stock Ubuntu and Debian packages
+  (tmux 3.2a-3.6) whenever `LANG` and `LC_ALL` are unset - so `awk -F'\t'` saw
+  one field, matched no pane and killed nothing, after which the removal deleted
+  the tree under a live shell and reported success. The separator is `|` now: it
+  is printable in every locale, and a path containing one is pathological. Two
+  tests pin it, because a build that keeps the tab even in C (this host's tmux
+  3.4 does) cannot fail the live one: a static assertion that the recipe embeds
+  no control character, and a sweep against a server started with `LC_ALL=C`,
+  which fails on the stock packages before the fix with "a session rooted in the
+  removed tree survived the sweep". The same separator replaces the tab in the
+  fake-tmux fixture and in the live fixture's own listing, so neither harness can
+  pass by inheriting a UTF-8 locale either.
+
+- **A child rooted in a worktree is told which agent dir to use, before the
+  duplicate-extension failure costs another run.** The `subagent` tool has no
+  `env` parameter, so a child inherits the parent's `PI_CODING_AGENT_DIR` — which
+  here is the *shared* agent dir with this repo installed as a package. Rooted in
+  `.worktrees/<slug>`, pi then loads both that package and the worktree's own
+  `.pi/` and exits 1 on duplicate tool registration before any model call. The
+  fact that this host already has the fix (`bin/pi-agent-dir` gives the checkout
+  `~/.pi/agent-my-agent-setup`) was recorded but not connected to the `subagent`
+  tool, so the workaround used instead was `cwd` = the main checkout, which runs
+  the *main* checkout's extensions and skills — enough for file edits, wrong for
+  anything testing the branch. `AGENTS.md` now states the failure, the exact
+  invocation (`PI_CODING_AGENT_DIR="$(bin/pi-agent-dir --print)" pi -p "<task>"`
+  from inside the worktree), and that this is how a child runs the branch's own
+  skills. The path is resolved, never written: `devcontainer-agent-dir.test.ts`
+  allows the literal in `devcontainer.json` only, so a copied directory name in a
+  tracked doc fails the suite — which is how the first version of this entry
+  landed red and had to be corrected;
+  `worktree/references/parallel.md` gained the same line beside its
+  package-copy paragraph, which previously described only the worse fallbacks.
+
+- **The mutation-proof requirement is measured: it is followed when it is in
+  context, and it changes evidence rather than test quality.** `AGENTS.md`'s
+  "name the test that fails when this change is reverted" was tested on one task
+  with two models, 3 runs per cell, arms differing only in whether that rule is in
+  `AGENTS.md`. deepseek-v4.1-flash: 3/3 performed the check with the rule, 2/3
+  with only the skill-body mentions, and 0/9 before any such requirement existed;
+  glm-5.3-flash: 1/3 either way, and it *claimed* the check in 2/3 while the
+  transcript showed no revert — a confident model describing the check instead of
+  doing it. Reverting the implementation failed 2–15 tests in all twelve runs, so
+  the requirement did not improve the tests on a task with an obvious seam; what
+  it changed is whether "done" came with evidence. Record, method, per-run table
+  and caveats: `docs/experiments/mutation-proof-step.md`.
+
+Maintenance:
+
+- **Four lifecycle assertions no longer read the completion message on the
+  statement after the status.** `settleRun` writes the run's terminal status
+  (`await persist()`) and only then notifies (`await notifyCompletion`), so the
+  status is observable before `sendMessage` has been called: the two are
+  separate observables, and asserting one immediately after the other assumes a
+  simultaneity the product never promises. That shape failed the `dev` gate in
+  CI run 44714766416 (attempt 1, `lifecycle-interrupt.test.ts:275`,
+  "and the run reports its completion normally  0 !== 1"), on the identical tree
+  that had passed on the pull request minutes earlier and passed again on
+  attempt 2 in 48 s. The failing test took 1016.9 ms, the same as a green run, so
+  it was not a slow machine: the record it read was already fully correct
+  (`completed`, the child's output, `interrupts: 1`) with no message recorded
+  yet. The four sites — three in `lifecycle-result.test.ts` and one in
+  `lifecycle-interrupt.test.ts` — now wait for the message with
+  `waitForCompletionMessage`, which names the status and the record if no
+  message ever arrives, so a run that stops notifying still fails and says
+  which half is missing. No assertion was relaxed: each still requires exactly
+  one message, or the one message's content. The mechanism, which the first
+  write-up left open: `writeJsonAtomic` publishes the status with `rename(2)`,
+  and everything from there to `sendMessage` is microtasks — the write chain's
+  continuation, `settleRun`'s, and the synchronous push — so a `readFile` issued
+  from another continuation can see the new bytes *before* the settle path's own
+  continuation runs. The test's poll issues its read from a timer, which is the
+  exposed shape: measured with the same two calls in a scratch harness under
+  load, reads that saw the new bytes saw them before the writer moved on in
+  1.3-3% of trials, with a window of about 1 ms median and 8 ms worst, and only
+  when a poll landed inside the ~1 ms write chain. That makes the flake rare
+  rather than mysterious — a few runs in a thousand across the four sites —
+  which is also why 60 replays saw nothing (about a 95% chance of that) and why
+  the failing run took 1016.9 ms against the green rerun's 1006.5 ms, with no
+  retried tick, no watcher restart and no logged notify failure anywhere in the
+  job. It is a harness artefact, not a product race: an in-process observer
+  cannot see the gap (it sits inside a microtask drain) and an out-of-process
+  one cannot see `messages` at all, so `persist`-then-notify — durable state
+  first, notification after — stays as it is. Making the notification 50 ms
+  late in the product reproduced the CI's exact `0 !== 1` with the old shape and
+  left the new shape green.
+
+- **`lifecycle.test.ts` is nine topic files now, so its waits overlap and the
+  suite's 8-lane floor is no longer dominated by one file.** It was 2,473 lines
+  with 89 tests, and it cost 97.3 s of wall clock on its own while using 4% CPU:
+  71 `waitFor` calls and 20 fixed sleeps, all orbiting the extension's
+  `POLL_INTERVAL_MS = 500`. Node runs test FILES concurrently but tests inside a
+  file strictly sequentially, so none of those waits could overlap with
+  anything, and because that one file took 97.3 s it alone set the floor for the
+  whole suite at `--test-concurrency=8` — every other file was ≤ 16.2 s. Split
+  by behaviour (launch/queueing, result finalisation, failure detection, the
+  activity snapshot and its stall rule, interrupt, shutdown/reload, the widget,
+  handoff/resume, and tool exposure) the waits run in parallel: the whole suite
+  went from 117.2-121.6 s to 46.3-53.9 s at `--test-concurrency=8` on this
+  machine, and the 8-lane floor the shape tool computes from a serial pass went
+  from 98.8 s to 24.2 s (the shape tool's serial pass over each tree; the
+  baseline was an untouched `origin/dev` worktree). The heaviest lifecycle file
+  is 21.3 s. All 89 tests moved unchanged — the count is identical, no assertion
+  was relaxed, and each new file passes on its own — with the fake
+  `ExtensionAPI`, its waits and its fixtures in `lifecycle-harness.ts`. Product
+  code and `POLL_INTERVAL_MS` are untouched: those intervals are the behaviour
+  under test. Worth knowing: the denser suite is what surfaced the
+  two tight bounds in the entry below — the `btw` viewer's 8 s wait for a
+  spawned `node`, and the widget's 20 ms ticker needing two ticks in 120 ms.
+  Both are widened there; this split did not cause either.
+- **The suite runs its files concurrently, which is what it always claimed to do.**
+  Node defaults `--test-concurrency` to `availableParallelism() - 1`, so on this
+  2-core host the runner was running **one file at a time**: 184 s of wall clock
+  for 67 s of CPU (36 %), which says the suite is wait-bound rather than
+  CPU-bound. The documented command now passes `--test-concurrency=8`: measured
+  2026-11-16 at 119-132 s, with no further gain at 16 (132 s), so the number is
+  fixed rather than derived from `nproc`. It is documented in `AGENTS.md` with
+  the reason, because a bare command loses the flag on the next copy-paste.
+
+  Parallelism also found two tests that had only ever passed because nothing ran
+  beside them, both fixed here rather than papered over: the `btw` viewer test
+  waited 8 s for a spawned node process to render (now 30 s), and a widget ticker
+  needed two 20 ms ticks inside 120 ms (now 500 ms). Both now assert behaviour
+  rather than the machine, which is the rule `helpers.ts` already states for its
+  own poll bound.
+- **The repeat-breaker ladder is withdrawn on measurement, and the frozen
+  baseline's corpus is corrected.** Row 7 of the harness ranking rested on "14×
+  the same `docker ps`; 8–9× the same suite", which counts commands that mention
+  `docker ps`/`node --test`, not repeats: no reachable session has 14 repeats of
+  one command, and the closest are 18 `docker ps` calls (all distinct) and 32
+  `node --test` calls (31 distinct). Re-measured over the frozen window across the host
+  agent dirs plus this container's private volume — reachable over `docker
+  exec`; the survey's 108-session baseline was host-only, despite the Method
+  paragraph — a consecutive bash exact-args streak of 3 fires in **0 of 124**
+  sessions, an identical-output streak of 3 in 1 (5 s), and the largest
+  verb-level run, 17 `docker exec` calls, is 17 different commands inside a
+  185-call session (75 of its calls are `docker exec`) — `devc` latency, not a
+  loop. Across all tools the only repeats
+  are `subagent_status`/`codemode` polling, the traffic `subagent_wait` (#163)
+  removed, so the reminder has no workload left. The candidate is rejected
+  rather than deferred, with its revival trigger in
+  `docs/tickets/harness-advancements/07-repeat-breaker.md`.
+  Ticket 03 is marked landed (#163) and ticket 00 in progress, where both had
+  still said `ready`.
+- **The comment question is measured, and the answer is `pupkeep` yes,
+  `analytics-agent` no.** R13 asked whether comment slop is a real problem in the
+  two projects before any comment skill was written: a stratified sample of 30
+  comments each, classified as invariant, external quirk, workaround
+  justification or narration, with 20% workaround justification as the bar. The
+  measurement is `tools/comment-audit.mjs` — stdlib only, read-only, `git
+  ls-files` for the inventory, ±3-line strata for suppressions and
+  timers/retries/async, and a fixed-seed draw with content-addressed IDs — plus
+  `docs/experiments/comment-audit.md` with all 60 units and the per-unit reason
+  for its class. `pupkeep` lands at 7 of 30 (23.3%, weighted 23.1% over 3,616
+  units), so a comment experiment is justified there; `analytics-agent` lands at
+  1 of 30 (3.3%, weighted 3.2% over 962), so nothing supports one there. The
+  margin in `pupkeep` is one unit: five of the seven are workarounds of a defect
+  or a hazard and two justify an error path, and dropping both error-path units
+  puts it at 5 of 30 (16.7%), below the bar — which is why the report tabulates
+  all three readings rather than quoting 23.3% alone. Two findings outlast the
+  percentage. `analytics-agent` has 49 suppression directives in 13 files, 44 of
+  them in `tests/`, and 6 of the 10 suppression-adjacent sample units are bare
+  `# type: ignore[...]` / `# noqa` with no reason recorded — the practice R8 now
+  forbids. `pupkeep` has none at all, and 17 of its 30 sampled comments are
+  invariants. No comment skill is added: R13 only asks that the question be
+  settled before one is written, and the ticket's scope refuses the skill either
+  way. The draft this replaces was re-derived from scratch, not adjusted: its 83
+  `analytics-agent` files were 86, its 63 directive lines were 49, its 218
+  `pupkeep` files counted the four vendored `web/vendor/*.mjs` it said it
+  excluded, and because it identified units by a sequential index no inherited
+  number — including its 10%/10% decision — could be carried over. Two
+  corrections to the draft were themselves wrong and are recorded in §6: 44 of
+  the 49 directives do sit in `tests/`, and an S pool larger than the directive
+  count is expected, not impossible, because adjacency is a window (63 S units
+  from 49 directives here).
+
+- **The review-triage judge is OpenCode's free Jev, not OpenRouter's paid one.**
+  The judge was `openrouter`/`typesafe/jev-1.13`; it is now
+  `opencode`/`jev-1.13-free`. Same System One protocol, same model family, one
+  fewer credential: `jev-1.13-free` is served by OpenCode Zen and authenticates
+  with the `OPENCODE_API_KEY` the four reviewers already need, so a machine with
+  the reviewer key but no OpenRouter key was losing triage entirely to a judge it
+  could have run for nothing. The provider is `opencode` and not `opencode-go`
+  because the Go endpoint serves chat models only — its provider registers no
+  classifier API at all — so the free Jev sits one provider over from the
+  reviewers, on the same key; `PROVIDER_ENV_VARS` now says so for both. Checked
+  against the live service before switching: a Choice question over that key
+  returned calibrated probabilities (`{"yes":0.82,"no":0.18}`) with `cost: 0`.
+  The built-in defaults, `review-triage.example.json`, the devcontainer seed, the
+  docs and the pinned tests move together, and `judgment().judge` reports
+  `opencode/jev-1.13-free` in the plan.
+
+- **`.devcontainer/pi/review-triage.json` had drifted to a judge the repository
+  never documented, and a test now pins it.** The seed file was added naming
+  `openrouter`/`perplexity/pplx-decider-v1.3:free` while the extension's defaults
+  and its example file named `typesafe/jev-1.13`; nothing read both, so a fresh
+  container was judged by a policy no test or document described. The new test
+  loads the seed and the example and requires the same judge and the same
+  candidates, because the seed exists to install *this* policy — which is what
+  the entry above assumed when it moved the judge.
+
 ## v1.14.0 — 2026-11-16
 
 Added:

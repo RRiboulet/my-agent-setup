@@ -1,6 +1,6 @@
 ---
 name: diagnosing-bugs
-description: "Diagnosis discipline for bugs, failing tests, CI failures, crashes, flaky behavior, and performance regressions: build a tight red-capable feedback loop first, reproduce and minimise, test ranked hypotheses, then fix the root cause with a regression test. Use when: something is broken, throwing, failing, flaky, or slow; the user says diagnose or debug this; or an earlier fix attempt did not work."
+description: "Diagnose to a confirmed root cause and a regression test, via a tight feedback loop and ranked hypotheses. Use when: something is broken, failing, flaky or slow; the user says diagnose or debug; or an earlier fix attempt did not work."
 ---
 
 <!-- Adapted from RRiboulet/agent-coding-skills; MIT notices for the underlying
@@ -91,6 +91,13 @@ Write the regression test before the fix, at a **correct seam**: one where the t
 2. Apply the smallest fix at the root cause.
 3. Watch the test pass, then re-run the original, un-minimised Phase 1 loop.
 4. Search for the same faulty pattern elsewhere and fix every instance.
+
+When the same class has now been corrected twice, the second fix is evidence of
+a repeat, not another instance to handle one at a time. Load the
+`prevent-recurrence` skill and turn the class into a check at the highest level
+that works, with the bad and good proof and a row in the repository's
+`AGENTS.md`. The regression test this phase writes proves one bug; the rule from
+that skill is what stops the class.
 
 ## Phase 6: Clean up
 

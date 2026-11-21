@@ -184,8 +184,18 @@ async function startViewer(answer: string, spec?: unknown) {
 		raw: () => output,
 		drawn: () => plain(output),
 		errors: () => errors.join(""),
-		/** Wait until the drawn text contains `needle`, or give up. */
-		async until(needle: string, timeoutMs = 8000) {
+		/**
+		 * Wait until the drawn text contains `needle`, or give up.
+		 *
+		 * The bound is generous on purpose, as `helpers.ts` argues for its own
+		 * poll: every assertion here spawns a whole node process and waits for it
+		 * to render, and the suite runs test files concurrently on a 2-core host.
+		 * 8 s went red at `--test-concurrency=8`; 30 s went red on the same box
+		 * while another session kept it at load ~20 (30.1 s measured). 60 s is
+		 * headroom, not a fix: this file spawns a viewer per assertion, and the
+		 * real repair is to spawn fewer of them (ticketed separately).
+		 */
+		async until(needle: string, timeoutMs = 60_000) {
 			const deadline = Date.now() + timeoutMs;
 			while (Date.now() < deadline) {
 				if (plain(output).includes(needle)) return true;

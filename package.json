@@ -13,6 +13,7 @@
       ".pi/extensions/btw/index.ts",
         ".pi/extensions/continue.ts",
       ".pi/extensions/goal.ts",
+      ".pi/extensions/mcp-catalogue.ts",
       ".pi/extensions/native-web-search.ts",
       ".pi/extensions/opencode-go-provider/index.ts",
       ".pi/extensions/repo-explorer/index.ts",
@@ -38,6 +39,7 @@
       ".pi/skills/in-your-own-words",
       ".pi/skills/librarian",
       ".pi/skills/native-web-search",
+      ".pi/skills/prevent-recurrence",
       ".pi/skills/prove-it-works",
       ".pi/skills/show-me-your-work",
       ".pi/skills/tdd",
@@ -46,7 +48,8 @@
       ".pi/skills/to-spec",
       ".pi/skills/to-tickets",
       ".pi/skills/update-changelog",
-      ".pi/skills/worktree"
+      ".pi/skills/worktree",
+      ".pi/skills/writing-for-agents"
     ]
   }
 }

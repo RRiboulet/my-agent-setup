@@ -1,6 +1,6 @@
 ---
 name: tmux
-description: "Drive interactive CLIs (python, gdb, lldb, psql) over a private tmux socket. Use when a process needs a persistent TTY that a one-shot bash call cannot provide."
+description: "Drive interactive CLIs (python, gdb, lldb, psql) over a private tmux socket. Use when: a process needs a persistent TTY that a one-shot bash call cannot provide."
 license: Apache-2.0
 ---
 
