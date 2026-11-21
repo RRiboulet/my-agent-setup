@@ -200,10 +200,24 @@ Maintenance:
   `waitForCompletionMessage`, which names the status and the record if no
   message ever arrives, so a run that stops notifying still fails and says
   which half is missing. No assertion was relaxed: each still requires exactly
-  one message, or the one message's content. Not reproduced locally — that file
-  passed 20/20 runs, and 60 replays of the failing sequence under parallel load
-  never saw the gap — which is why the fix is aimed at the ordering the code
-  proves rather than at a timing measured here; making the notification 50 ms
+  one message, or the one message's content. The mechanism, which the first
+  write-up left open: `writeJsonAtomic` publishes the status with `rename(2)`,
+  and everything from there to `sendMessage` is microtasks — the write chain's
+  continuation, `settleRun`'s, and the synchronous push — so a `readFile` issued
+  from another continuation can see the new bytes *before* the settle path's own
+  continuation runs. The test's poll issues its read from a timer, which is the
+  exposed shape: measured with the same two calls in a scratch harness under
+  load, reads that saw the new bytes saw them before the writer moved on in
+  1.3-3% of trials, with a window of about 1 ms median and 8 ms worst, and only
+  when a poll landed inside the ~1 ms write chain. That makes the flake rare
+  rather than mysterious — a few runs in a thousand across the four sites —
+  which is also why 60 replays saw nothing (about a 95% chance of that) and why
+  the failing run took 1016.9 ms against the green rerun's 1006.5 ms, with no
+  retried tick, no watcher restart and no logged notify failure anywhere in the
+  job. It is a harness artefact, not a product race: an in-process observer
+  cannot see the gap (it sits inside a microtask drain) and an out-of-process
+  one cannot see `messages` at all, so `persist`-then-notify — durable state
+  first, notification after — stays as it is. Making the notification 50 ms
   late in the product reproduced the CI's exact `0 !== 1` with the old shape and
   left the new shape green.
 

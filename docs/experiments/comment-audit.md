@@ -38,6 +38,26 @@ honest summary is that `pupkeep` is at or just above 20% depending on whether
 "justifies a deliberate error-handling shape" counts as a workaround, so 23.3%
 should not be read as a wide margin.
 
+## Follow-on: the experiment the threshold bought
+
+`pupkeep`'s 23.3% was acted on. An experiment branch there
+(`experiment/comment-discipline`, local, not merged) adds a check that a comment
+whose first sentence announces a dodge — "Backstop", "hack", "for now",
+"temporarily" and nine more — must carry `WORKAROUND(owner: …, expires: …)` and
+eight words naming the defect, with a 13-row ratchet baseline and a six-week
+window to 2027-01-02. The full design, the baseline command and the win/loss
+terms are in `pupkeep/docs/experiments/comment-discipline.md`.
+
+One caveat belongs next to that number rather than under it: the lexicon fires
+on **one** of the seven workaround units this audit sampled — the other six read
+"a macrotask, not a microtask", "not fatal", "does not wait out" and so on. So
+the experiment measures *announced* dodges (13 of 3,683 units, 0.35%), which is
+a different and much narrower thing than this report's 23.3%, and it does not
+inherit that figure. What closes the gap is the experiment's own D-time gate: a
+fresh 30-unit draw must read at most 20% workaround with no undeclared one in
+it, so the judgement at the end is this report's method, rerun, rather than the
+lexicon's recall.
+
 Two findings are worth more than the percentage:
 
 * **`analytics-agent`'s suppressions are silent.** 6 of its 10
