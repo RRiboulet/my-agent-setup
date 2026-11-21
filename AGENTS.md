@@ -246,7 +246,10 @@ than waiting to be told:
 - A **big task left unsupervised for a long time** — hours of work the user did
   not watch and will judge afterwards: `show-me-your-work`. Not for ordinary
   sessions.
-- Before saying work is done: `prove-it-works`.
+- Before saying work is done: `prove-it-works`. It asks for one thing no gate
+  can: **name the test that fails when this change is reverted.** Revert the
+  behavior in one edit, watch that test fail, restore, re-run. If no test can
+  fail, the change is `not_run`, never `passed`.
 - The same mistake class corrected a second time, or a review that calls a fix a
   repeat: `prevent-recurrence`. It chooses the highest level that can carry the
   rule, proves it at the bad and good revision, and records the row; it does not
@@ -430,6 +433,14 @@ node --test tools/mcp-catalogue.test.mjs                 # catalogue install tes
 node --test tools/branch-base.test.mjs                   # branch-base check tests
 node tools/branch-base.mjs                               # the branch-base rule; must exit 0
 ```
+
+Green is necessary, not sufficient: a gate proves the suite passes, not that it
+covers what you changed. Before reporting a behavior change as done, revert it in
+one edit and confirm the test that covers it goes red; restore and re-run. Report
+the test that failed. Measured on one task: the check appeared only in runs that
+had read `prove-it-works`, and a model that never opens a skill body never
+performed it. So it is written here, in context every turn, as well as in that
+skill.
 
 Run it with `bash` (or `sh`), not as `./setup-deps.sh` — see "Line endings"
 below. Node runs the TypeScript directly; there is no build step. See
