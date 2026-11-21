@@ -48,8 +48,8 @@ review comment, a revert, or commits. Not the same line twice.
   twice is one occurrence with two attempts.
 - **30 days, backwards from the current correction.** The current correction is
   one of the two; one earlier occurrence inside the 30 days is enough. Three
-  occurrences across three months are two repeats, and the row's count says which
-  repeat it is closing.
+  occurrences across three months are two repeats, and the row records the
+  occurrence count, so a reader can see which repeat it is closing.
 - **Evidence carries a date and a ref.** The evidence cell names each occurrence as
   a date plus a SHA, a PR, a review comment, or the conversation it came from. A
   correction with no second occurrence is a bug fix, not a repeat:
@@ -90,6 +90,7 @@ decided it.
 
 | date | correction | evidence | repeat count | level | rule | proof: command → exit codes | review rounds | notes |
 |---|---|---|---|---|---|---|---|---|
+| 2026-11-21 | Groundedness extraction treats period labels and evidence string cells as non-measurements | 2026-10-13 15:35 UTC, `2479ab9`; 2026-10-13 17:06 UTC, `7f3c5de`; 2026-10-13 18:52 UTC, `50a8260` | 3: 2026-10-13 → 2026-10-13 | test | Groundedness extraction treats period labels and evidence string cells as non-measurements | `cd analytics-agent && uv run pytest tests/test_manager_groundedness_labels.py -q` → bad `ce50a49` exit 1, good `d7872e5` exit 0; `node tools/rule-table.mjs check AGENTS.md` → exit 0 | 0 | Baseline: none (no existing violations; new regression test). Suppressions: none. Vendored checker: `tools/rule-table.mjs`, contract version 1, sha256 `9ab0994ddab7d256f654791fb6d89a8f315d577b092ceae83a82887d90645822`; proof `docs/proof/groundedness-labels.md`. The check pins extraction over report text and evidence values; it does not pin the graph's rephrase-retry or first-draft behavior from `2479ab9`/`7f3c5de`. Repeat count is occurrences: three fixes, two repeats, all on 2026-10-13. Capture: **full** for the extraction class as written — month/year labels, dates and evidence string cells are all red at `ce50a49` and green at `d7872e5`, and a real measurement next to a unit still passes. Deliberately out of scope, and a different class: `2479ab9`'s rephrase retry and `7f3c5de`'s first-draft preservation govern what happens when groundedness fails, not what counts as a measurement. Window opens 2026-11-21. |
 
 - **date** — the day the correction was handled, not the day of the first
   occurrence.
@@ -97,8 +98,10 @@ decided it.
   uses. A line number here is a bug fix, not a class.
 - **evidence** — every occurrence, each with a date and a ref. This is the column
   a later reader uses to decide whether the repeat was real.
-- **repeat count** — a number greater than 1, with the two dates it spans
-  (`2: 2026-11-05 → 2026-11-25`). See "A repeat, defined".
+- **repeat count** — occurrences of the class, not repeats: `3` means three
+  fixes and two repeats, and the two dates it spans follow it
+  (`3: 2026-11-05 → 2026-11-25`). Greater than 1, or the row does not belong
+  here. See "A repeat, defined".
 - **level** — `architecture`, `type`, `lint`, `test`, or `prose`, and it is the
   level the skill chose after walking the ladder. A `prose` row also carries
   `judgment: <reason>` in the target repository's table, per the skill.
@@ -110,8 +113,9 @@ decided it.
   reruns.
 - **review rounds** — the number of review passes the occurrence cost, defined in
   the next section.
-- **notes** — the baseline path and its starting count, suppressions with reason,
-  expiry and approver, open work, and anything the check cannot decide. A
+- **notes** — the capture (`full` or `partial`, and the evidenced forms the check
+  does not pin), the baseline path and its starting count, suppressions with
+  reason, expiry and approver, open work, and anything the check cannot decide. A
   correction to an earlier row is a dated note here, never a rewrite of the
   evidence above it.
 
@@ -121,7 +125,7 @@ Copy this row and fill it; nothing else in the table moves:
 | <YYYY-MM-DD> | <class in one sentence> | <occurrence 1: date, ref>; <occurrence 2: date, ref>; <this one: date, ref> | 2: <date> → <date> | <level> | <row text> | `<enforcer>` → bad `<ref>` exit 1, good `<ref>` exit 0; checker exit 0 | <n> | <baseline, suppressions, open work> |
 ```
 
-No rows yet: the first is ticket 07's conversion.
+The first row is ticket 07's conversion (2026-11-21).
 
 ## Review rounds, counted
 
@@ -160,11 +164,24 @@ changes, with the same count taken for the baseline window.
 
 All three, or the experiment loses:
 
-1. **A conversion reached a check.** At least one row's level is `architecture`,
-   `type`, `lint` or `test` — not `prose` — and its proof shows the enforcer
-   exiting 1 at the bad revision and 0 at the good one, with the checker exiting 0
-   on the row. A prose row can be the honest answer and is recorded; it just does
-   not show that a check replaced a review.
+1. **A conversion reached a check, and it says what it captured.** At least one
+   row's level is `architecture`, `type`, `lint` or `test` — not `prose` — and its
+   proof shows the enforcer exiting 1 at the bad revision and 0 at the good one,
+   with the checker exiting 0 on the row. A prose row can be the honest answer and
+   is recorded; it just does not show that a check replaced a review. The row also
+   states its **capture**:
+
+   - **full** — every form the class's evidence shows is red at the bad revision
+     and green at the good one;
+   - **partial** — some evidenced form is left unenforced.
+
+   A partial capture is a real row and real enforcement for what it pins, but on
+   its own it does not satisfy this criterion: the experiment asks whether a class
+   stopped recurring, not whether one shape of it was caught. Narrowing the class
+   to the forms the check pins is allowed — the row's rule text then has to say
+   the narrower thing, and the notes have to name the forms dropped and why they
+   are a different class. A rule narrowed by silence takes the credit of the
+   broad class it replaced, which is the failure this experiment exists to stop.
 2. **Repeat corrections fell, at comparable activity.** Repeat corrections per week
    in the window are below the baseline window's rate, and the window reviewed at
    least as many changes per week as the baseline did. Without the second half, a
