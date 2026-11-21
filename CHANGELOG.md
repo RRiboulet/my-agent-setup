@@ -286,6 +286,19 @@ Fixed:
   `worktree/references/parallel.md` gained the same line beside its
   package-copy paragraph, which previously described only the worse fallbacks.
 
+- **The mutation-proof requirement is measured: it is followed when it is in
+  context, and it changes evidence rather than test quality.** `AGENTS.md`'s
+  "name the test that fails when this change is reverted" was tested on one task
+  with two models, 3 runs per cell, arms differing only in whether that rule is in
+  `AGENTS.md`. deepseek-v4.1-flash: 3/3 performed the check with the rule, 2/3
+  with only the skill-body mentions, and 0/9 before any such requirement existed;
+  glm-5.3-flash: 1/3 either way, and it *claimed* the check in 2/3 while the
+  transcript showed no revert — a confident model describing the check instead of
+  doing it. Reverting the implementation failed 2–15 tests in all twelve runs, so
+  the requirement did not improve the tests on a task with an obvious seam; what
+  it changed is whether "done" came with evidence. Record, method, per-run table
+  and caveats: `docs/experiments/mutation-proof-step.md`.
+
 Maintenance:
 
 - **Four lifecycle assertions no longer read the completion message on the
