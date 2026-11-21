@@ -1,7 +1,7 @@
 # 03: The prevent-recurrence skill is loadable with the Python adapter
 
 **Blocked by:** 01, 02
-**Status:** ready
+**Status:** done - merged in #176 (2026-11-20)
 
 ## What to build
 

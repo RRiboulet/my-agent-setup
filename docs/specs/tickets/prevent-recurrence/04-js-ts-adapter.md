@@ -1,7 +1,7 @@
 # 04: The JS/TS adapter is available
 
 **Blocked by:** 03
-**Status:** ready
+**Status:** done - merged in #178 (2026-11-21)
 
 ## What to build
 

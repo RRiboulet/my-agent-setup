@@ -1,7 +1,7 @@
 # 01: A rule table can be validated in one command
 
 **Blocked by:** None (can start immediately)
-**Status:** ready
+**Status:** done - merged in #172 (2026-11-20)
 
 ## What to build
 
