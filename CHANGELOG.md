@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.15.0 — 2026-11-21
+
 Added:
 
 - **The implementation loop is in `implement`, where it is already in context,
