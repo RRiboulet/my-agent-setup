@@ -78,9 +78,9 @@ loss, not a win by default (see "How a loss is decided").
 
 | | date | what it means |
 |---|---|---|
-| window opens | — | ticket 07's conversion lands: check, row and proof in `analytics-agent`, log row here |
-| window closes | — | four calendar weeks after it opens |
-| baseline | — | the 30 days before the window opens |
+| window opens | 2026-11-21 | ticket 07's conversion lands: check, row and proof in `analytics-agent`, log row here |
+| window closes | 2026-12-19 | four calendar weeks after it opens |
+| baseline | 2026-10-22 → 2026-11-20 | the 30 days before the window opens |
 
 ## The log
 
@@ -128,6 +128,31 @@ Copy this row and fill it; nothing else in the table moves:
 
 The first row is ticket 07's conversion (2026-11-21).
 
+**2026-11-21 — both conversions are on their remotes.** A conversion that exists
+only in one checkout does not count, so both branches were pushed and put under
+review the day the window opened: `RRiboulet/analytics-agent#17` (base `dev`,
+from `0e7a9b1`) and `RRiboulet/pupkeep#84` (base `main`, from `a62c878`). Both
+rows' proofs were rerun the same day and returned the exit codes they record:
+`analytics-agent` bad `ce50a49` exit 1 (5 failed, 1 passed) / good `d7872e5`
+exit 0 (6 passed), the bad run inside a worktree whose `app/` is the bad revision;
+`pupkeep` bad `f1f53e5` exit 1 (3 of 4 fail) / good `2c609d2` exit 0 (4 pass);
+`node tools/rule-table.mjs check AGENTS.md` exit 0 in both projects. The
+analytics-agent run happened inside the project's devcontainer: `uv` is not on
+this host, and the project venv is the container's.
+
+**2026-11-21 — correction to the second row's repeat count.** That row records 2
+occurrences; the class has 3. The third is `my-agent-setup#96` (`1326f83`,
+2026-11-03 11:51 UTC): it added the same `containerEnv` (`PI_TRUE_COLOR`,
+`COLORTERM`), the same `terminal-features`/`terminal-overrides` pair and the same
+`setenv -g` lines to this repository's own `.devcontainer` — the shared template
+the spec names — two hours after the two project fixes (pupkeep `2c609d2`
+09:53:16 UTC, analytics-agent `2aa6720` 09:53:19 UTC). So "the shared-template fix
+the spec points at is open" in that row is wrong: it landed the same day, in this
+repository. What is open is what the row already names — the check pins
+pupkeep's forms only, not analytics-agent's copy, not this repository's template,
+and not a future project's. The evidence cell above is left as written; this note
+is the correction.
+
 ## Review rounds, counted
 
 A review round is one independent review of a change, per `REVIEW_GUIDELINES.md`'s
@@ -155,11 +180,93 @@ changes, with the same count taken for the baseline window.
 
 | window | repeat corrections | changes reviewed | review rounds per change | notes |
 |---|---|---|---|---|
-| baseline: 30 days before the window | | | | |
-| week 1 (—) | | | | |
-| week 2 (—) | | | | |
-| week 3 (—) | | | | |
-| week 4 (—) | | | | |
+| baseline: 2026-10-22 → 2026-11-20 | 8 classes / 17 corrections | 182 merged (90 `my-agent-setup`, 82 `pupkeep`, 10 `analytics-agent`) | **cannot be measured** | reconstructed 2026-11-21, the day the window opened; scope, queries and counts below |
+| week 1 (2026-11-21 → 2026-11-27) | | | | |
+| week 2 (2026-11-28 → 2026-12-04) | | | | |
+| week 3 (2026-12-05 → 2026-12-11) | | | | |
+| week 4 (2026-12-12 → 2026-12-18) | | | | |
+
+### The baseline, reconstructed 2026-11-21
+
+Reconstructed on the day the window opened, because the baseline decays and
+because the spec counts an unmeasurable count as a loss rather than a pass.
+
+**Scope.** The three repositories this harness's agent worked in during the
+period: `my-agent-setup`, `analytics-agent`, `pupkeep`. A correction made in any
+of them is a correction the same agent made, and the window's own rows are in the
+last two, so counting only this repository would make the two periods
+incomparable.
+
+**Queries**, run 2026-11-21, all reproducible:
+
+```bash
+for r in my-agent-setup pupkeep analytics-agent; do
+  gh pr list -R RRiboulet/$r --state merged --limit 400 \
+    --json number,title,mergedAt,reviews,body > /tmp/base-$r.json
+done
+# then filter mergedAt to 2026-10-22T00:00Z..2026-11-20T23:59Z
+git log --since=2026-10-22 --until=2026-11-21 --format='%h %ad %s' --date=short
+gh pr view <n> -R RRiboulet/<repo> --json title,body,reviews
+```
+
+**Changes reviewed.** 182 merged changes in the period — 90 in
+`my-agent-setup`, 82 in `pupkeep`, 10 in `analytics-agent`. This is the
+reproducible activity count, and it carries a caveat that must not be read past:
+**"reviewed" is not distinguishable from "merged" for the baseline.** GitHub
+records 0 review events on those 182 changes (the only review on a PR merged in
+the period, on `#54`, was submitted 2026-10-15 and so falls outside it), and the
+policy reviews a change only when the user asks, so the number of changes that
+were actually reviewed is not written down anywhere. The window's number has to
+be counted the same way for the comparison to mean anything.
+
+**Repeat corrections.** 8 classes, 17 corrections. Each class has two dated
+occurrences inside the 30 days except the truecolor class, which has three. The
+class had to be one sentence that applies to both changes; a shared
+`fix(devcontainer)` or `fix(worktree)` scope was not enough, and PR titles alone
+were not evidence — each pair was confirmed against both commit bodies.
+
+| class, in one sentence | occurrences | why these are one class |
+|---|---|---|
+| `devc` names its per-project state files by basename, so two projects with the same name share one | 2026-11-10 `#125` `23fb92a` (the lock); 2026-11-14 `#150` `9d97a36` (the config stamp) | `#150`'s body: "Same class as the shared-lock bug (23fb92a), same fix" |
+| A `devc` per-project check reads only `.devcontainer/devcontainer.json`, so a repo-root `.devcontainer.json` project is silently unserved | 2026-11-10 `#124` `f4b6bd8` (`cfg_hash` hashes an empty stream); 2026-11-14 `#149` `9428c50` (`doctor` skips the project and prints "nothing blocking") | both are the same omitted layout in different functions, and `#149` names the functions that already handled it |
+| The worktree `Remove` sweep can match no pane and still proceed, so the tree is removed from under a live shell | 2026-11-10 `#115` `9a115ac` (`awk -v` escapes the path); 2026-11-20 `#174` `a37b60d` (tmux rewrites the tab in a C locale) | both bodies: an empty sweep and a completed sweep print the same output, and the next line takes the tree from under a live session |
+| `opencode-go`'s stale model cache serves routing the code has left behind | 2026-11-11 `#120` `feff441` (curated `reasoning`/`thinkingLevelMap` never refreshed); 2026-11-13 `#136` `fcdf23c` (the cache is unversioned, so a pre-`#117` cache replays old `api`, `baseUrl` and cost) | `#136` is written as the residual of `#120` "after #120, refreshing only …" |
+| The parent launches a subagent with an `--extension` copy the child must not load, so pi dies on duplicate `--attach-subagent` registration | 2026-11-08 `#103` `66148f7` (resolved from the parent's tree, so a worktree-rooted child loads two copies); 2026-11-13 `#139` `21c39d9`, with the same-round `#140` `591c804` (a copy the child's project excludes) | the same startup error and the same "Child Pi exited before reporting a result" symptom in both |
+| The `review-triage` policy that ships is not the policy a real install runs, so a review dies or silently falls back | 2026-11-12 `#134` `5ec6697` (candidates on a provider with no credential); 2026-11-15 `#157` `4f3121d` (an unconfigured install leaves the bands empty; a missing credential is dropped silently) | both fix shipped-configuration ≠ working configuration; `#157` adds the diagnosis `#134`'s failure lacked |
+| The devcontainer does not advertise truecolor, so pi falls back to 256 colours in the container and inside tmux | 2026-11-03 `pupkeep` `2c609d2` (09:53:16 UTC); 2026-11-03 `analytics-agent` `2aa6720` (09:53:19 UTC); 2026-11-03 `#96` `1326f83` (11:51 UTC, this repository's shared template) | the class is the second row of the log above, and its conversion is that row; the three fixes landed within two hours, which is what makes this the structural one |
+| A JSX line splits two expressions, so the literal space between them is dropped | 2026-11-12 `pupkeep` `#71` `3b4d891`; 2026-11-12 `pupkeep` `#72` `31561d0` | `#72`'s body: "the same defect class as the appointment detail fixed in #71" |
+
+Pairs that were **not** counted as repeats, and why:
+
+- `#111` → `#119` (subagent `result.json` validation) — `#119` closes the findings
+  of `#111`'s own two reviews, so that is one occurrence with two attempts.
+- `#139` → `#140` — same review round, same day, same change; counted once.
+- `#120` and `#122` (same day, `opencode-go` curated-vs-live reasoning) — one
+  round's findings in two PRs, so one occurrence.
+- `#142` → `#146` (`opencode-go` cost tiers) — one sentence does not apply to
+  both: `#142` corrected a flat price read, `#146` corrected the band mapping
+  `#142` introduced. Different mistakes in the same function.
+- `#110` → `#124`/`#125` — `#124` and `#125` close **review findings on
+  `#110`**, so the `#110` round is one occurrence; `#125` is then paired with
+  `#150` (its own repeat) and `#124` with `#149`, as above.
+
+**Review rounds per change: cannot be measured.** Three sources were tried.
+GitHub has 0 review events on the 182 changes (above). The review tooling keeps
+no log: `~/.pi/agent/review-triage.json` is policy, and a `triage_change` call
+leaves no record. The agent's own session store exists —
+`~/.pi/agent-host/sessions`, 28 session files — but its oldest file is
+2026-11-14, so it covers 7 of the baseline's 30 days and, even there, records
+conversations rather than reviews per change. A mean over 7 of 30 days is a proxy
+nobody defined, and the spec forbids it here: the cell says "cannot be measured",
+not a number.
+
+**What that means for the verdict.** By "How a loss is decided", a count that
+cannot be measured is a loss, not a pass. Criterion 3 — review rounds did not
+rise — compares the window's mean with the baseline's, and the baseline's does
+not exist, so criterion 3 cannot be satisfied whatever the window records. That
+is written here on 2026-11-21, the day the window opened, rather than discovered
+at the close as an excuse. The window still runs to 2026-12-19 for the other two
+counts and for the record; the default direction remains delete.
 
 ### How a win is decided
 
