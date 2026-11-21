@@ -75,6 +75,9 @@ jobs:
       - name: Rule table is valid
         run: node .pi/skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md
 
+      - name: MCP catalogue install tests
+        run: node --test tools/mcp-catalogue.test.mjs
+
       - name: Branch-base check tests
         run: node --test tools/branch-base.test.mjs
 
