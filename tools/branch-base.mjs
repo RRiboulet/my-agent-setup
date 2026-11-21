@@ -16,24 +16,35 @@
 // Exit codes: 0 the base is right, 1 the rule is broken, 2 the check could not
 // run (not a work tree, no origin/dev to compare against).
 //
-// Classifications, and why there are four rather than "pass/fail":
+// Classifications, and why there are five rather than "pass/fail":
 //
 //   correct         origin/dev is an ancestor of HEAD, origin/dev..HEAD has
 //                   exactly one root commit, and that root's parent is
 //                   origin/dev. One root is what a branch carrying only its own
 //                   commits has; HEAD being exactly origin/dev is correct too,
 //                   because the branch carries nothing of its own.
+//   superseded      The checked-out branch IS origin/dev's own branch (`dev`,
+//                   which is what a push-event CI checkout is) and HEAD is an
+//                   ancestor of the origin/dev just fetched. That is a newer
+//                   push landing while the run was still going, not a broken
+//                   base: the integration branch is not a branch that needs a
+//                   base, so the rule is vacuous here and the line says there is
+//                   nothing to check. Exit 0, because nothing is wrong. Without
+//                   this classification every run whose check outlived one more
+//                   push to dev was red — CI run 44956803480 on 805e79e, where
+//                   origin/dev had already moved to 15c6c3a.
 //   foreign-commits origin/dev is an ancestor, but the range starts somewhere
 //                   else. Either its one root sits on an older dev (the branch
 //                   merged dev in instead of being rebased onto it), or it has
 //                   several roots because a merge brought a second history in.
 //                   The `--onto` command on the line replays this branch's
 //                   commits onto origin/dev.
-//   behind-dev      HEAD is an ancestor of origin/dev, so the tip already
-//                   contains everything the branch has. Reported separately
-//                   because "start a new branch from dev" is the fix, and calling
-//                   it a wrong base would send the reader looking for a branch
-//                   point that is not there.
+//   behind-dev      HEAD is an ancestor of origin/dev on any other branch — a
+//                   feature branch, or a detached pull-request checkout — so the
+//                   tip already contains everything the branch has. Reported
+//                   separately because "start a new branch from dev" is the fix,
+//                   and calling it a wrong base would send the reader looking for
+//                   a branch point that is not there.
 //   wrong-base      Neither ancestor case holds, so the branch does not descend
 //                   from origin/dev at all — the branch-off-main mistake. The
 //                   line names the branch point, i.e. the commit the branch
@@ -77,7 +88,8 @@ repository is resolved with \`git rev-parse --show-toplevel\`, never a
 hard-coded path.
 
 Exit codes
-  0  correct: based on origin/dev, or HEAD is origin/dev itself
+  0  correct, or superseded: based on origin/dev; HEAD is origin/dev itself; or
+     this is origin/dev's own branch and a newer push landed while the check ran
   1  behind-dev, foreign-commits, or wrong-base; the line names the fix
   2  the check could not run: not a work tree, no origin/dev to resolve, a
      shallow clone, a failed fetch, or a repository with no commit yet
@@ -198,6 +210,20 @@ function main(argv) {
 		report(
 			`correct — HEAD is exactly ${BASE_LABEL} (${short(baseSha)}): there is no branch base to check, because the branch carries nothing of its own yet; ` +
 				`next: git checkout -b <change-name> ${BASE_LABEL}`,
+		);
+		return 0;
+	}
+
+	// The integration branch has no base to check. CI checks a push event out on
+	// `dev` itself (actions/checkout with `ref: dev`), so when the next commit to
+	// dev lands while the run is still going, HEAD is simply an ancestor of the
+	// origin/dev fetched a moment later — expected, not a violation. The branch
+	// name alone identifies this case, so no CI flag is needed; a detached HEAD
+	// is a pull-request checkout and keeps `behind-dev` below.
+	if (attached.ok && attached.stdout === BRANCH && git(["merge-base", "--is-ancestor", "HEAD", BASE_REF]).ok) {
+		report(
+			`superseded — ${branch} is ${BASE_LABEL}'s own branch: HEAD ${short(headSha)} is already contained in ${BASE_LABEL} ${short(baseSha)}, so a newer push landed while this run was still going; ` +
+				`there is no branch base to check, because the integration branch does not stand on one, and nothing is wrong with this tree`,
 		);
 		return 0;
 	}

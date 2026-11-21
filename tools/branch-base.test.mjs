@@ -159,6 +159,33 @@ test("HEAD being origin/dev itself is correct: dev has no base of its own", () =
 	assert.match(output, /there is no branch base to check/);
 });
 
+test("dev itself, with origin/dev one push ahead, is superseded rather than behind-dev", () => {
+	// The race CI actually hit (run 44956803480, push event, commit 805e79e on
+	// dev): the checkout is on `dev` and the next commit landed on origin/dev
+	// while the run was still going. HEAD is then an ancestor of origin/dev, but
+	// `dev` is the integration branch itself, so it has no base to be behind —
+	// and "start a branch" is advice for a branch that needs a base.
+	const repo = scratch("superseded");
+	const head = git(repo.work, ["rev-parse", "HEAD"]);
+	commit(repo.seed, "chore(release): the next commit lands while the run is going");
+	git(repo.seed, ["push", "-q", "origin", "dev"]);
+	const moved = git(repo.seed, ["rev-parse", "HEAD"]);
+
+	const result = run(repo.work);
+	assert.equal(result.code, 0, result.stdout + result.stderr);
+	const output = line(result);
+	assert.match(
+		output,
+		new RegExp(
+			`^branch-base: superseded — dev is origin/dev's own branch: HEAD ${head.slice(0, 7)} is already contained in origin/dev ${moved.slice(0, 7)}`,
+		),
+	);
+	assert.match(output, /a newer push landed while this run was still going/);
+	assert.match(output, /there is no branch base to check/);
+	assert.doesNotMatch(output, /git checkout -b/);
+	assert.doesNotMatch(output, /behind-dev/);
+});
+
 test("two commits on a branch are correct and counted", () => {
 	const repo = scratch("two-commits");
 	git(repo.work, ["checkout", "-q", "-b", "two-changes"]);
@@ -228,6 +255,37 @@ test("a branch with no commits of its own that dev has moved past is behind-dev,
 	assert.match(output, /^branch-base: behind-dev — not-started-yet adds no commit of its own/);
 	assert.match(output, /next: git checkout -b <change-name> origin\/dev \(or git rebase origin\/dev to continue on this branch\)$/);
 	assert.doesNotMatch(output, /wrong-base/);
+});
+
+test("a feature branch whose name merely starts with dev is still behind-dev", () => {
+	// `superseded` is about the integration branch itself, so the comparison is
+	// the whole branch name: a feature branch that happens to be called
+	// `development` is behind origin/dev and stays a red build.
+	const repo = scratch("dev-prefix");
+	git(repo.work, ["checkout", "-q", "-b", "development"]);
+	commit(repo.seed, "feat(dev): dev moves on");
+	git(repo.seed, ["push", "-q", "origin", "dev"]);
+
+	const result = run(repo.work);
+	assert.equal(result.code, 1, result.stdout + result.stderr);
+	const output = line(result);
+	assert.match(output, /^branch-base: behind-dev — development adds no commit of its own/);
+	assert.doesNotMatch(output, /superseded/);
+});
+
+test("a detached HEAD that dev has moved past is still behind-dev", () => {
+	// A pull-request checkout is detached and is not the integration branch, so
+	// it keeps the classification the tool always gave it.
+	const repo = scratch("detached-behind");
+	git(repo.work, ["checkout", "-q", "--detach"]);
+	commit(repo.seed, "feat(dev): dev moves on");
+	git(repo.seed, ["push", "-q", "origin", "dev"]);
+
+	const result = run(repo.work);
+	assert.equal(result.code, 1, result.stdout + result.stderr);
+	const output = line(result);
+	assert.match(output, /^branch-base: behind-dev — HEAD \(detached\) adds no commit of its own/);
+	assert.doesNotMatch(output, /superseded/);
 });
 
 // ---------------------------------------------------------------------------

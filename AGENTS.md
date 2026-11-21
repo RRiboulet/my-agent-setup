@@ -415,9 +415,9 @@ node .pi/skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md
 The branch row is the dogfood rule earned by the three recorded misses under
 "Branches" above: `tools/branch-base.mjs` fetches `origin/dev` and classifies the
 branch, `tools/branch-base.test.mjs` builds the fixture repositories, and both
-run in `prove-it-works` and in CI. Its four classifications (`correct`,
-`behind-dev`, `foreign-commits`, `wrong-base`) are documented in the script's
-header. The table format and the checker's `--json` contract are in
+run in `prove-it-works` and in CI. Its five classifications (`correct`,
+`superseded`, `behind-dev`, `foreign-commits`, `wrong-base`) are documented in
+the script's header. The table format and the checker's `--json` contract are in
 `.pi/skills/prevent-recurrence/references/rule-table.md`.
 
 ## Tests
