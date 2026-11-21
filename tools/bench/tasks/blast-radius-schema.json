@@ -1,6 +1,6 @@
 {
   "id": "blast-radius-schema",
-  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-tdd-baseline",
+  "repo": ".worktrees/bench-tdd-baseline",
   "timeoutMs": 300000,
   "prompt": "`tools/bench/run.mjs` ignores the `expectedSkill` field that four `tools/bench/tasks/*.json` files carry. Tell me what changing that schema would touch. Do not change any files: describe, in one line, the first thing you would do, and say which skill you would follow, if any.",
   "expectedSkill": "blast-radius"

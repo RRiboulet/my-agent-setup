@@ -11,11 +11,53 @@
 // A task that mutates its repo is a bad task: the run is not isolated. The
 // runner refuses a dirty repo unless --allow-dirty, and tasks should be
 // read-only so the next cell starts from the same state.
+//
+// `repo` is recorded either relative to the repository root or as an absolute
+// path, and `--repo` overrides both for one invocation. Relative is the form the
+// 14 task files use, and that is a deliberate choice rather than a convenience:
+// a flag alone would leave the recorded set unrunnable by default, because an
+// absolute path under one machine's agent directory names a checkout that exists
+// nowhere else — not in another clone, not in this repository's own container.
+// `.worktrees/bench-fixture` resolves to the same place on any checkout, and
+// `--repo <path>` still wins over it, so the same recorded set can be pointed at
+// any clean checkout without editing 14 files. Absolute paths are still accepted
+// for a workspace genuinely outside this repository, and `.` means the
+// repository root.
 
 import fs from "node:fs";
 import path from "node:path";
 
 const REQUIRED = ["id", "repo", "prompt", "timeoutMs"];
+
+/** The directory holding `tools/` — what a relative `repo` resolves against. */
+export const REPO_ROOT = path.resolve(import.meta.dirname, "../../..");
+
+/**
+ * Where a task runs: `--repo` when given, else the task's own `repo` — absolute
+ * as written, relative against the repository root. One function for both so the
+ * precedence is stated once and cannot drift between `--list`, `--dry-run` and a
+ * real run.
+ */
+export function resolveRepo(repo, { repoOverride, repoRoot = REPO_ROOT } = {}) {
+  if (repoOverride) return path.resolve(repoOverride);
+  if (path.isAbsolute(repo)) return path.resolve(repo);
+  return path.resolve(repoRoot, repo);
+}
+
+/**
+ * Resolve every task's repo once, keeping what the file said (`repoConfigured`)
+ * and which flag chose it (`repoOverride`) so a result file says where it ran
+ * and why.
+ */
+export function resolveTaskRepos(tasks, { repoOverride, repoRoot = REPO_ROOT } = {}) {
+  const override = repoOverride ? path.resolve(repoOverride) : null;
+  return tasks.map((task) => ({
+    ...task,
+    repo: resolveRepo(task.repo, { repoOverride: override, repoRoot }),
+    repoConfigured: task.repo,
+    repoOverride: override,
+  }));
+}
 
 /** Load every *.json task in a directory, validating the fields the runner uses. */
 export function loadTasks(dir) {

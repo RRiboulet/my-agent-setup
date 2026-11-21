@@ -4,6 +4,53 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.15.1 — 2026-11-21
+
+Fixed:
+
+- **`node tools/branch-base.mjs` no longer goes red on `dev` itself when a push
+  supersedes the commit under test, and it no longer tells the integration
+  branch to start a branch.** The gate compares against the *live* `origin/dev`,
+  so any run that finished after a newer push failed on a commit that was never
+  wrong — the exact symptom being removed is a red build on `dev` whose line
+  ends "next: git checkout -b <change-name> origin/dev". CI run 44956803480
+  checked out `805e79e`, which by then was already an ancestor of `origin/dev`
+  at `15c6c3a` because the release bump landed while the run was still going,
+  and reported it as `behind-dev`. The rule the tool enforces is about feature
+  branches — a branch must descend from current `origin/dev` and carry only its
+  own commits — and on `dev` it is vacuous. So `superseded` is now its own
+  classification: the checked-out branch is `origin/dev`'s own branch and `HEAD`
+  is an ancestor of `origin/dev`, which exits 0 with a line saying a newer push
+  landed while the run was still going and that there is no branch base to
+  check. The tool already knew the branch it was checking (`git symbolic-ref
+  --short -q HEAD` is `dev` on a push-event checkout, because actions/checkout
+  uses `ref: dev`), so this needs no CI flag, no `checks.yml` change and no new
+  gate. Every other classification is byte-identical: `behind-dev` stays red for
+  a feature branch that is behind, which is the case it exists for, and a
+  detached pull-request checkout is pinned to its current behaviour by its own
+  test alongside the race reproduction.
+
+- **The bench runner's workspace is resolved instead of hardcoded, and `--repo`
+  exists.** All 14 `tools/bench/tasks/*.json` files carried an absolute path under
+  one machine's agent directory as their `repo`, so the recorded set ran nowhere
+  else — it failed with "not a git work tree" in this repository's own container
+  and on CI — and `tools/bench/README.md` promised a `--repo` override that
+  `run.mjs`'s `parseArgs` never had. The tasks now record `.worktrees/bench-fixture`,
+  `.worktrees/bench-tdd-baseline` or `.` (the two `devc` scenarios, whose prompt
+  reads nothing from the workspace), resolved against the repository root, so the
+  set is portable without a flag; absolute paths are still accepted, and
+  `--repo <path>` wins over both so one recorded set can be pointed at any clean
+  checkout. The resolved path is recorded on every cell, beside `repoConfigured`
+  (what the file said) and `repoOverride` (the flag, or `null`). A repo that does
+  not exist, is not inside a git work tree, or is dirty without `--allow-dirty`
+  now fails the whole invocation before the first token is spent, listing every
+  offending task with its fix — previously a non-git repo was quietly recorded as
+  `isGit: false` and the cell ran anyway. `tools/bench/run.test.mjs` pins the
+  resolution order and the refusals through the CLI with `--list` and `--dry-run`,
+  so the gate spends no tokens; it is listed in `AGENTS.md`'s Tests block and run
+  as its own `checks.yml` step, which `checks-parity.test.ts` requires in both
+  directions.
+
 ## v1.15.0 — 2026-11-21
 
 Added:

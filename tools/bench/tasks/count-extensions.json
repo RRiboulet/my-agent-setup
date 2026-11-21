@@ -1,6 +1,6 @@
 {
   "id": "count-extensions",
-  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-fixture",
+  "repo": ".worktrees/bench-fixture",
   "timeoutMs": 120000,
   "prompt": "Read package.json and reply with the number of entries in the pi.extensions array, and nothing else.",
   "check": {
