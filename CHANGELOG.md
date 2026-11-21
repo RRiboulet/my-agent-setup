@@ -163,6 +163,40 @@ Added:
   scratch projects, the manifest is unchanged, and the harness still consumes no
   npm packages.
 
+- **The MCP servers this package uses are a catalogue now, installed by one
+  command and off until a project asks for them.** `pi install` shipped this
+  package's extensions and skills and none of its MCP servers, because the `pi`
+  manifest has no MCP key and pi reads MCP configuration only from
+  `<agent dir>/mcp.json` and a trusted project's `.pi/mcp.json`. A colleague
+  therefore got the operator's setup minus Figma and Playwright, and the obvious
+  cure — `pi mcp add` on each machine — cannot write a *disabled* entry, so it
+  switched both on in every project at once, with an OAuth prompt and two
+  background processes attached. `mcp/catalogue.json` is now the one list
+  (Figma over streamable HTTP with Figma's `oauth.clientName` compatibility
+  value, Playwright through `npx -y @playwright/mcp@latest`), every entry
+  `"enabled": false` with an explicit `"exposure": "codemode"` and no `auth`;
+  `tools/mcp-catalogue.mjs` is the one merge; and it has two surfaces over it —
+  `bin/mcp-catalogue` for a setup script or a container, `/mcp-catalogue` inside
+  a session. The merge is add-only: a name already in the file, pinned or edited,
+  is left byte-identical and reported as skipped, the entries are spliced into
+  the existing text rather than re-serialised so unrelated keys, key order and
+  indentation survive, and a second run reports nothing added and changes
+  nothing. Seeding is deliberately the other semantic: `--if-missing` creates the
+  file only when it is absent and never merges, which is what `bin/pi-agent-dir`
+  (whose `--check` now reports the catalogue) and this repo's `postCreate.sh` use
+  on a fresh dir or volume, so an entry deleted on purpose is not resurrected by
+  a rebuild. Nothing connects until a project opts in: a trusted project's
+  `.pi/mcp.json` carrying only `{"figma": {"enabled": true}}`, or `/mcp` →
+  *Enable in this project*, which writes the same override — measured with
+  `pi mcp list` in a temp agent dir, which listed both as `disabled (codemode,
+  global)` and exited 0 without contacting either. The README gains an "MCP
+  servers" section covering that recipe, worktrees, which agent dirs seed
+  themselves, adding a server, the Figma `clientName` note and the Playwright
+  pin, and it no longer refers to a `$(pi agent dir)` command that does not exist
+  (`pi --help` lists no `agent` subcommand; the dir is `PI_CODING_AGENT_DIR`,
+  else `~/.pi/agent`). No setting, no server registration and no credential is
+  added by any of it.
+
 Fixed:
 
 - **The worktree sweep no longer goes blind on a C-locale host.** The Remove

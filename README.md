@@ -31,6 +31,7 @@ each entry point explicitly:
     ".pi/extensions/answer.ts",
     ".pi/extensions/continue.ts",
     ".pi/extensions/goal.ts",
+    ".pi/extensions/mcp-catalogue.ts",
     ".pi/extensions/native-web-search.ts",
     ".pi/extensions/opencode-go-provider/index.ts",
     ".pi/extensions/repo-explorer/index.ts",
@@ -153,15 +154,18 @@ the main checkout's extensions, not the branch's.
 
 `bin/pi-agent-dir` writes only what is missing, so re-running it is safe: an
 existing `settings.json` is kept (it belongs to that project from then on, like
-the container's), credentials are copied once and never overwritten, and
+the container's), credentials are copied once and never overwritten,
 `trust.json` is merged rather than replaced so a second project does not evict
-the first. Trust matters more here than it looks: it is what makes pi read
+the first, and `mcp.json` is seeded from the catalogue only when it is absent, so
+an entry deleted there stays deleted — see
+[MCP servers](#mcp-servers-installed-once-enabled-per-project). Trust matters
+more here than it looks: it is what makes pi read
 `<checkout>/.pi/` at all, and a saved decision applies to a directory or any of
 its parents, so the one entry covers `.worktrees/<slug>`. Without it the
 package-free dir is a *silently empty* agent — no extensions, no skills — rather
-than a broken one. `--check` reports exactly those three things and exits
-non-zero if a package would still conflict; `--print` resolves the path without
-writing anything.
+than a broken one. `--check` reports those four things — the catalogue as a
+warning, because a dir works without it — and exits non-zero if a package would
+still conflict; `--print` resolves the path without writing anything.
 
 In the devcontainer, that dir is the container's own and the volume is private:
 the model and tool defaults start from `.devcontainer/pi/settings.json`, and
@@ -179,6 +183,123 @@ Credentials for every container come from one host-side file,
 the OpenRouter key. Values therefore appear in `docker inspect` and in child
 process environments. That is the accepted trade-off: it keeps credentials
 shared without any cross-container mount or coupling.
+
+### MCP servers: installed once, enabled per project
+
+`pi install` ships this package's extensions and skills and **none of its MCP
+servers**: the `pi` manifest has no MCP key, and pi reads MCP configuration only
+from `<agent dir>/mcp.json` and a trusted project's `.pi/mcp.json`. The servers
+are therefore a catalogue in [`mcp/catalogue.json`](mcp/catalogue.json) — Figma
+over streamable HTTP, Playwright through `npx -y @playwright/mcp@latest` — and
+one command that ships with the clone installs it:
+
+```bash
+bash bin/mcp-catalogue      # from the clone; in a session: /mcp-catalogue
+```
+
+`pi install` (the top of this file) is the first half of that setup; this is the
+second, and it runs once per agent dir that should have the servers — from the
+clone, by path, with no PATH entry, no `jq` and no build step.
+
+That merges the catalogue into `<agent dir>/mcp.json`, where the agent dir is
+`$PI_CODING_AGENT_DIR` when it is set and non-empty, else `~/.pi/agent`. It
+**adds only the names you have not got**: an existing `figma` or `playwright`
+entry — one you edited or pinned — is left byte-identical and reported as
+skipped, and every other byte of the file survives, unrelated keys and its
+indentation included. Re-running it reports nothing added and changes nothing.
+`--if-missing` is the other mode, create the file only when it is absent and
+never merge into it: that is what the two automatic paths below use, and a
+person rarely needs it. Exit `1` means it refused to write and changed nothing
+(invalid catalogue, or an `mcp.json` it cannot merge into); exit `2` means it
+could not run. `bash bin/mcp-catalogue --help` prints the whole contract.
+
+**Nothing connects until a project opts in.** Every catalogue entry ships
+`"enabled": false` with an explicit `"exposure": "codemode"`, so installing it
+starts nothing — no process, no sign-in prompt, no tool in any request. `pi mcp
+list` only lists them:
+
+```console
+$ pi mcp list
+figma: disabled (codemode, global)
+  https://mcp.figma.com/mcp
+playwright: disabled (codemode, global)
+  npx -y @playwright/mcp@latest
+```
+
+**Opt a project in with one key** in its committed `.pi/mcp.json`:
+
+```json
+{ "mcpServers": { "figma": { "enabled": true } } }
+```
+
+That is the whole override: a project entry carrying only `enabled`, `exposure`
+or `toolExposure` layers onto the global server of the same name and keeps its
+`url`, `args` and `oauth`. The same thing without typing: `/mcp`, select the
+server, *Enable in this project* — in a trusted project, that writes exactly
+this override. `/reload` picks up a change made outside the session.
+
+Two facts about that file have bitten before. A **committed** `.pi/mcp.json`
+reaches every checkout of the branch, linked worktrees included, because it is
+part of the tree; an **uncommitted** one exists only in the working tree you
+wrote it in, so a worktree started from the same branch sees nothing. And an
+override needs the global entry to exist: without the catalogue installed,
+`{"figma": {"enabled": true}}` is a hard configuration error (`server "figma"
+needs "command" or "url", or a global server to override`), while in an
+**untrusted** project the file is ignored in silence — project trust is what
+makes pi read `.pi/` at all.
+
+**Which agent dirs get it without the command.** Two, both through
+`--if-missing`, so neither ever merges into a file that already exists:
+
+- this repo's devcontainer, from `postCreate.sh`, when the private volume is
+  fresh;
+- a per-checkout agent dir, when `bin/pi-agent-dir` creates it — `--check`
+  reports the catalogue file and warns rather than fails when it is missing.
+
+Everything else needs the command once per agent dir: `~/.pi/agent` on a host,
+another project's container, a machine where the package was installed by git
+source. Because seeding never merges, an entry you delete from one of those dirs
+stays deleted across a rebuild or a re-run; only the explicit command adds a
+newly catalogued server.
+
+**Signing in is once per agent dir, not per project.** Figma's server uses
+OAuth: `/mcp login figma` (or `pi mcp login figma`) opens the authorization page
+and stores the token in the agent dir's `mcp-auth.json`, so every project on
+that dir shares it.
+
+**Figma's `clientName` is a compatibility value, and it is the first thing to
+look at if sign-in fails.** The catalogue sends `"oauth": { "clientName":
+"Claude Code" }`, which tells Figma's authorization server that the client
+registering is one it recognises — pi's own documentation pairs this URL with
+it. If the sign-in is rejected, change or drop that field in your own `mcp.json`
+before looking anywhere else; the installer skips an entry that already exists,
+so your edit survives every re-run.
+
+**Playwright tracks the newest release, so a broken one is a pin away.** The
+catalogue launches `npx -y @playwright/mcp@latest`. If a release breaks, edit
+your own entry to `"args": ["-y", "@playwright/mcp@<version>"]` and re-run the
+installer freely: `playwright` is already present, so it is reported as skipped
+and your pin is not undone.
+
+**Adding a server to the catalogue** is one object in
+[`mcp/catalogue.json`](mcp/catalogue.json) under `mcpServers`, then the
+installer in each agent dir that should have it:
+
+```json
+"my-server": {
+  "command": "npx",
+  "args": ["-y", "my-mcp-server"],
+  "enabled": false,
+  "exposure": "codemode"
+}
+```
+
+Name it with letters, digits, `_` and `-` only; give it `command` or `url`, not
+both; keep `enabled: false` and state `exposure` explicitly, because the
+catalogue's promise that nothing connects must not depend on pi's defaults; and
+never put `auth` in it — a credential belongs to the agent dir that signs in.
+The installer validates the catalogue before writing and exits `1` with the
+reason, rather than writing an entry pi would skip with one line in a log.
 
 ## Upgrading to v1.12.0
 
@@ -215,6 +336,7 @@ default when it does not, and the `opencode-go` credential itself still serves
 | `.pi/extensions/answer.ts` | `/answer`: extract questions from the last response and answer them in a focused TUI |
 | `.pi/extensions/continue.ts` | `shift+alt+enter` sends the literal prompt `continue`, but only when the agent is idle, so it never steers or queues a message mid-run. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), unmodified |
 | `.pi/extensions/review.ts` | `/review` and `/end-review`: PR, branch, commit, folder and uncommitted review modes, loop-fixing, custom instructions, project-level `REVIEW_GUIDELINES.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with two local changes — see below |
+| `.pi/extensions/mcp-catalogue.ts` | `/mcp-catalogue`: install this package's MCP server catalogue into the agent dir, every server disabled — see [MCP servers](#mcp-servers-installed-once-enabled-per-project). **Ours** |
 | `.pi/extensions/goal.ts` | `/goal` and the `get_goal`/`create_goal`/`update_goal` tools: a long-running objective that auto-continues across turns with an optional token budget, its state appended to the session log and reconstructed on reload/tree navigation. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with two local changes — see below |
 | `.pi/extensions/session-breakdown.ts` | `/session-breakdown`: sessions, messages, tokens and cost per day over 7/30/90, model breakdown, contributions-style calendar. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with four local patches — see below |
 | `.pi/extensions/native-web-search.ts` | Native web search tool — **ours**, not upstream: it registers the `web_search` tool. Ships with `.pi/skills/native-web-search/`, which *is* vendored |
@@ -249,7 +371,9 @@ default when it does not, and the `opencode-go` credential itself still serves
 | `.pi/skills/worktree/` | Creates, lists, opens, reviews and removes git worktrees (linked working trees) for independent tasks, under a gitignored `.worktrees/` directory. **Ours** |
 | `REVIEW_GUIDELINES.md` | Project-level review guidelines read by `/review` — branch hygiene, token rules, changelog shape, PR workflow, line endings |
 | `licenses/` | MIT notices for the two projects the coding skill stack adapts, plus `NOTICE.md` with per-skill provenance and what changed here |
+| `mcp/catalogue.json` | The one list of MCP servers this package ships — Figma and Playwright, each disabled with `exposure: "codemode"`; installed by `bin/mcp-catalogue` and `/mcp-catalogue` |
 | `pi-session.sh` | Launch pi under tmux with an OpenRouter model |
+| `bin/mcp-catalogue` | Shell surface of that installer, for a setup script or a container; the merge itself is `tools/mcp-catalogue.mjs` |
 | `bin/devc` | Open a project's devcontainer from a terminal — headless, no GUI, tmux-backed. See [`devc`](#devc) |
 
 ### The coding skill stack
@@ -476,7 +600,8 @@ reconstruction and the budget-limiting decision instead.
 
 ## `/session-breakdown`
 
-Read-only analytics over the session transcripts in `$(pi agent dir)`:
+Read-only analytics over the session transcripts in pi's agent dir
+(`PI_CODING_AGENT_DIR` when set, else `~/.pi/agent`):
 sessions, messages, tokens and cost per day over the last 7/30/90 days, a model
 / directory / weekday / time-of-day breakdown, and a GitHub-contributions-style
 calendar. Nothing is written and no network call is made.

@@ -26,6 +26,7 @@ const EXTENSIONS = [
 	"../../btw/index.ts",
 	"../../continue.ts",
 	"../../goal.ts",
+	"../../mcp-catalogue.ts",
 	"../../native-web-search.ts",
 	"../../opencode-go-provider/index.ts",
 	"../../repo-explorer/index.ts",

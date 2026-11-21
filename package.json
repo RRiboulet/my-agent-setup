@@ -13,6 +13,7 @@
       ".pi/extensions/btw/index.ts",
         ".pi/extensions/continue.ts",
       ".pi/extensions/goal.ts",
+      ".pi/extensions/mcp-catalogue.ts",
       ".pi/extensions/native-web-search.ts",
       ".pi/extensions/opencode-go-provider/index.ts",
       ".pi/extensions/repo-explorer/index.ts",

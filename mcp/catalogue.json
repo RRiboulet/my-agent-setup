@@ -1,0 +1,23 @@
+{
+  "mcpServers": {
+    "figma": {
+      "description": "Inspect Figma design files, components, variables and comments through Figma's remote MCP server",
+      "url": "https://mcp.figma.com/mcp",
+      "oauth": {
+        "clientName": "Claude Code"
+      },
+      "enabled": false,
+      "exposure": "codemode"
+    },
+    "playwright": {
+      "description": "Drive a real browser: navigate, click, fill forms, take screenshots and read the accessibility tree",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@latest"
+      ],
+      "enabled": false,
+      "exposure": "codemode"
+    }
+  }
+}

@@ -74,6 +74,29 @@ if [ ! -f "$PROJECT_AGENT_DIR/settings.json" ]; then
   fi
 fi
 
+# --- MCP server catalogue ---
+# `mcp/` is this package's one list of MCP servers, and pi installs extensions and
+# skills from a manifest but MCP configuration from nothing at all: without this,
+# a fresh private volume is the one machine where the catalogue is missing. The
+# seeding mode, not the merge: `--if-missing` creates the file only when it is
+# absent, so the two files this repo ships cannot resurrect a server someone
+# deleted here. This volume survives every rebuild, so from the first run on the
+# file belongs to whoever uses the container, and a seed that merged would keep
+# undoing their edits.
+#
+# PI_CODING_AGENT_DIR is passed explicitly because the module resolves the agent
+# dir the way pi does — env first, then $HOME/.pi/agent — and in this container
+# that fallback is a *different* directory: pi reads the dir devcontainer.json
+# names, which is the one PROJECT_AGENT_DIR holds.
+#
+# A failure warns instead of exiting, the same posture as the model-catalog
+# refresh below. The catalogue is a convenience: a container without it still
+# starts sessions, whereas aborting here would take the trust entry, the theme and
+# the git identity further down with it on every rebuild.
+if ! PI_CODING_AGENT_DIR="$PROJECT_AGENT_DIR" node "$REPO/tools/mcp-catalogue.mjs" --if-missing; then
+  echo "postCreate: could not seed the MCP catalogue into $PROJECT_AGENT_DIR; run 'node $REPO/tools/mcp-catalogue.mjs --if-missing' in this container to retry" >&2
+fi
+
 # Enforce the package-free invariant even on a volume migrated from the old
 # shared layout: this container loads the checkout's `.pi/` only, never a package
 # clone. Filter only this repo's entries so an unrelated package a user added is

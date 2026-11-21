@@ -61,6 +61,13 @@
 #     package-free dir is a *silent empty* agent rather than a working one.
 #     Saved decisions apply to a directory or its parents, so one entry covers
 #     `.worktrees/<slug>`.
+#   * mcp.json — seeded once from this package's catalogue (`mcp/catalogue.json`,
+#     every server disabled) through `tools/mcp-catalogue.mjs --if-missing`, and
+#     never read, merged into or rewritten afterwards: from then on the file is
+#     this project's, so an entry deleted here stays deleted across re-runs. The
+#     module owns that contract; this script only calls it. Failing to seed it is
+#     a warning rather than a `die`, because what it adds is two disabled servers
+#     while aborting would throw away the settings, credentials and trust above.
 #   * ~/.bashrc — only with `--shell`, inside a marker-delimited block, exactly
 #     once.
 #
@@ -81,6 +88,12 @@ BASE="${PI_AGENT_BASE:-$AGENT_ROOT/agent}"
 SHELL_RC="${PI_SHELL_RC:-$HOME/.bashrc}"
 MARKER_BEGIN='# >>> pi-agent-dir >>>'
 MARKER_END='# <<< pi-agent-dir <<<'
+
+# The script's own directory, resolved once: `--project` can point at another
+# checkout, and the catalogue module below is this package's, so it is found
+# relative to this script rather than to the caller's cwd or to $PROJECT.
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+CATALOGUE_CLI="$SELF_DIR/../tools/mcp-catalogue.mjs"
 
 PROJECT=''
 PRINT_ONLY=''
@@ -122,7 +135,7 @@ done
 # The checkout to serve. Defaults to the repo this script lives in, so running
 # `bin/pi-agent-dir` from any subdirectory of any worktree does the right thing.
 if [ -z "$PROJECT" ]; then
-	PROJECT="$(cd "$(dirname "$0")" && pwd)"
+	PROJECT="$SELF_DIR"
 fi
 [ -d "$PROJECT" ] || die "not a directory: $PROJECT"
 
@@ -161,6 +174,28 @@ if [ -n "$CHECK_ONLY" ]; then
 	else
 		note "FAIL $DIR/trust.json does not trust $MAIN: the package-free dir would load no extensions or skills"
 		status=1
+	fi
+	# WARN, not FAIL: the dir works without a catalogue. It only means no MCP
+	# servers come seeded, and deleting this file is a legitimate way to keep a
+	# project off them altogether. The same weight for a file that exists but does
+	# not parse, which is *worse* than a missing one and reads as healthy without
+	# this check: seeding is `--if-missing`, so it never rewrites a file that is
+	# there, and the broken file survives every re-run — while pi reports its parse
+	# error at each session start and uses none of the servers in it. Validating
+	# here is what turns "the file is present" into "the file is usable".
+	if [ -f "$DIR/mcp.json" ]; then
+		if ! command -v jq >/dev/null 2>&1; then
+			# Not a verdict on the file: jq is a hard dependency of the seeding path
+			# (`--check` is the one path that runs before that guard), so say what is
+			# missing instead of blaming the catalogue.
+			note "WARN cannot check $DIR/mcp.json: jq is not installed"
+		elif jq -e . "$DIR/mcp.json" >/dev/null 2>&1; then
+			printf 'catalogue: %s\n' "$DIR/mcp.json"
+		else
+			note "WARN $DIR/mcp.json exists but is not valid JSON (a 0-byte file counts): pi reports it at every session start and no server in it is usable — delete it and re-run bin/pi-agent-dir to re-seed"
+		fi
+	else
+		note "WARN no $DIR/mcp.json: run bin/pi-agent-dir to seed this package's MCP catalogue (nothing connects either way)"
 	fi
 	if grep -qF "$MARKER_BEGIN" "$SHELL_RC" 2>/dev/null; then
 		printf 'shell:    %s has the cwd hook\n' "$SHELL_RC"
@@ -214,6 +249,31 @@ if [ -f "$DIR/trust.json" ]; then
 		mv "$DIR/trust.json.tmp" "$DIR/trust.json"
 else
 	jq -n --arg main "$MAIN" '{($main): true}' >"$DIR/trust.json.tmp" && mv "$DIR/trust.json.tmp" "$DIR/trust.json"
+fi
+
+# --- MCP catalogue: seeded once, then the project's own ---------------------
+# `--if-missing` is the seeding semantics (spec R5): create the file from the
+# catalogue only when it is absent, and otherwise leave it untouched — not read,
+# not merged into, not rewritten — so an entry deleted on purpose is not
+# resurrected by a re-run. Merging is the *installing* mode, for a person asking;
+# this runs unattended on every rebuild, which is why the two differ.
+#
+# The module's stdout is captured and dropped: this script's stdout is the agent
+# dir and nothing else, and "kept" is the expected state of a re-run rather than
+# a report. Only a file this run created gets a line, in the same column as the
+# other seeding notes.
+#
+# A failure here is a warning, not an abort: settings, credentials and trust are
+# already seeded above, and aborting would cost them for two disabled servers.
+had_mcp=0
+[ -f "$DIR/mcp.json" ] && had_mcp=1
+if mcp_output=$(PI_CODING_AGENT_DIR="$DIR" node "$CATALOGUE_CLI" --if-missing 2>&1); then
+	if [ "$had_mcp" -eq 0 ] && [ -f "$DIR/mcp.json" ]; then
+		note "created  $DIR/mcp.json (from the catalogue, every server disabled)"
+	fi
+else
+	note "warning: could not seed $DIR/mcp.json from the catalogue; carrying on without it"
+	printf '%s\n' "$mcp_output" | sed 's/^/         /' >&2
 fi
 
 # --- optional shell hook ----------------------------------------------------
