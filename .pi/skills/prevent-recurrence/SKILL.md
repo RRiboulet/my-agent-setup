@@ -117,8 +117,12 @@ stock rules already have docs, editor support, and a message convention.
 
 Python recipes — Ruff `TID251` and the stock rules worth reusing, ast-grep with
 `sg test`, `import-linter`, and the project-test fallback — are in
-[references/python.md](references/python.md). The same order applies in JS/TS
-with ESLint's `no-restricted-*` and dependency boundaries.
+[references/python.md](references/python.md). The same order applies in JS/TS:
+[references/js-ts.md](references/js-ts.md) covers ESLint's `no-restricted-imports`
+and `no-restricted-syntax`, a local flat-config rule when the message must name
+the canonical file, dependency-cruiser boundaries, typed linting through
+typescript-eslint, oxlint for the inner loop, and the `eslint-disable` /
+`@ts-ignore` audit.
 
 ## Write the check that names the fix
 

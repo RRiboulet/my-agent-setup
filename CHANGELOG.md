@@ -95,6 +95,38 @@ Added:
   and README, `AGENTS.md` and `licenses/NOTICE.md` advertise and credit it (the
   package manifest already listed it).
 
+- **The skill's JS/TS adapter lands too, every recipe run rather than
+  remembered.** `references/js-ts.md` carries the half of the stack a JavaScript
+  or TypeScript repository needs, in the Python adapter's shape and with the same
+  command-plus-exit-code discipline: `no-restricted-imports` and
+  `no-restricted-syntax` for zero-code bans whose message names the replacement;
+  a local flat-config rule (`meta.messages`, `meta.hasSuggestions`, `suggest`)
+  for the case where the diagnostic must name the canonical file or symbol;
+  dependency-cruiser for the module direction a line cannot prove;
+  typescript-eslint's `no-floating-promises` and `no-misused-promises` for the
+  root causes a syntax rule cannot see, with the project-service requirement
+  spelled out; oxlint for the inner loop and, explicitly, what it cannot yet
+  carry; and the `eslint-disable` / `@ts-ignore` / `@ts-expect-error` audit.
+  Everything was run on 2026-11-20 against two scratch projects under `/tmp` —
+  ESLint 10.15.0 and `@eslint/js` 10.0.1, typescript-eslint 8.73.0 on TypeScript
+  6.0.3, oxlint 1.94.0 with `oxlint-tsgolint` 7.0.2007, dependency-cruiser 18.8.0,
+  `@eslint-community/eslint-plugin-eslint-comments` 4.8.1 on Node 24.22.2 — with
+  the bad and good exit codes recorded for every recipe (exit 1 at the bad
+  revision, 0 at the good one, above). The limits are stated with the passing run as evidence, not
+  as prose: `no-restricted-imports` does not catch an inline `import("…")` type;
+  `--fix` never applies a `suggest` (both `--fix` and `--fix-type suggestion`
+  leave the file unchanged), and dropping `meta.hasSuggestions` makes ESLint 10
+  exit 2 instead of reporting; oxlint 1.94.0 rejects `no-restricted-syntax`
+  outright, exits 0 on a floating-promise file when `--type-aware` is omitted
+  (so the fast pass is not the typed gate), and surfaces no suggestions;
+  dependency-cruiser's console reporter prints the rule name but not its
+  `comment`, which is why the name carries the fix; and TypeScript 7.0.2 makes
+  typescript-eslint 8.73.0 exit 2 with the message that tells you to run it on
+  the TS 6 API, which is why the runs pin 6.0.3. `SKILL.md` and the README name
+  the new reference. No dependency is added to this repository: the examples are
+  scratch projects, the manifest is unchanged, and the harness still consumes no
+  npm packages.
+
 Fixed:
 
 - **The worktree sweep no longer goes blind on a C-locale host.** The Remove
