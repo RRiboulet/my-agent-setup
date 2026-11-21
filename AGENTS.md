@@ -238,7 +238,8 @@ than waiting to be told:
   `blast-radius`.
 - A bug, failing test, CI failure, crash, flake or regression: `diagnosing-bugs`.
 - Any new or changed behavior — the default implementation style: `tdd`. For a
-  bug, `diagnosing-bugs` first.
+  bug, `diagnosing-bugs` first. A rename, comment, typo or release note is not
+  behavior: skip `tdd` there, as `tdd`'s own description says.
 - Retries, queues, webhooks, jobs, migrations or setup scripts:
   `idempotent-operations`.
 - Producing or acting on a performance number: `benchmark-checklist`.

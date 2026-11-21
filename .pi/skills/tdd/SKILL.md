@@ -1,6 +1,6 @@
 ---
 name: tdd
-description: "The default implementation style for new or changed behavior: failing test at a public seam first, then the smallest code that passes. Use when: any behavior change, a bug with a test path, or the user says TDD or red-green."
+description: "Default style for new or changed behavior: failing test at a public seam, then the smallest code that passes. Use when: any behavior change, a bug with a test path, or the user asks for TDD or a regression test. Not for a rename, comment or typo."
 ---
 
 <!-- Adapted from RRiboulet/agent-coding-skills; MIT notices for the underlying
