@@ -6,8 +6,16 @@
 // things break silently as they change: a name that stops matching its folder
 // (pi tolerates it; other harnesses do not), an entry point that loses
 // `disable-model-invocation` and gets started by the model unasked, and a script
-// that loses its executable bit. These assertions are about shape, not wording,
+// that loses its executable bit. Those assertions are about shape, not wording,
 // so a reworded skill still passes.
+//
+// The description and split contract tests below come from ticket 05, Move 2:
+// every description is on the always-on surface, so it has a byte cap by class,
+// a trigger marker on the model-invoked ones, and no routing to another skill; every
+// `references/*.md` is reachable from its `SKILL.md` by link; and the two split
+// bodies stay in their line budget. They report every offender at once rather
+// than the first, because a cap that is over in one skill is usually over in
+// ten.
 
 import assert from "node:assert/strict";
 import { accessSync, constants, readFileSync, readdirSync, statSync } from "node:fs";
@@ -161,4 +169,186 @@ test("every relative link in an adapted, ported or local skill resolves", () => 
 			}
 		}
 	}
+});
+
+// --- The description and split contract (ticket 05, Move 2) ---------------
+//
+// Every description is always-on surface: it is on the request whether or not
+// the skill loads, so its cost is paid 100% of the time. The caps are small on
+// purpose and the saving is small too (~2 KB of a 6.5 KB surface); the point is
+// that a description stays a trigger line instead of growing into an abstract.
+
+const MODEL_INVOKED_CAP = 250;
+const USER_INVOKED_CAP = 150;
+
+// How many lines a body that was split for size may keep. `worktree` was 630
+// lines / 32 KB before its split; `add-model` is the second, deferred one.
+const BODY_BUDGET: Record<string, number> = { "add-model": 150, worktree: 150 };
+
+function descriptionOf(dir: string): string {
+	return rawDescriptionLine(dir)
+		.replace(/^description:\s*/, "")
+		.replace(/^"|"$/g, "")
+		// `\"` is one quote in the value the model sees; counting the two bytes
+		// of its escape would push a 250-byte description over the cap.
+		.replace(/\\"/g, '"');
+}
+
+// The raw frontmatter line, not the parsed value: frontmatter() reads one line
+// only, so a wrapped YAML value would be truncated and slip under the byte cap
+// without failing. The cap test below holds the description to the
+// single-double-quoted-line form Move 2 fixes, which is what makes the byte
+// count the whole value.
+function rawDescriptionLine(dir: string): string {
+	const lines = readFileSync(path.join(SKILLS_ROOT, dir, "SKILL.md"), "utf8").split("\n");
+	const end = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
+	return lines.slice(1, end).find((line) => line.startsWith("description:")) ?? "";
+}
+
+// A `description: "…"` line followed by an indented line keeps its YAML
+// meaning and hides the rest of the value from every one-line reader, so the
+// cap would measure a fragment. Reject the shape, not just the fragment.
+function hasContinuationLine(dir: string): boolean {
+	const lines = readFileSync(path.join(SKILLS_ROOT, dir, "SKILL.md"), "utf8").split("\n");
+	const start = lines.findIndex((line) => line.startsWith("description:"));
+	if (start === -1) return false;
+	const next = lines[start + 1] ?? "";
+	return /^\s+\S/.test(next) && next.trim() !== "---";
+}
+
+// Whole-file lines, frontmatter included: the budget is the spec's hard ceiling
+// on what a split body may keep (`docs/tickets/harness-advancements/05-skills-prune.md`),
+// and counting the file keeps a frontmatter-grown skill from dodging it.
+function skillFileLines(dir: string): number {
+	const text = readFileSync(path.join(SKILLS_ROOT, dir, "SKILL.md"), "utf8");
+	return text.split("\n").length - (text.endsWith("\n") ? 1 : 0);
+}
+
+// JSON rather than a bare join, so a violation list reads as a list in the
+// failure output instead of one long line.
+function report(violations: string[]): string {
+	return `\n${JSON.stringify(violations, null, 2)}`;
+}
+
+test("every description fits the byte cap of its class", () => {
+	// Bytes, not characters: the descriptions use em dashes, and the cap is a
+	// budget of what the request carries. A description authored to 250
+	// characters with three em dashes is 256 B.
+	const violations: string[] = [];
+	for (const dir of skillDirs()) {
+		const cap = USER_INVOKED.includes(dir) ? USER_INVOKED_CAP : MODEL_INVOKED_CAP;
+		const raw = rawDescriptionLine(dir);
+		if (!/^description: ".*"$/.test(raw) || hasContinuationLine(dir)) {
+			violations.push(`.pi/skills/${dir}: description is not one double-quoted line`);
+			continue;
+		}
+		const bytes = Buffer.byteLength(descriptionOf(dir), "utf8");
+		if (bytes > cap) violations.push(`.pi/skills/${dir}: ${bytes} B > ${cap} B`);
+	}
+	assert.deepEqual(violations, [], `descriptions that are over the cap or not one double-quoted line:${report(violations)}`);
+});
+
+test("every model-invoked description says when to use it", () => {
+	// `Use when:` is the marker the routing surfaces key off, and the shape AGENTS.md
+	// documents: the broadest true trigger first, then narrower ones. A
+	// description without it reads as a summary, which is not what the model
+	// selects on.
+	const missing: string[] = [];
+	for (const dir of skillDirs()) {
+		if (USER_INVOKED.includes(dir)) continue;
+		if (!descriptionOf(dir).includes("Use when:")) missing.push(`.pi/skills/${dir}`);
+	}
+	assert.deepEqual(missing, [], `model-invoked descriptions with no "Use when:":${report(missing)}`);
+});
+
+// One-word skill names that are also ordinary English or program names here, so a
+// token match on them flags prose that routes nowhere ("never commit, push",
+// "devc ... tmux"). Every other name is checked as a token, one word or not;
+// `tdd` is the reason this list exists rather than a blanket exemption.
+const HOMOGRAPHS = new Set([
+	"commit",
+	"devcontainer",
+	"github",
+	"grilling",
+	"handoff",
+	"implement",
+	"librarian",
+	"teach",
+	"tmux",
+	"worktree",
+]);
+
+test("no description names another skill", () => {
+	// A description that routes to another skill competes with it: two skills
+	// then load, or the wrong one does, and neither surface says why.
+	const violations: string[] = [];
+	const dirs = skillDirs();
+	for (const dir of dirs) {
+		const text = descriptionOf(dir);
+		for (const other of dirs) {
+			if (other === dir) continue;
+			const homograph = !other.includes("-") && HOMOGRAPHS.has(other);
+			const named = homograph
+				? text.includes(`\`${other}\``) || text.includes(`/skill:${other}`)
+				: new RegExp(`(^|[^a-z0-9-])${other}([^a-z0-9-]|$)`, "i").test(text);
+			if (named) violations.push(`.pi/skills/${dir} names ${other}`);
+		}
+	}
+	assert.deepEqual(violations, [], `descriptions naming another skill:${report(violations)}`);
+});
+
+test("every user-invoked description has the entry-point shape", () => {
+	// These five are hidden from model selection, so their description is read by
+	// the human as a menu line. The shape is what makes the menu consistent, and
+	// without an assertion a rewrite can leave one as a bare label.
+	const wrong: string[] = [];
+	for (const dir of USER_INVOKED) {
+		if (!descriptionOf(dir).startsWith(`User-invoked /skill:${dir}: `)) wrong.push(`.pi/skills/${dir}`);
+	}
+	assert.deepEqual(wrong, [], `user-invoked descriptions not in "User-invoked /skill:<name>: ..." form:${report(wrong)}`);
+});
+
+// Relative to `dir`, so a reference in a subdirectory is reported and matched by
+// the same path the link would use.
+function markdownFilesUnder(dir: string, prefix = ""): string[] {
+	return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+		const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+		if (entry.isDirectory()) return markdownFilesUnder(path.join(dir, entry.name), rel);
+		return entry.name.endsWith(".md") ? [rel] : [];
+	});
+}
+
+test("every references/*.md is reachable from its SKILL.md", () => {
+	// The link walk above catches a link to nowhere. This catches the opposite,
+	// which is silent: a reference file nobody links, so no agent ever finds it.
+	// `teach` shipped an orphaned `GLOSSARY-FORMAT.md` that way.
+	const orphans: string[] = [];
+	for (const dir of skillDirs()) {
+		const skillRoot = path.join(SKILLS_ROOT, dir);
+		const refRoot = path.join(skillRoot, "references");
+		if (!statSync(refRoot, { throwIfNoEntry: false })) continue;
+		const text = readFileSync(path.join(skillRoot, "SKILL.md"), "utf8").replace(/```[\s\S]*?```/g, "");
+		const linked = new Set(
+			[...text.matchAll(/\]\(([^)\s]+)\)/g)].map(([, target]) => target.split("#")[0].replace(/^\.\//, "")),
+		);
+		for (const entry of markdownFilesUnder(refRoot)) {
+			if (!linked.has(`references/${entry}`)) orphans.push(`.pi/skills/${dir}/references/${entry}`);
+		}
+	}
+	assert.deepEqual(orphans, [], `reference files no SKILL.md links to:${report(orphans)}`);
+});
+
+test("the split skill bodies stay within their line budget", () => {
+	// The budget is the point of the split: a body that grows back to its old size
+	// has not been split, and the always-on cost of loading it returns with it.
+	const over: string[] = [];
+	for (const [dir, budget] of Object.entries(BODY_BUDGET)) {
+		if (!statSync(path.join(SKILLS_ROOT, dir), { throwIfNoEntry: false })) {
+			over.push(`.pi/skills/${dir}: in the budget map but no longer exists`);
+			continue;
+		}
+		const lines = skillFileLines(dir);
+		if (lines > budget) over.push(`.pi/skills/${dir}/SKILL.md: ${lines} lines > ${budget}`);
+	}
+	assert.deepEqual(over, [], `split bodies over budget:${report(over)}`);
 });
