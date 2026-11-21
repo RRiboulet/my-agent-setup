@@ -57,7 +57,11 @@ R1. `mcp/catalogue.json` exists at the package root, in pi's `mcpServers` shape,
     false`, an explicit `"exposure": "codemode"`, and no `auth`. Its first two
     members are `figma` (the streamable-HTTP URL `https://mcp.figma.com/mcp` with
     `oauth.clientName` set to the documented compatibility value) and
-    `playwright` (the stdio `npx -y @playwright/mcp@latest` launch).
+    `playwright` (the stdio launch of `npx -y @playwright/mcp@latest` with
+    `--browser chromium --headless`, the only combination that works on an arm64
+    host without a display). R1 was amended after the first merge: the bare
+    launch connects and lists its tools but fails every action, so the flags and
+    the README's per-machine browser install are part of the requirement.
 
 R2. An installer merges the catalogue into `<agent dir>/mcp.json`, adding only
     the names that are missing. A name already present — including one the user
