@@ -178,7 +178,7 @@ function judgment(overrides: Partial<Judgment> = {}): Judgment {
 	return {
 		adversarial: track(),
 		complexity: track(),
-		judge: "openrouter/typesafe/jev-1.13",
+		judge: "opencode/jev-1.13-free",
 		latencyMs: 500,
 		...overrides,
 	};
@@ -216,8 +216,8 @@ test("config: defaults apply when no file exists", () => {
 	const loaded = loadConfig({ path: "/nonexistent/review-triage.json", env: {} });
 	assert.equal(loaded.enabled, true);
 	assert.equal(loaded.tool, true, "the tool is registered by default");
-	assert.equal(loaded.judge.provider, "openrouter");
-	assert.equal(loaded.judge.model, "typesafe/jev-1.13");
+	assert.equal(loaded.judge.provider, "opencode");
+	assert.equal(loaded.judge.model, "jev-1.13-free");
 	assert.equal(loaded.reverseChoice, true);
 	assert.equal(loaded.policy.skipThreshold, 0.9);
 	assert.deepEqual(loaded.thinkingLadder, DEFAULT_THINKING_LADDER);
@@ -354,7 +354,7 @@ test("config: a file merges over defaults field by field", () => {
 	try {
 		const loaded = loadConfig({ path, env: {} });
 		assert.equal(loaded.judge.model, "typesafe/jev-latest");
-		assert.equal(loaded.judge.provider, "openrouter", "an unset field keeps the default");
+		assert.equal(loaded.judge.provider, "opencode", "an unset field keeps the default");
 		assert.equal(loaded.judge.timeoutMs, 4000);
 		assert.equal(loaded.candidates.length, 1);
 		assert.equal(loaded.candidates[0]?.cost, 3.5, "the cost must survive the config read");
@@ -460,15 +460,15 @@ test("credentials: a missing judge credential names the provider, the model and 
 	const report = credentialReport({
 		judge: DEFAULT_CONFIG.judge,
 		candidates: DEFAULT_CANDIDATES,
-		auth: (provider) => ({ configured: provider !== "openrouter" }),
+		auth: (provider) => ({ configured: provider !== "opencode" }),
 	});
 	assert.equal(report.judgeGap?.role, "judge");
-	assert.equal(report.judgeGap?.provider, "openrouter");
-	assert.deepEqual(report.judgeGap?.models, ["openrouter/typesafe/jev-1.13"]);
+	assert.equal(report.judgeGap?.provider, "opencode");
+	assert.deepEqual(report.judgeGap?.models, ["opencode/jev-1.13-free"]);
 	const message = report.judgeGap?.message ?? "";
-	assert.match(message, /openrouter/u, "the provider is named");
-	assert.match(message, /typesafe\/jev-1\.13/u, "the model is named");
-	assert.match(message, /OPENROUTER_API_KEY/u, "the environment variable is named");
+	assert.match(message, /opencode/u, "the provider is named");
+	assert.match(message, /jev-1\.13-free/u, "the model is named");
+	assert.match(message, /OPENCODE_API_KEY/u, "the environment variable is named");
 	assert.match(message, /auth\.json/u, "the stored-credential route is named");
 	assert.match(message, /\/login/u, "the interactive route is named");
 	assert.deepEqual(
@@ -513,6 +513,7 @@ test("credentials: an unknown status is treated as usable, never as a failure", 
 
 test("credentials: an unknown provider gets a predictable environment variable", () => {
 	assert.equal(providerEnvVar("openrouter"), "OPENROUTER_API_KEY");
+	assert.equal(providerEnvVar("opencode"), "OPENCODE_API_KEY");
 	assert.equal(providerEnvVar("opencode-go"), "OPENCODE_API_KEY");
 	assert.equal(providerEnvVar("some-new-provider"), "SOME_NEW_PROVIDER_API_KEY");
 	assert.match(credentialFix("some-new-provider"), /SOME_NEW_PROVIDER_API_KEY/u);
@@ -1647,16 +1648,16 @@ test("wiring: a missing judge credential short-circuits the call with an actiona
 	const { details } = await runPipeline({
 		exec: stableExec().exec,
 		answers: fullAnswers(),
-		auth: (provider) => ({ configured: provider !== "openrouter" }),
+		auth: (provider) => ({ configured: provider !== "opencode" }),
 	});
 	const plan = details.plan;
 	// `fullAnswers` would produce a real recommendation if the judge had run, so
 	// the failure here proves the credential check skipped the classifier call.
 	assert.equal(plan?.judgeFailure?.kind, "unavailable");
-	assert.match(plan?.judgeFailure?.message ?? "", /openrouter/u);
-	assert.match(plan?.judgeFailure?.message ?? "", /OPENROUTER_API_KEY/u);
+	assert.match(plan?.judgeFailure?.message ?? "", /opencode/u);
+	assert.match(plan?.judgeFailure?.message ?? "", /OPENCODE_API_KEY/u);
 	assert.ok(
-		plan?.limitations?.some((limitation) => limitation.includes("OPENROUTER_API_KEY")),
+		plan?.limitations?.some((limitation) => limitation.includes("OPENCODE_API_KEY")),
 		"the fix is also visible in the rendered limitations",
 	);
 });
@@ -2626,6 +2627,21 @@ test("command: positional and flag forms both resolve the target", () => {
 	assert.deepEqual(resolveTarget(parseTriageArgs("--ref deadbeef")), { kind: "commit", ref: "deadbeef" });
 });
 
+test("the devcontainer seed is the shipped policy, not a second judge", () => {
+	// Found while moving the judge: `.devcontainer/pi/review-triage.json` is what
+	// postCreate installs into a fresh container, and its judge had drifted to
+	// `openrouter`/`perplexity/pplx-decider-v1.3:free` while the example — the file
+	// the same policy is documented as — named `typesafe/jev-1.13`. Nothing read
+	// both, so nothing failed; a container would have judged with a policy the
+	// repository never documented. The seed exists to install *this* policy.
+	const REPO_ROOT = resolve(new URL("../../../..", import.meta.url).pathname);
+	const load = (path: string) => loadConfig({ path, env: {}, warn: () => {} });
+	const seed = load(join(REPO_ROOT, ".devcontainer/pi/review-triage.json"));
+	const shipped = load(join(REPO_ROOT, ".pi/extensions/review-triage/review-triage.example.json"));
+	assert.deepEqual(seed.judge, shipped.judge, "the seed judges with the shipped judge");
+	assert.deepEqual(seed.candidates, shipped.candidates, "the seed offers the shipped reviewers");
+});
+
 test("the shipped review-triage policy routes every candidate through opencode-go", () => {
 	// The bug this pins, found by running a review: the config that reached
 	// ~/.pi/agent listed `deepseek-v4.1-flash` and `glm-5.3-flash` under provider
@@ -2649,8 +2665,8 @@ test("the shipped review-triage policy routes every candidate through opencode-g
 			`${candidate.model} must be reached through opencode-go, the provider this machine authenticates`,
 		);
 	}
-	assert.equal(config.judge.provider, "openrouter", "the judge stays on openrouter");
-	assert.equal(config.judge.model, "typesafe/jev-1.13");
+	assert.equal(config.judge.provider, "opencode", "the judge stays on OpenCode Zen");
+	assert.equal(config.judge.model, "jev-1.13-free");
 	// A stated cost overrides the catalogue in what Jev is shown and in the plan,
 	// so a hand-typed number that drifts is a silent 2x error in the routing
 	// decision. Found in review: 0.3 for deepseek-v4.1-flash, catalogue 0.15.

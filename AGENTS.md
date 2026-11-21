@@ -378,7 +378,8 @@ config lacks, add it to the config first. Which model sits in which capability
 band is a human judgement, not the agent's.
 
 Every candidate must name `opencode-go`, the provider this machine actually
-authenticates; the judge is the only model on another provider (`openrouter`).
+authenticates; the judge is the only model on another provider (`opencode`,
+OpenCode Zen, for the free `jev-1.13-free` classifier — same `OPENCODE_API_KEY`).
 The policy is built into `.pi/extensions/review-triage/config.ts`, so installing
 the package is enough, and the same policy is written out for editing as
 `.pi/extensions/review-triage/review-triage.example.json`; a test fails if a

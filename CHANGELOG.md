@@ -415,6 +415,31 @@ Maintenance:
   count is expected, not impossible, because adjacency is a window (63 S units
   from 49 directives here).
 
+- **The review-triage judge is OpenCode's free Jev, not OpenRouter's paid one.**
+  The judge was `openrouter`/`typesafe/jev-1.13`; it is now
+  `opencode`/`jev-1.13-free`. Same System One protocol, same model family, one
+  fewer credential: `jev-1.13-free` is served by OpenCode Zen and authenticates
+  with the `OPENCODE_API_KEY` the four reviewers already need, so a machine with
+  the reviewer key but no OpenRouter key was losing triage entirely to a judge it
+  could have run for nothing. The provider is `opencode` and not `opencode-go`
+  because the Go endpoint serves chat models only — its provider registers no
+  classifier API at all — so the free Jev sits one provider over from the
+  reviewers, on the same key; `PROVIDER_ENV_VARS` now says so for both. Checked
+  against the live service before switching: a Choice question over that key
+  returned calibrated probabilities (`{"yes":0.82,"no":0.18}`) with `cost: 0`.
+  The built-in defaults, `review-triage.example.json`, the devcontainer seed, the
+  docs and the pinned tests move together, and `judgment().judge` reports
+  `opencode/jev-1.13-free` in the plan.
+
+- **`.devcontainer/pi/review-triage.json` had drifted to a judge the repository
+  never documented, and a test now pins it.** The seed file was added naming
+  `openrouter`/`perplexity/pplx-decider-v1.3:free` while the extension's defaults
+  and its example file named `typesafe/jev-1.13`; nothing read both, so a fresh
+  container was judged by a policy no test or document described. The new test
+  loads the seed and the example and requires the same judge and the same
+  candidates, because the seed exists to install *this* policy — which is what
+  the entry above assumed when it moved the judge.
+
 ## v1.14.0 — 2026-11-16
 
 Added:
