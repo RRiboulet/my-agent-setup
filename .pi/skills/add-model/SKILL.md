@@ -63,7 +63,7 @@ Load a reference only when its branch applies — the body is the rule.
 
 | Reference | Load it when |
 |---|---|
-| [`references/editing.md`](references/editing.md) | you need the long form behind a field: the `baseUrl` reasoning, the level-by-level `thinkingLevelMap` rule, the payload's shape checks, the one-model `curl` dump, alternative edits, or the cache and test steps after editing |
+| [`references/editing.md`](references/editing.md) | you need the long form behind a field: the `baseUrl` reasoning, the level-by-level `thinkingLevelMap` rule, the payload's shape checks, the one-model `curl` dump, alternative edits, the cache and test steps after editing, or the common pitfalls |
 | [`references/catalog.md`](references/catalog.md) | the model is priced per context tier, or the API stopped serving its id and you are deprecating it |
 
 ## What the user must provide
@@ -75,7 +75,7 @@ Ask the user for (or look up from the live API / pi-ai bundled data):
 | `id`, `name` | the id exactly as the API reports it (`beam-free`) and a display name (`Beam Free`) |
 | `api` | `openai-completions` (default for opencode-go) or `anthropic-messages` |
 | `baseUrl` | the canonical endpoint for the model's `api`, not the URL the payload advertises: `https://opencode.ai/zen/go/v1` for `openai-completions`, `https://opencode.ai/zen/go` for `anthropic-messages` — **without** the trailing `/v1`, which pi's Anthropic client appends itself |
-| `reasoning` | `true` / `false` |
+| `reasoning` | `true` / `false` — an omitted `capabilities.reasoning` is an absent fact, not `false`; check the payload before writing `false` |
 | `thinkingLevelMap` | each supported level of `off, minimal, low, medium, high, xhigh, max` mapped to itself and the rest to `null`; the API's `"none"` is pi's `"off"`; **omit** the map for a toggle- or budget-only model |
 | `input` | `["text"]` and/or `"image"` |
 | `cost` | `input/output/cacheRead/cacheWrite` per 1M tokens (0 for free); a model priced per context tier also needs `tiers` |

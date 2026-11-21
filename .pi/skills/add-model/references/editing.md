@@ -126,10 +126,6 @@ and do not read "the API omitted it" as "the API denied it" — see the
   them; otherwise the user cannot disable reasoning.
 - For xhigh/max, the map entry must be present (not `undefined`); pi treats
   a missing key as "not supported" for those two levels.
-- If a model advertises no `effort` list, omitting `thinkingLevelMap` is
-  correct — do not synthesize an all-`null` map.
-- Use the canonical `baseUrl` for the model's `api` — `…/zen/go/v1` for
-  `openai-completions`, `…/zen/go` (no `/v1`) for `anthropic-messages` — not the
-  `inference/go/...` URL the payload advertises, which is the alias the live
-  transform uses for API-only models. The one curated alias in `models.json`,
-  `longcat-2.5-free`, is deliberate (#138);
+- Do not synthesize an all-`null` `thinkingLevelMap`; **Base URL** and
+  **Thinking levels** above own those two rules, and `../SKILL.md` owns the
+  summary — this file is the long form, not a second copy.
