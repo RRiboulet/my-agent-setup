@@ -138,7 +138,8 @@ test("the catalogue is pi's mcpServers shape, and every entry ships disabled, co
 	assert.equal(servers.figma.url, "https://mcp.figma.com/mcp");
 	assert.equal(servers.figma.oauth.clientName, "Claude Code", "pi's documented clientName for Figma's authorization server");
 	assert.equal(servers.playwright.command, "npx");
-	assert.deepEqual(servers.playwright.args, ["-y", "@playwright/mcp@latest"]);
+	assert.deepEqual(servers.playwright.args, ["-y", "@playwright/mcp@latest", "--browser", "chromium", "--headless"],
+		"chromium because the chrome channel is absent on arm64 hosts, headless because pi runs where there is no DISPLAY");
 });
 
 test("the module exposes the merge as a function, which the session command imports", async () => {
@@ -185,7 +186,7 @@ test("installing into an agent dir that does not exist yet creates it with both 
 		assert.equal(entry.exposure, "codemode");
 	}
 	assert.equal(server.figma.url, "https://mcp.figma.com/mcp");
-	assert.deepEqual(server.playwright.args, ["-y", "@playwright/mcp@latest"]);
+	assert.deepEqual(server.playwright.args, ["-y", "@playwright/mcp@latest", "--browser", "chromium", "--headless"]);
 	assert.doesNotMatch(readText(fileIn(agentDir)), /"auth"/, "no credential reaches a shared file");
 });
 

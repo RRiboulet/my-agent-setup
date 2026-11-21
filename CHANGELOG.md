@@ -199,6 +199,20 @@ Added:
 
 Fixed:
 
+- **The Playwright catalogue entry asks for Chromium and headless, so a real
+  action works on the hosts pi runs on.** The bare `npx -y @playwright/mcp@latest`
+  launch connected and listed its 25 tools, and then failed every call twice
+  over: the server's default browser is the `chrome` channel, which Playwright
+  cannot install on arm64 (`ERROR: not supported on Linux Arm64`), and its
+  default is headed, which has no window on an agent host with no `DISPLAY`.
+  Measured here on an arm64 host: with the flags added, `browser_navigate` to
+  `https://example.com` returned the page and its snapshot, and a pi session
+  driving it through codemode reported the real page title. The catalogue now
+  passes `--browser chromium --headless`, and the README carries the one-time
+  per-machine step that makes them work — `playwright install chromium` through
+  the same Playwright version the server ships, plus `install-deps` for the
+  system libraries — and states that a change to the catalogue's arguments does
+  not reach an entry someone already has, because the merge is add-only.
 - **The worktree sweep no longer goes blind on a C-locale host.** The Remove
   recipe reads `tmux list-panes -a` as two fields and used a tab as the
   separator. tmux rewrites a tab in `-F` output to `_` when the *server* ran in

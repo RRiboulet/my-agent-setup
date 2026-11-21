@@ -190,8 +190,9 @@ shared without any cross-container mount or coupling.
 servers**: the `pi` manifest has no MCP key, and pi reads MCP configuration only
 from `<agent dir>/mcp.json` and a trusted project's `.pi/mcp.json`. The servers
 are therefore a catalogue in [`mcp/catalogue.json`](mcp/catalogue.json) — Figma
-over streamable HTTP, Playwright through `npx -y @playwright/mcp@latest` — and
-one command that ships with the clone installs it:
+over streamable HTTP, Playwright through `npx -y @playwright/mcp@latest
+--browser chromium --headless` — and one command that ships with the clone
+installs it:
 
 ```bash
 bash bin/mcp-catalogue      # from the clone; in a session: /mcp-catalogue
@@ -223,7 +224,7 @@ $ pi mcp list
 figma: disabled (codemode, global)
   https://mcp.figma.com/mcp
 playwright: disabled (codemode, global)
-  npx -y @playwright/mcp@latest
+  npx -y @playwright/mcp@latest --browser chromium --headless
 ```
 
 **Opt a project in with one key** in its committed `.pi/mcp.json`:
@@ -275,11 +276,31 @@ it. If the sign-in is rejected, change or drop that field in your own `mcp.json`
 before looking anywhere else; the installer skips an entry that already exists,
 so your edit survives every re-run.
 
+**Playwright needs its browser installed once per machine.** The catalogue asks
+for Playwright's own Chromium on purpose: the `chrome` channel the server
+defaults to cannot be installed on arm64 hosts, and the headed default cannot
+open a window where pi runs headless. One install per machine, using the same
+Playwright version the server ships so the browser build numbers agree:
+
+```bash
+npx --package @playwright/mcp@latest -- playwright install chromium   # ~130 MB
+sudo npx --package @playwright/mcp@latest -- playwright install-deps chromium
+```
+
+Without them the server still connects and lists its tools, and every action
+fails with an `Executable doesn't exist` or `Missing system dependencies` error
+that names the command to run. Neither is a project concern, so nothing about
+them belongs in a project's `.pi/mcp.json`.
+
 **Playwright tracks the newest release, so a broken one is a pin away.** The
 catalogue launches `npx -y @playwright/mcp@latest`. If a release breaks, edit
-your own entry to `"args": ["-y", "@playwright/mcp@<version>"]` and re-run the
-installer freely: `playwright` is already present, so it is reported as skipped
-and your pin is not undone.
+your own entry to `"args": ["-y", "@playwright/mcp@<version>", "--browser",
+"chromium", "--headless"]` and re-run the installer freely: `playwright` is
+already present, so it is reported as skipped and your pin is not undone. The
+same rule cuts the other way, and it is worth knowing before you look for a bug
+in the catalogue: a change to the catalogue's own arguments does not reach an
+entry you already have. Delete that entry from your `mcp.json` and re-run the
+installer to take the new one.
 
 **Adding a server to the catalogue** is one object in
 [`mcp/catalogue.json`](mcp/catalogue.json) under `mcpServers`, then the
