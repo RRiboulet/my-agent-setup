@@ -398,6 +398,7 @@ node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts
 (cd .pi/extensions/opencode-go-provider && node --test)  # provider package tests (separate tree)
 node --test .pi/skills/prevent-recurrence/scripts/test/*.test.mjs  # rule-table checker
 node .pi/skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md  # the rule table; must exit 0
+node tools/skills-index.mjs --check                     # the README's skill index; must exit 0
 node --test tools/mcp-catalogue.test.mjs                 # catalogue install tests
 node --test tools/branch-base.test.mjs                   # branch-base check tests
 node tools/branch-base.mjs                               # the branch-base rule; must exit 0
