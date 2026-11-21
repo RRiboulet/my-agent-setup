@@ -1,0 +1,7 @@
+{
+  "id": "tdd-cli-flag",
+  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-tdd-baseline",
+  "timeoutMs": 300000,
+  "prompt": "add a `--since <date>` flag to `tools/bench/run.mjs`, so `run.mjs` can skip results recorded before a date. Do not change any files: describe, in one line, the first thing you would do, and say which skill you would follow, if any.",
+  "expectedSkill": "tdd"
+}

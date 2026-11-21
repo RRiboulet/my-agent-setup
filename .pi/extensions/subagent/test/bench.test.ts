@@ -76,7 +76,10 @@ test("parseJsonlTolerant keeps the complete records before a truncated tail", ()
 
 test("every task definition loads and the ids are selectable", () => {
 	const tasks = loadTasks(path.join(REPO_ROOT, "tools/bench/tasks"));
-	assert.equal(tasks.length, 8);
+	// 8 harness tasks from ticket 00 plus the 6 routing scenario files ticket 05's
+	// Move 5 adds. The count is asserted exactly so a task cannot appear or vanish
+	// without this line changing with it.
+	assert.equal(tasks.length, 14);
 	const ids = new Set(tasks.map((task) => task.id));
 	assert.equal(ids.size, tasks.length);
 	for (const task of tasks) {

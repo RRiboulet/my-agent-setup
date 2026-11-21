@@ -179,25 +179,64 @@ becomes the broadest true one.
 One row per skill in this ticket: kept / split / why. The four zero-load skills
 keep their routing reference, named. The "~15" target is deleted.
 
-## Move 5: cheap routing spot-check (Move 3 only)
+## Move 5: cheap routing spot-check - run, and it shows no gain
 
-Six prompts, one model, recorded **before and after the Move 3 wording change**.
-It validates the trigger rewrite, **not** the Move 2 descriptions — every prompt
-below routes through the AGENTS.md/`implement` lines that Move 3 edits, so a
-delta cannot be attributed to Move 2.
+Six task files are added here (`tools/bench/tasks/`), and `bench.test.ts`'s task
+count moves from 8 to 14 with them - the count is asserted exactly so a task
+cannot appear without that line changing too. Ticket 00's "exactly 8" becomes 8
+plus these 6 scenario files, which is what ticket 00 said other tickets would do
+through the documented entry point.
 
-| task | prompt | expected pick |
-|---|---|---|
-| `tdd-cli-flag` | "add a `--since` flag to the CLI" | `tdd` |
-| `idempotent-retry` | "the webhook consumer double-charges on retry" | `idempotent-operations` (+ `tdd`) |
-| `trivial-rename` | "rename this variable and update the comment" | none |
-| `blast-radius-schema` | "read this schema change and tell me what else breaks" | `blast-radius` |
-| `benchmark-number` | "the p50 in my benchmark looks 30% better" | `benchmark-checklist` |
-| `recurrence-timeout` | "I keep having to tell you to add a timeout" | `prevent-recurrence` |
+Fixing the prompts came first, because as written the run measured nothing. Three
+defects, and one prompt after a review:
 
-Built as six `tools/bench/tasks/*.json` files for the existing runner (which
-already records `metrics.skillLoads`), not as prose. Name the model in the
-result. Budget more than the 0.5 h the first draft assumed.
+- **The prompts instructed the answer** ("load the skill (or skills) you would
+  follow here"), so every cell passed at baseline, including a task with no check
+  at all. They are task-only now.
+- **Three prompts had no referent in the fixture** ("the CLI", "this variable",
+  "this schema change"); they now name real targets in `tools/bench/lib/tasks.mjs`
+  and `tools/bench/run.mjs`.
+- **`expectedSkill` is ignored by `run.mjs`**, and `expectAnswerContains` scored
+  prose rather than routing. The check is dropped; the signal is the skill names
+  in the recorded answer, read as a judgement.
+- `blast-radius-schema` claimed **four** task files carry `expectedSkill`; five do.
+
+Final run: baseline `17e3edb` (dev after the description rewrite) vs changed
+`9edd0b6` (this branch), `deepseek-v4.1-flash`, **one run per cell**. Names in
+the answer; `load` is `metrics.skillLoads`.
+
+| task | expected | baseline | changed |
+|---|---|---|---|
+| `tdd-cli-flag` | tdd | in-your-own-words, tdd | in-your-own-words, tdd |
+| `idempotent-retry` | idempotent-operations | diagnosing-bugs, **idempotent-operations**, tdd | diagnosing-bugs, tdd - **lost** |
+| `trivial-rename` | none | **none** | prove-it-works, tdd - **regressed** |
+| `blast-radius-schema` | blast-radius | blast-radius, in-your-own-words, tdd, worktree | blast-radius, in-your-own-words, tdd |
+| `benchmark-number` | benchmark-checklist | benchmark-checklist (load) | benchmark-checklist (load) |
+| `recurrence-timeout` | prevent-recurrence | prevent-recurrence (load), tdd | diagnosing-bugs, prevent-recurrence, writing-for-agents - **lost the load** |
+
+**The result is no gain and one visible regression.** Nothing improved; a trivial
+rename moved from naming no skill to naming `tdd`, and two prompts stopped naming
+or loading the skill they did before. `tdd` is named in both states on most
+prompts, so the wording did not measurably change its adoption either.
+
+The instrument cannot carry the claim, and that is the honest conclusion rather
+than a footnote:
+
+- **n = 1 per cell**, one model, six prompts. Any single answer could be noise;
+  the two "lost" cells are as likely sampling as effect.
+- **Naming is not routing.** Mentions are counted in the answer text, and an
+  answer that says "`tdd` says not to do this for a rename" scores as a `tdd`
+  hit. `skillLoads` is non-empty in only 4 of 12 cells, so most answers name a
+  skill without opening it - the description alone already does the routing.
+- A signal that could decide this needs `run.mjs` to record which `SKILL.md` was
+  actually read against a task-only prompt, several runs per cell, and a check
+  that can fail. That is ticket 00's runner, not scenario data.
+
+What the branch still does on its own merits: it removes a gate that fired before
+the judgement it depended on (`tdd`'s own body decides whether a seam exists), it
+names `diagnosing-bugs` first for a bug, and it puts the trivial boundary in two
+places - AGENTS.md as judgement, and `tdd`'s description as an explicit exclusion.
+None of that is measured above.
 
 ## Measurement support
 
@@ -223,7 +262,9 @@ change.
 - [ ] `tdd` is the default in its description, its body, `implement` §4 and
       AGENTS.md, with the judgement-only trivial boundary and the extended
       exception list.
-- [ ] Routing tasks recorded before and after, with the delta and the model.
+- [x] Routing tasks recorded before and after, with the delta and the model - and
+      the recorded conclusion that this instrument cannot resolve the change, and
+      that the one visible delta is a regression.
 - [ ] Per-skill verdict table, and the recorded decision that the count is 25.
 - [ ] `node --test .pi/extensions/subagent/test/coding-skills.test.ts`,
       `node --test .pi/extensions/subagent/test/package-manifest.test.ts` and
