@@ -234,6 +234,24 @@ Added:
   else `~/.pi/agent`). No setting, no server registration and no credential is
   added by any of it.
 
+- **The CI gate runs the README's skill-index check, and a test holds the gate
+  list to `AGENTS.md`'s `## Tests` block so a listed check cannot go unrun.**
+  `node tools/skills-index.mjs --check` was named in the Tests block — the list
+  a session actually runs — and above, in this section, but had no step in
+  `.github/workflows/checks.yml`, so the generated skill index could go stale on
+  a branch whose local suite was green. The workflow's own comment claiming to
+  be "the gate, run the way AGENTS.md → 'Tests' runs it" is exactly what missed
+  it: prose about parity is not parity. It is now a `Skill index` step, in the
+  position `AGENTS.md` orders it. `checks-parity.test.ts` compares the two lists
+  in both directions and in order — every gate `AGENTS.md` names must appear as
+  a `run:` step, and every `run:` step must be a gate `AGENTS.md` names — so
+  adding one without the other is red. The three environment-prep commands
+  (installing pi, fetching `origin/dev`, and linking pi's packages through
+  `setup-deps.sh`, which `AGENTS.md` annotates `once`) are enumerated in the
+  test as prep rather than inferred from a step's name, and the checkout and
+  Node setup are `uses:` steps with no command at all, so a new `run:` step has
+  to be classified by hand before it can pass.
+
 Fixed:
 
 - **The Playwright catalogue entry asks for Chromium and headless, so a real
