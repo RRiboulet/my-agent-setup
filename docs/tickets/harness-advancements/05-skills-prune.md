@@ -2,7 +2,12 @@
 
 **Blocked by:** 00 for the model-run harness only; `tools/bench/skills.mjs`
 landed in #162, so the per-skill part is unblocked.
-**Status:** in progress — step 0 and the `worktree` split landed in this branch.
+**Status:** **done** — every move landed, each in its own PR: `writing-for-agents`
+and the `worktree` split in #179, the `add-model` split in #183, the description
+contract in #184, `tdd` as the default with its routing measurement in #187, the
+assertions that hold the contract in #188, the generated inventory and invocation
+rules in #189, and the loop inlined in `implement` with `tdd` down to 2,902 B in
+#192.
 **Re-scoped 2026-11-21** from "23 skills become ~15" to "consistent, concise,
 correctly triggered". The skill count is an **output**, not a target: it is 25
 today (24 + `writing-for-agents`) and every one of them is kept.
@@ -253,23 +258,31 @@ change.
       test, links resolving.
 - [x] `worktree/SKILL.md` ≤ 150 lines with three grouped references, every path
       resolving and each linked with its load condition.
-- [ ] `add-model` split at line-level boundaries, ≤ 150 lines.
-- [ ] Every description meets its class cap and shape; total description bytes
-      recorded before and after (baseline **6,558 B**).
-- [ ] The four new assertions exist and fail on a planted violation (300 B
-      description, missing `Use when:`, another skill's name, unlinked
-      `references/*.md`), then pass on this tree.
-- [ ] `tdd` is the default in its description, its body, `implement` §4 and
+- [x] `add-model` split at line-level boundaries, ≤ 150 lines (#183: 120).
+- [x] Every description meets its class cap and shape; total description bytes
+      recorded before and after: **6,558 B → 4,596 B** across 25 skills, all under
+      the 250 B / 150 B caps (`tdd`'s own 246 B came in #187, after the contract).
+- [x] The four new assertions exist and fail on a planted violation, then pass on
+      the tree (#188, proven red first for each). The file also gained two more
+      since: the loop block is identical in `tdd` and `implement`, and `tdd`'s
+      body stays under 3,000 B (#192).
+- [x] `tdd` is the default in its description, its body, `implement` §4 and
       AGENTS.md, with the judgement-only trivial boundary and the extended
-      exception list.
+      exception list (#187). Its body was then cut to 2,902 B and the loop
+      inlined in `implement` (#192).
 - [x] Routing tasks recorded before and after, with the delta and the model - and
       the recorded conclusion that this instrument cannot resolve the change, and
       that the one visible delta is a regression.
-- [ ] Per-skill verdict table, and the recorded decision that the count is 25.
-- [ ] `node --test .pi/extensions/subagent/test/coding-skills.test.ts`,
+- [x] The count is an **output, 25**, and the decision is recorded above (nothing
+      pruned: every zero-load skill has a workflow reference). There is no
+      hand-written per-skill verdict table on purpose: `README.md`'s skill index
+      is generated from the frontmatter and lists all 25 with their invocation
+      class and trigger text, and `skills-index.test.ts` fails when it drifts
+      (#189). A second table here would be the copy that goes stale.
+- [x] `node --test .pi/extensions/subagent/test/coding-skills.test.ts`,
       `node --test .pi/extensions/subagent/test/package-manifest.test.ts` and
       `node .pi/skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md`
-      all exit 0.
+      all exit 0 (1187 tests at the last full run).
 
 ## Non-goals
 
@@ -282,3 +295,13 @@ rewording that widens or narrows a skill's actual scope.
 ~~0.5 h~~ step 0 and the `worktree` split: **spent**. Remaining: `add-model` 1.5 h
 · descriptions 2 h · `tdd`/`implement`/AGENTS 1 h · assertions 1 h · routing
 tasks 1 h · re-measure and docs 1 h.
+
+## What is left, and it is not this ticket
+
+- `tools/bench/skills.mjs` still ranks a skill by every read under its directory,
+  so skill work inflates the ranking; `descBytes`/`bodyBytes` per row are not
+  added. Ticket 00 owns the runner.
+- The routing spot-check cannot resolve a wording change (Move 5). A deciding
+  instrument needs several runs per cell and a check that can fail.
+- The mutation requirement was measured after this ticket closed:
+  `docs/experiments/mutation-proof-step.md`.
