@@ -157,6 +157,42 @@ test("HEAD being origin/dev itself is correct: dev has no base of its own", () =
 	const output = line(result);
 	assert.match(output, /^branch-base: correct — HEAD is exactly origin\/dev \([0-9a-f]{7}\)/);
 	assert.match(output, /there is no branch base to check/);
+	// The checkout IS the integration branch, so feature-branch advice — start a
+	// branch for this changeset — is not what the line should say (v1.15.1
+	// review finding: the changelog claimed this and the two dev paths below
+	// still printed it).
+	assert.doesNotMatch(output, /git checkout -b/);
+	assert.match(output, /start the next change on a branch cut from origin\/dev/);
+});
+
+test("a detached HEAD that is origin/dev keeps the checkout-a-branch advice", () => {
+	// Detached is a pull-request checkout, not the integration branch, so its
+	// line is pinned byte-for-byte: the dev-specific wording above must not
+	// leak into it.
+	const repo = scratch("detached-equal");
+	git(repo.work, ["checkout", "-q", "--detach"]);
+
+	const result = run(repo.work);
+	assert.equal(result.code, 0, result.stdout + result.stderr);
+	assert.match(line(result), /next: git checkout -b <change-name> origin\/dev$/);
+});
+
+test("dev with unpushed commits is correct and does not tell dev to open a PR into dev", () => {
+	// Work landing directly on the integration branch is not a feature branch:
+	// `gh pr create --base dev` would ask dev to review a pull request from dev
+	// into dev, and "git checkout -b" would treat the work as a changeset that
+	// needs one. dev's own commits reach the remote with a push; the release
+	// flow in AGENTS.md is the only path to main.
+	const repo = scratch("dev-ahead");
+	commit(repo.work, "feat: work committed straight onto dev");
+
+	const result = run(repo.work);
+	assert.equal(result.code, 0, result.stdout + result.stderr);
+	const output = line(result);
+	assert.match(output, /^branch-base: correct — dev descends from origin\/dev \([0-9a-f]{7}\) and carries 1 commit of its own/);
+	assert.doesNotMatch(output, /gh pr create/);
+	assert.doesNotMatch(output, /git checkout -b/);
+	assert.match(output, /next: git push -u origin dev$/);
 });
 
 test("dev itself, with origin/dev one push ahead, is superseded rather than behind-dev", () => {

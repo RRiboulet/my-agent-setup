@@ -25,9 +25,14 @@
 //     the resolved path, plus `repoConfigured` and `repoOverride`, so a result
 //     file says where it ran and whether a flag put it there.
 //   - A workspace that cannot be run is an error, not a skipped cell: before the
-//     first token is spent, every selected task's repo is resolved and checked
-//     (exists, inside a git work tree, clean unless allowed). One bad repo fails
-//     the invocation and names each offending task and its fix.
+//     first token is spent, every selected task that still has a cell to run is
+//     resolved and checked (exists, inside a git work tree, clean unless
+//     allowed). One bad repo fails the invocation and names each offending task
+//     and its fix. A task whose every cell is already covered by a stored result
+//     is out of scope -- the cells would be skipped, so its repo is never used --
+//     which is what lets a resumed grid succeed after its fixture worktrees are
+//     gone. A cell that will be written is never preflighted late: the check
+//     runs before any cell starts.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -153,10 +158,13 @@ function repoProblem(task, { allowDirty }) {
 }
 
 /**
- * Resolve every selected task's workspace before the first token is spent, and
- * refuse the whole invocation if any of them cannot run. Per-cell skipping would
- * silently drop a task from the comparison, so this fails loudly and lists every
- * offending task at once rather than one per run.
+ * Resolve the workspace of every selected task that still has a cell to run
+ * before the first token is spent, and refuse the whole invocation if any of
+ * them cannot run. Per-cell skipping would silently drop a task from the
+ * comparison, so this fails loudly and lists every offending task at once rather
+ * than one per run. A task whose every cell is covered by a stored result is
+ * left out: its cells are skipped and its repo is never touched, so a resumed
+ * grid does not fail on fixtures that no longer exist.
  */
 function preflightRepos(tasks, { allowDirty }) {
   const problems = [];
@@ -168,6 +176,21 @@ function preflightRepos(tasks, { allowDirty }) {
   throw new Error(
     `${problems.length} task repo(s) cannot run, so no cell was started:\n  ${problems.join("\n  ")}`,
   );
+}
+
+/**
+ * Whether a cell will actually run, or a stored result already covers it.
+ *
+ * `--force` rewrites the cell and `--recheck` re-evaluates it in the task's
+ * repo, so both put the cell back in preflight scope. `--dry-run` follows the
+ * same rule because it is the same code path: it prints the cells it would run,
+ * and preflighting a cell that would only be skipped would fail a grid that is
+ * not going to touch that repo.
+ */
+function cellWillRun(task, model, { out, state, force, recheck }) {
+  if (force || recheck) return true;
+  const outFile = path.join(out, state, modelSlug(model), `${task.id}.json`);
+  return !fs.existsSync(outFile);
 }
 
 function taskVars(task) {
@@ -436,14 +459,27 @@ async function main() {
   });
   const models = normalizeModels(args.models);
   if (models.length === 0) throw new Error("--models selected no models");
-  preflightRepos(tasks, { allowDirty: Boolean(args.allowDirty) });
+  // Cells first, preflight second: the skip decision needs no repo access, and
+  // it decides which repos are even in scope. A cell whose result already
+  // exists (and is not forced or rechecked) is skipped, so its task's repo is
+  // never used and must not refuse the invocation. A cell that will run keeps
+  // its repo in scope, and the whole preflight still happens before any cell
+  // starts, so a bad workspace is never discovered mid-grid.
+  const scope = { out: args.out, state: args.state, force: Boolean(args.force), recheck: Boolean(args.recheck) };
+  preflightRepos(
+    tasks.filter((task) => models.some((model) => cellWillRun(task, model, scope))),
+    { allowDirty: Boolean(args.allowDirty) },
+  );
   const cells = tasks.flatMap((task) => models.map((model) => ({ task, model })));
 
   if (args.dryRun) {
+    let skipped = 0;
     for (const { task, model } of cells) {
-      console.log(`${args.state}\t${modelSlug(model)}\t${task.id}\t${task.repo}`);
+      const willRun = cellWillRun(task, model, scope);
+      if (!willRun) skipped += 1;
+      console.log(`${args.state}\t${modelSlug(model)}\t${task.id}\t${task.repo}${willRun ? "" : "\tskip (exists; --force to rerun)"}`);
     }
-    console.log(`${cells.length} cell(s)`);
+    console.log(`${cells.length} cell(s)${skipped > 0 ? `, ${skipped} skipped (stored results; --force to rerun)` : ""}`);
     return;
   }
 

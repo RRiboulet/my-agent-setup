@@ -207,9 +207,17 @@ function main(argv) {
 	const target = attached.ok && attached.stdout !== "" ? attached.stdout : "HEAD";
 
 	if (headSha === baseSha) {
+		// Feature-branch advice only fits a branch that needs a base. On dev
+		// itself there is no changeset to start a branch for and nothing to do;
+		// the same branch-name test the `superseded` guard below uses identifies
+		// it. A detached checkout keeps the original line: it is a pull-request
+		// checkout, not the integration branch.
+		const onDev = attached.ok && attached.stdout === BRANCH;
 		report(
 			`correct — HEAD is exactly ${BASE_LABEL} (${short(baseSha)}): there is no branch base to check, because the branch carries nothing of its own yet; ` +
-				`next: git checkout -b <change-name> ${BASE_LABEL}`,
+				(onDev
+					? `next: nothing to do — this is ${BRANCH} itself; start the next change on a branch cut from ${BASE_LABEL} when you have one`
+					: `next: git checkout -b <change-name> ${BASE_LABEL}`),
 		);
 		return 0;
 	}
@@ -291,9 +299,14 @@ function main(argv) {
 		// there, so the line names the reattach instead of advice already known to
 		// break in the one mode CI runs the check in.
 		const next =
-			attached.ok && attached.stdout !== ""
-				? `git push -u ${REMOTE} ${target} && gh pr create --base ${BRANCH} --fill`
-				: `git switch -c <change-name> to reattach, or git push ${REMOTE} HEAD:refs/heads/<branch>, then gh pr create --base ${BRANCH} --fill`;
+			!attached.ok || attached.stdout === ""
+				? `git switch -c <change-name> to reattach, or git push ${REMOTE} HEAD:refs/heads/<branch>, then gh pr create --base ${BRANCH} --fill`
+				: attached.stdout === BRANCH
+					// dev's own commits reach the remote with a push; a pull request
+					// from dev into dev is not a step in this repository's flow, and
+					// the release is the only path to main (see AGENTS.md).
+					? `git push -u ${REMOTE} ${target}`
+					: `git push -u ${REMOTE} ${target} && gh pr create --base ${BRANCH} --fill`;
 		report(
 			`correct — ${branch} descends from ${BASE_LABEL} (${short(baseSha)}) and carries ${commits} of its own; ` +
 				`next: ${next}`,
