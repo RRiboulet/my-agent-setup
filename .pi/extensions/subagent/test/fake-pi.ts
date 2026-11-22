@@ -20,7 +20,16 @@
 //   * messages recorded with their delivery options, in order;
 //   * session entries appended by the extension, separately from messages,
 //     because the two have different context semantics in pi;
-//   * the session identity and branch a factory reads to reconstruct state.
+//   * the session identity and branch a factory reads to reconstruct state;
+//   * `sessionManager.appendUsage`, `pi.setModel` and `pi.setThinkingLevel`,
+//     recorded rather than applied: a nested model call's usage accounting and a
+//     model switch are both things a test must be able to deny.
+//
+// `ctx.modelRegistry` is whatever the test supplies, and absent by default. A
+// model call is the one thing this double will not invent: the methods a factory
+// needs (`find`, `complete`, `getProviderAuthStatus`) are supplied by the test,
+// which also records the calls, so an invocation count is asserted where it
+// happens rather than inferred.
 //
 // What it deliberately does NOT model:
 //   * boundary proposals (`turn_end` / `agent_before_settle` entry merging).
@@ -97,6 +106,11 @@ export interface FakeHostOptions {
 	mode?: "tui" | "rpc" | "json" | "print";
 	model?: { provider: string; id: string };
 	thinkingLevel?: string;
+	/** Replace `ctx.modelRegistry`. Absent by default, and a factory that reaches
+	 *  for it then fails loudly rather than getting a plausible stub: a test that
+	 *  needs a model call supplies the methods it expects (`find`, `complete`,
+	 *  `getProviderAuthStatus`) and records the calls itself. */
+	modelRegistry?: Record<string, unknown>;
 	/** Whether a message is already queued, as `ctx.hasPendingMessages()` reports. */
 	pendingMessages?: boolean;
 	/** Handed to tools and handlers as `ctx.signal`. */
@@ -127,6 +141,13 @@ export interface FakeHost {
 	appended: FakeAppendedEntry[];
 	/** Every `pi.events.emit` call, in order. */
 	emitted: { channel: string; data: unknown }[];
+	/** Every `sessionManager.appendUsage` call, in order (the session's own
+	 *  usage accounting). */
+	usageEntries: { kind: string; provider: string; model: string; usage: unknown; note: string | undefined }[];
+	/** Every `pi.setModel` / `pi.setThinkingLevel` call. A consultation must add
+	 *  none: changing the model would discard the main loop's prompt cache. */
+	modelChanges: { provider: string; id: string }[];
+	thinkingChanges: string[];
 	/** Every `pi.exec` call, in order. */
 	execCalls: FakeExecCall[];
 	notifications: { message: string; type: string | undefined }[];
@@ -164,6 +185,9 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
 	const notifications: { message: string; type: string | undefined }[] = [];
 	const statuses: { key: string; text: string | undefined }[] = [];
 	const widgets: { key: string; content: unknown; options: unknown }[] = [];
+	const usageEntries: { kind: string; provider: string; model: string; usage: unknown; note: string | undefined }[] = [];
+	const modelChanges: { provider: string; id: string }[] = [];
+	const thinkingChanges: string[] = [];
 
 	// Whether a low-level agent run is in progress, as pi's internal flag would be.
 	let runActive = false;
@@ -175,6 +199,14 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
 		// A deep copy each call: a factory that mutates an entry cannot change the
 		// branch the next assertion or the next dispatch reads.
 		getBranch: () => structuredClone(branch) as Record<string, unknown>[],
+		// pi's SessionManager has this (the cache warmer uses it) although the
+		// extension-facing type narrows to `ReadonlySessionManager`; recording it
+		// is how a test sees a nested model call reach the session's totals.
+		appendUsage: (kind: string, provider: string, model: string, usage: unknown, note?: string) => {
+			const record = { kind, provider, model, usage, note };
+			usageEntries.push(record);
+			return record;
+		},
 	};
 
 	const ctx = {
@@ -217,6 +249,7 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
 		isIdle: () => !runActive,
 		hasPendingMessages: () => pendingMessages,
 		signal: options.signal,
+		modelRegistry: options.modelRegistry,
 	} as unknown as ExtensionContext;
 
 	/**
@@ -288,6 +321,13 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
 		},
 		sendMessage: (message: Record<string, unknown>, messageOptions?: Record<string, unknown>) => {
 			messages.push({ message, options: messageOptions });
+		},
+		setModel: async (model: { provider: string; id: string }) => {
+			modelChanges.push(model);
+			return true;
+		},
+		setThinkingLevel: (level: string) => {
+			thinkingChanges.push(level);
 		},
 		appendEntry: (customType: string, data?: unknown) => {
 			appended.push({ customType, data });
@@ -380,6 +420,9 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
 		messages,
 		appended,
 		emitted,
+		usageEntries,
+		modelChanges,
+		thinkingChanges,
 		execCalls,
 		notifications,
 		statuses,

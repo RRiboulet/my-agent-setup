@@ -6,6 +6,27 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
+- **The settlement gate can ask a stronger model for one bounded second opinion
+  when it keeps failing the same way.** A committed `advisor` block in
+  `.pi/orchestrator.json` names the provider and model; the consultation runs at
+  `before_agent_start` when the branch holds an unanswered trigger — a loop block,
+  or `minGateBlocks` settlement blocks (default 2) reporting the same conditions —
+  and its verdict is added to the prompt as an additive `sections.advisor` — on
+  the next prompt, not on the run that was stuck, because a boundary continuation
+  skips `before_agent_start`; a trigger disarmed only by a successful
+  consultation, so a problem fixed before the next prompt can still be described.
+  The
+  system prompt is never replaced, the session model and thinking level are never
+  switched, and nothing is called if the provider has no credentials: the refusal
+  names the provider and the fix instead of skipping silently. One completion
+  against the host's model registry resolves credentials and records usage like
+  any other call, including in the session totals. A trigger is answered once per
+  branch, and `cooldownMs` and `budget` bound the rest; the digest is capped at
+  4 KB and built from the gate's reasons, the verification summary, failure
+  signatures, edited files, todos and the goal, never tool output bodies. It
+  acts only in a trusted project and never in a delegated child. Tests:
+  `orchestrator-advisor.test.ts`.
+
 - **The settlement gate can now stop a run from settling, but only where a
   project opts in.** A committed `.pi/orchestrator.json` turns each check on
   separately: `block.openTodos` and `block.repeatedFailure` make an open todo or
