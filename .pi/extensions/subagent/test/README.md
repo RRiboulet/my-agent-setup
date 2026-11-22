@@ -26,7 +26,10 @@ asserts no further `pi.exec` calls happen after shutdown.
 The suite is safe to run from inside a pi subagent child: `createHarness` clears
 `PI_TMUX_SUBAGENT_CHILD` / `PI_TMUX_SUBAGENT_RESULT`, which the extension factory
 otherwise branches on, and `lifecycle-launch.test.ts` guards that with a
-regression test.
+regression test. `lifecycle-escalation.test.ts` also drives the child branch deliberately:
+it sets `PI_TMUX_SUBAGENT_ESCALATION` for the length of one factory call to obtain
+the real `subagent_ask`, and never for the parent's, which is how "the parent pays
+nothing for the child's tool" is observed rather than asserted from the source.
 
 ## Layout
 
@@ -66,8 +69,10 @@ regression test.
 | `lifecycle-widget.test.ts` | the live widget: lazy install above the editor and TUI-only, the row following the child, an interrupted run never reading as active, the ticker refreshing when the watcher cannot, clear-on-last-finish, interrupted rows sorting last, elapsed time measured from the start, and the widget→panel wiring (a click binds Escape then launches the popup detached, through a fake launcher) |
 | `lifecycle-handoff.test.ts` | context handoff and resume: fork inheriting only the live branch, lineage linking without copying, one transcript per resume (including two fired in parallel), resume refusing a live child, and `subagent_clean` retaining a run dir that still owns a live run's transcript |
 | `lifecycle-exposure.test.ts` | lazy tool exposure (local patch 15): declared when pi cannot reach them on demand, hidden behind codemode/`tool_search` but never `subagent`, re-checked on `/tools` changes, the note only when hidden, one registration per load, and an unbound `pi` leaving everything declared |
-| `lifecycle-harness.ts` | the fake `ExtensionAPI` the `lifecycle-*.test.ts` files drive, plus their waits (`waitForRunStatus`, `assertWatcherStopped`, `assertUnusableResultFailsRun`) and fixtures (activity snapshots, the live-branch session manager, `completeRun`) |
+| `lifecycle-harness.ts` | the fake `ExtensionAPI` the `lifecycle-*.test.ts` files drive, plus their waits (`waitForRunStatus`, `assertWatcherStopped`, `assertUnusableResultFailsRun`) and fixtures (activity snapshots, the live-branch session manager, `completeRun`); `ctx.ui.confirm` is recorded and scripted (`confirmAnswer`) and `ctx.hasUI` is an option, so the human gate is exercised in both modes |
 | `interrupt.test.ts` | the `interrupt.json` marker (validation, reading, writing), the child reporter's abort path, and the parent lifecycle of an interrupted run |
+| `escalation.test.ts` | the child→parent escalation channel (`escalation.ts`): the channel layout inside the run dir, a filename-safe request id, the atomic write (a leftover `.tmp` is never a request, a truncated file is never validated), the size bounds on a question and an answer, validation against the run and request id — including a newer version with a compatible shape — the parent heartbeat's touch/read/clear, the wait's four exits (answered, expired, no-parent from a missing or stale heartbeat, aborted), a reply accepted on the poll after the deadline, and consuming an exchange once |
+| `lifecycle-escalation.test.ts` | escalated questions through the real factory: the child's `subagent_ask` round trip (request surfaced by the watcher tick, `subagent_answer` confirmed by a human, the answer returned as the child's tool result, the exchange consumed), `kind: "progress"` delivered with no gate and no answer, a declined confirmation sending nothing, the no-UI refusal plus the child's timeout, a request past its deadline never delivered, an expired question refused by the answer tool, a replayed request delivered once, a child failing fast with no parent and after a parent shutdown, the no-timer assertion over `process.getActiveResourcesInfo()`, and the status rendering (the `question:` block, the `? waiting on a question` row and the widget's own kind) |
 | `session-breakdown.test.ts` | the vendored `/session-breakdown`: aggregation over fixture session trees, its four `LOCAL PATCH` hunks — agent-dir roots, inherited-prefix exclusion, the footer note (including that it reaches both the TUI and the non-interactive path), and the `__test__` surface — the upstream behaviours re-vendored on 2026-10-05 (faux/test-provider sessions skipped, only models that produced a message counted, cost/session + provider grouping), which ship untested upstream, and the four metric tables' exact layout plus both palette choosers (pinned against the pre-2026-10-08-dedup output) |
 | `review.test.ts` | the vendored `/review`: strict-ESM load guard, the `__test__` surface, arg parsing (`tokenizeArgs`/`parseArgs`/`parseReviewPaths`/`parsePrReference`), and the verdict/findings rubric (`hasNeedsAttentionVerdict`, `hasBlockingReviewFindings`, code-fence skipping, verdict fall-through) |
 | `orchestrator-gate.test.ts` | the settlement gate (`.pi/extensions/orchestrator/`): the pure decision function's five conditions and their reasons, report-only with no config, a configured condition blocking once and then reporting, `attemptCap` bounding every block and `0` disabling them, an override reporting instead of blocking, a child session never acting, a timed-out verification failing open while a passing or failing one still continues once, `reconstructGateState`'s last-entry/blocked-condition/loop-entry/ticket-08/malformed cases, `scanEditVerification` (the ticket-08 proxy with no command; only the configured command with one; the gate's own passing run) and `scanFailures`, the todo reader's format/closed-status/missing-dir/non-directory cases, the config reader's defaults/malformed/invalid/legacy-`retryCap` cases, and the factory through `fake-pi.ts` — every condition in one verdict, `gate-decided` published with `action: "settle"`, an earlier handler's entries carried forward, `continue` left alone when a goal owns it, block-then-settle across a simulated resume, an override consumed once, resume and tree navigation preserving the budget and blocked conditions, a non-completed outcome and an unevaluable todo condition reported rather than acted on, the override tool registered only for an opted-in project, and `/gate` with and without `--json` (the JSON now carries the advisor record as well) |
@@ -129,6 +134,12 @@ size:
   tests cover the argv, the seeded session files and the usage baseline without
   launching pi, but the end-to-end path — a real `pi` opening a forked or
   resumed transcript — needs credentials and is not part of the suite.
+- **Escalation against a live child process.** `lifecycle-escalation.test.ts`
+  drives the child's real `subagent_ask` tool in-process against the real parent
+  factory, so the file protocol, both gates and every exit are covered — but
+  nothing here proves a live child model chooses to call the tool, or that pi
+  keeps the turn open while it waits. That needs an opt-in integration harness
+  with model credentials, like turn-level interrupt.
 - **long-poll behaviour** — the fake always reports `pane_dead = "1"`, so
   "pane still alive, keep waiting" is untested; `pi.exec`'s `timeout` option is
   ignored by the fake, so no timeout or abort path runs.
@@ -153,6 +164,8 @@ Read once, when the extension factory runs:
 | `PI_SUBAGENT_INTERRUPT_CONFIRM_MS` | `3000` | how long `subagent_interrupt` waits for confirmation; `0` returns immediately |
 | `PI_SUBAGENT_STALL_SECONDS` | `180` | silence, in whole seconds, before the widget calls a run stalled |
 | `PI_SUBAGENT_TOOL_STALL_SECONDS` | `900` | the same, for a run inside a tool call, which is silent by construction |
+| `PI_SUBAGENT_QUESTION_TIMEOUT_SECONDS` | `300` | child only: how long a blocking `subagent_ask` waits for an answer before it reports the blocker |
+| `PI_SUBAGENT_QUESTION_GRACE_SECONDS` | `5` | child only: how long a blocked child accepts parent silence (the heartbeat is rewritten every watcher tick) before it decides nobody is there |
 
 A value that is set but is not a positive whole number is reported on stderr and
 ignored, in favour of the default.

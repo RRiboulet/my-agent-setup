@@ -368,7 +368,7 @@ default when it does not, and the `opencode-go` credential itself still serves
 | Path | What it is |
 |---|---|
 | `package.json` | the `pi` manifest that makes this repo installable as a package (see above) |
-| `.pi/extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent` (one run, or a `tasks` fan-out with per-step overrides and optional `dependsOn` dependency edges), `subagent_status`, `subagent_wait`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel`, `subagent_clean`, a live child-activity phase and a status widget above the editor; fan-out steps share the one concurrency queue and their plan is persisted in `plans.json` beside the runs; a plan survives reload (it resumes at the first unfinished step, adopts a run the plan index missed, and reconciles a step whose child is gone rather than re-running it), cancels with its live steps (`subagent_cancel` takes a plan id), and is inspectable as one row — `subagent_status` folds a plan's step runs into it so a ten-step plan costs one detail slot, and `subagent_wait({ plan })` waits for every wave; every run that reports a final answer (completed or failed) leaves a `report.md` artifact with it, plus a bounded copy and a pointer in its run record |
+| `.pi/extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent` (one run, or a `tasks` fan-out with per-step overrides and optional `dependsOn` dependency edges), `subagent_status`, `subagent_wait`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel`, `subagent_clean`, `subagent_answer` (a child's blocking question, answered only after `ctx.ui.confirm`; `subagent_ask` inside the child is the one deliberate blocking wait, and a progress update needs no answer), a live child-activity phase and a status widget above the editor; fan-out steps share the one concurrency queue and their plan is persisted in `plans.json` beside the runs; a plan survives reload (it resumes at the first unfinished step, adopts a run the plan index missed, and reconciles a step whose child is gone rather than re-running it), cancels with its live steps (`subagent_cancel` takes a plan id), and is inspectable as one row — `subagent_status` folds a plan's step runs into it so a ten-step plan costs one detail slot, and `subagent_wait({ plan })` waits for every wave; every run that reports a final answer (completed or failed) leaves a `report.md` artifact with it, plus a bounded copy and a pointer in its run record |
 | `.pi/extensions/todos.ts` | `/todos` TUI and the `todo` tool |
 | `.pi/extensions/orchestrator/` | The settlement gate, the loop breaker, the advisor and the typed orchestration event bus: `/gate` shows the last verdict, loop block and consultation, and at `agent_before_settle` the gate reports an active goal, open todos, edits without a verification run, a repeated failure signature and the remaining gate-block budget as a session `custom` entry. A committed `.pi/orchestrator.json` (example beside the extension) opts a **trusted** project into blocking checks — an open todo, a repeated failure, a project verification command run by the gate, and the tool-call loop breaker — plus the `orchestrator_override` tool every block reason names; its `advisor` key adds one bounded second opinion from a stronger model, injected as a prompt section rather than replacing the prompt. Its absence means report-only. **Ours** |
 | `.pi/extensions/answer.ts` | `/answer`: extract questions from the last response and answer them in a focused TUI |
@@ -917,11 +917,14 @@ The subagent extension reads `PI_SUBAGENT_*` environment variables —
 `PI_SUBAGENT_AUTO_REAP`, `PI_SUBAGENT_REAP_DELAY_MS`, `PI_SUBAGENT_GC_DAYS`,
 `PI_SUBAGENT_KILL_ON_SHUTDOWN`, `PI_SUBAGENT_PROVIDER`, `PI_SUBAGENT_MODEL`,
 `PI_SUBAGENT_INTERRUPT_CONFIRM_MS`, `PI_SUBAGENT_STALL_SECONDS`,
-`PI_SUBAGENT_TOOL_STALL_SECONDS`. The test README documents what each one does;
-the header comment in `.pi/extensions/subagent/index.ts` lists the local patches.
+`PI_SUBAGENT_TOOL_STALL_SECONDS`, and — in a child only —
+`PI_SUBAGENT_QUESTION_TIMEOUT_SECONDS` / `PI_SUBAGENT_QUESTION_GRACE_SECONDS`.
+The test README documents what each one does; the header comment in
+`.pi/extensions/subagent/index.ts` lists the local patches.
 
 The subagent management tools (`subagent_status`, `subagent_wait`,
-`subagent_cancel`, `subagent_interrupt`, `subagent_resume`, `subagent_clean`) are hidden from the
+`subagent_answer`, `subagent_cancel`, `subagent_interrupt`, `subagent_resume`,
+`subagent_clean`) are hidden from the
 model's tool declarations when pi can reach them another way — that is, when
 `codemode` or `tool_search` is in your tool set:
 
@@ -971,6 +974,21 @@ to you; it is one entry, and nothing in the extension changes either way.
 Subagent delegation is non-blocking: start independent tasks together, then
 call `subagent_wait` once per run (or once with `ids`) instead of polling.
 `subagent_status` remains the live "what is it doing right now" view.
+
+The one exception runs the other way: a child can block on a question to its
+parent. `subagent_ask` (registered only inside a delegated child, and only when
+its parent gave it a channel) writes a request file and waits; the parent's
+existing watcher tick surfaces it as a `subagent_status` question and a session
+message, and `subagent_answer({ id, answer })` sends the reply — after
+`ctx.ui.confirm`, because a decision comes from a human or from nobody. With no
+UI the answer is refused and says why, and a child with no parent, an expired
+request or a shut-down watcher is told to report the blocker and its partial
+result and stop rather than hang. A blocked child still holds its concurrency
+slot, and its status row says `? waiting on a question`, distinct from stalled
+and interrupted. `subagent_ask` with `kind: "progress"` is the non-blocking
+half: the update reaches the parent's session with no human gate and no answer.
+The channel is `<runDir>/escalation/`, a request/reply file pair per request id,
+written atomically and bounded in size like `result.json` and `interrupt.json`.
 
 One `subagent({ tasks: [...] })` call can launch the whole fan-out, with
 per-step `cwd`/provider/model/thinking/handoff overrides, and returns the runs in

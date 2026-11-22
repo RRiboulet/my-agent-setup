@@ -33,7 +33,7 @@ test("codemode or tool_search hides the management tools but never `subagent`", 
 	for (const activeTools of [["read", "bash", "edit", "write", "codemode"], ["read", "tool_search"]]) {
 		await withHarness({ activeTools }, async (h) => {
 			assert.equal(h.toolExposure("subagent"), undefined, "the launch tool is always declared");
-			for (const name of ["subagent_status", "subagent_wait", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
+			for (const name of ["subagent_status", "subagent_wait", "subagent_answer", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
 				assert.equal(h.toolExposure(name), "codemode", `${name} should be hidden from every request`);
 				assert.equal(
 					h.toolRegistrations.filter((entry) => entry.name === name).length,
@@ -55,7 +55,7 @@ test("/tools switching discovery off mid-session does not strand the tools", asy
 	// no longer reachable — with `subagent` still declared, so the model could
 	// start a run it then could not poll or cancel.
 	await withHarness({ activeTools: ["read", "codemode", "tool_search"] }, async (h) => {
-		for (const name of ["subagent_status", "subagent_wait", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
+		for (const name of ["subagent_status", "subagent_wait", "subagent_answer", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
 			assert.equal(h.declared(name), false, `${name} starts hidden`);
 		}
 
@@ -63,7 +63,7 @@ test("/tools switching discovery off mid-session does not strand the tools", asy
 		h.setActiveTools(["read", "bash", "edit", "write"]);
 		await h.fireBeforeAgentStart();
 
-		for (const name of ["subagent_status", "subagent_wait", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
+		for (const name of ["subagent_status", "subagent_wait", "subagent_answer", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
 			assert.equal(h.toolExposure(name), undefined, `${name} must be re-registered direct`);
 			assert.equal(h.declared(name), true, `${name} must be declared again, or the model cannot reach it at all`);
 		}
@@ -115,7 +115,7 @@ test("the exposure is re-checked without churning the tool registry", async () =
 		await h.call("subagent", { task: "one turn" });
 		await h.fireBeforeAgentStart();
 		await h.fireBeforeAgentStart();
-		for (const name of ["subagent_status", "subagent_wait", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
+		for (const name of ["subagent_status", "subagent_wait", "subagent_answer", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
 			assert.equal(h.toolRegistrations.filter((entry) => entry.name === name).length, 1, `${name} registered once`);
 		}
 	});
@@ -138,7 +138,7 @@ test("the management tools are registered once, not on every tick", async () => 
 	await withHarness({ activeTools: ["read", "tool_search"] }, async (h) => {
 		await h.call("subagent", { task: "counts registrations" });
 		await new Promise((resolve) => setTimeout(resolve, 1_200));
-		for (const name of ["subagent_status", "subagent_wait", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
+		for (const name of ["subagent_status", "subagent_wait", "subagent_answer", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
 			assert.equal(h.toolRegistrations.filter((entry) => entry.name === name).length, 1, `${name} must not churn the tool registry`);
 		}
 	});
@@ -155,7 +155,7 @@ test("a fresh extension load re-registers the management tools", async () => {
 		await first.shutdown();
 		const second = await createHarness();
 		try {
-			for (const name of ["subagent_status", "subagent_wait", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
+			for (const name of ["subagent_status", "subagent_wait", "subagent_answer", "subagent_cancel", "subagent_interrupt", "subagent_resume", "subagent_clean"]) {
 				assert.ok(second.tools.has(name), `${name} must be registered again after a fresh load, not skipped by a shared memo`);
 			}
 		} finally {

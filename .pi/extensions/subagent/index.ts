@@ -223,10 +223,37 @@
 //     event is published after the state is persisted, so a subscriber that
 //     reads `runs.json`/`plans.json` sees the settlement it was told about.
 //
+// 23. Escalated questions (see escalation.ts): a child can ask its parent a
+//     blocking question and receive the answer as its tool result, or send a
+//     non-blocking progress update. The channel is a pair of atomic files per
+//     request id under `<runDir>/escalation/`, and it is a file protocol across
+//     builds like `result.json`/`interrupt.json`, so the shape is the gate and
+//     the version is advisory. Three rules carry the feature and are easy to
+//     undo by accident:
+//       - The child registers `subagent_ask` ONLY in child mode and ONLY when
+//         the parent named a channel (`PI_TMUX_SUBAGENT_ESCALATION`), so a
+//         parent turn pays nothing for a tool it can never call; a child of an
+//         older parent registers nothing and simply cannot ask.
+//       - The parent polls the channel from the watcher tick it already runs
+//         (no second timer), surfaces a question as a session message and on
+//         `RunRecord.pendingRequest`, and refreshes a heartbeat while anything
+//         waits. The human gate lives in `subagent_answer` — a normal tool call
+//         that uses `ctx.ui.confirm` — never in the tick, which runs mid-run.
+//         With no UI the answer is REFUSED and the child times out: a model
+//         answering its own child's decision is the failure mode, not the
+//         feature.
+//       - Every non-answer exit (deadline, no parent, aborted turn) tells the
+//         child to report the blocker and its partial result and stop, and it
+//         can never hang: the deadline bounds the wait, the parent's heartbeat
+//         catches a shut-down parent in seconds, and the tool's own signal ends
+//         it at once. A blocked child still holds its concurrency slot, and
+//         `subagent_status` says so as "waiting on a question", distinctly from
+//         a stalled or interrupted run.
+//
 // The child reporter (CHILD_ENV) still reports completion the same way; patch 11
 // only adds the activity snapshot to it, patch 13 only diverts the aborted
-// settle onto the marker, patch 20 adds the report field, and patch 22 adds the
-// two events.
+// settle onto the marker, patch 20 adds the report field, patch 22 adds the two
+// events, and patch 23 adds the asking tool.
 
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -267,11 +294,30 @@ import {
 	type SubagentInterruptMarker,
 } from "./interrupt.ts";
 import {
+	clearEscalationHeartbeat,
+	consumeEscalationExchange,
+	DEFAULT_QUESTION_GRACE_MS,
+	DEFAULT_QUESTION_TIMEOUT_MS,
+	ESCALATION_VERSION,
+	escalationDir,
+	listEscalationRequests,
+	readEscalationReply,
+	readEscalationRequest,
+	replyPath,
+	touchEscalationHeartbeat,
+	waitForEscalationReply,
+	writeEscalationReply,
+	writeEscalationRequest,
+	type EscalationRequest,
+	type PendingQuestion,
+} from "./escalation.ts";
+import {
 	advanceStatusState,
 	classifyStatus,
 	createStatusState,
 	DEFAULT_STALL_AFTER_MS,
 	DEFAULT_TOOL_STALL_AFTER_MS,
+	formatElapsedDuration,
 	observationFromActivity,
 	observeStatus,
 	withRunStatus,
@@ -330,6 +376,19 @@ const CHILD_ENV = "PI_TMUX_SUBAGENT_CHILD";
 const RESULT_ENV = "PI_TMUX_SUBAGENT_RESULT";
 /** Marker path the child writes when a turn was interrupted (local patch 13). */
 const INTERRUPT_ENV = "PI_TMUX_SUBAGENT_INTERRUPT";
+/**
+ * The escalation channel directory, or nothing (local patch 23).
+ *
+ * Presence is the handshake: a parent that sets it has a watcher tick that reads
+ * requests, so the child registers the asking tool. An older parent does not set
+ * it and the child registers nothing — the feature degrades to "a child cannot
+ * ask", which is exactly what an older parent can support.
+ */
+const ESCALATION_ENV = "PI_TMUX_SUBAGENT_ESCALATION";
+/** Custom message type for a pending question delivered to the parent session. */
+const QUESTION_MESSAGE_TYPE = "subagent-question";
+/** Custom message type for a child's non-blocking progress update. */
+const PROGRESS_MESSAGE_TYPE = "subagent-progress";
 const RUNS_DIR = "tmux-subagents";
 const POLL_INTERVAL_MS = 500;
 const PANE_PREVIEW_LINES = 18;
@@ -352,6 +411,22 @@ const WIDGET_TICK_MS = 1_000;
  * normal result, never an error.
  */
 const DEFAULT_WAIT_TIMEOUT_MS = 600_000;
+/**
+ * How long a child's blocking question waits for an answer (local patch 23).
+ *
+ * Long enough for a human to notice the parent's question, short enough that an
+ * unattended parent does not hold a concurrency slot for an hour. Overridable
+ * through `PI_SUBAGENT_QUESTION_TIMEOUT_SECONDS`.
+ */
+const DEFAULT_QUESTION_TIMEOUT_SECONDS = DEFAULT_QUESTION_TIMEOUT_MS / 1000;
+/**
+ * How long a blocked child accepts parent silence before giving up.
+ *
+ * The parent rewrites its heartbeat on every 500 ms watcher tick while a request
+ * is pending, so this is ten missed ticks: enough not to fire on a slow tick,
+ * short enough that a shut-down parent is noticed in seconds.
+ */
+const DEFAULT_QUESTION_GRACE_SECONDS = DEFAULT_QUESTION_GRACE_MS / 1000;
 /** Widget key, so pi can replace and clear our widget without touching others. */
 const WIDGET_KEY = "subagent-status";
 
@@ -461,6 +536,23 @@ interface RunRecord {
 	planId?: string;
 	/** The step inside that plan this run is one attempt of. */
 	stepId?: string;
+	/**
+	 * Whether this run's child was given an escalation channel (local patch 23).
+	 *
+	 * Absent or false means the run predates the channel, or was recorded by a
+	 * build that did not launch one; the watcher then does not poll a channel
+	 * directory that can never hold anything.
+	 */
+	escalation?: boolean;
+	/**
+	 * A child's question that still needs a human-confirmed answer.
+	 *
+	 * Persisted in `runs.json` rather than derived from the channel directory: it
+	 * is what `subagent_status` renders as "waiting on a question" (distinctly from
+	 * a stalled or interrupted run), what `subagent_answer` finds by request id, and
+	 * what survives a reload with the run it belongs to.
+	 */
+	pendingRequest?: PendingQuestion;
 }
 
 /**
@@ -839,6 +931,142 @@ function registerChildReporter(pi: ExtensionAPI, resultPath: string, runId: stri
 	});
 }
 
+/**
+ * What a blocked child is told when no answer arrives (local patch 23).
+ *
+ * The point of the escalation channel is that a decision comes from a HUMAN. A
+ * model answering its own child's decision request is the failure this text
+ * exists to prevent, so every exit that is not an answer ends the same way: stop,
+ * say what blocked you, and leave a readable partial result. The envelope is the
+ * one from report.ts, whose `blocked` status is distinct from `failed` because
+ * nothing here went wrong — a decision was simply not available.
+ */
+const ESCALATION_FAILURE_INSTRUCTION =
+	"Do not wait again and do not guess an answer yourself." +
+	" Report the blocker and everything you did complete, then stop:" +
+	' end with a ```subagent-report block whose status is "blocked", and put the open question in `unresolved`.';
+
+/**
+ * Register the child's escalation tools (local patch 23).
+ *
+ * Only ever called in child mode, and only when the parent gave this child a
+ * channel (ESCALATION_ENV). Everything it needs — the channel directory, the run
+ * id the parent verifies, the deadline and the no-parent grace — is passed in, so
+ * this registers nothing on the parent and costs a parent turn nothing.
+ *
+ * A blocking call here holds the child's TURN, not the parent: the parent keeps
+ * whatever it was doing, its watcher delivers the question to the session, and a
+ * human-confirmed `subagent_answer` writes the reply this call is polling for. It
+ * is the one deliberate exception to "delegation is non-blocking".
+ */
+function registerChildEscalation(
+	pi: ExtensionAPI,
+	options: { dir: string; runId: string; timeoutMs: number; graceMs: number },
+): void {
+	pi.registerTool({
+		name: "subagent_ask",
+		label: "Subagent Ask",
+		description:
+			"Ask the parent session a question and WAIT for the answer, or send it a progress update without waiting. A question is delivered to the parent, surfaces to the human there, and comes back as this tool's result — usually the same turn, but a person has to answer it, so it can take a while. A decision is never answered by a model: if no human is available the answer is refused and this call ends with instructions to report the blocker. Call this when the task genuinely cannot continue without a choice or a missing fact; do not use it to ask permission for a step the task already authorises.",
+		promptSnippet: "Ask the parent (a human) a blocking question, or send it a progress update",
+		parameters: Type.Object({
+			question: Type.String({
+				description:
+					"The question, stated so it can be answered in one or two sentences. With kind 'progress', the update to send instead (no answer comes back).",
+			}),
+			kind: Type.Optional(
+				StringEnum(["question", "progress"] as const, {
+					description:
+						"'question' (default) blocks until the parent answers. 'progress' is fire-and-forget: it is delivered to the parent session and this call returns at once.",
+				}),
+			),
+			options: Type.Optional(
+				Type.Array(Type.String(), {
+					description:
+						"Suggested answers shown to the human, e.g. [\"Postgres\", \"SQLite\"]. Optional, and never binding: the human may answer anything. Questions only.",
+				}),
+			),
+		}),
+
+		async execute(_toolCallId, params, signal, _onUpdate, _ctx) {
+			const kind = params.kind === "progress" ? "progress" : "question";
+			const text = params.question?.trim() ?? "";
+			if (!text) {
+				return escalationToolResult(`subagent_ask needs a non-empty question${kind === "progress" ? " (or progress message)" : ""}.`, {
+					outcome: "rejected",
+				});
+			}
+			const id = `ask-${randomUUID()}`;
+			const askedAt = Date.now();
+			const request: EscalationRequest = {
+				version: ESCALATION_VERSION,
+				id,
+				runId: options.runId,
+				kind,
+				text,
+				...(kind === "question" && params.options && params.options.length > 0 ? { options: params.options } : {}),
+				askedAt,
+				...(kind === "question" ? { deadlineAt: askedAt + options.timeoutMs } : {}),
+			};
+			try {
+				await writeEscalationRequest(options.dir, request);
+			} catch (error) {
+				// The shape was refused (an oversized question, an unusable id) or the run
+				// dir is not writable. Either way the parent will never see it, so saying
+				// "sent" would be a lie.
+				return escalationToolResult(
+					`Could not send this to the parent: ${error instanceof Error ? error.message : String(error)}`,
+					{ outcome: "failed", id },
+				);
+			}
+			if (kind === "progress") {
+				return escalationToolResult(
+					"Progress update delivered to the parent session. It needs no answer: carry on with the task.",
+					{ outcome: "delivered", id },
+				);
+			}
+
+			const outcome = await waitForEscalationReply({
+				dir: options.dir,
+				id,
+				runId: options.runId,
+				deadlineAt: request.deadlineAt ?? askedAt,
+				signal,
+				graceMs: options.graceMs,
+			});
+
+			if (outcome.state === "aborted") {
+				// The turn is being aborted, so there is nothing to continue with; the
+				// request is left in place for the run dir's history rather than consumed.
+				throw new Error("subagent_ask was cancelled before the parent answered.");
+			}
+			if (outcome.state === "answered") {
+				// Consumed here, once: the request and reply both go, so a replay of these
+				// bytes can never answer this child twice.
+				await consumeEscalationExchange(options.dir, id).catch(() => undefined);
+				return escalationToolResult(
+					`Answer from the parent (confirmed by a human): ${outcome.answer}\n\nContinue with the task, or stop if the answer says so.`,
+					{ outcome: "answered", id },
+				);
+			}
+			await consumeEscalationExchange(options.dir, id).catch(() => undefined);
+			const why =
+				outcome.state === "expired"
+					? `No answer arrived within ${Math.round(options.timeoutMs / 1000)}s (the request's deadline).`
+					: `No parent session is there to answer: ${outcome.detail}.`;
+			return escalationToolResult(`${why} ${ESCALATION_FAILURE_INSTRUCTION}`, { outcome: outcome.state, id });
+		},
+	});
+}
+
+/** One tool result for `subagent_ask`, with a `details` shape that never varies. */
+function escalationToolResult(
+	text: string,
+	details: { outcome: string; id?: string },
+): { content: { type: "text"; text: string }[]; details: { outcome: string; id?: string } } {
+	return { content: [{ type: "text", text }], details };
+}
+
 function trimPane(output: string): string {
 	const lines = output.replace(/\r/g, "").split("\n");
 	while (lines.length > 0 && !lines[0]?.trim()) lines.shift();
@@ -952,6 +1180,8 @@ function statusDetail(snapshot: StatusSnapshot): string {
 			return "queued for a slot";
 		case "interrupted":
 			return "interrupted";
+		case "question":
+			return "waiting on a question";
 		default:
 			return "starting";
 	}
@@ -1238,12 +1468,29 @@ function formatActivity(activity: RunActivity | undefined): string | undefined {
  * Durations and usage are formatted HERE rather than in listview.ts, which stays
  * structural so the budget policy can be tested without a run record.
  */
+/** A question that is still waiting for an answer, or nothing once its deadline has passed. */
+function liveQuestion(run: RunRecord, now = Date.now()): PendingQuestion | undefined {
+	const pending = run.pendingRequest;
+	if (!pending || pending.deadlineAt <= now) return undefined;
+	return pending;
+}
+
+/** A pending question's one-line note, or nothing. */
+function pendingQuestionNote(run: RunRecord): string | undefined {
+	const pending = liveQuestion(run);
+	if (!pending) return undefined;
+	const text = oneLineNote(pending.text, 90);
+	return text === undefined ? "? waiting on a question" : `? waiting on a question: ${text}`;
+}
+
 function listRow(run: RunRecord): ListRow {
 	const durationText = formatDuration(run.startedAt, run.finishedAt);
 	const usageText = formatUsage(run.usage);
 	// The note is what has to survive onto a one-line row, because everything else
-	// the full block carries is one `subagent_status({ id })` away.
-	const note = interruptedAttachNote(run) ?? errorNote(run);
+	// the full block carries is one `subagent_status({ id })` away. A pending
+	// question comes first: it is the only note that needs a HUMAN to act, and a
+	// run holding its slot until a deadline is the one thing a row must not hide.
+	const note = pendingQuestionNote(run) ?? interruptedAttachNote(run) ?? errorNote(run);
 	return {
 		id: run.id,
 		status: run.status,
@@ -1365,6 +1612,19 @@ function runSummary(run: RunRecord, options: { pane?: boolean; output?: boolean 
 		`  model: ${run.provider}/${run.model} (${run.thinking})`,
 	];
 	if (activity) lines.push(`  activity: ${activity}`);
+	const question = liveQuestion(run);
+	if (question) {
+		// Local patch 23. Deliberately its own line, in front of the interrupt notes:
+		// a run blocked on a question is neither stalled nor interrupted, and an
+		// operator has to be able to tell "waiting on a human" from "child wedged"
+		// from "turn aborted". The request id is what subagent_answer takes.
+		const blocks = question.options?.length ? ` · proposed: ${question.options.join(" / ")}` : "";
+		lines.push(
+			`  question: ${oneLineNote(question.text, 200) ?? "(empty)"}${blocks}`,
+			`  waiting on: a human-confirmed answer since ${new Date(question.askedAt).toISOString()}` +
+				` (request ${question.id}, deadline ${new Date(question.deadlineAt).toISOString()})`,
+		);
+	}
 	lines.push(`  tmux: ${run.tmuxSession}`, `  attach: ${run.attachCommand}`);
 	if (run.sessionFile) lines.push(`  child session: ${run.sessionFile}`);
 	if (run.report) {
@@ -1425,7 +1685,20 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			return;
 		}
 		// The run id is the run directory name: <agentDir>/tmux-subagents/<session>/<run>/result.json.
-		registerChildReporter(pi, resultPath, path.basename(path.dirname(resultPath)), process.env[INTERRUPT_ENV]?.trim() || undefined);
+		const runId = path.basename(path.dirname(resultPath));
+		registerChildReporter(pi, resultPath, runId, process.env[INTERRUPT_ENV]?.trim() || undefined);
+		// Escalation (local patch 23). Registered only when the parent named a
+		// channel, which is also how a run launched by a build that has none keeps
+		// the old behaviour instead of writing requests nobody reads.
+		const escalationPath = process.env[ESCALATION_ENV]?.trim();
+		if (escalationPath) {
+			registerChildEscalation(pi, {
+				dir: escalationPath,
+				runId,
+				timeoutMs: readIntEnv("PI_SUBAGENT_QUESTION_TIMEOUT_SECONDS", DEFAULT_QUESTION_TIMEOUT_SECONDS) * 1000,
+				graceMs: readIntEnv("PI_SUBAGENT_QUESTION_GRACE_SECONDS", DEFAULT_QUESTION_GRACE_SECONDS) * 1000,
+			});
+		}
 		// Scrub the child-mode variables out of this process once they are read:
 		// every bash-tool subprocess inherits process.env, so a surviving variable
 		// makes any `pi` the child runs from a tool re-enter child mode on the SAME
@@ -1437,6 +1710,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		delete process.env[CHILD_ENV];
 		delete process.env[RESULT_ENV];
 		delete process.env[INTERRUPT_ENV];
+		delete process.env[ESCALATION_ENV];
 		return;
 	}
 
@@ -1513,6 +1787,16 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	 * fail the run; see MAX_TRANSIENT_RESULT_FAILURES.
 	 */
 	const resultFailures = new Map<string, number>();
+	/**
+	 * Escalation requests this parent has already acted on, per run (local patch 23).
+	 *
+	 * A request file stays on disk until the child consumes the exchange, so without
+	 * this every 500 ms tick would deliver the same progress update again and
+	 * re-surface the same question. The persisted `run.pendingRequest` covers a
+	 * question across a reload; this set is the per-tick memory that makes a replayed
+	 * request exactly one delivery.
+	 */
+	const handledRequests = new Map<string, Set<string>>();
 	/**
 	 * Resolvers for pending `subagent_wait` calls (local patch 19), keyed by run id.
 	 *
@@ -1965,8 +2249,10 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		run.finishedAt = result.finishedAt || Date.now();
 		// The run is over one way or another, so an outstanding Escape is no longer
 		// news; leaving it would make subagent_status report a pending interrupt on
-		// a finished run.
+		// a finished run. A question goes with it: there is no child left to answer
+		// (local patch 23).
 		run.interruptRequestedAt = undefined;
+		run.pendingRequest = undefined;
 		// The child reports the path it actually opened. Keep the one we already
 		// recorded when it does not: a result without sessionFile must not erase
 		// the pointer subagent_resume depends on.
@@ -1999,6 +2285,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		await captureRunUsage(run);
 		run.status = "failed";
 		run.interruptRequestedAt = undefined;
+		run.pendingRequest = undefined;
 		run.error = message;
 		run.finishedAt = Date.now();
 		// A run that failed before its child reported still leaves a readable
@@ -2138,13 +2425,19 @@ const statusRows = (now: number): StatusRow[] =>
 		// classifyStatus, not advanceStatusState: the stored state is already
 		// advanced by refreshStatusWidget, and rendering must not move it.
 		const snapshot = classifyStatus(statusStates.get(run.id) ?? statusStateFor(run), now);
+		// A blocked child (local patch 23) is a kind of its own, not "active with a
+		// tool" and not "stalled": its tool is alive and the parent holds the
+		// question, so only the run status plus the parent's own record can say why
+		// it stopped moving. `interrupted` keeps its authority: an Escape aborts the
+		// waiting call, and expected() clears the pending request with it.
+		const blocked = run.status === "running" && liveQuestion(run, now) !== undefined;
 		return {
 			runId: run.id,
 			id: run.id.slice(0, 8),
 			task: run.task,
-			kind: snapshot.kind,
+			kind: blocked ? "question" : snapshot.kind,
 			elapsedText: snapshot.elapsedText,
-			detail: statusDetail(snapshot),
+			detail: blocked ? `waiting on a question ${formatElapsedDuration(now - (liveQuestion(run, now)?.askedAt ?? now))}` : statusDetail(snapshot),
 		};
 	});
 
@@ -2282,6 +2575,10 @@ const noteInterrupt = async (
 		// The request has been honoured; keeping it would make subagent_status
 		// report an unconfirmed interrupt for a run that is known to be stopped.
 		run.interruptRequestedAt = undefined;
+		// An Escape aborts the in-flight tool call, so a waiting question belongs to
+		// a call that no longer exists: clear it rather than leave subagent_status
+		// reporting a blocked run whose child is actually idle at its prompt.
+		run.pendingRequest = undefined;
 		// No finishedAt: the child is still running, so the elapsed time shown by
 		// formatDuration must keep counting rather than freezing.
 		await persist();
@@ -2377,6 +2674,164 @@ const noteInterrupt = async (
 		void drainQueue();
 	};
 
+	/**
+	 * Remember that this tick acted on a request, reporting whether it was the first.
+	 *
+	 * A request that could not be read is remembered too: it will never become
+	 * usable, so retrying it every tick would only repeat the same log line. The set
+	 * is capped because its job is deduplicating files that are still on disk; a
+	 * consumed exchange cannot be replayed at all, so dropping the oldest entry is
+	 * safe long before the cap is reached.
+	 */
+	const markRequestHandled = (run: RunRecord, id: string): boolean => {
+		const handled = handledRequests.get(run.id) ?? new Set<string>();
+		handledRequests.set(run.id, handled);
+		if (handled.has(id)) return false;
+		handled.add(id);
+		if (handled.size > 500) {
+			const oldest = handled.values().next().value;
+			if (oldest !== undefined) handled.delete(oldest);
+		}
+		return true;
+	};
+
+	/**
+	 * Read this run's escalation channel — on the watcher tick that already runs.
+	 *
+	 * This is the whole polling mechanism for escalated questions (R17): the tick
+	 * that reads `result.json`, `activity.json` and the interrupt marker reads the
+	 * request files too, so the feature starts no timer of its own and shutdown has
+	 * nothing extra to clear. The heartbeat is refreshed on the same tick, and only
+	 * while something is waiting on it, which is what lets a blocked child notice a
+	 * parent that went away instead of sitting on its deadline (R16).
+	 *
+	 * Nothing user-facing runs here: a question is surfaced as a session message,
+	 * never as a dialog, because the tick runs mid-run and prompting from it would
+	 * race the TUI (see "The human gate lives in the answering tool", spec).
+	 */
+	const handleEscalation = async (run: RunRecord): Promise<void> => {
+		if (!run.escalation) return;
+		const dir = escalationDir(run.runDir);
+		// No deadline cleanup here, deliberately. The child expires its own wait and
+		// then reports its blocker, which settles the run and clears the question with
+		// it; the renderers stop calling an expired question "waiting", and
+		// subagent_answer refuses it. Clearing it from the tick instead would race that
+		// report and lose the one record a human could still inspect.
+		const requests = await listEscalationRequests(dir);
+		if (requests.length > 0 || run.pendingRequest) {
+			try {
+				await touchEscalationHeartbeat(dir);
+			} catch (error) {
+				// A child will read this as "no parent" eventually; there is nothing else
+				// to do about it, and it must not fail the tick.
+				console.error(`[tmux-subagent] could not touch the escalation heartbeat for ${run.id}: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+		// Only a live child can be waiting. An interrupted run's question was cleared
+		// with the status change, and a settled one has no child left to answer.
+		if (run.status !== "running") return;
+		for (const entry of requests) {
+			const read = await readEscalationRequest(entry.file, { runId: run.id });
+			if (!read.ok) {
+				markRequestHandled(run, entry.id);
+				console.error(
+					`[tmux-subagent] ignoring an unusable escalation request ${entry.id} for ${run.id}: ${read.error ?? read.reason}`,
+				);
+				continue;
+			}
+			const request = read.value;
+			if (!markRequestHandled(run, request.id)) continue;
+			// The per-session set is the only thing that dedupes a file the child has not
+			// consumed yet, and a reload has no memory of it: a question already pending,
+			// or already answered (its reply is on disk, the child has not collected it),
+			// must not be surfaced a second time.
+			if (run.pendingRequest?.id === request.id) continue;
+			if (request.kind === "question") {
+				const answered = await readEscalationReply(replyPath(dir, request.id), { runId: run.id, id: request.id });
+				if (answered.ok) continue;
+			}
+			if (request.kind === "progress") {
+				await deliverProgressUpdate(run, request);
+				// The child never consumes a progress request, so nothing else would: without
+				// this a reload re-delivers it, because the handled-set is per process.
+				await consumeEscalationExchange(dir, request.id).catch(() => undefined);
+				continue;
+			}
+			// Expired before it was ever surfaced: not delivered, and not answered. The
+			// child is told by its own deadline, so answering here would be worse than
+			// doing nothing — a late answer is not an answer (R13, R16).
+			if ((request.deadlineAt ?? 0) <= Date.now()) continue;
+			await surfaceQuestion(run, request);
+		}
+	};
+
+	/**
+	 * Deliver a progress update, without a human gate and without taking a turn.
+	 *
+	 * Deliberately no `triggerTurn` and no `deliverAs`, for the same reason
+	 * `notifyCompletion` has none: an update is information, and a child that sends
+	 * one must never pull the parent into a turn to read it.
+	 */
+	const deliverProgressUpdate = async (run: RunRecord, request: EscalationRequest): Promise<void> => {
+		try {
+			await pi.sendMessage({
+				customType: PROGRESS_MESSAGE_TYPE,
+				content: `Subagent ${run.id} progress: ${request.text}`,
+				display: true,
+				details: { id: run.id, requestId: request.id },
+			});
+		} catch (error) {
+			console.error(`[tmux-subagent] could not deliver progress from ${run.id}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	};
+
+	/**
+	 * Surface a pending decision on the run and in the parent session.
+	 *
+	 * The message DOES wake the parent, unlike every other watcher-driven message:
+	 * a question nobody is woken for is a child holding a concurrency slot until its
+	 * deadline, and the human who has to answer it never learns it was asked.
+	 * `followUp` rather than `steer` so it cannot pre-empt the parent's in-flight
+	 * tool calls; `triggerTurn` makes an idle parent read it at once.
+	 *
+	 * Recording it on the run is what makes it observable: `subagent_status` renders
+	 * "waiting on a question" from `pendingRequest`, and `subagent_answer` finds the
+	 * request by its id without re-reading the child's files.
+	 */
+	const surfaceQuestion = async (run: RunRecord, request: EscalationRequest): Promise<void> => {
+		run.pendingRequest = {
+			id: request.id,
+			text: request.text,
+			...(request.options === undefined ? {} : { options: request.options }),
+			askedAt: request.askedAt,
+			deadlineAt: request.deadlineAt ?? Date.now(),
+		};
+		await persist();
+		refreshStatusWidget();
+		const lines = [`Subagent ${run.id} is blocked on a question.`, "", request.text];
+		if (request.options && request.options.length > 0) lines.push("", `Proposed answers: ${request.options.join(" / ")}`);
+		lines.push(
+			"",
+			`Answer with subagent_answer({ id: "${request.id}", answer: "..." }). That tool asks a human to confirm; a decision is never answered by a model.`,
+			`The child waits until ${new Date(run.pendingRequest.deadlineAt).toISOString()}, then reports the blocker and stops.`,
+		);
+		try {
+			await pi.sendMessage(
+				{
+					customType: QUESTION_MESSAGE_TYPE,
+					content: lines.join("\n"),
+					display: true,
+					details: { id: run.id, requestId: request.id },
+				},
+				{ triggerTurn: true, deliverAs: "followUp" },
+			);
+		} catch (error) {
+			// The session may be shutting down; the question is still on the run and the
+			// child is still polling, so a lost message degrades to "nobody was woken".
+			console.error(`[tmux-subagent] could not surface the question from ${run.id}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	};
+
 	const watchTick = async (run: RunRecord): Promise<void> => {
 		timers.delete(run.id);
 		if (shuttingDown) return;
@@ -2463,6 +2918,16 @@ const noteInterrupt = async (
 			// makes a repeat read of the same marker a no-op.
 			const marker = await readInterruptMarker(getInterruptFilePath(run.runDir), run.id);
 			if (marker.ok) await noteInterrupt(run, marker.marker);
+
+			// Escalated questions (local patch 23), read on this same tick: no extra
+			// timer, and a question is delivered within one poll of the child writing
+			// it. Its own try so a channel problem cannot skip the liveness checks that
+			// follow; nothing in it can finish or fail the run.
+			try {
+				await handleEscalation(run);
+			} catch (error) {
+				console.error(`[tmux-subagent] escalation read failed for ${run.id}: ${error instanceof Error ? error.message : String(error)}`);
+			}
 
 			const paneResult = await pi.exec("tmux", tmuxArgs("capture-pane", "-p", "-J", "-t", run.tmuxTarget), {
 				timeout: 5_000,
@@ -2563,6 +3028,10 @@ const noteInterrupt = async (
 				`${CHILD_ENV}=1`,
 				`${RESULT_ENV}=${shellQuote(run.resultPath)}`,
 				`${INTERRUPT_ENV}=${shellQuote(getInterruptFilePath(run.runDir))}`,
+				// Local patch 23: the channel directory, which is also the child's
+				// permission to ask. Written as a literal, like the others, so the child
+				// reads it from its own environment only.
+				`${ESCALATION_ENV}=${shellQuote(escalationDir(run.runDir))}`,
 				piArgs.map(shellQuote).join(" "),
 			].join(" ");
 
@@ -2658,6 +3127,8 @@ const noteInterrupt = async (
 			attempt: step.attempts + 1,
 			planId: plan.id,
 			stepId: step.id,
+			// Local patch 23: plan steps get the same channel as standalone runs.
+			escalation: true,
 		};
 		updateTmuxCommands(run);
 		return run;
@@ -2811,6 +3282,7 @@ const noteInterrupt = async (
 		clearTimer(run.id);
 		resultFailures.delete(run.id);
 		run.interruptRequestedAt = undefined;
+		run.pendingRequest = undefined;
 		await killTmuxSession(run);
 		run.status = "cancelled";
 		run.finishedAt = Date.now();
@@ -2984,9 +3456,20 @@ const noteInterrupt = async (
 		reservedResumes.clear();
 		statusUi = undefined;
 		for (const run of runs.values()) {
+			// A blocked child reads the heartbeat to decide whether a parent is there, so
+			// removing it is how shutdown says "nobody is left to answer" (local patch
+			// 23). Its staleness check would notice within seconds regardless; this makes
+			// it the child's very next poll. No timer is involved on either side.
+			if (run.escalation && run.pendingRequest) {
+				await clearEscalationHeartbeat(escalationDir(run.runDir)).catch(() => undefined);
+			}
 			if (killOnShutdown && holdsChild(run.status)) {
 				run.status = "cancelled";
 				run.finishedAt = Date.now();
+				// A killed child has no question left to answer. Leaving it would let a
+				// reload surface a dialog for a run that no longer exists.
+				run.pendingRequest = undefined;
+				run.escalation = undefined;
 				await killTmuxSession(run);
 				// Kill first, then read: the child has stopped writing, but the tokens it
 				// already burned are still its own. Same reason as subagent_cancel.
@@ -3195,6 +3678,8 @@ const noteInterrupt = async (
 				createdAt: Date.now(),
 				mode,
 				attempt: 1,
+				// Local patch 23: this build launches a child with an escalation channel.
+				escalation: true,
 			};
 			run.trusted = isSameOrDescendant(path.resolve(ctx.cwd), cwd) && ctx.isProjectTrusted();
 			updateTmuxCommands(run);
@@ -3242,7 +3727,7 @@ const noteInterrupt = async (
 			const description = tool?.description ?? SUBAGENT_DESCRIPTION;
 			return {
 				descriptions: {
-					subagent: `${description} The other subagent tools (subagent_wait, subagent_status, subagent_cancel, subagent_interrupt, subagent_resume, subagent_clean) are not declared while \`codemode\` or \`tool_search\` is active: reach them with tool_search, or tools.<name>(...) in a codemode script.`,
+					subagent: `${description} The other subagent tools (subagent_wait, subagent_status, subagent_answer, subagent_cancel, subagent_interrupt, subagent_resume, subagent_clean) are not declared while \`codemode\` or \`tool_search\` is active: reach them with tool_search, or tools.<name>(...) in a codemode script.`,
 				},
 			};
 		},
@@ -3507,6 +3992,146 @@ const noteInterrupt = async (
 					},
 				});
 				return { content: [{ type: "text", text }], details: { runs: runsArray, plans: plansArray } };
+			},
+		},
+
+		{
+			name: "subagent_answer",
+			label: "Subagent Answer",
+			description:
+				"Answer a question a subagent is blocked on. The run's pending question is reported by subagent_status (a run waiting on one says so) and is also delivered as a session message when it arrives; pass that request id with the answer you propose. A decision is CONFIRMED BY A HUMAN: this tool shows the question and your proposed answer to the user and only sends it if they confirm, so nothing here lets a model answer its own child's decision. With no UI to ask (print or JSON mode) it refuses and says why — the child then reaches its deadline and reports the blocker instead of being answered. A child's progress update needs no answer. The answer arrives as the child's tool result, so the child continues in the same turn.",
+			promptSnippet: "Answer a subagent's blocking question, after a human confirms it",
+			parameters: Type.Object({
+				id: Type.String({
+					description: "The request id of the pending question, as reported by subagent_status or by the question's session message.",
+				}),
+				answer: Type.String({
+					description:
+					"The answer to send. Put in it only what the human confirmed — the child treats it as authoritative and cannot ask again about the same thing.",
+				}),
+			}),
+
+			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+				await ensureSessionPaths(ctx);
+				const requestId = params.id.trim();
+				const answer = params.answer.trim();
+				if (!answer) throw new Error("subagent_answer needs a non-empty answer.");
+
+				let target: { run: RunRecord; pending: PendingQuestion } | undefined;
+				for (const run of runs.values()) {
+					if (run.pendingRequest?.id === requestId) {
+						target = { run, pending: run.pendingRequest };
+						break;
+					}
+				}
+				if (!target) {
+					throw new Error(
+						`No subagent question with id ${requestId} is waiting for an answer. ` +
+							`The question may already be answered or expired; subagent_status lists runs and says which one is blocked.`,
+					);
+				}
+				const { run, pending } = target;
+				if (run.status !== "running") {
+					// The child is gone (cancelled, interrupted, settled): a confirm dialog for
+					// it would collect an answer nobody can receive. Clear the stale record.
+					run.pendingRequest = undefined;
+					await persist();
+					refreshStatusWidget();
+					throw new Error(
+						`The run asking question ${requestId} is ${run.status}, so there is no child left to answer. ` +
+							`The question was cleared; the run's own record says how it ended.`,
+					);
+				}
+				if (pending.deadlineAt <= Date.now()) {
+					// The child's clock has already expired the wait, so a reply now would
+					// arrive after it gave up — or worse, be read by a later tool call that
+					// reused the id. Clear it and report the expiry.
+					run.pendingRequest = undefined;
+					await persist();
+					refreshStatusWidget();
+					throw new Error(
+						`The question (${requestId}) passed its deadline at ${new Date(pending.deadlineAt).toISOString()}. ` +
+							`It was not delivered and the child was told the answer failed; the child reports the blocker and stops.`,
+					);
+				}
+				if (!ctx.hasUI) {
+					// The deliberate refusal (R14): a decision comes from a human or from
+					// nobody. Answering it from the model would be the failure this feature
+					// exists to prevent, so the tool fails loudly instead and the child times
+					// out and reports the blocker.
+					throw new Error(
+						`subagent_answer needs a human to confirm a decision, and this session has no UI (mode "${ctx.mode}"). ` +
+							`The answer was NOT sent. The child waits until ${new Date(pending.deadlineAt).toISOString()}, then reports the blocker and stops. ` +
+							`Answer a decision in a TUI or RPC session; never answer one on the child's behalf.`,
+					);
+				}
+
+				const question = [pending.text];
+				if (pending.options && pending.options.length > 0) question.push("", `Proposed answers: ${pending.options.join(" / ")}`);
+				const confirmed = await ctx.ui.confirm(
+					`Send this answer to subagent ${run.id.slice(0, 8)}?`,
+					[
+						`The child is blocked on: ${pending.text}`,
+						"",
+						`Proposed answer: ${answer}`,
+						"",
+						"The child receives this as its tool result and continues. Only you can decide it; the model cannot.",
+					].join("\n"),
+				);
+				if (!confirmed) {
+					return {
+						content: [
+							{
+								type: "text",
+								text:
+									`Not sent: the human declined to confirm this answer. The question (${requestId}) is still pending until ` +
+									`${new Date(pending.deadlineAt).toISOString()}; ask them what to answer, or stop and report that the decision is open.`,
+							},
+						],
+						details: run,
+					};
+				}
+
+				// The dialog can be open arbitrarily long, so the deadline is re-checked AFTER
+				// it: writing a reply the child has already stopped waiting for would leave an
+				// orphan file and make "a late answer is never written" false.
+				if (pending.deadlineAt <= Date.now()) {
+					run.pendingRequest = undefined;
+					await persist();
+					refreshStatusWidget();
+					throw new Error(
+						`The question (${requestId}) passed its deadline while the confirmation was open. ` +
+							`It was not delivered; the child reports the blocker and stops.`,
+					);
+				}
+				try {
+					await writeEscalationReply(escalationDir(run.runDir), {
+						version: ESCALATION_VERSION,
+						id: pending.id,
+						runId: run.id,
+						answer,
+						answeredAt: Date.now(),
+					});
+				} catch (error) {
+					throw new Error(
+						`The confirmed answer could not be delivered to subagent ${run.id}: ${error instanceof Error ? error.message : String(error)}. ` +
+							`The question is still pending until ${new Date(pending.deadlineAt).toISOString()}.`,
+					);
+				}
+				run.pendingRequest = undefined;
+				await persist();
+				refreshStatusWidget();
+				return {
+					content: [
+						{
+							type: "text",
+							text:
+								`Answer delivered to subagent ${run.id}. The child received it as its tool result and continues in the same turn. ` +
+								`Collect the run with subagent_wait({ id: "${run.id}" }) or inspect it with subagent_status({ id: "${run.id}" }).`,
+						},
+					],
+					details: run,
+				};
 			},
 		},
 
@@ -3799,6 +4424,11 @@ const noteInterrupt = async (
 						interrupts: undefined,
 						interruptedAt: undefined,
 						interruptRequestedAt: undefined,
+						// A pending question belongs to the attempt that asked it: this attempt
+						// gets a fresh channel, so inheriting one would report a blocked run that
+						// is not blocked and point subagent_answer at a dead request.
+						pendingRequest: undefined,
+						escalation: true,
 						mode: "resume",
 						resumeOf: previous.id,
 						attempt: (previous.attempt ?? 1) + 1,
