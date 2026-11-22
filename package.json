@@ -16,6 +16,7 @@
       ".pi/extensions/mcp-catalogue.ts",
       ".pi/extensions/native-web-search.ts",
       ".pi/extensions/opencode-go-provider/index.ts",
+      ".pi/extensions/orchestrator/index.ts",
       ".pi/extensions/repo-explorer/index.ts",
       ".pi/extensions/review-triage/index.ts",
       ".pi/extensions/review.ts",

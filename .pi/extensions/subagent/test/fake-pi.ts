@@ -103,6 +103,8 @@ export interface FakeHost {
 	flagOrder: string[];
 	messages: FakeMessage[];
 	appended: FakeAppendedEntry[];
+	/** Every `pi.events.emit` call, in order. */
+	emitted: { channel: string; data: unknown }[];
 	notifications: { message: string; type: string | undefined }[];
 	statuses: { key: string; text: string | undefined }[];
 	widgets: { key: string; content: unknown; options: unknown }[];
@@ -133,6 +135,7 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
 	const handlers = new Map<string, Handler[]>();
 	const messages: FakeMessage[] = [];
 	const appended: FakeAppendedEntry[] = [];
+	const emitted: { channel: string; data: unknown }[] = [];
 	const notifications: { message: string; type: string | undefined }[] = [];
 	const statuses: { key: string; text: string | undefined }[] = [];
 	const widgets: { key: string; content: unknown; options: unknown }[] = [];
@@ -191,6 +194,15 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
 	} as unknown as ExtensionContext;
 
 	const pi = {
+		// The orchestration event bus, recorded. Tests that need subscriber
+		// behaviour drive a local EventBus instead; this double is enough to see
+		// that an emitter published.
+		events: {
+			emit: (channel: string, data: unknown) => {
+				emitted.push({ channel, data });
+			},
+			on: (_channel: string, _handler: (data: unknown) => void) => () => {},
+		},
 		on: (event: string, handler: Handler) => {
 			const list = handlers.get(event) ?? [];
 			list.push(handler);
@@ -295,6 +307,7 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
 		flagOrder,
 		messages,
 		appended,
+		emitted,
 		notifications,
 		statuses,
 		widgets,

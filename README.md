@@ -34,6 +34,7 @@ each entry point explicitly:
     ".pi/extensions/mcp-catalogue.ts",
     ".pi/extensions/native-web-search.ts",
     ".pi/extensions/opencode-go-provider/index.ts",
+    ".pi/extensions/orchestrator/index.ts",
     ".pi/extensions/repo-explorer/index.ts",
     ".pi/extensions/review-triage/index.ts",
     ".pi/extensions/review.ts",
@@ -369,11 +370,12 @@ default when it does not, and the `opencode-go` credential itself still serves
 | `package.json` | the `pi` manifest that makes this repo installable as a package (see above) |
 | `.pi/extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent` (one run, or a `tasks` fan-out with per-step overrides and optional `dependsOn` dependency edges), `subagent_status`, `subagent_wait`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel`, `subagent_clean`, a live child-activity phase and a status widget above the editor; fan-out steps share the one concurrency queue and their plan is persisted in `plans.json` beside the runs; a plan survives reload (it resumes at the first unfinished step, adopts a run the plan index missed, and reconciles a step whose child is gone rather than re-running it), cancels with its live steps (`subagent_cancel` takes a plan id), and is inspectable as one row — `subagent_status` folds a plan's step runs into it so a ten-step plan costs one detail slot, and `subagent_wait({ plan })` waits for every wave; every run that reports a final answer (completed or failed) leaves a `report.md` artifact with it, plus a bounded copy and a pointer in its run record |
 | `.pi/extensions/todos.ts` | `/todos` TUI and the `todo` tool |
+| `.pi/extensions/orchestrator/` | The settlement gate and the typed orchestration event bus: `/gate` shows the last verdict, and at `agent_before_settle` the gate reports an active goal, open todos, edits without a verification run, a repeated failure signature and the remaining retry allowance as a session `custom` entry. **Report-only in this ticket** — it never blocks or continues; a committed `.pi/orchestrator.json` (example beside the extension) sets the retry cap, and its absence means defaults. **Ours** |
 | `.pi/extensions/answer.ts` | `/answer`: extract questions from the last response and answer them in a focused TUI |
 | `.pi/extensions/continue.ts` | `shift+alt+enter` sends the literal prompt `continue`, but only when the agent is idle, so it never steers or queues a message mid-run. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), unmodified |
 | `.pi/extensions/review.ts` | `/review` and `/end-review`: PR, branch, commit, folder and uncommitted review modes, loop-fixing, custom instructions, project-level `REVIEW_GUIDELINES.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with two local changes — see below |
 | `.pi/extensions/mcp-catalogue.ts` | `/mcp-catalogue`: install this package's MCP server catalogue into the agent dir, every server disabled — see [MCP servers](#mcp-servers-installed-once-enabled-per-project). **Ours** |
-| `.pi/extensions/goal.ts` | `/goal` and the `get_goal`/`create_goal`/`update_goal` tools: a long-running objective that auto-continues across turns with an optional token budget, its state appended to the session log and reconstructed on reload/tree navigation. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with three local changes — see below |
+| `.pi/extensions/goal.ts` | `/goal` and the `get_goal`/`create_goal`/`update_goal` tools: a long-running objective that auto-continues across turns with an optional token budget, its state appended to the session log and reconstructed on reload/tree navigation. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with four local changes — see below |
 | `.pi/extensions/session-breakdown.ts` | `/session-breakdown`: sessions, messages, tokens and cost per day over 7/30/90, model breakdown, contributions-style calendar. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with four local patches — see below |
 | `.pi/extensions/native-web-search.ts` | Native web search tool — **ours**, not upstream: it registers the `web_search` tool. Ships with `.pi/skills/native-web-search/`, which *is* vendored |
 | `.pi/extensions/repo-explorer/` | `/explore`: browse a branch's file tree with a directory-by-directory fuzzy filter and print a file into the transcript, or quick-open `/explore <path> [branch]` / `<branch>:<path>` to skip the menus. Read-only git resolved against the session cwd; the process runner, branch menu, browser, transcript renderer, display sanitizer and argument grammar are separate internals. **Ours** |
@@ -671,6 +673,11 @@ header:
    continuation — the abort-pause prompt stays in `agent_end`, as do the usage
    accounting and the error-stop decision.
 
+4. **Read-only goal view for the settlement gate.**
+   `activeGoalFromBranch` is exported so `.pi/extensions/orchestrator/` reads
+   the active objective through this extension's own reconstruction instead of
+   duplicating the persisted format. It cannot mutate the goal.
+
 Behaviourally it is the most invasive vendor in this repo: a run's next turn is
 requested at its settlement boundary, and `/goal` — which runs outside any run —
 still queues a follow-up message directly (`deliverAs: "followUp"`); on the next
@@ -681,6 +688,38 @@ extensions use never collide — but a real end-to-end continuation run still
 needs credentials and is not part of the suite; `goal.test.ts` pins the
 reconstruction, the budget-limiting decision and the boundary's returned
 proposal instead.
+
+## Settlement gate
+
+`.pi/extensions/orchestrator/` runs at `agent_before_settle`, the final
+actionable boundary, and records what this project considers a finished run:
+an active goal, open todos, edits made since the last successful `bash`/
+`powershell` command, a repeated failure signature (same tool, same invocation,
+same first error line), and the remaining retry allowance. Each evaluation is a
+`custom` session entry — append-only, ignored by the model context, and
+reconstructed from the active branch on resume and tree navigation — so a cap
+cannot be reset by reloading. `/gate` prints the last verdict; `/gate --json`
+prints it verbatim.
+
+The gate is **report-only** here: it never blocks settlement, runs a command or
+requests a continuation. It also yields the continuation when an active goal
+owns it — the goal extension asks for the next turn, and the gate adds an entry
+without touching `continue`. A condition that cannot be evaluated (an unreadable
+config or todo directory) is reported as unknown and still settles.
+
+Configuration is a committed `<project>/.pi/orchestrator.json`; the shape ships
+beside the extension as `orchestrator.example.json`. This repository deliberately
+commits none, so its own gate uses the defaults (`retryCap: 3`) and stays
+report-only. `retryCap` is the only key this ticket evaluates; blocking checks,
+verification commands and the override arrive with the next ticket.
+
+Related extensions publish typed events to the same in-process bus:
+`orchestrator:run-settled`, `orchestrator:plan-settled`,
+`orchestrator:todo-changed`, `orchestrator:triage-planned` and
+`orchestrator:gate-decided` (payload types in
+`.pi/extensions/orchestrator/events.ts`). They are local to one parent session:
+no cross-process or cross-worktree delivery is promised, and a subscriber that
+throws is reported and ignored.
 
 ## `/session-breakdown`
 
