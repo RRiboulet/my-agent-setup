@@ -13,9 +13,9 @@
 //   https://github.com/mitsuhiko/agent-stuff (extensions/goal.ts)
 //   Licensed under the Apache License, Version 2.0.
 //
-// Vendored with one structural refactor, one behavioural change and a __test__
-// tail — everything that differs from upstream is listed below, so a refresh
-// stays a readable diff.
+// Vendored with one structural refactor, one behavioural change, one read-only
+// export for the settlement gate and a __test__ tail — everything that differs
+// from upstream is listed below, so a refresh stays a readable diff.
 //
 // Upstream base: commit 0865c84 ("fix(session-breakdown): only count models
 // that produced messages"). Verified on 2026-10-07 by diffing against
@@ -57,6 +57,11 @@
 //      handler returning `continue: false` cancels this request while the draft
 //      stays committed. The settlement gate must yield by leaving `continue`
 //      alone, not by overriding it.
+//
+//   4. `activeGoalFromBranch` is exported read-only for the settlement gate
+//      (`.pi/extensions/orchestrator/`). The gate reads goal state through this
+//      extension's own reconstruction instead of duplicating the persisted
+//      `goal` entry format; it cannot mutate the goal. No behaviour changes.
 // ---------------------------------------------------------------------------
 
 import { randomUUID } from "node:crypto";
@@ -437,6 +442,22 @@ function reconstructGoalFromBranch(branch: readonly { type?: string; customType?
 		state = normalizeGoal(data?.goal);
 	}
 	return state;
+}
+
+/**
+ * Read-only view of the goal persisted on a branch, for the settlement gate.
+ *
+ * `null` unless the last goal entry describes an active goal: a paused, blocked,
+ * usage-limited, budget-limited or complete goal is not something a settlement
+ * should hold open. Deliberately returns a copy of the two fields the gate
+ * reports, so a caller cannot reach into the extension's live goal object.
+ */
+export function activeGoalFromBranch(
+	branch: readonly { type?: string; customType?: string; data?: unknown }[],
+): { id: string; objective: string } | null {
+	const goal = reconstructGoalFromBranch(branch);
+	if (!goal || goal.status !== "active") return null;
+	return { id: goal.id, objective: goal.objective };
 }
 
 function hasExhaustedTokenBudget(goal: Goal | null): boolean {

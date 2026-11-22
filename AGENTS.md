@@ -192,6 +192,17 @@ Adding a new extension or skill means adding it to the `pi` manifest in
 discovery will not glob, so an unlisted extension installs nowhere.
 `test/package-manifest.test.ts` fails if the manifest and the tree disagree.
 
+Cross-extension imports have one home per extension. The settlement gate's
+typed event bus lives in `.pi/extensions/orchestrator/events.ts` and is imported
+by `todos.ts`, `review-triage/index.ts` and `subagent/index.ts`, because the
+publisher must not own the bus and a directory without an entry point fails the
+manifest test. The gate itself (`.pi/extensions/orchestrator/`) is
+**report-only**: at `agent_before_settle` it records a verdict as a session
+`custom` entry, publishes `orchestrator:gate-decided` and never returns
+`continue`, so the goal extension keeps ownership of continuation. A project
+opts into its config by committing `.pi/orchestrator.json`; this repository
+deliberately has none, and absence means defaults plus report-only.
+
 Install this repo where you run `pi` from it **as a local path**
 (`pi install /path/to/my-agent-setup`), never as
 `git:github.com/RRiboulet/my-agent-setup`: project discovery and an installed

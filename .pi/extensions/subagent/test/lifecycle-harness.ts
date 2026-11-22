@@ -35,6 +35,8 @@ export interface Harness {
 	tools: Map<string, Record<string, unknown>>;
 	execCalls: { command: string; args: string[] }[];
 	messages: CompletionMessage[];
+	/** Every `pi.events.emit` call, in order (patch 22's orchestration events). */
+	events: { channel: string; data: unknown }[];
 	/** Every ctx.ui.notify call, so guard messages can be asserted. */
 	notifications: { message: string; type: string | undefined }[];
 	/** Make every tmux call against the run's pane fail as if the session were gone. */
@@ -132,6 +134,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const handlers = new Map<string, (...args: unknown[]) => unknown>();
 	const execCalls: { command: string; args: string[] }[] = [];
 	const messages: CompletionMessage[] = [];
+	const orchestrationEvents: { channel: string; data: unknown }[] = [];
 	const notifications: { message: string; type: string | undefined }[] = [];
 	// Flipped by removeTarget() to simulate the user killing the tmux session (or
 	// the server dying) out from under a run.
@@ -192,6 +195,15 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		},
 		sendMessage: (message: Record<string, unknown>, opts?: Record<string, unknown>) => {
 			messages.push({ message, options: opts });
+		},
+		// The orchestration event bus (patch 22). A recording double, not an
+		// emitter: no test in this suite subscribes, and a subscriber is covered
+		// in orchestrator-events.test.ts.
+		events: {
+			emit: (channel: string, data: unknown) => {
+				orchestrationEvents.push({ channel, data });
+			},
+			on: () => () => {},
 		},
 		exec: async (command: string, args: string[]) => {
 			execCalls.push({ command, args });
@@ -382,6 +394,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			const result = await execute(`call-${tool}`, params, undefined, undefined, ctx);
 			return { text: result.content[0]?.text ?? "", details: result.details ?? {} };
 		},
+		events: orchestrationEvents,
 		readRuns: async () => JSON.parse(await readFile(runsIndex, "utf8")) as RunRecord[],
 		readPlans: async () => {
 			try {

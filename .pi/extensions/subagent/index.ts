@@ -215,9 +215,18 @@
 //     shows a plan as ONE row with its step runs folded into it, so a ten-step
 //     plan cannot spend the list's detail budget ten times.
 //
+// 22. Typed orchestration events (see `../orchestrator/events.ts`): a run that
+//     reports a final answer publishes `orchestrator:run-settled`, and a plan
+//     that becomes terminal publishes `orchestrator:plan-settled` once. The
+//     bus lives with the settlement gate, which is its first consumer; the
+//     publisher is total, so a subscriber cannot affect a run or a plan. The
+//     event is published after the state is persisted, so a subscriber that
+//     reads `runs.json`/`plans.json` sees the settlement it was told about.
+//
 // The child reporter (CHILD_ENV) still reports completion the same way; patch 11
 // only adds the activity snapshot to it, patch 13 only diverts the aborted
-// settle onto the marker, and patch 20 adds the report field.
+// settle onto the marker, patch 20 adds the report field, and patch 22 adds the
+// two events.
 
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -314,6 +323,7 @@ import {
 } from "./plan.ts";
 import { currentTmuxPointer, currentTmuxSocket, defaultPanelLauncher, resolvePaneClient, type PanelLauncher } from "./popup.ts";
 import { shellQuote } from "./shell.ts";
+import { ORCHESTRATION_EVENTS, publishOrchestrationEvent } from "../orchestrator/events.ts";
 
 const ATTACH_FLAG = "attach-subagent";
 const CHILD_ENV = "PI_TMUX_SUBAGENT_CHILD";
@@ -1469,6 +1479,15 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	 */
 	const plans = new Map<string, PlanRecord>();
 	/**
+	 * Plans whose terminal settlement has already been published (patch 22).
+	 *
+	 * A plan can be reduced after it is already terminal — a late settlement
+	 * records a step without changing the plan — and `applyPlanAdvance` runs for
+	 * those too. The set is what makes `orchestrator:plan-settled` mean "this plan
+	 * became terminal", not "a reduction touched a terminal plan".
+	 */
+	const announcedPlans = new Set<string>();
+	/**
 	 * Session files a resume has claimed but not yet registered a run for.
 	 *
 	 * A resume does I/O (`mkdir`, `countSessionLines`) between the "is another
@@ -1858,6 +1877,35 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	};
 
 	/**
+	 * Publish a run's settlement (patch 22). Called after `persist`, so a
+	 * subscriber reading `runs.json` sees the same terminal status. Total by
+	 * construction: `publishOrchestrationEvent` never throws and its result is
+	 * deliberately ignored.
+	 */
+	const publishRunSettled = (run: RunRecord): void => {
+		publishOrchestrationEvent(pi, ORCHESTRATION_EVENTS.runSettled, {
+			runId: run.id,
+			status: run.status === "completed" ? "completed" : "failed",
+			...(run.planId ? { planId: run.planId } : {}),
+			...(run.stepId ? { stepId: run.stepId } : {}),
+			...(run.error ? { error: run.error } : {}),
+			finishedAt: run.finishedAt ?? Date.now(),
+		});
+	};
+
+	/** Publish a plan's terminal transition at most once (patch 22). */
+	const publishPlanSettled = (plan: PlanRecord): void => {
+		if (plan.status === "running" || announcedPlans.has(plan.id)) return;
+		announcedPlans.add(plan.id);
+		publishOrchestrationEvent(pi, ORCHESTRATION_EVENTS.planSettled, {
+			planId: plan.id,
+			status: plan.status === "completed" || plan.status === "failed" ? plan.status : "cancelled",
+			...(plan.reason ? { reason: plan.reason } : {}),
+			finishedAt: plan.finishedAt ?? Date.now(),
+		});
+	};
+
+	/**
 	 * The terminal tail both finalisers share: read the child's usage, persist,
 	 * notify, refresh the widget, schedule the reap. Callers set their
 	 * status-specific fields first.
@@ -1872,6 +1920,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		// level; a failure must not report none. See captureRunUsage.
 		await captureRunUsage(run);
 		await persist();
+		publishRunSettled(run);
 		await notifyCompletion(run);
 		refreshStatusWidget();
 		scheduleReap(run);
@@ -2701,6 +2750,7 @@ const noteInterrupt = async (
 		}
 
 		await persist();
+		publishPlanSettled(plan);
 
 		for (const stepId of advance.launch) {
 			if (plan.status !== "running") break;
@@ -3491,6 +3541,7 @@ const noteInterrupt = async (
 						if (run && (await cancelRunRecord(run, `Cancelled: plan ${plan.id} was cancelled.`))) cancelledRuns.push(run);
 					}
 					await persist();
+					publishPlanSettled(plan);
 					for (const run of cancelledRuns) notifyWaiters(run);
 					notifyPlanWaiters(plan);
 					refreshStatusWidget();

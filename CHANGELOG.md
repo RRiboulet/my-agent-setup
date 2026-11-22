@@ -6,6 +6,39 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
+- **A settlement gate now reports what a project considers a finished run, and
+  publishes typed orchestration events.** A new `.pi/extensions/orchestrator/`
+  extension runs at `agent_before_settle` and records a verdict — an active
+  goal, open todos, files edited since the last successful verification
+  command, a repeated failure signature, and the remaining retry allowance —
+  as an append-only `custom` session entry. The entry is ignored by the model
+  context, so a verdict per settlement costs no tokens; `/gate` prints the last
+  one and `/gate --json` returns it verbatim. The attempt count is reconstructed
+  from the active branch on `session_start` and `session_tree`, so a resume or a
+  tree navigation cannot reset a cap. The gate composes with other boundary
+  handlers: it carries forward every entry proposed before it and leaves
+  `continue` alone, so an active goal keeps ownership of the next turn. A
+  condition it cannot evaluate is reported as unknown and the run still settles.
+
+  This ticket is deliberately **report-only**: the gate never blocks, runs a
+  command or requests a continuation. Configuration is a committed
+  `<project>/.pi/orchestrator.json`, shipped as
+  `.pi/extensions/orchestrator/orchestrator.example.json`; absence means the
+  defaults (`retryCap: 3`) and report-only. Blocking checks, verification
+  commands, the override and the loop breaker follow in the next ticket.
+
+  The same extension owns the typed event bus: `orchestrator:run-settled`,
+  `orchestrator:plan-settled`, `orchestrator:todo-changed`,
+  `orchestrator:triage-planned` and `orchestrator:gate-decided`, with payload
+  types in `events.ts`. The subagent, todo and review-triage extensions now
+  publish their events after the state is persisted; publishing is total, so a
+  missing bus or a throwing subscriber cannot affect the operation observed.
+  The events are local to one parent session — no cross-process or cross-worktree
+  delivery is promised. Tests: `orchestrator-gate.test.ts` covers the decision
+  function, the readers, resume/tree reconstruction, entry composition and
+  fail-open; `orchestrator-events.test.ts` covers the bus contract and one
+  emitter per publishing extension.
+
 - **A finished subagent run now leaves a standalone report artifact, so its
   complete answer is readable without opening the child's transcript.** Each
   child is asked to end with a fenced `subagent-report` block carrying `status`
