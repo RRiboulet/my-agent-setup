@@ -51,6 +51,32 @@ Added:
   rather than a working one. `pi-wrapped.test.ts` pins all of it against a stub
   `pi` on PATH, including a real linked worktree.
 
+- **One `subagent` request can fan out N children and run a dependency plan.**
+  `subagent({ tasks: [...] })` is the one plan shape: each item may override
+  `task`, `cwd`, provider, model, thinking and handoff, and may declare
+  `dependsOn` step ids — a plain fan-out is just a plan with no edges. The tool
+  returns the runs in the requested order, and the children go through the same
+  `startRun`/`drainQueue` path as standalone runs, so they share one concurrency
+  budget rather than opening a second queue. A step starts only after every
+  dependency completed successfully; a cycle, self-dependency, unknown id or
+  duplicate id is rejected before the plan is recorded and before any run
+  exists. A permanently failed step follows `failurePolicy`: `continue` (the
+  default) cancels only its transitive dependents and keeps independent branches
+  running, while `stop` starts nothing further, abandons a step whose run was
+  still queued, and marks the plan failed (live children are not killed — that
+  cascade is a later change). A stop that lands while a child is being
+  submitted kills that child instead of writing the abandoned run back as
+  running. `retries` per step, or a plan-level `retryLimit`,
+  is enforced as a new run per attempt with its own run id, report and usage, so
+  `attempts`, `retries` and every attempt's id stay visible. The plan is a
+  `plans.json` record beside `runs.json`, written through the same atomic writer
+  and persist chain and advanced only by the existing settle path
+  (`finalizeRun`/`markRunFailed`), with an idempotency guard so a replayed or
+  stale settlement launches nothing twice. `plan.test.ts` pins the pure
+  readiness/graph/policy/retry rules and `lifecycle-plan.test.ts` covers fan-out
+  ordering, budget sharing, dependency order, rejection, both policies and the
+  retry cap.
+
 Maintenance:
 
 - **`/goal` now asks for its next turn at the settlement boundary instead of

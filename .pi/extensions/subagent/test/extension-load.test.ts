@@ -93,6 +93,14 @@ const MODULES: Record<string, string[]> = {
 		"usesSessionFile",
 	],
 	"../panel.ts": ["buildEscapeBindArgs", "buildAttachCommand", "buildPanelLaunch"],
+	"../plan.ts": [
+		"buildPlan",
+		"failPlanStep",
+		"markStepLaunched",
+		"queuedStopCandidates",
+		"readyStepIds",
+		"settlePlanStep",
+	],
 	"../report.ts": [
 		"boundChildReport",
 		"buildChildTaskPrompt",

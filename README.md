@@ -367,7 +367,7 @@ default when it does not, and the `opencode-go` credential itself still serves
 | Path | What it is |
 |---|---|
 | `package.json` | the `pi` manifest that makes this repo installable as a package (see above) |
-| `.pi/extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent`, `subagent_status`, `subagent_wait`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel`, `subagent_clean`, a live child-activity phase and a status widget above the editor; every run that reports a final answer (completed or failed) leaves a `report.md` artifact with it, plus a bounded copy and a pointer in its run record |
+| `.pi/extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent` (one run, or a `tasks` fan-out with per-step overrides and optional `dependsOn` dependency edges), `subagent_status`, `subagent_wait`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel`, `subagent_clean`, a live child-activity phase and a status widget above the editor; fan-out steps share the one concurrency queue and their plan is persisted in `plans.json` beside the runs; every run that reports a final answer (completed or failed) leaves a `report.md` artifact with it, plus a bounded copy and a pointer in its run record |
 | `.pi/extensions/todos.ts` | `/todos` TUI and the `todo` tool |
 | `.pi/extensions/answer.ts` | `/answer`: extract questions from the last response and answer them in a focused TUI |
 | `.pi/extensions/continue.ts` | `shift+alt+enter` sends the literal prompt `continue`, but only when the agent is idle, so it never steers or queues a message mid-run. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), unmodified |
@@ -836,7 +836,19 @@ to you; it is one entry, and nothing in the extension changes either way.
 
 Subagent delegation is non-blocking: start independent tasks together, then
 call `subagent_wait` once per run (or once with `ids`) instead of polling.
-`subagent_status` remains the live "what is it doing right now" view. If the
+`subagent_status` remains the live "what is it doing right now" view.
+
+One `subagent({ tasks: [...] })` call can launch the whole fan-out, with
+per-step `cwd`/provider/model/thinking/handoff overrides, and returns the runs in
+the requested order. Adding `dependsOn` step ids makes a dependency plan: a step
+starts only after every dependency completed successfully, a cycle or
+self-dependency is rejected before anything launches, and a failed step follows
+the plan's `failurePolicy` (`continue`, the default, cancels only its dependents
+and lets independent branches finish; `stop` starts nothing further). Each step
+may set `retries` (or the plan-level `retryLimit`); a retry is a new run, and the
+plan records every attempt. Plans and their steps are written to `plans.json` in
+the session's `tmux-subagents` directory, advanced by the ordinary settle path
+rather than a scheduler. If the
 session ends while a wait is pending, it returns `details.ended` with the run's
 current state — never a claim that the run settled. A finishing run never takes the turn — its notification is appended to the
 transcript and the model reads it next time it acts, while the widget shows the
