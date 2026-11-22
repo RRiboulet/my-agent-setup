@@ -4,6 +4,66 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.15.2 — 2026-11-22
+
+Fixed:
+
+- **A nested `pi` can no longer hijack a subagent run's `result.json`, and the
+  child-mode variables no longer leak into the child's tool subprocesses.** The
+  tmux launcher exports `PI_TMUX_SUBAGENT_CHILD`, `_RESULT` and `_INTERRUPT`
+  into the child's shell, and every bash tool call the child makes inherits
+  them, so a `pi` spawned from a subagent's bash tool re-entered child mode on
+  the same `result.json` and overwrote the run's status, output, session file
+  and model with its own. That happened for real: the run
+  `c2428902-14b8-48f0-be5a-3b63e94bec50` reported `completed`/`"ok"` from a
+  nested pi's session under `sessions/--home-ubuntu-…/` while the run's own
+  session under the run dir held 16 assistant turns, so the parent treated the
+  run as finished and cut it off. Two defences: the child branch deletes the
+  three variables from `process.env` right after registering its reporter (the
+  parent's launch path writes them into the tmux command as literals, so
+  nothing reads them afterwards), and a report refuses to replace a
+  `result.json` whose record names a different session file, so a second writer
+  cannot replace a finished record — the run's own child keeps write access, an
+  impostor does not. The interrupt path is untouched: it writes the marker
+  file, not the result. Tests in `lifecycle-result.test.ts` pin the scrub, the
+  owner's landing write, and the refusal in both write orders.
+
+- **`branch-base` no longer tells `dev` itself to start a branch or open a pull
+  request into itself.** The v1.15.1 changelog claimed the tool "no longer tells
+  the integration branch to start a branch", but two paths still did: on
+  `HEAD == origin/dev` the line ended `next: git checkout -b <change-name>
+  origin/dev`, and on dev with unpushed commits it ended `next: git push -u
+  origin dev && gh pr create --base dev --fill` — a pull request from dev into
+  dev, which is not a step in this repository's flow. Both now check the branch
+  name the way the `superseded` guard already does (`git symbolic-ref --short
+  -q HEAD` is `dev`): the equal case says there is nothing to do and to start
+  the next change on a branch cut from dev, and the unpushed-commits case says
+  `git push -u origin dev`, the push being all a release needs. Every other
+  classification and exit code is byte-identical; the feature-branch and
+  detached-HEAD `next:` lines are pinned by tests so they cannot regress.
+
+- **The bench preflight only checks the repos of cells that will actually run,
+  so a resumed grid no longer fails on fixtures it would skip.**
+  `preflightRepos` ran before the per-cell skip, so re-running `--tasks all`
+  against a grid whose stored results already covered a task exited 1 on that
+  task's repo — for instance after the fixture worktrees it named were gone —
+  even though every one of its cells would have been skipped. The skip decision
+  needs no repo access, so it now runs first and scopes the preflight: a task
+  whose every cell is covered by a stored result is out of scope, `--force` and
+  `--recheck` put a cell back in scope, and the whole refusal still happens
+  before any cell starts, naming every offending task and its fix. `--dry-run`
+  follows the same rule on the same code path and now marks skipped cells in
+  its output. A cell that will be written is never preflighted late.
+
+- **The two `devc` bench tasks set `"allowDirty": true`, so `--tasks all` runs
+  while the checkout is dirty.** Their `repo` is `.` — the checkout the operator
+  is editing — but their prompts read nothing from the workspace, and the dirty
+  refusal preflighted that checkout anyway, so the default task set refused to
+  start whenever work was in flight. The runner already supported and recorded
+  the field; the tasks now carry it, and `tools/bench/README.md` documents the
+  exemption where it discusses where a task runs and isolation: it is for
+  workspaces that cannot be clean by choice, not for tasks that want to edit.
+
 ## v1.15.1 — 2026-11-21
 
 Fixed:
