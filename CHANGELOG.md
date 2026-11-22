@@ -4,6 +4,30 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Added:
+
+- **A launcher wrapper gives non-interactive invocations the agent dir a login
+  shell would have picked.** `bin/pi-wrapped` exists because the `--shell` hook
+  `bin/pi-agent-dir` installs lives in `~/.bashrc`, and a tmux child, a CI step
+  or an editor task gets the environment without the rc — so it started `pi` on
+  the shared, package-installed agent dir, and a run rooted in a linked worktree
+  hit the duplicate-tool load error with nobody watching. The wrapper forwards
+  every argument to `pi` unchanged and has no option of its own (a flag it saw is
+  a flag for `pi`; `--`, `@file` arguments and values with spaces are passed as
+  given); a `PI_CODING_AGENT_DIR` already in the environment wins over the derived
+  one, because an explicit choice outranks a derived one; and the project dir is
+  resolved by `bin/pi-agent-dir --print --project "$PWD"`, so the wrapper cannot
+  drift from the helper's own rule and a worktree maps to its main checkout. (The
+  `--shell` hook is an inline copy of that rule that assumes the default root and
+  overrides an explicit `PI_CODING_AGENT_DIR`; this wrapper honours it.) Outside a checkout — or when the project's dir was never created — it
+  runs `pi` with its defaults and says why on stderr, because a launcher that
+  dies over a path it could not derive is worse than one that runs with defaults.
+  It deliberately does not create the dir: running the helper without `--print`
+  would seed the user's agent root as a side effect of starting `pi`, needs `jq`
+  present, and a dir it half-created trusts nothing — a *silently empty* agent
+  rather than a working one. `pi-wrapped.test.ts` pins all of it against a stub
+  `pi` on PATH, including a real linked worktree.
+
 Maintenance:
 
 - **`/goal` now asks for its next turn at the settlement boundary instead of

@@ -320,6 +320,14 @@ which also means the child runs the branch's code and the branch's skills:
 cd .worktrees/<slug> && PI_CODING_AGENT_DIR="$(bin/pi-agent-dir --print)" pi -p "<task>"
 ```
 
+A launcher that bypasses a login shell gets no `~/.bashrc`, so the `--shell` hook
+cannot pick the dir for it: run `bin/pi-wrapped` instead of `pi` there. It
+resolves the same dir `bin/pi-agent-dir --print` names, forwards every argument
+to `pi` unchanged and has no flags of its own, keeps a `PI_CODING_AGENT_DIR`
+already set in the environment, and falls back to a plain `pi` with a note on
+stderr outside a checkout or when the dir was never created. It does not create
+the dir — `bin/pi-agent-dir` is the one-time step.
+
 The `subagent` tool has no env argument, so for a child that must live in a
 worktree, run it this way (or `pi --attach-subagent` into an existing session)
 rather than through `subagent({ cwd })`. Launching with `cwd` = the main checkout
