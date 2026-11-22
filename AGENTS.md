@@ -196,12 +196,20 @@ Cross-extension imports have one home per extension. The settlement gate's
 typed event bus lives in `.pi/extensions/orchestrator/events.ts` and is imported
 by `todos.ts`, `review-triage/index.ts` and `subagent/index.ts`, because the
 publisher must not own the bus and a directory without an entry point fails the
-manifest test. The gate itself (`.pi/extensions/orchestrator/`) is
-**report-only**: at `agent_before_settle` it records a verdict as a session
-`custom` entry, publishes `orchestrator:gate-decided` and never returns
-`continue`, so the goal extension keeps ownership of continuation. A project
-opts into its config by committing `.pi/orchestrator.json`; this repository
-deliberately has none, and absence means defaults plus report-only.
+manifest test. The gate itself (`.pi/extensions/orchestrator/`) records a verdict
+as a session `custom` entry at `agent_before_settle`, publishes
+`orchestrator:gate-decided`, and **acts only where a project opted in** by
+committing `.pi/orchestrator.json`: an open todo, a repeated failure, a project
+verification command the gate runs, or the tool-call loop breaker can then commit
+one more turn instead of settling. A condition blocks once per piece of evidence
+(the same unverified files or todo set cannot block twice, a new edit re-arms it)
+and every
+block spends one of the branch's `attemptCap`; every block reason names
+`orchestrator_override`, which grants a one-shot override. It yields `continue`
+when a goal owns it and never returns `continue: false`, so the goal extension
+keeps ownership of continuation. A check that cannot be evaluated fails open, and
+a delegated child records `scope: child` and blocks nothing. This repository
+deliberately has no config, so its own gate reports and nothing more.
 
 Install this repo where you run `pi` from it **as a local path**
 (`pi install /path/to/my-agent-setup`), never as

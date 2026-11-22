@@ -370,7 +370,7 @@ default when it does not, and the `opencode-go` credential itself still serves
 | `package.json` | the `pi` manifest that makes this repo installable as a package (see above) |
 | `.pi/extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent` (one run, or a `tasks` fan-out with per-step overrides and optional `dependsOn` dependency edges), `subagent_status`, `subagent_wait`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel`, `subagent_clean`, a live child-activity phase and a status widget above the editor; fan-out steps share the one concurrency queue and their plan is persisted in `plans.json` beside the runs; a plan survives reload (it resumes at the first unfinished step, adopts a run the plan index missed, and reconciles a step whose child is gone rather than re-running it), cancels with its live steps (`subagent_cancel` takes a plan id), and is inspectable as one row — `subagent_status` folds a plan's step runs into it so a ten-step plan costs one detail slot, and `subagent_wait({ plan })` waits for every wave; every run that reports a final answer (completed or failed) leaves a `report.md` artifact with it, plus a bounded copy and a pointer in its run record |
 | `.pi/extensions/todos.ts` | `/todos` TUI and the `todo` tool |
-| `.pi/extensions/orchestrator/` | The settlement gate and the typed orchestration event bus: `/gate` shows the last verdict, and at `agent_before_settle` the gate reports an active goal, open todos, edits without a verification run, a repeated failure signature and the remaining retry allowance as a session `custom` entry. **Report-only in this ticket** — it never blocks or continues; a committed `.pi/orchestrator.json` (example beside the extension) sets the retry cap, and its absence means defaults. **Ours** |
+| `.pi/extensions/orchestrator/` | The settlement gate, the loop breaker and the typed orchestration event bus: `/gate` shows the last verdict and loop block, and at `agent_before_settle` the gate reports an active goal, open todos, edits without a verification run, a repeated failure signature and the remaining gate-block budget as a session `custom` entry. A committed `.pi/orchestrator.json` (example beside the extension) opts a **trusted** project into blocking checks — an open todo, a repeated failure, a project verification command run by the gate, and the tool-call loop breaker — plus the `orchestrator_override` tool every block reason names; its absence means report-only. **Ours** |
 | `.pi/extensions/answer.ts` | `/answer`: extract questions from the last response and answer them in a focused TUI |
 | `.pi/extensions/continue.ts` | `shift+alt+enter` sends the literal prompt `continue`, but only when the agent is idle, so it never steers or queues a message mid-run. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), unmodified |
 | `.pi/extensions/review.ts` | `/review` and `/end-review`: PR, branch, commit, folder and uncommitted review modes, loop-fixing, custom instructions, project-level `REVIEW_GUIDELINES.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with two local changes — see below |
@@ -693,31 +693,96 @@ proposal instead.
 
 `.pi/extensions/orchestrator/` runs at `agent_before_settle`, the final
 actionable boundary, and records what this project considers a finished run:
-an active goal, open todos, edits made since the last successful `bash`/
-`powershell` command, a repeated failure signature (same tool, same invocation,
-same first error line), and the remaining retry allowance. Each evaluation is a
-`custom` session entry — append-only, ignored by the model context, and
-reconstructed from the active branch on resume and tree navigation — so a cap
-cannot be reset by reloading. `/gate` prints the last verdict; `/gate --json`
-prints it verbatim.
+an active goal, open todos, edits with no verification run, a repeated failure
+signature (same tool, same invocation, same first error line), and the remaining
+gate-block budget. Each evaluation is a `custom` session entry — append-only,
+ignored by the model context, and reconstructed from the active branch on resume
+and tree navigation — so a budget cannot be reset by reloading. `/gate` prints
+the last verdict and the last loop block; `/gate --json` prints both verbatim.
 
-The gate is **report-only** here: it never blocks settlement, runs a command or
-requests a continuation. It also yields the continuation when an active goal
-owns it — the goal extension asks for the next turn, and the gate adds an entry
-without touching `continue`. A condition that cannot be evaluated (an unreadable
-config or todo directory) is reported as unknown and still settles.
+**Report-only unless a project opts in.** With no configuration the gate records
+and publishes a verdict and nothing else: it runs no command, blocks nothing and
+never returns `continue`. Each opt-in key buys one check:
+
+| Key | What it turns on |
+|---|---|
+| `attemptCap` | Gate blocks allowed on one branch (default 3). `0` makes a configured gate report-only. |
+| `block.openTodos` | An open todo stops the run settling. |
+| `block.repeatedFailure` | A repeated failure signature stops it. |
+| `block.loops` | The tool-call loop breaker, below. |
+| `verification.command` | The project's verification command, run by the gate at the boundary, and the edits-without-verification check that goes with it. |
+
+A block is `continue: true` plus a `custom_message` carrying the reason and the
+verification output, so the model gets one more turn with the evidence. It never
+terminates the run, and it is bounded twice over: a condition blocks **once** per
+branch (the verdict carries the set, and every later settlement with the same
+condition reports and settles), and every block — settlement or loop — spends one
+of the branch's `attemptCap`. `attempts` counts blocks, not evaluations: an active
+goal that continues three times spends nothing.
+
+Every block reason names `orchestrator_override`, a tool that grants a one-shot
+override: it lets the next settlement settle, or the next blocked call run, and
+records the reason in the session. It is consumed by that block, spends no
+attempt, and is not inherited by a resumed session. The tool is registered only
+in a session whose config opts into a check, so a report-only project pays
+nothing for an escape hatch it cannot need.
+
+**The verification command is the gate's own run.** A run that edited files
+without running the configured command gets it run by the gate, non-interactively
+through the host's `pi.exec`, with `timeoutMs` and `maxOutputBytes` from the
+config. The model's own run of the same command also counts, so a run that
+already verified is not asked twice. A command that times out, exceeds its output
+cap, cannot be started, or returns a result that cannot be parsed is **fail-open**:
+the run settles, and the verdict names the timeout. Only a command that ran to
+completion with a non-zero exit is evidence against the change.
+
+**Committing the config is the opt-in, and it runs code.** `verification.command`
+executes at settlement with your permissions, which is why the gate acts only in a
+project pi trusts: the extension is installed as a user-level package and loads in
+clones you have never trusted, where that file came from the repository's author.
+In an untrusted project the gate reports a suppressed verdict, reads nothing from
+the config and offers no override.
+
+**A condition blocks once per piece of evidence, not once per branch.** The same
+open todo set, or the same unverified files, cannot block twice; a new todo or a
+new edit after the block re-arms the check, and `attemptCap` still bounds the
+total. Without that, one block would make the check decorative: edit once more and
+the next settlement passes unverified.
+
+**The loop breaker reads no-progress evidence, not repetition.** It considers
+`edit`, `write`, `bash` and `powershell` (an observation cannot make progress, so
+blocking one removes information and breaks no loop), and it needs the results to
+repeat as well as the calls: the same invocation producing the same result three
+times with no successful edit in between, or the same first error line three
+times, edits notwithstanding. Two documented workflows stay clear of it — polling
+a status tool repeats a call but is never considered, and a status command after
+each edit is separated by the edit. A block is one per turn and shares the branch
+budget, and the reason names the override.
+
+**What a blocking check cannot see.** The gate reads this session's own tool
+calls. A run that delegated every edit to subagents reports no unverified edits
+over a worktree full of them, because a child is another process with another
+session log; the gate says so in its scope line. A delegated child
+(`PI_TMUX_SUBAGENT_CHILD=1`) records a verdict with `scope: child`, runs no command
+and blocks nothing — parent and child share the project config, and a child that
+blocked itself would stall the delegation its parent is waiting on.
+
+**What the event means.** `gate-decided` is published from the boundary, before
+the entry is committed, because pi offers no post-commit hook there. Nothing acts
+on the event: the action is the boundary's return value, and the attempt count is
+re-read from the branch at every settlement rather than advanced when the event
+fires. A subscriber may therefore see a proposal a later handler dropped.
 
 Configuration is a committed `<project>/.pi/orchestrator.json`; the shape ships
 beside the extension as `orchestrator.example.json`. This repository deliberately
-commits none, so its own gate uses the defaults (`retryCap: 3`) and stays
-report-only. `retryCap` is the only key this ticket evaluates; blocking checks,
-verification commands and the override arrive with the next ticket.
+commits none, so its own gate reports and does nothing else.
 
 Related extensions publish typed events to the same in-process bus:
 `orchestrator:run-settled`, `orchestrator:plan-settled`,
 `orchestrator:todo-changed`, `orchestrator:triage-planned` and
 `orchestrator:gate-decided` (payload types in
-`.pi/extensions/orchestrator/events.ts`). They are local to one parent session:
+`.pi/extensions/orchestrator/events.ts`; `gate-decided` is a discriminated union
+of a settlement verdict and a loop block). They are local to one parent session:
 no cross-process or cross-worktree delivery is promised, and a subscriber that
 throws is reported and ignored.
 
