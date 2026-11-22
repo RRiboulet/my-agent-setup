@@ -1,6 +1,6 @@
 /**
  * Orchestrator extension: the settlement gate, the loop breaker, the override,
- * and the typed event bus.
+ * the advisor, and the typed event bus.
  *
  * Loaded in every session, so load does nothing but register handlers and one
  * command. It starts no timer. The project config and the todo directory are
@@ -31,11 +31,19 @@
  *      continuation when a goal is active.
  *
  * `orchestrator:gate-decided` is published from the boundary, before the entry
- * is committed — pi offers no post-commit hook there. That is why nothing acts on
- * the event: the action is the return value, and the state was read from the
- * branch rather than advanced when the event fired. A subscriber (the advisor in
- * ticket 10) may therefore see a proposal that a later handler dropped; it may
- * not treat the event as the only record.
+ * is committed — pi offers no post-commit hook there. It is therefore an
+ * announcement, not the record: the advisor (ticket 10) reads the committed
+ * verdicts and loop decisions from the branch instead of subscribing, because a
+ * subscriber may see a proposal that a later handler dropped.
+ *
+ * **The advisor.** When a project configures `advisor`, a run that starts while
+ * the branch holds an unanswered trigger — a repeated settlement failure, or a
+ * broken loop — asks one configured stronger model for a second opinion and
+ * injects its verdict as an extra prompt section at `before_agent_start`. It
+ * never replaces the system prompt and never changes the session model, so the
+ * main loop's cached prefix survives; see `advisor.ts` for the trigger, the
+ * budget, the digest and the credential rule. The advisor runs in the same
+ * trusted project the gate acts in, and only there.
  *
  * **Delegated children report and never act.** `PI_TMUX_SUBAGENT_CHILD=1` marks a
  * child session, whose project config is the same file as the parent's. A child
@@ -43,13 +51,27 @@
  * parent's policy applied to a child's own work is a decision made with less
  * context than the parent has. So the gate records a verdict with `scope: child`,
  * runs no command, blocks nothing; the same guard stops the loop breaker from
- * blocking a child's tool call.
+ * blocking a child's tool call, and the advisor from consulting.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import { activeGoalFromBranch } from "../goal.ts";
+import {
+	ADVISOR_ENTRY_TYPE,
+	ADVISOR_SECTION,
+	ADVISOR_VERSION,
+	advisorSkipReason,
+	buildAdvisorDigest,
+	consultAdvisor,
+	detectAdvisorTrigger,
+	formatAdvisorRecord,
+	formatAdvisorSection,
+	readAdvisorState,
+	toPiUsage,
+	type AdvisorRecord,
+} from "./advisor.ts";
 import { gateConfigCanAct, readGateConfig, type GateConfig, type GateConfigRead } from "./config.ts";
 import {
 	evaluateGate,
@@ -86,6 +108,7 @@ import {
 
 const GATE_REPORT_TYPE = "orchestrator-gate-report";
 const GATE_CONTINUATION_TYPE = "orchestrator-gate-continuation";
+const ADVISOR_NOTICE_TYPE = "orchestrator-advisor-notice";
 const CHILD_ENV = "PI_TMUX_SUBAGENT_CHILD";
 
 /** A delegated child reports and never acts; see the header. */
@@ -128,6 +151,8 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 	let pendingOverride: GateOverrideUse | null = null;
 	let lastVerdict: GateVerdict | null = null;
 	let lastLoopVerdict: LoopVerdict | null = null;
+	/** The last consultation recorded on this branch, for `/gate`. */
+	let lastAdvisor: AdvisorRecord | null = null;
 	/**
 	 * Gate blocks recorded on this branch. Authoritative at the settlement
 	 * boundary, which re-derives it from the branch; the copy here exists so the
@@ -195,6 +220,10 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 		const state = reconstructGateState(ctx.sessionManager.getBranch());
 		lastVerdict = state.lastVerdict;
 		lastLoopVerdict = state.lastLoopVerdict;
+		// Read from the branch, not remembered: a resume must see the consultations
+		// this branch already paid for, and the budget and cooldown are derived
+		// from them.
+		lastAdvisor = readAdvisorState(ctx.sessionManager.getBranch()).last;
 		attempts = state.attempts;
 		// One config read per session boundary: the loop breaker and the override
 		// tool both need to know, before the first tool call, whether this project
@@ -211,6 +240,147 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 	// call of the turn, and `agent_start` as a second, idempotent reset.
 	pi.on("turn_start", async () => resetLoopTurn(loop));
 	pi.on("agent_start", async () => resetLoopTurn(loop));
+
+	// --- The advisor -------------------------------------------------------
+
+	/**
+	 * Record the consultation's usage against the session, so `/session` totals
+	 * include what the second opinion cost (R37: it is a model call like any
+	 * other, not a hidden one). `appendUsage` exists on the SessionManager pi
+	 * hands a context — the cache warmer uses it — but the extension-facing type
+	 * narrows that object to `ReadonlySessionManager`, so it is called
+	 * structurally and skipped when absent. The advisor's own session entry
+	 * always carries the same numbers.
+	 */
+	const recordAdvisorUsage = (ctx: ExtensionContext, record: AdvisorRecord): void => {
+		if (!record.called || !record.usage) return;
+		const manager = ctx.sessionManager as unknown as {
+			appendUsage?: (kind: string, provider: string, model: string, usage: unknown, note?: string) => unknown;
+		};
+		if (typeof manager.appendUsage !== "function") return;
+		try {
+			manager.appendUsage(
+				"advisor",
+				record.model.provider,
+				record.model.model,
+				toPiUsage(record.usage),
+				"orchestrator advisor consultation",
+			);
+		} catch {
+			// Usage accounting must never be the reason a run fails to start.
+		}
+	};
+
+	/**
+	 * One consultation at run start, when the branch holds an unanswered trigger.
+	 *
+	 * `before_agent_start` is the only seam at which a prompt section can still
+	 * change the request: pi applies prompt options once per prompt, and a
+	 * settlement-boundary continuation reuses them. The trigger is read from the
+	 * branch because that is what was committed — the `gate-decided` event fires
+	 * before commit and may describe a dropped proposal.
+	 */
+	const advise = async (
+		event: { systemPromptOptions?: { sections?: Record<string, string> } },
+		ctx: ExtensionContext,
+	): Promise<void> => {
+		// A delegated child reports and never acts, exactly like the gate: the
+		// parent owns the run's decisions, and its spend.
+		if (inChildSession()) return;
+		// The advisor is a model call configured by a committed file. In a project
+		// pi has never trusted that file came from whoever wrote the repository, so
+		// its advisor key is ignored entirely: no call, no entry, no section.
+		if (!ctx.isProjectTrusted()) return;
+
+		let config: GateConfig;
+		try {
+			// Cached: one config read per session, not per prompt.
+			config = cachedConfigAt(ctx.cwd);
+		} catch {
+			return;
+		}
+		const advisor = config.advisor;
+		if (!advisor) return;
+
+		const branch = ctx.sessionManager.getBranch();
+		const state = readAdvisorState(branch);
+		const match = detectAdvisorTrigger({ branch, config: advisor, consumedKeys: state.consumedKeys });
+		if (!match) return;
+		if (advisorSkipReason({ state, config: advisor, now: Date.now() }) !== null) return;
+
+		const todos = await readOpenTodos(ctx.cwd);
+		const digest = buildAdvisorDigest({
+			trigger: match.trigger,
+			gate: match.gate,
+			loop: match.loop,
+			goal: activeGoalFromBranch(branch),
+			openTodos: todos.todos,
+			edits: scanEditVerification(branch, { verificationCommand: config.verification?.command ?? null }),
+		});
+		const call = await consultAdvisor({ registry: ctx.modelRegistry, config: advisor, digest, signal: ctx.signal });
+		const record: AdvisorRecord = {
+			version: ADVISOR_VERSION,
+			at: Date.now(),
+			trigger: match.trigger,
+			model: { provider: advisor.provider, model: advisor.model },
+			called: call.called,
+			status: call.status,
+			reason: call.reason,
+			verdict: call.verdict,
+			usage: call.usage,
+			digest,
+			latencyMs: call.latencyMs,
+		};
+		lastAdvisor = record;
+		pi.appendEntry(ADVISOR_ENTRY_TYPE, record);
+		recordAdvisorUsage(ctx, record);
+
+		if (record.status === "ok" && record.verdict) {
+			const sections = event.systemPromptOptions?.sections;
+			if (sections && typeof sections === "object" && !Array.isArray(sections)) {
+				// Additive only: no `systemPrompt` return, no model change. pi diffs the
+				// sections and appends one patch message, so the cached prefix survives.
+				sections[ADVISOR_SECTION] = formatAdvisorSection(record);
+				return;
+			}
+			// The section is the only delivery channel this extension uses. A host that
+			// offered no mutable sections gets a notice that the verdict was recorded
+			// but not attached, rather than a second, quieter channel invented for it.
+			pi.sendMessage(
+				{
+					customType: ADVISOR_NOTICE_TYPE,
+					content: `The orchestration advisor returned a verdict, but this host offered no prompt sections to attach it to; it is recorded in the session and /gate shows it.`,
+					display: true,
+				},
+				{ triggerTurn: false },
+			);
+			return;
+		}
+
+		// A refusal or a failed call is surfaced, never a silent skip: the reason
+		// names the provider or the error, and the entry above keeps it auditable.
+		pi.sendMessage(
+			{
+				customType: ADVISOR_NOTICE_TYPE,
+				content: `The orchestration advisor made no consultation: ${record.reason}`,
+				display: true,
+			},
+			{ triggerTurn: false },
+		);
+	};
+
+	pi.on("before_agent_start", async (event, ctx) => {
+		try {
+			await advise(event, ctx);
+		} catch (error) {
+			// A second opinion is a convenience. A failure to prepare one must never
+			// stop the run that is about to start.
+			ctx.ui.notify(
+				`orchestrator advisor: ${error instanceof Error ? error.message : String(error)}`,
+				"warning",
+			);
+		}
+	});
 
 	// --- The settlement boundary -------------------------------------------
 
@@ -472,10 +642,10 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 	// --- /gate -------------------------------------------------------------
 
 	pi.registerCommand("gate", {
-		description: "Show the last orchestration settlement verdict and loop block",
+		description: "Show the last orchestration settlement verdict, loop block and advisor consultation",
 		handler: async (args, ctx) => {
 			const json = args.trim() === "--json";
-			if (lastVerdict === null && lastLoopVerdict === null) {
+			if (lastVerdict === null && lastLoopVerdict === null && lastAdvisor === null) {
 				pi.sendMessage(
 					{
 						customType: GATE_REPORT_TYPE,
@@ -488,11 +658,12 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 			}
 			let content: string;
 			if (json) {
-				content = JSON.stringify({ verdict: lastVerdict, loop: lastLoopVerdict }, null, 2);
+				content = JSON.stringify({ verdict: lastVerdict, loop: lastLoopVerdict, advisor: lastAdvisor }, null, 2);
 			} else {
 				const parts: string[] = [];
 				if (lastVerdict) parts.push(formatVerdict(lastVerdict));
 				if (lastLoopVerdict) parts.push(formatLoopVerdict(lastLoopVerdict));
+				if (lastAdvisor) parts.push(formatAdvisorRecord(lastAdvisor));
 				content = parts.join("\n\n");
 			}
 			pi.sendMessage({ customType: GATE_REPORT_TYPE, content, display: true }, { triggerTurn: false });

@@ -142,6 +142,37 @@ interface BranchEntry {
 	message?: unknown;
 }
 
+/** Every settlement verdict and loop decision a branch holds, each in the order
+ *  it was decided. */
+export interface GateHistory {
+	verdicts: GateVerdict[];
+	loops: LoopVerdict[];
+}
+
+/**
+ * Every settlement verdict and loop decision on the active branch, in branch
+ * order. `reconstructGateState` answers "what is the state now"; this answers
+ * "what has the gate done", which the advisor needs to tell a single block from
+ * a repeated failure. Entries that cannot be read are skipped, exactly as the
+ * reconstruction skips them: a malformed entry is not history.
+ */
+export function readGateHistory(branch: readonly unknown[]): GateHistory {
+	const verdicts: GateVerdict[] = [];
+	const loops: LoopVerdict[] = [];
+	for (const item of branch) {
+		if (!isRecord(item) || item.type !== "custom") continue;
+		if (item.customType === GATE_LOOP_ENTRY_TYPE) {
+			const loop = normalizePersistedLoop(item.data);
+			if (loop) loops.push(loop);
+			continue;
+		}
+		if (item.customType !== GATE_ENTRY_TYPE) continue;
+		const verdict = normalizePersistedVerdict(item.data);
+		if (verdict) verdicts.push(verdict);
+	}
+	return { verdicts, loops };
+}
+
 interface ToolCallRecord {
 	name: string;
 	arguments: Record<string, unknown>;

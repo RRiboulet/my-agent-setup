@@ -208,8 +208,15 @@ block spends one of the branch's `attemptCap`; every block reason names
 `orchestrator_override`, which grants a one-shot override. It yields `continue`
 when a goal owns it and never returns `continue: false`, so the goal extension
 keeps ownership of continuation. A check that cannot be evaluated fails open, and
-a delegated child records `scope: child` and blocks nothing. This repository
-deliberately has no config, so its own gate reports and nothing more.
+a delegated child records `scope: child` and blocks nothing. The same config's
+`advisor` key asks one configured stronger model for a second opinion when a
+branch holds an unanswered loop block or a repeated settlement failure, inside a
+cooldown and a per-branch budget, and injects the verdict as an extra prompt
+section at `before_agent_start` — never as a replacement system prompt and never
+by switching the model, so the cached prefix survives; it acts only in a trusted
+project, refuses loudly when the provider has no credentials, and its digest
+excludes tool output bodies. This repository deliberately has no config, so its
+own gate reports and nothing more.
 
 Install this repo where you run `pi` from it **as a local path**
 (`pi install /path/to/my-agent-setup`), never as

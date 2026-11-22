@@ -19,7 +19,11 @@
  *     because a command that exists only to be reported would be a second way of
  *     spelling the same intent;
  *   * `block.loops` enables the tool-call loop breaker, which is off by default
- *     because it acts on every tool call rather than once per run.
+ *     because it acts on every tool call rather than once per run;
+ *   * `advisor` configures one bounded second opinion from a stronger model when
+ *     the gate keeps failing the same way or a loop was broken. It is off by
+ *     default and separate from `block`, because it is not a blocking check: it
+ *     spends tokens on a model call rather than deciding whether to settle.
  *
  * **What committing this file means.** It opts the checkout into running
  * `verification.command` at settlement, with the user's permissions. That is why
@@ -56,6 +60,22 @@ export const MAX_VERIFICATION_OUTPUT_BYTES = 1_048_576;
 /** The ticket-08 spelling of `attemptCap`, honoured for the warning only. */
 export const LEGACY_ATTEMPT_CAP_KEY = "retryCap";
 
+// --- Advisor --------------------------------------------------------------
+
+/** Ten minutes: long enough that one stuck run cannot buy several opinions. */
+export const DEFAULT_ADVISOR_COOLDOWN_MS = 600_000;
+export const MAX_ADVISOR_COOLDOWN_MS = 86_400_000;
+/** Recorded attempts per branch, refusals included. `0` disables the advisor. */
+export const DEFAULT_ADVISOR_BUDGET = 2;
+export const MAX_ADVISOR_BUDGET = 20;
+/** Settlement blocks reporting the same conditions before a repeat is a trigger. */
+export const DEFAULT_ADVISOR_MIN_GATE_BLOCKS = 2;
+export const MAX_ADVISOR_MIN_GATE_BLOCKS = 10;
+/** The consultation is awaited at run start, so a slow provider delays the
+ *  first token; five minutes is the most that can be called bounded. */
+export const DEFAULT_ADVISOR_TIMEOUT_MS = 60_000;
+export const MAX_ADVISOR_TIMEOUT_MS = 300_000;
+
 /** The project's verification command, run by the gate at the settle boundary. */
 export interface VerificationConfig {
 	/** Shell command line, run non-interactively through `pi.exec`. */
@@ -74,6 +94,25 @@ export interface GateBlockConfig {
 	loops: boolean;
 }
 
+/**
+ * One bounded second opinion from a stronger model.
+ *
+ * A separate top-level key rather than part of `block`: this does not decide
+ * whether a run settles, it spends a model call. Absent means off, which is the
+ * default — the advisor is the only part of this extension that costs money by
+ * itself. `budget` is the number of recorded attempts (calls and refusals alike)
+ * allowed on one branch, and `minGateBlocks` is how many settlement blocks must
+ * report the same conditions before they count as a repeated failure.
+ */
+export interface AdvisorConfig {
+	provider: string;
+	model: string;
+	cooldownMs: number;
+	budget: number;
+	minGateBlocks: number;
+	timeoutMs: number;
+}
+
 export interface GateConfig {
 	version: number;
 	/** Gate blocks allowed on one branch. `0` disables blocking entirely. */
@@ -81,6 +120,8 @@ export interface GateConfig {
 	block: GateBlockConfig;
 	/** `null` means no command is configured: verification is only reported. */
 	verification: VerificationConfig | null;
+	/** `null` means no second opinion is configured. */
+	advisor: AdvisorConfig | null;
 }
 
 export interface GateConfigRead {
@@ -94,6 +135,7 @@ export const DEFAULT_GATE_CONFIG: GateConfig = {
 	attemptCap: DEFAULT_ATTEMPT_CAP,
 	block: { openTodos: false, repeatedFailure: false, loops: false },
 	verification: null,
+	advisor: null,
 };
 
 /** The committed project file this reader looks for. */
@@ -107,6 +149,7 @@ function defaultConfig(): GateConfig {
 		attemptCap: DEFAULT_ATTEMPT_CAP,
 		block: { ...DEFAULT_GATE_CONFIG.block },
 		verification: null,
+		advisor: null,
 	};
 }
 
@@ -152,6 +195,16 @@ function positiveInteger(value: unknown, fallback: number, max: number, name: st
 	return { value };
 }
 
+/** Like {@link positiveInteger}, but 0 is a valid value (it means "disabled"). */
+function nonNegativeInteger(value: unknown, fallback: number, max: number, name: string): { value: number; warning?: string } {
+	if (value === undefined) return { value: fallback };
+	if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || !Number.isInteger(value)) {
+		return { value: fallback, warning: `${name} must be a non-negative integer; using ${fallback}` };
+	}
+	if (value > max) return { value: max, warning: `${name} is capped at ${max}; using ${max}` };
+	return { value };
+}
+
 function normalizeVerification(raw: unknown): { verification: VerificationConfig | null; warnings: string[] } {
 	const warnings: string[] = [];
 	if (raw === undefined || raw === null) return { verification: null, warnings };
@@ -184,6 +237,51 @@ function normalizeVerification(raw: unknown): { verification: VerificationConfig
 }
 
 /**
+ * Validate the advisor block. A model is two keys rather than one
+ * `provider/model` string because model ids contain slashes of their own; a
+ * half-configured advisor is off, with a warning, rather than a guess.
+ */
+function normalizeAdvisor(raw: unknown): { advisor: AdvisorConfig | null; warnings: string[] } {
+	const warnings: string[] = [];
+	if (raw === undefined || raw === null) return { advisor: null, warnings };
+	if (typeof raw !== "object" || Array.isArray(raw)) {
+		return { advisor: null, warnings: ["advisor must be an object; no second opinion is configured"] };
+	}
+	const record = raw as Record<string, unknown>;
+	const provider = typeof record.provider === "string" ? record.provider.trim() : "";
+	const model = typeof record.model === "string" ? record.model.trim() : "";
+	if (!provider || !model) {
+		return {
+			advisor: null,
+			warnings: ["advisor.provider and advisor.model must both be non-empty strings; no second opinion is configured"],
+		};
+	}
+	const cooldown = positiveInteger(record.cooldownMs, DEFAULT_ADVISOR_COOLDOWN_MS, MAX_ADVISOR_COOLDOWN_MS, "advisor.cooldownMs");
+	const budget = nonNegativeInteger(record.budget, DEFAULT_ADVISOR_BUDGET, MAX_ADVISOR_BUDGET, "advisor.budget");
+	const minGateBlocks = positiveInteger(
+		record.minGateBlocks,
+		DEFAULT_ADVISOR_MIN_GATE_BLOCKS,
+		MAX_ADVISOR_MIN_GATE_BLOCKS,
+		"advisor.minGateBlocks",
+	);
+	const timeout = positiveInteger(record.timeoutMs, DEFAULT_ADVISOR_TIMEOUT_MS, MAX_ADVISOR_TIMEOUT_MS, "advisor.timeoutMs");
+	for (const result of [cooldown, budget, minGateBlocks, timeout]) {
+		if (result.warning) warnings.push(result.warning);
+	}
+	return {
+		advisor: {
+			provider,
+			model,
+			cooldownMs: cooldown.value,
+			budget: budget.value,
+			minGateBlocks: minGateBlocks.value,
+			timeoutMs: timeout.value,
+		},
+		warnings,
+	};
+}
+
+/**
  * Validate a parsed config object. Unknown keys are ignored deliberately: a
  * newer project may commit a key this build does not know.
  */
@@ -199,14 +297,16 @@ export function normalizeGateConfig(raw: unknown): { config: GateConfig; warning
 	const attempt = normalizeAttemptCap(record);
 	const block = normalizeBlock(record.block);
 	const verification = normalizeVerification(record.verification);
+	const advisor = normalizeAdvisor(record.advisor);
 	return {
 		config: {
 			version: GATE_CONFIG_VERSION,
 			attemptCap: attempt.attemptCap,
 			block: block.block,
 			verification: verification.verification,
+			advisor: advisor.advisor,
 		},
-		warnings: [...warnings, ...attempt.warnings, ...block.warnings, ...verification.warnings],
+		warnings: [...warnings, ...attempt.warnings, ...block.warnings, ...verification.warnings, ...advisor.warnings],
 	};
 }
 
@@ -215,7 +315,9 @@ export function normalizeGateConfig(raw: unknown): { config: GateConfig; warning
  *
  * The override tool is registered only for such a project: every registered
  * tool's description rides on every request, and a project that never opts into
- * blocking should not pay for the escape hatch from a block it cannot get.
+ * blocking should not pay for the escape hatch from a block it cannot get. The
+ * advisor is deliberately excluded: it reacts to blocks rather than making one,
+ * and a config that only asks for a second opinion has nothing to override.
  */
 export function gateConfigCanAct(config: GateConfig): boolean {
 	return config.verification !== null || config.block.openTodos || config.block.repeatedFailure || config.block.loops;

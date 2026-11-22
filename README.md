@@ -370,7 +370,7 @@ default when it does not, and the `opencode-go` credential itself still serves
 | `package.json` | the `pi` manifest that makes this repo installable as a package (see above) |
 | `.pi/extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent` (one run, or a `tasks` fan-out with per-step overrides and optional `dependsOn` dependency edges), `subagent_status`, `subagent_wait`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel`, `subagent_clean`, a live child-activity phase and a status widget above the editor; fan-out steps share the one concurrency queue and their plan is persisted in `plans.json` beside the runs; a plan survives reload (it resumes at the first unfinished step, adopts a run the plan index missed, and reconciles a step whose child is gone rather than re-running it), cancels with its live steps (`subagent_cancel` takes a plan id), and is inspectable as one row — `subagent_status` folds a plan's step runs into it so a ten-step plan costs one detail slot, and `subagent_wait({ plan })` waits for every wave; every run that reports a final answer (completed or failed) leaves a `report.md` artifact with it, plus a bounded copy and a pointer in its run record |
 | `.pi/extensions/todos.ts` | `/todos` TUI and the `todo` tool |
-| `.pi/extensions/orchestrator/` | The settlement gate, the loop breaker and the typed orchestration event bus: `/gate` shows the last verdict and loop block, and at `agent_before_settle` the gate reports an active goal, open todos, edits without a verification run, a repeated failure signature and the remaining gate-block budget as a session `custom` entry. A committed `.pi/orchestrator.json` (example beside the extension) opts a **trusted** project into blocking checks — an open todo, a repeated failure, a project verification command run by the gate, and the tool-call loop breaker — plus the `orchestrator_override` tool every block reason names; its absence means report-only. **Ours** |
+| `.pi/extensions/orchestrator/` | The settlement gate, the loop breaker, the advisor and the typed orchestration event bus: `/gate` shows the last verdict, loop block and consultation, and at `agent_before_settle` the gate reports an active goal, open todos, edits without a verification run, a repeated failure signature and the remaining gate-block budget as a session `custom` entry. A committed `.pi/orchestrator.json` (example beside the extension) opts a **trusted** project into blocking checks — an open todo, a repeated failure, a project verification command run by the gate, and the tool-call loop breaker — plus the `orchestrator_override` tool every block reason names; its `advisor` key adds one bounded second opinion from a stronger model, injected as a prompt section rather than replacing the prompt. Its absence means report-only. **Ours** |
 | `.pi/extensions/answer.ts` | `/answer`: extract questions from the last response and answer them in a focused TUI |
 | `.pi/extensions/continue.ts` | `shift+alt+enter` sends the literal prompt `continue`, but only when the agent is idle, so it never steers or queues a message mid-run. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), unmodified |
 | `.pi/extensions/review.ts` | `/review` and `/end-review`: PR, branch, commit, folder and uncommitted review modes, loop-fixing, custom instructions, project-level `REVIEW_GUIDELINES.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with two local changes — see below |
@@ -698,7 +698,8 @@ signature (same tool, same invocation, same first error line), and the remaining
 gate-block budget. Each evaluation is a `custom` session entry — append-only,
 ignored by the model context, and reconstructed from the active branch on resume
 and tree navigation — so a budget cannot be reset by reloading. `/gate` prints
-the last verdict and the last loop block; `/gate --json` prints both verbatim.
+the last verdict, the last loop block and the last advisor consultation;
+`/gate --json` prints all three verbatim.
 
 **Report-only unless a project opts in.** With no configuration the gate records
 and publishes a verdict and nothing else: it runs no command, blocks nothing and
@@ -711,6 +712,11 @@ never returns `continue`. Each opt-in key buys one check:
 | `block.repeatedFailure` | A repeated failure signature stops it. |
 | `block.loops` | The tool-call loop breaker, below. |
 | `verification.command` | The project's verification command, run by the gate at the boundary, and the edits-without-verification check that goes with it. |
+| `advisor.provider` + `advisor.model` | The model a second opinion is asked of when the gate keeps failing the same way or a loop was broken. Off unless both are set. |
+| `advisor.cooldownMs` | Minimum gap between recorded advisor attempts (default 10 minutes). |
+| `advisor.budget` | Recorded attempts allowed on one branch, calls and refusals alike (default 2); `0` disables the advisor. |
+| `advisor.minGateBlocks` | Settlement blocks reporting the same conditions before that counts as a repeated failure (default 2). |
+| `advisor.timeoutMs` | Bound on the consultation call (default 60 s); it is awaited at run start. |
 
 A block is `continue: true` plus a `custom_message` carrying the reason and the
 verification output, so the model gets one more turn with the evidence. It never
@@ -758,6 +764,30 @@ times, edits notwithstanding. Two documented workflows stay clear of it — poll
 a status tool repeats a call but is never considered, and a status command after
 each edit is separated by the edit. A block is one per turn and shares the branch
 budget, and the reason names the override.
+
+**A second opinion, off the main loop's cache.** `advisor` configures one
+bounded consultation with a stronger model when the branch already shows a stuck
+session: a loop block, or at least `minGateBlocks` settlement blocks reporting
+the same conditions (default 2 — the gate's first nudge has not failed yet, it
+has not been tried). The consultation happens at `before_agent_start`, the only
+seam at which a prompt section can still change the request: pi applies prompt
+options once per prompt, and a settlement-boundary continuation reuses them. The
+verdict is added as `sections.advisor` — the system prompt is not replaced and
+the session model is not switched, so the main loop's cached prefix survives.
+One completion against the host's model registry means credentials resolve like
+any other model call and the usage lands in `/session` totals. Each trigger is
+answered once per branch (its key is the evidence: the same loop, or the same set
+of blocked conditions), and `cooldownMs` and `budget` bound the rest, refusals
+included so a misconfiguration cannot write an entry on every prompt. The
+provider is checked first: no credentials means no call, and a notice names the
+provider and the fix. The digest is bounded to 4 KB and built only from
+structured evidence — the gate's reasons, the verification *summary*, failure
+signatures, edited file names, open todos and the goal — never tool output
+bodies. Every attempt is an `orchestrator-advisor` session entry, and `/gate`
+shows the last one; the section is attached to the run being prepared, so a
+reload does not re-inject a stale verdict. Like the rest of the gate it acts only
+in a trusted project (an untrusted clone's advisor key is ignored entirely), and
+a delegated child consults nothing.
 
 **What a blocking check cannot see.** The gate reads this session's own tool
 calls. A run that delegated every edit to subagents reports no unverified edits

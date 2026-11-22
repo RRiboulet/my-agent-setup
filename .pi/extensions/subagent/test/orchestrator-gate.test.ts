@@ -667,6 +667,7 @@ test("normalizeGateConfig validates the block keys, the verification command and
 				attemptCap: 5,
 				block: { openTodos: true, repeatedFailure: false, loops: true },
 				verification: { command: "node --test", timeoutMs: 300_000, maxOutputBytes: DEFAULT_VERIFICATION_MAX_OUTPUT_BYTES },
+				advisor: null,
 			},
 			warnings: [],
 		},
@@ -1019,7 +1020,7 @@ test("a condition that cannot be evaluated produces a report-only verdict, not a
 	});
 });
 
-test("/gate shows the last verdict, and --json returns the verdict and the last loop block", async () => {
+test("/gate shows the last verdict, and --json returns the verdict, the last loop block and the advisor record", async () => {
 	await withTempDir(async (cwd) => {
 		const host = await startHost({ branch: [], cwd });
 		const result = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
@@ -1032,6 +1033,6 @@ test("/gate shows the last verdict, and --json returns the verdict and the last 
 
 		await host.runCommand("gate", "--json");
 		const json = String(host.messages.at(-1)?.message.content ?? "");
-		assert.deepEqual(JSON.parse(json), { verdict, loop: null });
+		assert.deepEqual(JSON.parse(json), { verdict, loop: null, advisor: null });
 	});
 });
