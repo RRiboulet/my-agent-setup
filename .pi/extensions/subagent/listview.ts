@@ -13,7 +13,9 @@
 //     runs get the full block (pane, activity, tmux, attach); every other run is
 //     one line — id, status, elapsed, usage — which is what a poll actually
 //     needs to decide which run to inspect. With one or two runs in the session
-//     nothing changes, so the common case keeps every detail it had.
+//     nothing changes, so the common case keeps every detail it had. The budget
+//     is spent on ROWS, and a row can be a plan: a plan block lists all its
+//     steps and still costs one slot, so a ten-step plan cannot multiply it.
 //   - the budget goes to the runs that HOLD a pane first, newest first. A live
 //     child's pane is the only view of that child there is, and the newest is
 //     the one a model that just launched something is asking about. `queued` is
@@ -42,6 +44,13 @@ export const LIST_DETAIL_BUDGET = 2;
 /** What the list view needs from a run to render it. Preformatted on purpose. */
 export interface ListRow {
 	id: string;
+	/**
+	 * What kind of thing this row is, when it is not a run (today: `plan`).
+	 *
+	 * The list carries two kinds of entry and they share one budget, so the row
+	 * says which it is rather than making the id's shape carry the answer.
+	 */
+	label?: string;
 	status: string;
 	/** Elapsed time, already formatted. Undefined for a run that never started. */
 	durationText?: string;
@@ -74,7 +83,8 @@ export function runHeadline(row: Pick<ListRow, "id" | "status" | "durationText" 
 /** The one-line form: the headline plus whatever `note` the caller set. */
 export function compactRowText(row: ListRow): string {
 	const headline = runHeadline(row);
-	return row.note ? `${headline} — ${row.note}` : headline;
+	const text = row.note ? `${headline} — ${row.note}` : headline;
+	return row.label ? `${row.label} ${text}` : text;
 }
 
 /**

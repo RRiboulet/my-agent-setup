@@ -95,10 +95,14 @@ const MODULES: Record<string, string[]> = {
 	"../panel.ts": ["buildEscapeBindArgs", "buildAttachCommand", "buildPanelLaunch"],
 	"../plan.ts": [
 		"buildPlan",
+		"cancelPlan",
+		"cancelPlanStep",
 		"failPlanStep",
 		"markStepLaunched",
 		"queuedStopCandidates",
 		"readyStepIds",
+		"reconcilePlan",
+		"resolvePlan",
 		"settlePlanStep",
 	],
 	"../report.ts": [
