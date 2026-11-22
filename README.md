@@ -167,6 +167,21 @@ than a broken one. `--check` reports those four things — the catalogue as a
 warning, because a dir works without it — and exits non-zero if a package would
 still conflict; `--print` resolves the path without writing anything.
 
+**A launcher that bypasses a login shell gets none of that.** The hook lives in
+`~/.bashrc`, so a tmux child, a CI step, a scheduled job or an editor task starts
+`pi` without it and lands back on the shared, package-installed agent dir — the
+worktree conflict above, from a process nobody is watching. `bin/pi-wrapped` is
+the command for those: it selects the same per-project dir and forwards every
+argument to `pi` unchanged, with no option of its own (a flag it saw is a flag
+for `pi`, and `--`, `@file` arguments and values with spaces are passed as
+given). An agent dir already in the environment wins, because an explicit choice
+outranks a derived one; outside a git checkout, or when the project's dir has
+never been created, it runs `pi` with its defaults and says why on stderr rather
+than failing. It never creates the dir: one without trust is a *silently empty*
+agent, and seeding the user's agent root as a side effect of starting `pi` is not
+a launcher's job — `bin/pi-agent-dir` is the one-time step, and the wrapper names
+it in the note.
+
 In the devcontainer, that dir is the container's own and the volume is private:
 the model and tool defaults start from `.devcontainer/pi/settings.json`, and
 everything else is created in the container. Rotate a key or change a default *in
@@ -397,6 +412,7 @@ default when it does not, and the `opencode-go` credential itself still serves
 | `pi-session.sh` | Launch pi under tmux with an OpenRouter model |
 | `bin/mcp-catalogue` | Shell surface of that installer, for a setup script or a container; the merge itself is `tools/mcp-catalogue.mjs` |
 | `bin/devc` | Open a project's devcontainer from a terminal — headless, no GUI, tmux-backed. See [`devc`](#devc) |
+| `bin/pi-wrapped` | Start `pi` with the per-project agent dir a login shell would have selected, for launchers that bypass the shell — see [One copy of the extensions, never two](#one-copy-of-the-extensions-never-two) |
 
 Rows prefixed `User-invoked /skill:<name>:` are the five entry points only you can
 start; every other skill is model-invoked, which means you can type it and the
