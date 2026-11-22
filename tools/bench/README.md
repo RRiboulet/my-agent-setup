@@ -70,7 +70,10 @@ the runner exits 1.
 `repo` is the workspace the cell runs in, and it is recorded **relative to the
 repository root** in every file under `tasks/`: `.worktrees/bench-fixture` and
 `.worktrees/bench-tdd-baseline` for the twelve harness scenarios, and `.` for the
-two `devc` ones, whose prompt reads nothing from the workspace. The relative form
+two `devc` ones, whose prompt reads nothing from the workspace. Those two set
+`"allowDirty": true`, because `.` **is** the checkout the operator is editing:
+the dirty refusal would otherwise make `--tasks all` (the default) unusable
+whenever work was in flight, for tasks that never look at the workspace. The relative form
 is deliberate: an absolute path to one machine's agent directory made the whole
 recorded set unrunnable anywhere else, while a relative one resolves to the same
 place in any checkout of this repository. Absolute paths are still accepted for a
@@ -104,6 +107,11 @@ a task that edits its repo leaves the next cell dirty and the comparison
 worthless. The runner refuses a dirty repo unless `--allow-dirty` (or the task
 sets `"allowDirty": true`, which is recorded).
 
+The exemption is for workspaces that cannot be dirty by choice, not for tasks
+that want to edit: the two `devc` tasks use it because their `repo` is `.` — the
+checkout the operator is editing — while their prompts read nothing from it. A
+task that mutates its repo should not carry the field; fix the task instead.
+
 Use a clean checkout — a detached fixture worktree works, and the recorded set
 already names it relative to the repository root:
 
@@ -115,7 +123,8 @@ git worktree add --detach .worktrees/bench-tdd-baseline <ref>
 The harness itself is whatever `pi` loads from the agent configuration; the task's
 `repo` is only the workspace the task runs in. Do not point tasks at the checkout
 you are editing: pass `--repo <path>` for a different clean checkout, or
-`--allow-dirty` when the workspace is legitimately open in another session.
+`--allow-dirty` when the workspace is legitimately open in another session. (The
+two `devc` tasks are the recorded exception: see `allowDirty` above.)
 
 ### Models
 

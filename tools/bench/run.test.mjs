@@ -20,7 +20,7 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { after, test } from "node:test";
@@ -95,7 +95,12 @@ function listRows(stdout) {
 	return rows;
 }
 
-const DRY_RUN = ["--state", "baseline", "--tasks", "head-hash", "--models", "deepseek-v4.1-flash", "--dry-run"];
+// A fresh --out per run: without one, a stored result under the default
+// tools/bench/results would put the head-hash cell in skip scope, and the
+// preflight refusals below assert on cells that will actually run.
+function dryRunArgs() {
+	return ["--state", "baseline", "--tasks", "head-hash", "--models", "deepseek-v4.1-flash", "--dry-run", "--out", scratchDir("dry-run-out")];
+}
 
 test("every recorded task repo resolves inside this repository, not one machine's agent directory", () => {
 	const { status, stdout, stderr } = run(["--list"]);
@@ -143,7 +148,7 @@ test("resolveRepo: --repo wins, an absolute field is kept, a relative one resolv
 
 test("--dry-run prints the resolved repo for every cell", () => {
 	const override = cleanRepo();
-	const { status, stdout, stderr } = run([...DRY_RUN, "--repo", override]);
+	const { status, stdout, stderr } = run([...dryRunArgs(), "--repo", override]);
 	assert.equal(status, 0, stderr);
 	assert.ok(stdout.includes(`\thead-hash\t${override}`), `dry-run did not print the resolved repo:\n${stdout}`);
 	assert.match(stdout, /1 cell\(s\)/);
@@ -151,7 +156,7 @@ test("--dry-run prints the resolved repo for every cell", () => {
 
 test("a --repo that does not exist exits non-zero, naming the task and the fix", () => {
 	const missing = path.join(scratchDir("missing"), "not-there");
-	const { status, stderr } = run([...DRY_RUN, "--repo", missing]);
+	const { status, stderr } = run([...dryRunArgs(), "--repo", missing]);
 	assert.equal(status, 1, "a missing repo must fail the run, not skip the cell");
 	assert.ok(stderr.includes("head-hash"), `stderr does not name the task:\n${stderr}`);
 	assert.ok(stderr.includes(missing), `stderr does not name the path:\n${stderr}`);
@@ -161,7 +166,7 @@ test("a --repo that does not exist exits non-zero, naming the task and the fix",
 
 test("a --repo that is not inside a git work tree exits non-zero, naming the task and the fix", () => {
 	const plain = scratchDir("plain");
-	const { status, stderr } = run([...DRY_RUN, "--repo", plain]);
+	const { status, stderr } = run([...dryRunArgs(), "--repo", plain]);
 	assert.equal(status, 1, "a non-git repo must fail the run, not skip the cell");
 	assert.ok(stderr.includes("head-hash"), `stderr does not name the task:\n${stderr}`);
 	assert.ok(stderr.includes(plain), `stderr does not name the path:\n${stderr}`);
@@ -173,13 +178,13 @@ test("a dirty --repo exits non-zero unless --allow-dirty, naming the task and th
 	const dirty = cleanRepo();
 	writeFileSync(path.join(dirty, "scratch.txt"), "uncommitted\n");
 
-	const refused = run([...DRY_RUN, "--repo", dirty]);
+	const refused = run([...dryRunArgs(), "--repo", dirty]);
 	assert.equal(refused.status, 1, "a dirty repo must fail the run, not skip the cell");
 	assert.ok(refused.stderr.includes("head-hash"), `stderr does not name the task:\n${refused.stderr}`);
 	assert.match(refused.stderr, /dirty/);
 	assert.ok(refused.stderr.includes("--allow-dirty"), `stderr does not name the --allow-dirty fix:\n${refused.stderr}`);
 
-	const allowed = run([...DRY_RUN, "--repo", dirty, "--allow-dirty"]);
+	const allowed = run([...dryRunArgs(), "--repo", dirty, "--allow-dirty"]);
 	assert.equal(allowed.status, 0, allowed.stderr);
 });
 
@@ -187,4 +192,77 @@ test("--repo requires a value", () => {
 	const { status, stderr } = run(["--state", "baseline", "--repo"]);
 	assert.equal(status, 1);
 	assert.match(stderr, /--repo needs a value/);
+});
+
+// --- allowDirty: the devc tasks run in the checkout being edited ---
+
+const DRY_RUN_DEVC = ["--state", "baseline", "--tasks", "devc-doctor", "--models", "deepseek-v4.1-flash", "--dry-run"];
+
+test("a task with allowDirty runs --dry-run in a dirty repo without --allow-dirty", () => {
+	// The devc tasks read nothing from their workspace, but their preflight
+	// checked the checkout the operator is editing, so --tasks all refused
+	// while that checkout was dirty. The field is what exempts them; the
+	// --out keeps stored results from skipping the cell, and --repo points the
+	// recorded task at a disposable dirty fixture instead of this checkout.
+	const dirty = cleanRepo();
+	writeFileSync(path.join(dirty, "scratch.txt"), "uncommitted\n");
+	const out = scratchDir("allow-dirty-out");
+
+	const { status, stderr } = run([...DRY_RUN_DEVC, "--out", out, "--repo", dirty]);
+	assert.equal(status, 0, `a task that opted into a dirty repo must not be refused:\n${stderr}`);
+	assert.ok(stderr === "", stderr);
+});
+
+test("the two devc tasks record allowDirty: true because their repo is the checkout being edited", () => {
+	for (const id of ["devc-doctor", "devc-ls"]) {
+		const task = JSON.parse(readFileSync(path.join(HERE, "tasks", `${id}.json`), "utf8"));
+		assert.equal(task.repo, ".", `${id} is expected to run against the repository root`);
+		assert.equal(task.allowDirty, true, `${id} must set "allowDirty": true, or --tasks all refuses while the checkout is dirty`);
+	}
+});
+
+// --- preflight scope: only cells that will actually run (v1.15.1 finding F3) ---
+
+const MODEL_DIR = encodeURIComponent("opencode-go/deepseek-v4.1-flash");
+
+function storeResult(out, task, modelDir, value = {}) {
+	mkdirSync(path.join(out, "baseline", modelDir), { recursive: true });
+	writeFileSync(path.join(out, "baseline", modelDir, `${task}.json`), `${JSON.stringify(value)}\n`);
+}
+
+test("a cell whose result already exists is skipped without preflighting its repo", () => {
+	// A resumed grid holds stored results for tasks whose repo has since gone
+	// missing or dirty; re-running the invocation with the default --tasks all
+	// must skip those cells, not fail on repos the cells will never use. The
+	// stored result is faked with --out rather than by editing tools/bench/results,
+	// and --repo points at a path that does not exist, so a preflight would
+	// refuse and the skip is provable only if the refusal is gone.
+	const out = scratchDir("preflight-out");
+	storeResult(out, "head-hash", MODEL_DIR);
+	const missing = path.join(scratchDir("missing-repo"), "not-there");
+
+	const skipped = run([...dryRunArgs(), "--out", out, "--repo", missing]);
+	assert.equal(skipped.status, 0, `a stored result must cover the cell without preflighting its repo:\n${skipped.stderr}`);
+	assert.ok(skipped.stdout.includes("skip"), `the skipped cell must be reported as skipped:\n${skipped.stdout}`);
+
+	// --force rewrites the cell, so its repo is back in scope and the refusal
+	// must return: preflighting late would mean discovering the bad workspace
+	// only when the cell starts.
+	const forced = run([...dryRunArgs(), "--out", out, "--repo", missing, "--force"]);
+	assert.equal(forced.status, 1, "--force puts the cell back in preflight scope");
+	assert.ok(forced.stderr.includes("head-hash"), forced.stderr);
+});
+
+test("a task that will run still fails the invocation on a bad repo before any cell starts", () => {
+	// No --dry-run here: the refusal is the same preflight, and it must fire
+	// before the first cell rather than when the cell comes up. Nothing spawns:
+	// the bad repo is caught before a token is spent.
+	const missing = path.join(scratchDir("bad-repo"), "not-there");
+	const out = scratchDir("bad-repo-out");
+	const { status, stderr } = run([
+		"--state", "baseline", "--tasks", "head-hash", "--models", "deepseek-v4.1-flash", "--out", out, "--repo", missing,
+	]);
+	assert.equal(status, 1, "a cell that will run must still be preflighted");
+	assert.ok(stderr.includes("head-hash"), `stderr does not name the task:\n${stderr}`);
+	assert.match(stderr, /does not exist/);
 });

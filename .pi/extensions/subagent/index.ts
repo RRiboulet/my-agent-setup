@@ -664,6 +664,23 @@ function registerChildReporter(pi: ExtensionAPI, resultPath: string, runId: stri
 		};
 
 		try {
+			// Ownership (the second defence against the nested-pi hijack; the first
+			// is the env scrub in the child branch above). result.json belongs to the
+			// run's own child, and the record carries the writer's sessionFile, so a
+			// record naming a DIFFERENT session was written by someone else — an
+			// impostor's finished record must not be replaced. An unusable read
+			// (missing, partial, corrupt) is not a finished record, so a good result
+			// still publishes over it, and the run's own file is always writable by
+			// its child. The one-shot `reported` latch is what makes "overwrite when
+			// the session matches" safe: this child reports at most once.
+			const existing = await readChildResultFile(resultPath);
+			const writer = ctx.sessionManager.getSessionFile();
+			if (existing.ok && existing.result.sessionFile !== writer) {
+				console.error(
+					`[tmux-subagent] ${resultPath} already holds a record from ${existing.result.sessionFile ?? "an unknown session"}; not replacing it with a report from ${writer}`,
+				);
+				return;
+			}
 			await writeJsonAtomic(resultPath, result);
 		} catch (error) {
 			console.error(`[tmux-subagent] Failed to write result: ${error instanceof Error ? error.message : String(error)}`);
@@ -1224,6 +1241,17 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		}
 		// The run id is the run directory name: <agentDir>/tmux-subagents/<session>/<run>/result.json.
 		registerChildReporter(pi, resultPath, path.basename(path.dirname(resultPath)), process.env[INTERRUPT_ENV]?.trim() || undefined);
+		// Scrub the child-mode variables out of this process once they are read:
+		// every bash-tool subprocess inherits process.env, so a surviving variable
+		// makes any `pi` the child runs from a tool re-enter child mode on the SAME
+		// result.json and overwrite the run's record with its own answer — recorded
+		// as run c2428902-… being reported completed/"ok" by a nested pi spawned
+		// from the child's bash tool while the run was still going. The parent's
+		// launch path below writes the variables into the tmux command as literals,
+		// not by reading the environment, so nothing reads them after this point.
+		delete process.env[CHILD_ENV];
+		delete process.env[RESULT_ENV];
+		delete process.env[INTERRUPT_ENV];
 		return;
 	}
 

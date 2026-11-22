@@ -7,5 +7,6 @@
     "expectAnswerContains": [
       "pupkeep"
     ]
-  }
+  },
+  "allowDirty": true
 }
