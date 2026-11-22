@@ -14,13 +14,21 @@
 // accounting, budget limiting, the continuation prompt). These ship untested
 // upstream; the __test__ tail is the only reason they are testable at all.
 //
+// Part 3 drives the factory itself through the fake extension host
+// (./fake-pi.ts). The helpers above prove what a goal MEANS; those tests prove
+// WHEN the extension acts, which the pure-helper surface cannot: that a
+// completed run continues an active goal exactly once, that an inactive goal
+// continues not at all, and that an aborted run pauses rather than continues
+// when no UI is available.
+//
 // Importing the module has no side effects: the factory is only called when
 // pi actually loads the extension.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { __test__ } from "../../goal.ts";
+import goalExtension, { __test__ } from "../../goal.ts";
+import { createFakeHost } from "./fake-pi.ts";
 
 const {
 	STATE_TYPE,
@@ -388,4 +396,92 @@ test("activeGoalSystemPrompt and budgetLimitMessage reflect state", () => {
 test("escapeXmlText escapes the three XML specials", () => {
 	assert.equal(escapeXmlText(`a & b < c > d`), `a &amp; b &lt; c &gt; d`);
 	assert.equal(escapeXmlText("plain"), "plain");
+});
+
+// --- Factory wiring (fake extension host) ------------------------------------
+
+const ASSISTANT_DONE = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] };
+const ASSISTANT_ABORTED = { role: "assistant", stopReason: "aborted", content: [] };
+
+/** A session branch that reconstructs into a goal in `status`. */
+function branchWithGoal(status: string): Record<string, unknown>[] {
+	return [
+		{
+			type: "custom",
+			customType: STATE_TYPE,
+			data: {
+				version: 2,
+				action: "set",
+				goal: {
+					id: "goal-under-test",
+					objective: "Ship the factory harness",
+					status,
+					tokensUsed: 0,
+					timeUsedSeconds: 0,
+					createdAt: 1,
+					updatedAt: 1,
+				},
+			},
+		},
+	];
+}
+
+async function startGoalHost(status: string, hasUI = false) {
+	const host = createFakeHost({ sessionId: "goal-session", branch: branchWithGoal(status), hasUI });
+	goalExtension(host.pi);
+	await host.fire("session_start", { reason: "startup" });
+	return host;
+}
+
+/** `get_goal` returns `{ goal, remainingTokens, completionBudgetReport }`. */
+function goalStatus(result: Awaited<ReturnType<Awaited<ReturnType<typeof startGoalHost>>["callTool"]>>): string | undefined {
+	return (result.details as { goal?: { status?: string } } | undefined)?.goal?.status;
+}
+
+function continuations(host: Awaited<ReturnType<typeof startGoalHost>>) {
+	return host.messages.filter((entry) => entry.message.customType === CONTINUATION_MESSAGE_TYPE);
+}
+
+test("a completed run continues an active goal exactly once", async () => {
+	const host = await startGoalHost("active");
+
+	const before = await host.callTool("get_goal", {});
+	assert.equal(goalStatus(before), "active", "session_start must reconstruct the goal from the branch");
+
+	await host.fire("agent_start", {});
+	await host.fire("agent_end", { messages: [ASSISTANT_DONE] });
+	// A second end without a new run must not queue a second continuation: the
+	// guard is per run, and duplicating it would send the conversation twice.
+	await host.fire("agent_end", { messages: [ASSISTANT_DONE] });
+
+	const queued = continuations(host);
+	assert.equal(queued.length, 1);
+	assert.equal(queued[0]?.options?.triggerTurn, true);
+	// `agent_end` fires while the run is still active, so pi's streaming rule
+	// applies: the continuation is queued as a follow-up, not sent as an idle
+	// turn. Ticket 07 moves the request to the settlement boundary, which is
+	// where this branch becomes idle-by-construction.
+	assert.equal(queued[0]?.options?.deliverAs, "followUp");
+});
+
+test("an inactive goal never continues", async () => {
+	const host = await startGoalHost("paused");
+
+	await host.fire("agent_start", {});
+	await host.fire("agent_end", { messages: [ASSISTANT_DONE] });
+
+	assert.equal(continuations(host).length, 0);
+});
+
+test("an aborted run pauses an active goal instead of continuing it when no UI is available", async () => {
+	const host = await startGoalHost("active", false);
+
+	await host.fire("agent_start", {});
+	await host.fire("agent_end", { messages: [ASSISTANT_ABORTED] });
+
+	assert.equal(continuations(host).length, 0);
+	const goal = await host.callTool("get_goal", {});
+	assert.equal(goalStatus(goal), "paused");
+	const lastState = host.appended.filter((entry) => entry.customType === STATE_TYPE).at(-1);
+	assert.equal((lastState?.data as { action?: string } | undefined)?.action, "status");
 });

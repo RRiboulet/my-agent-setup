@@ -4,6 +4,27 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Maintenance:
+
+- **A fake extension host makes a factory's event wiring testable without tmux
+  or a model.** The suite could prove what an extension computes and, for the
+  subagent extension, what its run state machine does; it could not prove *when*
+  a factory acts, because pi's event wiring only runs under a real session. The
+  vendored `/goal` was the visible gap: its pure helpers were covered and the
+  claim that a completed run continues the goal was not. A new double records
+  registrations in order, dispatches an event to every handler over one mutable
+  event object (so a later handler sees an earlier mutation, and the last
+  non-undefined result is what the double returns), records messages with their
+  delivery options and
+  appended session entries, and runs a registered tool with the host context.
+  What it deliberately does not model — pi's chained-transform composition,
+  boundary-proposal merging, `tool_result` chaining, provider hooks, argument
+  validation, interactive UI answers — is stated in its header, so
+  a test that needs those extends it rather than trusting a plausible-looking
+  default. The goal suite now drives the factory through it: one continuation
+  per completed run, none for an inactive goal, and a pause rather than a
+  continuation after an abort with no UI. No production file changes.
+
 ## v1.15.2 — 2026-11-22
 
 Fixed:
