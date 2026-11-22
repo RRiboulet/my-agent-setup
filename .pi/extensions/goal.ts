@@ -38,7 +38,8 @@
 //      `agent_end`. Upstream calls `sendMessage(..., { triggerTurn: true })`
 //      from `agent_end`, which is the wrong moment for two reasons: pi may
 //      still auto-retry, compact and retry, or drain a queued follow-up after
-//      it, and a message can start a run that the boundary never sees. The
+//      it, so a message sent there is input to whatever run pi starts next, not
+//      a proposal the settlement boundary composes with. The
 //      request now comes from `agent_before_settle` as a `custom_message` draft
 //      plus `continue: true` — the final actionable boundary, which pi honours
 //      exactly once per run and composes with other handlers' proposals (so the
@@ -47,7 +48,9 @@
 //      is what the `context` hook keys on to suppress a consumed continuation.
 //      An aborted run skips that boundary, so an aborted run requests no
 //      continuation; the abort-pause prompt, the usage accounting and the
-//      error-stop decision stay in `agent_end`, unchanged in timing. `/goal`
+//      error-stop decision stay in `agent_end`, unchanged in timing — the prompt's
+//      wording does change, to say that declining leaves the goal waiting for the
+//      user's next message, because this change makes that the truth. `/goal`
 //      keeps sending a continuation directly, because a command runs outside
 //      any run and therefore has no boundary to attach to. Composition is per
 //      field: `entries` compose, but `continue` is last-writer-wins, so a later
@@ -445,9 +448,13 @@ export default function goalExtension(pi: ExtensionAPI) {
 	let activeSinceMs: number | null = null;
 	let activeGoalIdAtAgentStart: string | null = null;
 	// One continuation per low-level run: `agent_start` clears it, so the next run
-	// may ask again. It survives into a boundary only when the `/goal` command
-	// queued a continuation inside the current run, whose follow-up pi drains
-	// before the boundary runs.
+	// may ask again. A `/goal` command that queues a continuation mid-run does not
+	// leave it set at a boundary — pi drains the follow-up by starting another run,
+	// whose `agent_start` clears it. The flag is still load-bearing for the narrow
+	// case it actually covers: a command landing after pi's post-run handling has
+	// decided there is nothing queued and before the boundary runs. Its follow-up is
+	// flushed only afterwards, so without this guard the goal would add a
+	// continuation on top of a turn that is already coming.
 	let continuationQueued = false;
 
 	function currentGoalSnapshot(): Goal | null {

@@ -526,10 +526,13 @@ test("each low-level run gets its own continuation", async () => {
 	assert.equal(boundaryContinuations(second).length, 1, "the next run must be able to continue too");
 });
 
-test("a continuation the /goal command queued inside the run stands the boundary down", async () => {
-	// The one reachable state where the flag is already set at the boundary: a
-	// command ran while the run was streaming, so its follow-up is drained by this
-	// same run. A second request here would be a second turn.
+test("a boundary dispatch with a continuation already queued proposes nothing", async () => {
+	// This stands in for the flag's one real case: a `/goal` command landing after
+	// pi's post-run check has decided nothing is queued and before the boundary
+	// runs, so its follow-up is flushed only afterwards. The double does not model
+	// pi's run loop, so the state is constructed directly rather than timed: a
+	// command that lands mid-run is drained by a fresh run, whose `agent_start`
+	// clears the flag before any boundary.
 	const host = await startGoalHost("paused");
 	await host.fire("agent_start", {});
 	await host.runCommand("goal", "resume");
@@ -602,4 +605,23 @@ test("an aborted run pauses an active goal instead of continuing it when no UI i
 	assert.equal(goalStatus(goal), "paused");
 	const lastState = host.appended.filter((entry) => entry.customType === STATE_TYPE).at(-1);
 	assert.equal((lastState?.data as { action?: string } | undefined)?.action, "status");
+});
+
+test("a pending notice does not stop the boundary from continuing the goal", async () => {
+	// A message an extension sent without `triggerTurn` — a subagent completion
+	// notice is exactly that — is appended to the transcript but does not start a
+	// run. Guarding on the boundary's pending-message preview would therefore stall
+	// an active goal for something that was never going to speak, which is the
+	// regression this test exists to prevent.
+	const host = await startGoalHost("active");
+	await host.fire("agent_start", {});
+	await host.fire("agent_end", { messages: [ASSISTANT_DONE] });
+
+	const boundary = (await host.fire(
+		"agent_before_settle",
+		boundaryEvent([], [{ role: "user", customType: "subagent-result", content: "a child finished" }]),
+	)) as BoundaryProposal | undefined;
+
+	assert.equal(boundaryContinuations(boundary).length, 1, "the goal still continues");
+	assert.equal(boundary?.continue, true);
 });

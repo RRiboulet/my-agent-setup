@@ -22,8 +22,9 @@ Maintenance:
   continuation at all (pi skips that boundary for an abort; the pause prompt
   stays in `agent_end`, where the run is still active, and now says that
   declining leaves the goal waiting for the user's next message), and a `/goal`
-  command that queued a continuation inside the same run stands the boundary
-  down, so the two channels cannot request two turns.
+  command that lands between pi's post-run check and the boundary stands it
+  down, because its follow-up is flushed only afterwards; without that guard the
+  goal would add a continuation on top of a turn already coming.
   Usage and elapsed accounting, the budget limit, the error-stop decision and the
   abort prompt all still run at `agent_end`, so recorded values are unchanged.
   The draft keeps the same customType and `details.goalId`, which is what the
