@@ -32,8 +32,9 @@
  * with a real `git` binary against real temp repositories.
  */
 
-import { statSync } from "node:fs";
-import { mkdir, open, readdir, readFile, rename, rm, stat, unlink } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { lstatSync, realpathSync, statSync } from "node:fs";
+import { mkdir, open, readdir, readFile, rename, rm, stat, unlink, utimes } from "node:fs/promises";
 import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -64,11 +65,6 @@ export const DEFAULT_RESERVATION_TTL_MS = 15 * 60_000;
 export const MIN_RESERVATION_TTL_MS = 5_000;
 export const MAX_RESERVATION_TTL_MS = 24 * 60 * 60_000;
 
-/** A peer message is short-lived: it is a nudge, not a mailbox. */
-export const DEFAULT_MESSAGE_TTL_MS = 10 * 60_000;
-export const MIN_MESSAGE_TTL_MS = 5_000;
-export const MAX_MESSAGE_TTL_MS = 60 * 60_000;
-export const MAX_MESSAGE_BODY_BYTES = 8 * 1024;
 export const MAX_REASON_BYTES = 2 * 1024;
 export const MAX_PRESENCE_PEERS = 200;
 
@@ -445,6 +441,44 @@ export function lockDir(registryDir: string): string {
  * after `staleMs` the next contender renames it aside and removes it, which is
  * also atomic, so two sweepers cannot both win.
  */
+interface LockOwner {
+	token: string;
+	pid: number;
+	at: number;
+}
+
+function ownerPath(dir: string): string {
+	return join(dir, "owner.json");
+}
+
+async function readLockOwner(dir: string): Promise<LockOwner | null> {
+	const read = await readJson(ownerPath(dir));
+	if (!read.ok || !isRecord(read.value)) return null;
+	const { token, pid, at } = read.value;
+	if (typeof token !== "string" || !token || !finiteNumber(pid) || !finiteNumber(at)) return null;
+	return { token, pid, at };
+}
+
+/**
+ * Release only the lock this call owns.
+ *
+ * A stale sweep may have broken the lock and another holder may own the same
+ * path by the time this runs. Deleting by path alone would then remove *their*
+ * lock and let a third process in — the mutual-exclusion hole this check
+ * exists to close. Rename first so the removal is still atomic.
+ */
+async function releaseLock(dir: string, token: string): Promise<void> {
+	const owner = await readLockOwner(dir);
+	if (!owner || owner.token !== token) return;
+	const aside = `${dir}.release.${process.pid}.${tmpCounter++}`;
+	try {
+		await rename(dir, aside);
+	} catch {
+		return;
+	}
+	await rm(aside, { recursive: true, force: true }).catch(() => undefined);
+}
+
 export async function withWorkspaceLock<T>(
 	registryDir: string,
 	fn: () => Promise<T>,
@@ -456,6 +490,7 @@ export async function withWorkspaceLock<T>(
 	const sleep = options.sleep ?? ((ms: number) => delay(ms));
 	const dir = lockDir(registryDir);
 	const deadline = now() + timeoutMs;
+	const token = `${process.pid}-${randomUUID()}`;
 	await mkdir(registryDir, { recursive: true, mode: 0o700 });
 	for (;;) {
 		try {
@@ -469,10 +504,28 @@ export async function withWorkspaceLock<T>(
 			await sleep(LOCK_RETRY_MS);
 		}
 	}
+	// The owner file makes release ownership-checked. It is written immediately
+	// after mkdir, before the critical section, so a contender that sees EEXIST
+	// in that window waits on a fresh mtime rather than breaking a live lock.
+	try {
+		await writeJsonAtomic(ownerPath(dir), { token, pid: process.pid, at: Date.now() });
+	} catch (error) {
+		await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+		throw error;
+	}
+	// Refresh the mtime while the section runs: "stale" then means the holder
+	// stopped refreshing (crashed or wedged), not "the section took a while".
+	// A short section would never notice; a long one should not be broken.
+	const refresh = setInterval(() => {
+		const at = new Date();
+		void utimes(dir, at, at).catch(() => undefined);
+	}, Math.max(10, Math.round(staleMs / 3)));
+	refresh.unref?.();
 	try {
 		return await fn();
 	} finally {
-		await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+		clearInterval(refresh);
+		await releaseLock(dir, token).catch(() => undefined);
 	}
 }
 
@@ -490,4 +543,372 @@ async function breakStaleLock(dir: string, now: () => number, staleMs: number): 
 		return; // another contender swept it first
 	}
 	await rm(aside, { recursive: true, force: true }).catch(() => undefined);
+}
+
+// --- Reservations -----------------------------------------------------------
+
+export type ReservationKind = "file" | "dir" | "glob";
+
+export interface ReservationPath {
+	/** Absolute, canonical path. A glob keeps its `*`/`?` characters. */
+	pattern: string;
+	kind: ReservationKind;
+}
+
+export interface ReservationRecord {
+	version: number;
+	id: string;
+	sessionId: string;
+	cwd: string;
+	branch: string | null;
+	paths: ReservationPath[];
+	reason: string;
+	createdAt: number;
+	expiresAt: number;
+}
+
+export interface ReservationConflict {
+	reservation: ReservationRecord;
+	path: ReservationPath;
+}
+
+/**
+ * Canonicalise a concrete path through the deepest existing ancestor. That is
+ * what makes `./src/x`, `/repo/src/x`, and a symlinked spelling of the same file
+ * compare equal; `realpath` on the whole path cannot be used because the file
+ * being reserved often does not exist yet.
+ */
+export function canonicalPath(cwd: string, input: string): string {
+	const absolute = resolve(cwd, input);
+	let probe = absolute;
+	const tail: string[] = [];
+	for (;;) {
+		try {
+			const real = realpathSync.native(probe);
+			return tail.length === 0 ? real : join(real, ...tail.reverse());
+		} catch {
+			const parent = dirname(probe);
+			if (parent === probe) return absolute;
+			tail.push(basename(probe));
+			probe = parent;
+		}
+	}
+}
+
+function hasGlob(input: string): boolean {
+	return input.includes("*") || input.includes("?");
+}
+
+/** Classify and canonicalise one user-supplied path. */
+export function buildReservationPath(cwd: string, input: string): ReservationPath {
+	const trimmed = input.trim();
+	if (!trimmed) throw new Error("a reservation path may not be empty");
+	if (hasGlob(trimmed)) {
+		// Canonicalise only the static prefix, then put the glob back. Resolving
+		// the whole thing would fail on the `*`, and dropping it would let two
+		// spellings of the static directory reserve different regions.
+		const cut = trimmed.search(/[*?]/);
+		const prefix = trimmed.slice(0, cut);
+		const rest = trimmed.slice(cut);
+		const base = canonicalPath(cwd, prefix || ".");
+		// A prefix that ends mid-segment (`src/fi*`) must not get a separator; an
+		// empty prefix and a directory prefix both must.
+		const needsSep = !base.endsWith(sep) && (prefix === "" || prefix.endsWith("/"));
+		return { pattern: `${base}${needsSep ? sep : ""}${rest}`.replace(/\/+/g, "/"), kind: "glob" };
+	}
+	const canonical = canonicalPath(cwd, trimmed);
+	const wantsDir = trimmed.endsWith("/") || trimmed === "." || trimmed === "..";
+	let isDir = wantsDir;
+	try {
+		isDir = lstatSync(canonical).isDirectory();
+	} catch {
+		// Missing path: a trailing slash is the only signal that it is a directory.
+	}
+	return { pattern: canonical, kind: isDir ? "dir" : "file" };
+}
+
+export function buildReservationPaths(cwd: string, inputs: string[]): ReservationPath[] {
+	const seen = new Set<string>();
+	const paths: ReservationPath[] = [];
+	for (const input of inputs) {
+		const built = buildReservationPath(cwd, input);
+		const key = `${built.kind}:${built.pattern}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		paths.push(built);
+	}
+	return paths;
+}
+
+function escapeRegExp(char: string): string {
+	return char.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+/** `*` stays inside one path segment; `**` crosses segments; `**` followed by a separator may match zero segments. */
+export function globToRegExp(pattern: string): RegExp {
+	let source = "^";
+	for (let i = 0; i < pattern.length; i++) {
+		const char = pattern[i]!;
+		if (char === "*") {
+			if (pattern[i + 1] === "*") {
+				i++;
+				if (pattern[i + 1] === sep) {
+					source += "(?:.*/)?";
+					i++;
+				} else {
+					source += ".*";
+				}
+			} else {
+				source += `[^${escapeRegExp(sep)}]*`;
+			}
+		} else if (char === "?") {
+			source += `[^${escapeRegExp(sep)}]`;
+		} else {
+			source += escapeRegExp(char);
+		}
+	}
+	return new RegExp(`${source}$`);
+}
+
+export function reservationPathMatches(path: ReservationPath, candidate: string): boolean {
+	if (path.kind === "glob") return globToRegExp(path.pattern).test(candidate);
+	if (path.kind === "dir") return candidate === path.pattern || candidate.startsWith(path.pattern + sep);
+	return candidate === path.pattern;
+}
+
+export function reservationMatches(record: ReservationRecord, candidate: string): boolean {
+	return record.paths.some((path) => reservationPathMatches(path, candidate));
+}
+
+function within(child: string, parent: string): boolean {
+	return child === parent || child.startsWith(parent + sep);
+}
+
+/**
+ * Do two reservation scopes overlap?
+ *
+ * Deliberately conservative for globs: a literal glob-overlap decision is a
+ * different problem (regex intersection), and this is an advisory collision
+ * check. Rejecting two wildcards with overlapping static prefixes is a cheap
+ * false conflict; missing a real one is the expensive mistake.
+ */
+export function reservationPathsOverlap(a: ReservationPath, b: ReservationPath): boolean {
+	if (a.pattern === b.pattern) return true;
+	if (a.kind === "glob" || b.kind === "glob") {
+		const aStatic = a.pattern.split(/[*?]/)[0]!;
+		const bStatic = b.pattern.split(/[*?]/)[0]!;
+		if (a.kind === "glob" && b.kind === "glob") {
+			return within(aStatic, bStatic) || within(bStatic, aStatic) || within(a.pattern, b.pattern) || within(b.pattern, a.pattern);
+		}
+		const concrete = a.kind === "glob" ? b : a;
+		const glob = a.kind === "glob" ? a : b;
+		if (reservationPathMatches(glob, concrete.pattern)) return true;
+		if (concrete.kind === "dir" && within(glob.pattern.split(/[*?]/)[0]!, concrete.pattern)) return true;
+		return within(concrete.pattern, glob.pattern.split(/[*?]/)[0]!);
+	}
+	if (a.kind === "dir") return within(b.pattern, a.pattern);
+	if (b.kind === "dir") return within(a.pattern, b.pattern);
+	return false;
+}
+
+export function validateReservation(value: unknown): ReservationRecord | null {
+	if (!isRecord(value)) return null;
+	if (value.version !== WORKSPACE_VERSION) return null;
+	if (typeof value.id !== "string" || !isSafeId(value.id)) return null;
+	if (typeof value.sessionId !== "string" || !isSafeId(value.sessionId)) return null;
+	if (typeof value.cwd !== "string" || !value.cwd) return null;
+	if (value.branch !== null && typeof value.branch !== "string") return null;
+	if (typeof value.reason !== "string" || !value.reason) return null;
+	if (!finiteNumber(value.createdAt) || !finiteNumber(value.expiresAt)) return null;
+	if (!Array.isArray(value.paths) || value.paths.length === 0) return null;
+	const paths: ReservationPath[] = [];
+	for (const raw of value.paths) {
+		if (!isRecord(raw)) return null;
+		if (raw.kind !== "file" && raw.kind !== "dir" && raw.kind !== "glob") return null;
+		if (typeof raw.pattern !== "string" || !isAbsolute(raw.pattern)) return null;
+		paths.push({ pattern: raw.pattern, kind: raw.kind });
+	}
+	return {
+		version: WORKSPACE_VERSION,
+		id: value.id,
+		sessionId: value.sessionId,
+		cwd: value.cwd,
+		branch: value.branch,
+		paths,
+		reason: value.reason.slice(0, MAX_REASON_BYTES),
+		createdAt: value.createdAt,
+		expiresAt: value.expiresAt,
+	};
+}
+
+export function reservationPath(registryDir: string, id: string): string {
+	return join(reservationsDir(registryDir), `${safeId(id)}.json`);
+}
+
+/** Read every record without taking the lock; expiry is decided by the caller. */
+export async function readReservations(registryDir: string): Promise<{ reservations: ReservationRecord[]; invalid: string[] }> {
+	const dir = reservationsDir(registryDir);
+	const invalid: string[] = [];
+	let names: string[];
+	try {
+		names = await readdir(dir);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return { reservations: [], invalid };
+		throw error;
+	}
+	const reservations: ReservationRecord[] = [];
+	for (const name of names) {
+		if (!name.endsWith(".json") || name.startsWith(".")) continue;
+		const read = await readJson(join(dir, name));
+		if (!read.ok) {
+			if (read.kind === "invalid") invalid.push(name);
+			continue;
+		}
+		const record = validateReservation(read.value);
+		if (!record || `${record.id}.json` !== name) {
+			invalid.push(name);
+			continue;
+		}
+		reservations.push(record);
+	}
+	return { reservations, invalid };
+}
+
+/** Sweep under the lock. Only the mutating paths call this. */
+async function sweepReservationsLocked(registryDir: string, now: number): Promise<ReservationRecord[]> {
+	const { reservations } = await readReservations(registryDir);
+	const expired: ReservationRecord[] = [];
+	for (const record of reservations) {
+		if (record.expiresAt <= now) {
+			await unlink(reservationPath(registryDir, record.id)).catch(() => undefined);
+			expired.push(record);
+		}
+	}
+	return expired;
+}
+
+export interface ReserveRequest {
+	sessionId: string;
+	cwd: string;
+	branch: string | null;
+	paths: ReservationPath[];
+	reason: string;
+	now: number;
+	ttlMs?: number;
+}
+
+export type ReserveResult =
+	| { ok: true; reservation: ReservationRecord; expired: ReservationRecord[]; replaced: ReservationRecord[] }
+	| { ok: false; conflicts: ReservationConflict[]; expired: ReservationRecord[] };
+
+export function clampReservationTtl(ttlMs: number): number {
+	if (!Number.isFinite(ttlMs)) return DEFAULT_RESERVATION_TTL_MS;
+	return Math.min(MAX_RESERVATION_TTL_MS, Math.max(MIN_RESERVATION_TTL_MS, Math.round(ttlMs)));
+}
+
+/**
+ * Reserve paths under the shared lock.
+ *
+ * The lock is what makes "two reservers cannot both believe they hold the same
+ * path" true: the check and the write are one critical section. The records are
+ * still advisory — anything outside this extension may write the file.
+ */
+export async function reservePaths(registryDir: string, request: ReserveRequest): Promise<ReserveResult> {
+	if (request.paths.length === 0) throw new Error("a reservation needs at least one path");
+	const reason = request.reason.trim();
+	if (!reason) throw new Error("a reservation needs a non-empty reason");
+	const now = request.now;
+	const expiresAt = now + clampReservationTtl(request.ttlMs ?? DEFAULT_RESERVATION_TTL_MS);
+	return withWorkspaceLock(registryDir, async () => {
+		const expired = await sweepReservationsLocked(registryDir, now);
+		const { reservations } = await readReservations(registryDir);
+		const conflicts: ReservationConflict[] = [];
+		for (const reservation of reservations) {
+			if (reservation.sessionId === request.sessionId) continue;
+			for (const path of request.paths) {
+				const holderPath = reservation.paths.find((held) => reservationPathsOverlap(held, path));
+				if (holderPath) conflicts.push({ reservation, path: holderPath });
+			}
+		}
+		if (conflicts.length > 0) return { ok: false, conflicts, expired };
+		// Re-reserving is how a session extends or widens its own claim. Supersede
+		// its overlapping records in the same critical section rather than leaving
+		// every earlier TTL behind as a duplicate that list shows and peers trip on.
+		const replaced: ReservationRecord[] = [];
+		for (const reservation of reservations) {
+			if (reservation.sessionId !== request.sessionId) continue;
+			const overlaps = reservation.paths.some((held) => request.paths.some((path) => reservationPathsOverlap(held, path)));
+			if (!overlaps) continue;
+			await unlink(reservationPath(registryDir, reservation.id)).catch(() => undefined);
+			replaced.push(reservation);
+		}
+		const reservation: ReservationRecord = {
+			version: WORKSPACE_VERSION,
+			id: randomUUID(),
+			sessionId: safeId(request.sessionId),
+			cwd: request.cwd,
+			branch: request.branch,
+			paths: request.paths,
+			reason: reason.slice(0, MAX_REASON_BYTES),
+			createdAt: now,
+			expiresAt,
+		};
+		await writeJsonAtomic(reservationPath(registryDir, reservation.id), reservation);
+		return { ok: true, reservation, expired, replaced };
+	});
+}
+
+export interface ReleaseResult {
+	released: ReservationRecord[];
+	expired: ReservationRecord[];
+}
+
+/** Release one reservation by id, or every reservation this session holds. */
+export async function releaseReservations(
+	registryDir: string,
+	request: { sessionId: string; id?: string; now: number },
+): Promise<ReleaseResult> {
+	return withWorkspaceLock(registryDir, async () => {
+		const expired = await sweepReservationsLocked(registryDir, request.now);
+		const { reservations } = await readReservations(registryDir);
+		const released: ReservationRecord[] = [];
+		for (const reservation of reservations) {
+			if (reservation.sessionId !== request.sessionId) continue;
+			if (request.id !== undefined && reservation.id !== request.id) continue;
+			await unlink(reservationPath(registryDir, reservation.id)).catch(() => undefined);
+			released.push(reservation);
+		}
+		return { released, expired };
+	});
+}
+
+export interface LiveReservations {
+	live: ReservationRecord[];
+	expired: ReservationRecord[];
+	invalid: string[];
+}
+
+/** Expiry is read-time truth: a TTL that passed stops blocking even before a sweep. */
+export function partitionReservations(
+	records: ReservationRecord[],
+	now: number,
+): { live: ReservationRecord[]; expired: ReservationRecord[] } {
+	const live: ReservationRecord[] = [];
+	const expired: ReservationRecord[] = [];
+	for (const record of records) (record.expiresAt > now ? live : expired).push(record);
+	return { live, expired };
+}
+
+/** The guard's hot path: no lock, no sweep, expiry filtered in memory. */
+export async function liveReservations(registryDir: string, now: number): Promise<LiveReservations> {
+	const { reservations, invalid } = await readReservations(registryDir);
+	const { live, expired } = partitionReservations(reservations, now);
+	if (expired.length > 0) {
+		await withWorkspaceLock(registryDir, async () => {
+			for (const record of expired) {
+				await unlink(reservationPath(registryDir, record.id)).catch(() => undefined);
+			}
+		}).catch(() => undefined);
+	}
+	return { live, expired, invalid };
 }
