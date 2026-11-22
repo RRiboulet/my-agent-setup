@@ -358,7 +358,7 @@ default when it does not, and the `opencode-go` credential itself still serves
 | `.pi/extensions/continue.ts` | `shift+alt+enter` sends the literal prompt `continue`, but only when the agent is idle, so it never steers or queues a message mid-run. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), unmodified |
 | `.pi/extensions/review.ts` | `/review` and `/end-review`: PR, branch, commit, folder and uncommitted review modes, loop-fixing, custom instructions, project-level `REVIEW_GUIDELINES.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with two local changes — see below |
 | `.pi/extensions/mcp-catalogue.ts` | `/mcp-catalogue`: install this package's MCP server catalogue into the agent dir, every server disabled — see [MCP servers](#mcp-servers-installed-once-enabled-per-project). **Ours** |
-| `.pi/extensions/goal.ts` | `/goal` and the `get_goal`/`create_goal`/`update_goal` tools: a long-running objective that auto-continues across turns with an optional token budget, its state appended to the session log and reconstructed on reload/tree navigation. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with two local changes — see below |
+| `.pi/extensions/goal.ts` | `/goal` and the `get_goal`/`create_goal`/`update_goal` tools: a long-running objective that auto-continues across turns with an optional token budget, its state appended to the session log and reconstructed on reload/tree navigation. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with three local changes — see below |
 | `.pi/extensions/session-breakdown.ts` | `/session-breakdown`: sessions, messages, tokens and cost per day over 7/30/90, model breakdown, contributions-style calendar. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with four local patches — see below |
 | `.pi/extensions/native-web-search.ts` | Native web search tool — **ours**, not upstream: it registers the `web_search` tool. Ships with `.pi/skills/native-web-search/`, which *is* vendored |
 | `.pi/extensions/repo-explorer/` | `/explore`: browse a branch's file tree with a directory-by-directory fuzzy filter and print a file into the transcript, or quick-open `/explore <path> [branch]` / `<branch>:<path>` to skip the menus. Read-only git resolved against the session cwd; the process runner, branch menu, browser, transcript renderer, display sanitizer and argument grammar are separate internals. **Ours** |
@@ -646,14 +646,25 @@ header:
    accounting, continuation/budget prompts) so `goal.test.ts` can cover them
    without loading the extension through jiti.
 
-Behaviourally it is the most invasive vendor in this repo: the extension
-queues its own follow-up turns (`deliverAs: "followUp"`) and filters its
-bookkeeping messages out of the model context on the next turn. That is
-orthogonal to the subagent extension's queueing — `subagent` messages of the
-same delivery kind are unaffected, and the custom message types the two
+3. **Continuation at the settlement boundary.** Upstream asks for the next goal
+   turn from `agent_end`, where pi may still retry, compact and retry, or drain
+   a queued follow-up. The request is now a `custom_message` draft plus
+   `continue: true` returned from `agent_before_settle`, the final actionable
+   boundary: pi honours it exactly once per run and composes it with other
+   handlers' proposals. An aborted run skips that boundary, so it requests no
+   continuation — the abort-pause prompt stays in `agent_end`, as do the usage
+   accounting and the error-stop decision.
+
+Behaviourally it is the most invasive vendor in this repo: a run's next turn is
+requested at its settlement boundary, and `/goal` — which runs outside any run —
+still queues a follow-up message directly (`deliverAs: "followUp"`); on the next
+turn the extension filters its own bookkeeping messages out of the model context.
+That is orthogonal to the subagent extension's queueing — `subagent` messages of
+the same delivery kind are unaffected, and the custom message types the two
 extensions use never collide — but a real end-to-end continuation run still
 needs credentials and is not part of the suite; `goal.test.ts` pins the
-reconstruction and the budget-limiting decision instead.
+reconstruction, the budget-limiting decision and the boundary's returned
+proposal instead.
 
 ## `/session-breakdown`
 

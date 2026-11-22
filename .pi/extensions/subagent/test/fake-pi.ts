@@ -108,6 +108,8 @@ export interface FakeHost {
 	widgets: { key: string; content: unknown; options: unknown }[];
 	/** Run a registered tool's `execute()` with the host's context. */
 	callTool(name: string, params?: Record<string, unknown>): Promise<FakeToolResult>;
+	/** Run a registered command's handler, as `/name args` would. */
+	runCommand(name: string, args?: string): Promise<void>;
 }
 
 type Handler = (payload: Record<string, unknown>, ctx: ExtensionContext) => unknown;
@@ -270,6 +272,14 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
 		) => Promise<FakeToolResult>)("fake-call", params, options.signal, undefined, toolContext));
 	};
 
+	const runCommand = async (name: string, args = ""): Promise<void> => {
+		const command = commands.get(name);
+		if (!command) throw new Error(`fake host: no command registered as "${name}"`);
+		const handler = command.handler;
+		if (typeof handler !== "function") throw new Error(`fake host: command "${name}" has no handler()`);
+		await (handler as (commandArgs: string, commandCtx: unknown) => Promise<void>)(args, ctx);
+	};
+
 	return {
 		pi: pi as unknown as ExtensionAPI,
 		ctx,
@@ -289,5 +299,6 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
 		statuses,
 		widgets,
 		callTool,
+		runCommand,
 	};
 }

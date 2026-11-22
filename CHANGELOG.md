@@ -6,6 +6,33 @@ Versions are git tags. This repository is not published to npm.
 
 Maintenance:
 
+- **`/goal` now asks for its next turn at the settlement boundary instead of
+  mid-run, so a continuation is final and composes with other handlers.** The
+  vendored extension called `sendMessage(..., { triggerTurn: true })` from
+  `agent_end`, which fires before pi has finished with the run: pi may still
+  auto-retry, compact and retry, or drain a queued follow-up after it. A message
+  sent there is input to whatever run pi starts next, not a proposal the
+  settlement boundary composes with — so nothing else at that boundary can see it
+  or yield to it. The request is now a
+  `custom_message` draft returned from `agent_before_settle` alongside
+  `continue: true`, appended to `event.entries` so an earlier handler's proposal
+  survives. Behaviour is unchanged from the user's side — an active goal still
+  continues, and a paused, blocked, budget-limited, usage-limited or complete one
+  still does not — with two deliberate differences: an aborted run requests no
+  continuation at all (pi skips that boundary for an abort; the pause prompt
+  stays in `agent_end`, where the run is still active, and now says that
+  declining leaves the goal waiting for the user's next message), and a `/goal`
+  command that queued a continuation inside the same run stands the boundary
+  down, so the two channels cannot request two turns.
+  Usage and elapsed accounting, the budget limit, the error-stop decision and the
+  abort prompt all still run at `agent_end`, so recorded values are unchanged.
+  The draft keeps the same customType and `details.goalId`, which is what the
+  `context` hook keys on to drop a consumed continuation. Recorded as local
+  change 3 in `goal.ts`'s vendored-file header; `goal.test.ts` now asserts the
+  boundary's returned proposal rather than a sent message, across two consecutive
+  runs, with the `/goal` command's own continuation standing it down and a run's
+  usage still recorded against the goal.
+
 - **A fake extension host makes a factory's event wiring testable without tmux
   or a model.** The suite could prove what an extension computes and, for the
   subagent extension, what its run state machine does; it could not prove *when*
@@ -23,7 +50,8 @@ Maintenance:
   a test that needs those extends it rather than trusting a plausible-looking
   default. The goal suite now drives the factory through it: one continuation
   per completed run, none for an inactive goal, and a pause rather than a
-  continuation after an abort with no UI. No production file changes.
+  continuation after an abort with no UI. The harness itself changes no
+  production file.
 
 ## v1.15.2 — 2026-11-22
 
