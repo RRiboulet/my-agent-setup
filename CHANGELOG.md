@@ -6,6 +6,40 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
+- **The settlement gate can now stop a run from settling, but only where a
+  project opts in.** A committed `.pi/orchestrator.json` turns each check on
+  separately: `block.openTodos` and `block.repeatedFailure` make an open todo or
+  a repeated failure signature commit one more turn, `verification.command`
+  names the project's own check — run by the gate through `pi.exec` with a
+  timeout and an output cap, and what the edits-without-verification condition
+  now means — and `block.loops` arms the tool-call loop breaker. With no config
+  nothing is run and nothing is blocked, which is exactly the previous
+  behaviour.
+
+  A block is a `continue` plus a message carrying the reason and the
+  verification output. It never terminates the run, and it is bounded twice: a
+  condition blocks once per piece of evidence — a new edit or todo re-arms it —
+  and every block spends one of the branch's `attemptCap`, which `retryCap` is
+  renamed to now that it counts blocks rather than settles. Every reason names the new `orchestrator_override` tool, whose
+  one-shot override lets the next block through and is recorded in the session.
+  A check that times out, exceeds its output cap or cannot be parsed fails open
+  and says so in the verdict, so the gate's own failure never becomes the run's
+  trap. The gate acts only in a project pi trusts: the config is a committed
+  file that names a command, and this extension also loads in clones that were
+  never trusted. The loop breaker reads no-progress evidence — the same
+  `edit`/`write` invocation with the same result three times and no other edit in
+  between, or any loop tool failing with the same signature three times — so a
+  status poll and a status command after each edit
+  are both untouched; it shares the branch budget and is capped at one block per
+  turn. Inside a delegated child the gate records `scope: child` and acts on
+  nothing, because the parent owns the decision and a blocked child would stall
+  the delegation, and every verdict states the limit a blocking check has: it
+  sees this session's own tool calls, not edits made by children. Tests:
+  `orchestrator-gate.test.ts` covers the decision, config, override and resume
+  paths; `orchestrator-loop.test.ts` the loop evidence and both bounds;
+  `orchestrator-verify.test.ts` the command, each fail-open outcome, and a real
+  process killed at its timeout.
+
 - **A settlement gate now reports what a project considers a finished run, and
   publishes typed orchestration events.** A new `.pi/extensions/orchestrator/`
   extension runs at `agent_before_settle` and records a verdict — an active
@@ -20,12 +54,12 @@ Added:
   `continue` alone, so an active goal keeps ownership of the next turn. A
   condition it cannot evaluate is reported as unknown and the run still settles.
 
-  This ticket is deliberately **report-only**: the gate never blocks, runs a
-  command or requests a continuation. Configuration is a committed
+  It landed report-only first: the gate recorded a verdict and never blocked,
+  ran a command or requested a continuation. Configuration is a committed
   `<project>/.pi/orchestrator.json`, shipped as
-  `.pi/extensions/orchestrator/orchestrator.example.json`; absence means the
-  defaults (`retryCap: 3`) and report-only. Blocking checks, verification
-  commands, the override and the loop breaker follow in the next ticket.
+  `.pi/extensions/orchestrator/orchestrator.example.json`; the bullet above adds
+  the blocking checks, the verification command, the override and the loop
+  breaker, and renames `retryCap` to `attemptCap`.
 
   The same extension owns the typed event bus: `orchestrator:run-settled`,
   `orchestrator:plan-settled`, `orchestrator:todo-changed`,

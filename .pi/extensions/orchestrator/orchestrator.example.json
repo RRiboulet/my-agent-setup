@@ -1,4 +1,14 @@
 {
   "version": 1,
-  "retryCap": 3
+  "attemptCap": 3,
+  "block": {
+    "openTodos": false,
+    "repeatedFailure": false,
+    "loops": false
+  },
+  "verification": {
+    "command": "node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts",
+    "timeoutMs": 300000,
+    "maxOutputBytes": 16000
+  }
 }

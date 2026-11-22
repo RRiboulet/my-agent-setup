@@ -1,13 +1,16 @@
-// The settlement gate (ticket 08): the pure decision function, the session-log
-// state reconstruction, the disk readers, and the factory wiring through the
-// fake extension host.
+// The settlement gate: the pure decision function, the session-log state
+// reconstruction, the disk readers, and the factory wiring through the fake
+// extension host.
 //
-// The factory part asserts on the boundary RETURNED proposal, not on
-// `pi.sendMessage`: `agent_before_settle` has no message channel. It also pins
-// the report-only contract in the strongest available form — the gate's result
-// has no `continue` property at all, and every earlier handler's draft is still
-// present — so a later ticket that adds action must change this test
-// deliberately.
+// Ticket 08's contract was report-only and its tests pinned that in the
+// strongest form ("no `continue` at all"). Ticket 09 adds action, so those
+// assertions change deliberately: what replaces them is the rule that the gate
+// blocks only where a project opted in, only once per condition, only within the
+// branch's attempt budget, and never when it cannot evaluate or when the session
+// is a delegated child. The factory part still asserts on the boundary RETURNED
+// proposal — `agent_before_settle` has no message channel — and still pins the
+// composition rule: a yielding gate leaves `continue` alone and an acting one
+// carries every earlier handler's entries forward.
 
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
@@ -19,14 +22,23 @@ import {
 	evaluateGate,
 	formatVerdict,
 	GATE_ENTRY_TYPE,
+	GATE_LOOP_ENTRY_TYPE,
+	GATE_OVERRIDE_ENTRY_TYPE,
+	GATE_OVERRIDE_TOOL,
 	reconstructGateState,
 	scanEditVerification,
 	scanFailures,
 	type GateVerdict,
 } from "../../orchestrator/gate.ts";
-import { gateConfigPath, normalizeGateConfig, readGateConfig } from "../../orchestrator/config.ts";
+import {
+	gateConfigPath,
+	normalizeGateConfig,
+	readGateConfig,
+	DEFAULT_VERIFICATION_MAX_OUTPUT_BYTES,
+} from "../../orchestrator/config.ts";
 import { ORCHESTRATION_EVENTS } from "../../orchestrator/events.ts";
 import { readOpenTodos, todoDirectory } from "../../orchestrator/todo-state.ts";
+import type { VerificationOutcome } from "../../orchestrator/verify.ts";
 import orchestratorExtension from "../../orchestrator/index.ts";
 import { createFakeHost } from "./fake-pi.ts";
 import { withEnv } from "./helpers.ts";
@@ -75,7 +87,30 @@ function toolResult(id: string, toolName: string, options: { text?: string; isEr
 	};
 }
 
-function gateStateEntry(attempts: number, retryCap = 3): Entry {
+function gateStateEntry(attempts: number, attemptCap = 3, extra: Record<string, unknown> = {}): Entry {
+	return custom(GATE_ENTRY_TYPE, {
+		version: 2,
+		kind: "attention",
+		decision: attempts > 0 ? "continue" : "report",
+		outcome: "completed",
+		at: 1,
+		scope: "parent",
+		attempts,
+		attemptCap,
+		remainingAttempts: Math.max(0, attemptCap - attempts),
+		blockedBy: attempts > 0 ? ["todos"] : [],
+		blockedConditions: attempts > 0 ? ["todos"] : [],
+		verification: null,
+		override: null,
+		reason: "recorded",
+		reasons: [],
+		conditions: [],
+		...extra,
+	});
+}
+
+/** A verdict exactly as ticket 08 wrote it: `retryCap`, `decision: "report"`. */
+function ticket08Entry(attempts = 2, retryCap = 3): Entry {
 	return custom(GATE_ENTRY_TYPE, {
 		version: 1,
 		kind: "attention",
@@ -87,6 +122,24 @@ function gateStateEntry(attempts: number, retryCap = 3): Entry {
 		remainingAttempts: Math.max(0, retryCap - attempts),
 		reasons: [{ code: "goal-active", summary: "a goal is still active" }],
 		conditions: [{ kind: "goal", status: "attention", summary: "a goal is still active" }],
+	});
+}
+
+function loopEntry(attempts: number, attemptCap = 3): Entry {
+	return custom(GATE_LOOP_ENTRY_TYPE, {
+		version: 2,
+		action: "block",
+		at: 2,
+		tool: "bash",
+		invocation: "npm run build",
+		kind: "no-progress",
+		count: 3,
+		detail: "1|abc",
+		reason: "a loop",
+		attempts,
+		attemptCap,
+		remainingAttempts: Math.max(0, attemptCap - attempts),
+		blocksTheTurn: 1,
 	});
 }
 
@@ -132,13 +185,27 @@ async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 	}
 }
 
+function verification(status: VerificationOutcome["status"], extra: Partial<VerificationOutcome> = {}): VerificationOutcome {
+	return {
+		status,
+		command: "node --test",
+		exitCode: status === "passed" ? 0 : 1,
+		durationMs: 5,
+		killed: status === "timed-out" || status === "truncated",
+		truncated: status === "truncated",
+		summary: `verification command \`node --test\` ${status}`,
+		output: "1 failing",
+		...extra,
+	};
+}
+
 // --- Pure decision function -------------------------------------------------
 
-test("evaluateGate reports an active goal, open todos, unverified edits, a repeated failure and the retry cap", () => {
+test("evaluateGate reports an active goal, open todos, unverified edits, a repeated failure and the block budget", () => {
 	const verdict = evaluateGate({
 		outcome: "completed",
 		attempts: 2,
-		retryCap: 3,
+		attemptCap: 3,
 		activeGoal: { id: "g1", objective: "finish the ticket" },
 		openTodos: [{ id: "aaaaaaaa", title: "write the test", status: "open" }],
 		edits: { editedFiles: ["src/a.ts"], verificationRuns: 0 },
@@ -146,35 +213,41 @@ test("evaluateGate reports an active goal, open todos, unverified edits, a repea
 		now: 42,
 	});
 
-	assert.equal(verdict.decision, "report", "ticket 08 never decides to block or continue");
+	assert.equal(verdict.decision, "report", "nothing is configured to block here");
 	assert.equal(verdict.kind, "attention");
-	assert.equal(verdict.attempts, 3, "the current evaluation is counted");
-	assert.equal(verdict.remainingAttempts, 0);
+	assert.equal(verdict.attempts, 2, "attempts count blocks, not evaluations");
+	assert.equal(verdict.remainingAttempts, 1);
 	assert.equal(verdict.at, 42);
+	assert.equal(verdict.scope, "parent");
+	assert.deepEqual(verdict.blockedBy, []);
 	assert.deepEqual(
 		verdict.reasons.map((reason) => reason.code),
-		["goal-active", "open-todos", "edits-without-verification", "repeated-failure", "retry-cap-reached"],
+		["goal-active", "open-todos", "edits-without-verification", "repeated-failure"],
 	);
 	const details = Object.fromEntries(verdict.reasons.map((reason) => [reason.code, reason.details]));
 	assert.deepEqual(details["open-todos"], { ids: ["aaaaaaaa"], titles: ["write the test"] });
-	assert.deepEqual(details["edits-without-verification"], { files: ["src/a.ts"] });
-	assert.equal(details["retry-cap-reached"]?.attempts, 3);
+	assert.deepEqual(details["edits-without-verification"], { files: ["src/a.ts"], verificationRuns: 0 });
+	assert.match(
+		verdict.conditions.find((condition) => condition.kind === "verification")?.summary ?? "",
+		/0 verification runs on this branch/,
+	);
 });
 
-test("evaluateGate is clear when nothing is open and still counts the attempt", () => {
-	const verdict = evaluateGate({ outcome: "completed", attempts: 0, retryCap: 3, now: 1 });
+test("evaluateGate is clear when nothing is open and still spends no attempt", () => {
+	const verdict = evaluateGate({ outcome: "completed", attempts: 0, attemptCap: 3, now: 1 });
 	assert.equal(verdict.kind, "clear");
 	assert.equal(verdict.decision, "report");
-	assert.equal(verdict.attempts, 1);
-	assert.equal(verdict.remainingAttempts, 2);
+	assert.equal(verdict.attempts, 0);
+	assert.equal(verdict.remainingAttempts, 3);
 	assert.deepEqual(verdict.reasons, []);
+	assert.match(verdict.reason, /settled normally/);
 });
 
-test("evaluateGate marks an unevaluable condition unknown but still report-only", () => {
+test("evaluateGate marks an unevaluable condition unknown but still reports", () => {
 	const verdict = evaluateGate({
 		outcome: "completed",
 		attempts: 0,
-		retryCap: 3,
+		attemptCap: 3,
 		unevaluated: ["todos: permission denied"],
 		now: 1,
 	});
@@ -184,39 +257,228 @@ test("evaluateGate marks an unevaluable condition unknown but still report-only"
 	assert.equal(verdict.reasons[0]?.code, "unevaluated");
 });
 
-test("formatVerdict names the attempt, the reasons and the unevaluated conditions", () => {
+test("the same evidence cannot block twice, but new evidence re-arms it", () => {
+	const input = {
+		outcome: "completed",
+		attemptCap: 3,
+		openTodos: [{ id: "aaaaaaaa", title: "finish", status: "open" }],
+	} as const;
+	const blocked = evaluateGate({ ...input, attempts: 0, policy: { kinds: ["todos"], alreadyBlocked: [] }, now: 1 });
+	assert.equal(blocked.decision, "continue");
+	assert.deepEqual(blocked.blockedBy, ["todos"]);
+	assert.deepEqual(blocked.blockedConditions, ["todos"]);
+	assert.equal(blocked.attempts, 1);
+	assert.match(blocked.reason, new RegExp(GATE_OVERRIDE_TOOL));
+
+	// The same evidence, next settlement: the branch remembers it blocked.
+	const reported = evaluateGate({
+		...input,
+		attempts: 1,
+		policy: { kinds: ["todos"], alreadyBlocked: ["todos"], alreadyBlockedEvidence: blocked.blockedEvidence },
+		now: 2,
+	});
+	assert.equal(reported.decision, "report", "the same evidence cannot block twice");
+	assert.equal(reported.attempts, 1);
+	assert.deepEqual(reported.blockedBy, []);
+	assert.deepEqual(reported.blockedConditions, ["todos"]);
+
+	// A new open todo is new evidence: the check re-arms, still bounded by the cap.
+	const rearmed = evaluateGate({
+		...input,
+		openTodos: [
+			{ id: "aaaaaaaa", title: "finish", status: "open" },
+			{ id: "bbbbbbbb", title: "another", status: "open" },
+		],
+		attempts: 1,
+		policy: { kinds: ["todos"], alreadyBlocked: ["todos"], alreadyBlockedEvidence: blocked.blockedEvidence },
+		now: 3,
+	});
+	assert.equal(rearmed.decision, "continue", "a new open todo must be able to block again");
+	assert.equal(rearmed.attempts, 2);
+});
+
+test("the attempt budget bounds every block on the branch", () => {
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 3,
+		attemptCap: 3,
+		openTodos: [{ id: "aaaaaaaa", title: "finish", status: "open" }],
+		policy: { kinds: ["todos"], alreadyBlocked: [] },
+		now: 1,
+	});
+	assert.equal(verdict.decision, "report");
+	assert.equal(verdict.attempts, 3, "an attempt is only spent by a block");
+	assert.equal(verdict.remainingAttempts, 0);
+	assert.ok(verdict.reasons.some((reason) => reason.code === "attempt-cap-reached"));
+	assert.equal(verdict.conditions.find((condition) => condition.kind === "attempt")?.status, "attention");
+});
+
+test("a cap of zero makes a configured gate report-only", () => {
 	const verdict = evaluateGate({
 		outcome: "completed",
 		attempts: 0,
-		retryCap: 3,
+		attemptCap: 0,
+		openTodos: [{ id: "aaaaaaaa", title: "finish", status: "open" }],
+		policy: { kinds: ["todos"], alreadyBlocked: [] },
+		now: 1,
+	});
+	assert.equal(verdict.decision, "report");
+	assert.ok(verdict.reasons.some((reason) => reason.code === "attempt-cap-reached"));
+});
+
+test("an override reports instead of blocking and records itself", () => {
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 0,
+		attemptCap: 3,
+		openTodos: [{ id: "aaaaaaaa", title: "finish", status: "open" }],
+		policy: { kinds: ["todos"], alreadyBlocked: [] },
+		override: { reason: "the todo is a scratch note", at: 7 },
+		now: 1,
+	});
+	assert.equal(verdict.decision, "report");
+	assert.equal(verdict.attempts, 0, "an override spends no attempt");
+	assert.deepEqual(verdict.override, { reason: "the todo is a scratch note", at: 7 });
+	assert.ok(verdict.reasons.some((reason) => reason.code === "override-used"));
+});
+
+test("an override granted while nothing is open stays pending for the settlement that needs it", () => {
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 0,
+		attemptCap: 3,
+		policy: { kinds: ["todos"], alreadyBlocked: [] },
+		override: { reason: "granted early", at: 9 },
+		now: 1,
+	});
+	assert.equal(verdict.decision, "report");
+	assert.equal(verdict.override, null, "an override is spent by the block it prevents, not by a clean settlement");
+	assert.equal(verdict.reasons.some((reason) => reason.code === "override-used"), false);
+});
+
+test("a delegated child session reports and never blocks", () => {
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 0,
+		attemptCap: 3,
+		scope: "child",
+		openTodos: [{ id: "aaaaaaaa", title: "finish", status: "open" }],
+		policy: { kinds: ["todos"], alreadyBlocked: [] },
+		suppressed: "this is a delegated child session",
+		now: 1,
+	});
+	assert.equal(verdict.decision, "report");
+	assert.equal(verdict.scope, "child");
+	assert.ok(verdict.reasons.some((reason) => reason.code === "blocking-suppressed"));
+});
+
+test("a verification run that timed out fails open and stays visible in the verdict", () => {
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 0,
+		attemptCap: 3,
+		edits: { editedFiles: ["src/a.ts"], verificationRuns: 1 },
+		verification: verification("timed-out"),
+		policy: { kinds: ["verification"], alreadyBlocked: [] },
+		now: 1,
+	});
+	assert.equal(verdict.decision, "report", "a check that could not finish must not trap the run");
+	assert.equal(verdict.verification?.status, "timed-out");
+	assert.ok(verdict.reasons.some((reason) => reason.code === "verification-fail-open"));
+	assert.equal(verdict.conditions.find((condition) => condition.kind === "verification")?.status, "unknown");
+});
+
+test("a verification run that passed still continues once with the result", () => {
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 0,
+		attemptCap: 3,
+		edits: { editedFiles: ["src/a.ts"], verificationRuns: 1 },
+		verification: verification("passed"),
+		policy: { kinds: ["verification"], alreadyBlocked: [] },
+		now: 1,
+	});
+	assert.equal(verdict.decision, "continue", "the model gets one turn with what the project's command said");
+	assert.deepEqual(verdict.blockedBy, ["verification"]);
+	assert.equal(verdict.reasons.find((reason) => reason.code === "verification-ran")?.details?.exitCode, 0);
+});
+
+test("a verification run that failed blocks, naming the exit code", () => {
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 0,
+		attemptCap: 3,
+		edits: { editedFiles: ["src/a.ts"], verificationRuns: 1 },
+		verification: verification("failed", { exitCode: 2 }),
+		policy: { kinds: ["verification"], alreadyBlocked: [] },
+		now: 1,
+	});
+	assert.equal(verdict.decision, "continue");
+	const reason = verdict.reasons.find((candidate) => candidate.code === "verification-failed");
+	assert.equal(reason?.details?.exitCode, 2);
+});
+
+test("formatVerdict names the action, the budget, the scope and the verification", () => {
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 0,
+		attemptCap: 3,
 		openTodos: [{ id: "deadbeef", title: "t", status: "open" }],
+		policy: { kinds: ["todos"], alreadyBlocked: [] },
 		unevaluated: ["config: broken"],
 		now: 1,
 	});
 	const text = formatVerdict(verdict);
-	assert.match(text, /ATTENTION \(report-only\)/);
-	assert.match(text, /Attempt 1 of 3/);
+	assert.match(text, /ATTENTION \(BLOCKED SETTLEMENT\)/);
+	assert.match(text, /Attempt 1 of 3 gate blocks/);
 	assert.match(text, /open todo: deadbeef/);
+	assert.match(text, /delegated children are not visible/);
 	assert.match(text, /Unevaluated \(reported, not blocking\):/);
 });
 
 // --- Session-backed state ---------------------------------------------------
 
-test("reconstructGateState takes the last verdict and its attempt count", () => {
-	const state = reconstructGateState([gateStateEntry(1), gateStateEntry(4)]);
-	assert.equal(state.attempts, 4);
-	assert.equal(state.lastVerdict?.attempts, 4);
+test("reconstructGateState takes the last verdict, its attempt count and every blocked condition", () => {
+	const state = reconstructGateState([gateStateEntry(1), gateStateEntry(2)]);
+	assert.equal(state.attempts, 2);
+	assert.equal(state.lastVerdict?.attempts, 2);
+	assert.deepEqual(state.blockedConditions, ["todos"]);
+});
+
+test("reconstructGateState reads a ticket-08 entry, whose cap was called retryCap", () => {
+	const state = reconstructGateState([ticket08Entry(2, 3)]);
+	assert.equal(state.attempts, 2);
+	assert.equal(state.lastVerdict?.attemptCap, 3);
+	assert.equal(state.lastVerdict?.decision, "report");
+	assert.equal(state.lastVerdict?.scope, "parent");
+});
+
+test("reconstructGateState counts loop blocks, so a resume cannot reset the budget", () => {
+	const state = reconstructGateState([gateStateEntry(1), loopEntry(2)]);
+	assert.equal(state.attempts, 2);
+	assert.equal(state.lastLoopVerdict?.action, "block");
+	assert.deepEqual(state.blockedConditions, ["todos"], "the condition memory survives a loop block");
 });
 
 test("reconstructGateState ignores malformed entries and a branch before any decision", () => {
-	assert.deepEqual(reconstructGateState([]), { attempts: 0, lastVerdict: null });
-	const state = reconstructGateState([custom(GATE_ENTRY_TYPE, { nonsense: true }), gateStateEntry(2)]);
+	assert.deepEqual(reconstructGateState([]), {
+		attempts: 0,
+		lastVerdict: null,
+		lastLoopVerdict: null,
+		blockedConditions: [],
+		blockedEvidence: {},
+	});
+	const state = reconstructGateState([
+		custom(GATE_ENTRY_TYPE, { nonsense: true }),
+		custom(GATE_LOOP_ENTRY_TYPE, { action: "block" }),
+		gateStateEntry(2),
+	]);
 	assert.equal(state.attempts, 2);
 });
 
 // --- Branch readers ---------------------------------------------------------
 
-test("scanEditVerification clears an edit once a verification command succeeds", () => {
+test("scanEditVerification clears an edit once a shell command succeeds", () => {
 	const branch = [
 		assistantCall("e1", "edit", { path: "src/a.ts" }),
 		toolResult("e1", "edit"),
@@ -244,6 +506,47 @@ test("scanEditVerification ignores a failed edit", () => {
 		toolResult("e1", "edit", { isError: true, text: "no match" }),
 	];
 	assert.deepEqual(scanEditVerification(branch), { editedFiles: [], verificationRuns: 0 });
+});
+
+test("with a configured command only that command verifies, not any shell call", () => {
+	// Ticket 08's proxy cleared an edit on `ls` or `git status`. Ticket 09 asks
+	// what "the command was run after the edit" means when the command lives in
+	// config: it means this command.
+	const branch = [
+		assistantCall("e1", "edit", { path: "src/a.ts" }),
+		toolResult("e1", "edit"),
+		assistantCall("b1", "bash", { command: "ls" }),
+		toolResult("b1", "bash"),
+	];
+	const proxied = scanEditVerification(branch);
+	assert.deepEqual(proxied.editedFiles, [], "without a command, ticket 08's proxy is kept");
+	const commanded = scanEditVerification(branch, { verificationCommand: "node --test" });
+	assert.deepEqual(commanded.editedFiles, ["src/a.ts"], "a different command is not the project's verification");
+	assert.equal(commanded.verificationRuns, 0);
+
+	const verified = [
+		...branch,
+		assistantCall("b2", "bash", { command: "node   --test" }),
+		toolResult("b2", "bash"),
+	];
+	assert.deepEqual(scanEditVerification(verified, { verificationCommand: "node --test" }), {
+		editedFiles: [],
+		verificationRuns: 1,
+	});
+});
+
+test("the gate's own passing verification clears the edits it covered, and a failing one does not", () => {
+	const edits = [assistantCall("e1", "edit", { path: "src/a.ts" }), toolResult("e1", "edit")];
+	const passed = [...edits, custom(GATE_ENTRY_TYPE, { verification: { status: "passed" }, attempts: 1 })];
+	assert.deepEqual(scanEditVerification(passed, { verificationCommand: "node --test" }), {
+		editedFiles: [],
+		verificationRuns: 1,
+	});
+	const failed = [...edits, custom(GATE_ENTRY_TYPE, { verification: { status: "failed" }, attempts: 1 })];
+	assert.deepEqual(scanEditVerification(failed, { verificationCommand: "node --test" }), {
+		editedFiles: ["src/a.ts"],
+		verificationRuns: 0,
+	});
 });
 
 test("scanFailures reports the same failing invocation repeated, not two different failures", () => {
@@ -334,7 +637,9 @@ test("readGateConfig defaults when absent, and reports a malformed file rather t
 		assert.equal(gateConfigPath(dir), path.join(dir, ".pi", "orchestrator.json"));
 		const missing = readGateConfig(dir);
 		assert.equal(missing.source, "default");
-		assert.equal(missing.config.retryCap, 3);
+		assert.equal(missing.config.attemptCap, 3);
+		assert.equal(missing.config.verification, null);
+		assert.deepEqual(missing.config.block, { openTodos: false, repeatedFailure: false, loops: false });
 		assert.equal(missing.warning, undefined);
 
 		await withTempDir(async (configDir) => {
@@ -347,22 +652,57 @@ test("readGateConfig defaults when absent, and reports a malformed file rather t
 	});
 });
 
-test("normalizeGateConfig validates retryCap and ignores unknown keys", () => {
-	assert.deepEqual(normalizeGateConfig({ version: 1, retryCap: 5, future: true }), {
-		config: { version: 1, retryCap: 5 },
-		warnings: [],
+test("normalizeGateConfig validates the block keys, the verification command and the attempt cap", () => {
+	assert.deepEqual(
+		normalizeGateConfig({
+			version: 1,
+			attemptCap: 5,
+			block: { openTodos: true, loops: true, future: true },
+			verification: { command: "node --test" },
+			future: true,
+		}),
+		{
+			config: {
+				version: 1,
+				attemptCap: 5,
+				block: { openTodos: true, repeatedFailure: false, loops: true },
+				verification: { command: "node --test", timeoutMs: 300_000, maxOutputBytes: DEFAULT_VERIFICATION_MAX_OUTPUT_BYTES },
+			},
+			warnings: [],
+		},
+		"unknown keys are ignored, so a newer project can commit one",
+	);
+
+	const invalid = normalizeGateConfig({
+		version: 1,
+		attemptCap: -1,
+		block: { openTodos: "yes" },
+		verification: { command: "" },
 	});
-	const invalid = normalizeGateConfig({ version: 1, retryCap: -1 });
-	assert.equal(invalid.config.retryCap, 3);
-	assert.match(invalid.warnings[0] ?? "", /non-negative integer/);
-	const future = normalizeGateConfig({ version: 99, retryCap: 2 });
-	assert.equal(future.config.retryCap, 2);
+	assert.equal(invalid.config.attemptCap, 3);
+	assert.equal(invalid.config.block.openTodos, false);
+	assert.equal(invalid.config.verification, null);
+	assert.match(invalid.warnings.join(" "), /attemptCap must be a non-negative integer/);
+	assert.match(invalid.warnings.join(" "), /block\.openTodos must be a boolean/);
+	assert.match(invalid.warnings.join(" "), /verification\.command must be a non-empty string/);
+
+	const capped = normalizeGateConfig({ version: 1, verification: { command: "x", timeoutMs: 1e9, maxOutputBytes: 1e9 } });
+	assert.equal(capped.config.verification?.timeoutMs, 3_600_000);
+	assert.equal(capped.config.verification?.maxOutputBytes, 1_048_576);
+	assert.match(capped.warnings.join(" "), /capped at/);
+
+	const legacy = normalizeGateConfig({ version: 1, retryCap: 2 });
+	assert.equal(legacy.config.attemptCap, 2, "the ticket-08 key is still honoured");
+	assert.match(legacy.warnings.join(" "), /renamed attemptCap/);
+
+	const future = normalizeGateConfig({ version: 99, attemptCap: 2 });
+	assert.equal(future.config.attemptCap, 2);
 	assert.match(future.warnings[0] ?? "", /unsupported config version/);
 });
 
 // --- Factory wiring ---------------------------------------------------------
 
-test("the settlement boundary records a report-only verdict with every open condition and publishes it", async () => {
+test("the settlement boundary records a verdict with every open condition and publishes it", async () => {
 	await withTempDir(async (todosDir) => {
 		await writeFile(path.join(todosDir, "aaaaaaaa.md"), `${JSON.stringify({ id: "aaaaaaaa", title: "open", status: "open" })}\n`);
 		await withEnv({ PI_TODO_PATH: todosDir }, async () => {
@@ -383,11 +723,11 @@ test("the settlement boundary records a report-only verdict with every open cond
 			const result = (await host.fire("agent_before_settle", boundaryEvent([sentinel]))) as BoundaryProposal;
 			const verdict = gateVerdictOf(result);
 
-			assert.equal(result.continue, undefined, "the gate must not request a continuation");
+			assert.equal(result.continue, undefined, "nothing is configured to block");
 			assert.ok(result.entries?.includes(sentinel as never), "an earlier handler's draft survives");
 			assert.equal(verdict.decision, "report");
 			assert.equal(verdict.kind, "attention");
-			assert.equal(verdict.attempts, 1);
+			assert.equal(verdict.attempts, 0, "a report is not an attempt");
 			assert.deepEqual(
 				verdict.reasons.map((reason) => reason.code),
 				["goal-active", "open-todos", "edits-without-verification", "repeated-failure"],
@@ -395,9 +735,10 @@ test("the settlement boundary records a report-only verdict with every open cond
 			assert.equal(host.emitted.length, 1);
 			assert.equal(host.emitted[0]?.channel, ORCHESTRATION_EVENTS.gateDecided);
 			assert.deepEqual((host.emitted[0]?.data as { verdict: GateVerdict }).verdict, verdict);
+			assert.equal((host.emitted[0]?.data as { action: string }).action, "settle");
+			assert.equal(host.execCalls.length, 0, "no command is configured, so nothing runs");
 
-			// What the boundary proposed is what a later load reconstructs: the
-			// reasons are in the session entry, not only in this return value.
+			// What the boundary proposed is what a later load reconstructs.
 			const recovered = reconstructGateState(result.entries ?? []);
 			assert.deepEqual(recovered.lastVerdict, verdict);
 			assert.equal(recovered.attempts, verdict.attempts);
@@ -405,7 +746,7 @@ test("the settlement boundary records a report-only verdict with every open cond
 	});
 });
 
-test("with no configuration the gate reports clear and never blocks or continues", async () => {
+test("with no configuration the gate reports clear and never blocks, continues or runs a command", async () => {
 	await withTempDir(async (cwd) => {
 		// A fresh project directory: no .pi/orchestrator.json and no todos.
 		const host = await startHost({ branch: [], cwd });
@@ -417,6 +758,8 @@ test("with no configuration the gate reports clear and never blocks or continues
 		assert.equal(verdict.decision, "report");
 		assert.equal(result.continue, undefined);
 		assert.ok(result.entries?.includes(sentinel as never));
+		assert.equal(host.execCalls.length, 0);
+		assert.equal(host.emitted.length, 1, "the report-only decision is still published");
 	});
 });
 
@@ -427,14 +770,174 @@ test("when a goal already owns the continuation the gate does not request anothe
 	const verdict = gateVerdictOf(result);
 
 	assert.equal(verdict.reasons[0]?.code, "goal-active");
-	assert.equal(result.continue, undefined, "yield by leaving the field alone; never return continue: true");
+	assert.equal(result.continue, undefined, "yield by leaving the field alone; never return continue: false");
 });
 
-test("verdicts and attempt counts survive a simulated resume", async () => {
-	const host = await startHost({ branch: [gateStateEntry(2)] });
+test("a configured open-todo check blocks once, carries the draft forward, and settles next time", async () => {
+	await withTempDir(async (todosDir) => {
+		await writeFile(path.join(todosDir, "aaaaaaaa.md"), `${JSON.stringify({ id: "aaaaaaaa", title: "finish", status: "open" })}\n`);
+		await withEnv({ PI_TODO_PATH: todosDir }, async () => {
+			await withTempDir(async (cwd) => {
+				await mkdir(path.join(cwd, ".pi"), { recursive: true });
+				await writeFile(gateConfigPath(cwd), JSON.stringify({ version: 1, block: { openTodos: true } }));
+
+				const host = await startHost({ branch: [], cwd });
+				const sentinel = { type: "custom", customType: "another-extension", data: { proposed: true } };
+				const first = (await host.fire("agent_before_settle", boundaryEvent([sentinel]))) as BoundaryProposal;
+				const blocked = gateVerdictOf(first);
+				assert.equal(first.continue, true);
+				assert.deepEqual(blocked.blockedBy, ["todos"]);
+				assert.equal(blocked.attempts, 1);
+				assert.ok(first.entries?.includes(sentinel as never), "the gate must not drop an earlier handler's entries");
+				const message = first.entries?.find((entry) => entry.type === "custom_message");
+				assert.match(String(message?.content ?? ""), /did not settle/);
+				assert.match(String(message?.content ?? ""), new RegExp(GATE_OVERRIDE_TOOL));
+
+				// The next load sees the committed verdict, so the same condition
+				// cannot block again — that is what makes this a block and not a trap.
+				const resumed = await startHost({ branch: first.entries as Entry[], cwd });
+				const second = (await resumed.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+				assert.equal(second.continue, undefined);
+				const settled = gateVerdictOf(second);
+				assert.equal(settled.decision, "report");
+				assert.equal(settled.attempts, 1);
+				assert.deepEqual(settled.blockedConditions, ["todos"]);
+			});
+		});
+	});
+});
+
+test("an override lets a blocked settlement settle, and is recorded in the session", async () => {
+	await withTempDir(async (todosDir) => {
+		await writeFile(path.join(todosDir, "aaaaaaaa.md"), `${JSON.stringify({ id: "aaaaaaaa", title: "finish", status: "open" })}\n`);
+		await withEnv({ PI_TODO_PATH: todosDir }, async () => {
+			await withTempDir(async (cwd) => {
+				await mkdir(path.join(cwd, ".pi"), { recursive: true });
+				await writeFile(gateConfigPath(cwd), JSON.stringify({ version: 1, block: { openTodos: true } }));
+
+				const host = await startHost({ branch: [], cwd });
+				await host.fire("session_start", {});
+				await host.callTool(GATE_OVERRIDE_TOOL, { reason: "the todo is a scratch note" });
+				assert.ok(host.appended.some((entry) => entry.customType === GATE_OVERRIDE_ENTRY_TYPE));
+
+				const result = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+				const verdict = gateVerdictOf(result);
+				assert.equal(result.continue, undefined, "the override suppresses the block");
+				assert.equal(verdict.decision, "report");
+				assert.deepEqual(verdict.override, { reason: "the todo is a scratch note", at: verdict.override?.at });
+				assert.equal(verdict.attempts, 0);
+
+				// Consumed: the next settlement blocks again, as it would have.
+				const next = newHostFrom(cwd, result.entries as Entry[]);
+				const after = (await next.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+				assert.equal(after.continue, true);
+				assert.equal(gateVerdictOf(after).override, null);
+			});
+		});
+	});
+});
+
+function newHostFrom(cwd: string, branch: Entry[]) {
+	const host = createFakeHost({ sessionId: "orchestrator-gate-test", cwd, branch });
+	orchestratorExtension(host.pi);
+	return host;
+}
+
+test("the override tool refuses an empty reason", async () => {
+	await withTempDir(async (cwd) => {
+		await mkdir(path.join(cwd, ".pi"), { recursive: true });
+		await writeFile(gateConfigPath(cwd), JSON.stringify({ version: 1, block: { openTodos: true } }));
+		const host = await startHost({ cwd });
+		await host.fire("session_start", {});
+		await assert.rejects(async () => await host.callTool(GATE_OVERRIDE_TOOL, { reason: "  " }), /non-empty reason/);
+	});
+});
+
+test("a report-only project pays nothing for the override: the tool is not registered", async () => {
+	await withTempDir(async (cwd) => {
+		const host = await startHost({ cwd });
+		await host.fire("session_start", {});
+		assert.equal(host.tools.has(GATE_OVERRIDE_TOOL), false, "no block is possible, so no escape hatch is advertised");
+	});
+});
+
+test("a project that opts into a check gets the override tool at session start", async () => {
+	await withTempDir(async (cwd) => {
+		await mkdir(path.join(cwd, ".pi"), { recursive: true });
+		await writeFile(gateConfigPath(cwd), JSON.stringify({ version: 1, block: { loops: true } }));
+		const host = await startHost({ cwd });
+		await host.fire("session_start", {});
+		assert.equal(host.tools.has(GATE_OVERRIDE_TOOL), true);
+	});
+});
+
+test("an untrusted project's config is never executed and never blocks", async () => {
+	// This extension ships as a user-level package, so it loads in a checkout pi has
+	// never trusted. Running that checkout's committed command at settlement would be
+	// arbitrary code execution from a cloned repository.
+	await withTempDir(async (dir) => {
+		await mkdir(path.join(dir, ".pi"), { recursive: true });
+		await writeFile(
+			gateConfigPath(dir),
+			JSON.stringify({
+				version: 1,
+				attemptCap: 3,
+				block: { openTodos: true },
+				verification: { command: "touch PWNED" },
+			}),
+		);
+		await mkdir(path.join(dir, ".pi", "todos"), { recursive: true });
+		await writeFile(
+			path.join(dir, ".pi", "todos", "aaaaaaaa.md"),
+			`${JSON.stringify({ id: "aaaaaaaa", title: "finish", status: "open" })}\n`,
+		);
+
+		const host = createFakeHost({ sessionId: "untrusted", cwd: dir, trusted: false });
+		orchestratorExtension(host.pi);
+		await host.fire("session_start", {});
+		const verdict = gateVerdictOf((await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal);
+
+		assert.equal(verdict.decision, "report");
+		const suppressed = verdict.reasons.find((reason) => reason.code === "blocking-suppressed");
+		assert.match(String(suppressed?.summary ?? ""), /not trusted/);
+		assert.equal(verdict.verification, null, "no command may run in an untrusted project");
+		assert.equal(
+			host.toolOrder.includes(GATE_OVERRIDE_TOOL),
+			false,
+			"a project the gate will not act in gets no escape hatch",
+		);
+	});
+});
+
+test("an override is not burned on a settlement that could not block", () => {
+	// The budget is spent, so this settlement reports with or without an override;
+	// consuming the one-shot here would silently waste it.
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 2,
+		attemptCap: 2,
+		openTodos: [{ id: "aaaaaaaa", title: "finish", status: "open" }],
+		policy: { kinds: ["todos"], alreadyBlocked: [] },
+		override: { reason: "iterating", at: 1 },
+		now: 2,
+	});
+	assert.equal(verdict.decision, "report");
+	assert.equal(verdict.override, null, "the override must stay pending");
+});
+
+test("attemptCap 0 is reported as disabled, not as attention", () => {
+	const verdict = evaluateGate({ outcome: "completed", attempts: 0, attemptCap: 0 });
+	assert.equal(verdict.kind, "clear");
+	assert.equal(verdict.conditions.find((condition) => condition.kind === "attempt")?.status, "clear");
+});
+
+test("verdicts, blocked conditions and the attempt budget survive a simulated resume", async () => {
+	const host = await startHost({ branch: [gateStateEntry(1)] });
 	await host.fire("session_start", {});
 	const result = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
-	assert.equal(gateVerdictOf(result).attempts, 3);
+	const verdict = gateVerdictOf(result);
+	assert.equal(verdict.attempts, 1);
+	assert.equal(verdict.reasons.some((reason) => reason.code === "settlement-blocked"), false, "nothing blocks after a resume");
 });
 
 test("session_tree re-reconstructs the last decision instead of resetting it", async () => {
@@ -442,23 +945,61 @@ test("session_tree re-reconstructs the last decision instead of resetting it", a
 	await host.fire("session_start", {});
 	await host.fire("session_tree", {});
 	const result = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
-	assert.equal(gateVerdictOf(result).attempts, 3);
+	assert.equal(gateVerdictOf(result).attempts, 2);
 });
 
-test("a cap reached before a resume stays reached after it", async () => {
-	const first = await startHost({ branch: [gateStateEntry(2)] });
-	await first.fire("session_start", {});
-	const settled = (await first.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
-	assert.equal(gateVerdictOf(settled).remainingAttempts, 0);
+test("a budget reached before a resume stays reached after it", async () => {
+	await withTempDir(async (todosDir) => {
+		await writeFile(path.join(todosDir, "aaaaaaaa.md"), `${JSON.stringify({ id: "aaaaaaaa", title: "finish", status: "open" })}\n`);
+		await withEnv({ PI_TODO_PATH: todosDir }, async () => {
+			await withTempDir(async (cwd) => {
+				await mkdir(path.join(cwd, ".pi"), { recursive: true });
+				await writeFile(
+					gateConfigPath(cwd),
+					JSON.stringify({ version: 1, block: { openTodos: true, repeatedFailure: true } }),
+				);
+				// The budget was spent on a different condition than the one open now,
+				// so the cap — not the per-condition memory — is what settles this run.
+				const resumed = await startHost({
+					branch: [
+						gateStateEntry(3),
+						assistantCall("b1", "bash", { command: "npm test" }),
+						toolResult("b1", "bash", { isError: true, text: "boom" }),
+						assistantCall("b2", "bash", { command: "npm test" }),
+						toolResult("b2", "bash", { isError: true, text: "boom" }),
+					],
+					cwd,
+				});
+				await resumed.fire("session_start", {});
+				const after = (await resumed.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+				const verdict = gateVerdictOf(after);
+				assert.equal(after.continue, undefined, "an exhausted budget settles the run");
+				assert.equal(verdict.attempts, 3);
+				assert.equal(verdict.remainingAttempts, 0);
+				assert.ok(verdict.reasons.some((reason) => reason.code === "attempt-cap-reached"));
+			});
+		});
+	});
+});
 
-	// The next load sees the entry the boundary just proposed.
-	const resumed = await startHost({ branch: [gateStateEntry(3)] });
-	await resumed.fire("session_start", {});
-	const after = (await resumed.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
-	const verdict = gateVerdictOf(after);
-	assert.equal(verdict.attempts, 4);
-	assert.equal(verdict.remainingAttempts, 0);
-	assert.ok(verdict.reasons.some((reason) => reason.code === "retry-cap-reached"));
+test("a run that did not complete is reported, never continued", async () => {
+	await withTempDir(async (todosDir) => {
+		await writeFile(path.join(todosDir, "aaaaaaaa.md"), `${JSON.stringify({ id: "aaaaaaaa", title: "finish", status: "open" })}\n`);
+		await withEnv({ PI_TODO_PATH: todosDir }, async () => {
+			await withTempDir(async (cwd) => {
+				await mkdir(path.join(cwd, ".pi"), { recursive: true });
+				await writeFile(gateConfigPath(cwd), JSON.stringify({ version: 1, block: { openTodos: true } }));
+				const host = await startHost({ branch: [], cwd });
+				const result = (await host.fire(
+					"agent_before_settle",
+					boundaryEvent([], { outcome: "error" }),
+				)) as BoundaryProposal;
+				assert.equal(result.continue, undefined);
+				assert.equal(gateVerdictOf(result).decision, "report");
+				assert.ok(gateVerdictOf(result).reasons.some((reason) => reason.code === "blocking-suppressed"));
+			});
+		});
+	});
 });
 
 test("a condition that cannot be evaluated produces a report-only verdict, not an error or a block", async () => {
@@ -478,19 +1019,19 @@ test("a condition that cannot be evaluated produces a report-only verdict, not a
 	});
 });
 
-test("/gate shows the last verdict, and --json returns it verbatim", async () => {
+test("/gate shows the last verdict, and --json returns the verdict and the last loop block", async () => {
 	await withTempDir(async (cwd) => {
 		const host = await startHost({ branch: [], cwd });
-		await host.fire("agent_before_settle", boundaryEvent());
-		const verdict = gateVerdictOf(await host.fire("agent_before_settle", boundaryEvent()));
+		const result = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+		const verdict = gateVerdictOf(result);
 
 		await host.runCommand("gate");
 		const text = String(host.messages.at(-1)?.message.content ?? "");
 		assert.match(text, /Orchestration gate: CLEAR \(report-only\)/);
-		assert.match(text, new RegExp(`Attempt ${verdict.attempts} of 3`));
+		assert.match(text, new RegExp(`Attempt ${verdict.attempts} of 3 gate blocks`));
 
 		await host.runCommand("gate", "--json");
 		const json = String(host.messages.at(-1)?.message.content ?? "");
-		assert.deepEqual(JSON.parse(json), verdict);
+		assert.deepEqual(JSON.parse(json), { verdict, loop: null });
 	});
 });

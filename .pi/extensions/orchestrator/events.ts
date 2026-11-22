@@ -21,7 +21,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import type { GateVerdict } from "./gate.ts";
+import type { GateVerdict, LoopVerdict } from "./gate.ts";
 
 /** The documented channels. The `orchestrator:` prefix keeps them out of the
  *  collision set of third-party extension event names. */
@@ -78,10 +78,15 @@ export interface TriagePlannedPayload {
 	fingerprint?: string;
 }
 
-/** The settlement gate recorded a verdict. */
-export interface GateDecidedPayload {
-	verdict: GateVerdict;
-}
+/**
+ * The settlement gate acted: it recorded a settlement verdict, or the loop
+ * breaker blocked (or overrode) a repeated tool call. A discriminated union, so
+ * a subscriber that reacts to loops (the advisor in ticket 10) cannot mistake a
+ * loop record for a verdict.
+ */
+export type GateDecidedPayload =
+	| { action: "settle"; verdict: GateVerdict }
+	| { action: "loop-block"; loop: LoopVerdict };
 
 export interface OrchestrationEventMap {
 	"orchestrator:run-settled": RunSettledPayload;

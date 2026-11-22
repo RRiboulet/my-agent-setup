@@ -38,10 +38,19 @@
 //     accepts all of them, so a malformed registration or parameter is a test
 //     bug here rather than an error.
 //
+// `exec` IS modelled, because a verification command's timeout path is only
+// believable when a real process is killed: the implementation below spawns the
+// command and maps Node's failure shape onto pi's `ExecResult` contract
+// (`killed` for a timeout or abort, `truncated` for an output cap, `128 + signal`
+// for the code). Build it with a temp copy of the script it spawns and a short
+// timeout to exercise that path; pass `exec` to script a result instead.
+//
 // Anything absent is absent on purpose: calling a method this double does not
 // implement fails loudly instead of silently returning a plausible default.
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { execFile } from "node:child_process";
+
+import type { ExtensionAPI, ExtensionContext, ExecResult } from "@earendil-works/pi-coding-agent";
 
 /** A tool definition as the host received it, kept loose on purpose: the point
  *  is to inspect fields a test cares about, not to re-validate pi's schema. */
@@ -67,6 +76,13 @@ export interface FakeToolResult {
 	details?: unknown;
 }
 
+/** One `pi.exec` call, recorded so a test can assert what the gate ran. */
+export interface FakeExecCall {
+	command: string;
+	args: string[];
+	options: Record<string, unknown>;
+}
+
 export interface FakeHostOptions {
 	/** Session identity a factory reads to reconstruct state. */
 	sessionId?: string;
@@ -85,6 +101,12 @@ export interface FakeHostOptions {
 	pendingMessages?: boolean;
 	/** Handed to tools and handlers as `ctx.signal`. */
 	signal?: AbortSignal;
+	/** Replace `pi.exec`; the default spawns a real process through `execFile`. */
+	exec?: (
+		command: string,
+		args: string[],
+		options: { cwd?: string; timeout?: number; maxBuffer?: number; signal?: AbortSignal },
+	) => Promise<ExecResult>;
 }
 
 export interface FakeHost {
@@ -105,6 +127,8 @@ export interface FakeHost {
 	appended: FakeAppendedEntry[];
 	/** Every `pi.events.emit` call, in order. */
 	emitted: { channel: string; data: unknown }[];
+	/** Every `pi.exec` call, in order. */
+	execCalls: FakeExecCall[];
 	notifications: { message: string; type: string | undefined }[];
 	statuses: { key: string; text: string | undefined }[];
 	widgets: { key: string; content: unknown; options: unknown }[];
@@ -136,6 +160,7 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
 	const messages: FakeMessage[] = [];
 	const appended: FakeAppendedEntry[] = [];
 	const emitted: { channel: string; data: unknown }[] = [];
+	const execCalls: FakeExecCall[] = [];
 	const notifications: { message: string; type: string | undefined }[] = [];
 	const statuses: { key: string; text: string | undefined }[] = [];
 	const widgets: { key: string; content: unknown; options: unknown }[] = [];
@@ -181,6 +206,7 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
 		mode: options.mode ?? (hasUI ? "tui" : "print"),
 		hasUI,
 		cwd,
+		isProjectTrusted: () => options.trusted ?? true,
 		sessionManager,
 		model: options.model,
 		thinkingLevel: options.thinkingLevel,
@@ -192,6 +218,51 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
 		hasPendingMessages: () => pendingMessages,
 		signal: options.signal,
 	} as unknown as ExtensionContext;
+
+	/**
+	 * The default `pi.exec`: a real spawn, mapped onto pi's `ExecResult`
+	 * contract. Node reports a timeout or a signal as `killed` with a signal and
+	 * no numeric code, and an output cap as `code: "ENOBUFS"`; pi reports the
+	 * former as `killed: true` with `128 + signal`, and the latter as `truncated`.
+	 */
+	const exec = async (
+		command: string,
+		args: string[],
+		execOptions: { cwd?: string; timeout?: number; maxBuffer?: number; signal?: AbortSignal } = {},
+	): Promise<ExecResult> => {
+		execCalls.push({ command, args, options: { ...execOptions } });
+		if (options.exec) return options.exec(command, args, execOptions);
+		return await new Promise<ExecResult>((resolve, reject) => {
+			execFile(
+				command,
+				args,
+				{
+					cwd: execOptions.cwd,
+					timeout: execOptions.timeout,
+					maxBuffer: execOptions.maxBuffer ?? 1024 * 1024,
+					signal: execOptions.signal,
+					encoding: "utf8",
+				},
+				(error, stdout, stderr) => {
+					if (!error) {
+						resolve({ stdout: stdout ?? "", stderr: stderr ?? "", code: 0, killed: false, truncated: false });
+						return;
+					}
+					const code = (error as { code?: unknown }).code;
+					if (code === "ENOENT") {
+						reject(error);
+						return;
+					}
+					const signal = (error as { signal?: string }).signal;
+					const truncated = code === "ENOBUFS";
+					const killed = Boolean((error as { killed?: boolean }).killed) || truncated;
+					const numeric = typeof code === "number" ? code : undefined;
+					const exitCode = numeric ?? (killed ? (signal === "SIGKILL" ? 137 : 143) : 1);
+					resolve({ stdout: stdout ?? "", stderr: stderr ?? "", code: exitCode, killed, truncated });
+				},
+			);
+		});
+	};
 
 	const pi = {
 		// The orchestration event bus, recorded. Tests that need subscriber
@@ -221,6 +292,7 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
 		appendEntry: (customType: string, data?: unknown) => {
 			appended.push({ customType, data });
 		},
+		exec,
 		registerFlag: (name: string, flagOptions: FakeFlagDefinition) => {
 			flags.set(name, flagOptions);
 			flagOrder.push(name);
@@ -308,6 +380,7 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
 		messages,
 		appended,
 		emitted,
+		execCalls,
 		notifications,
 		statuses,
 		widgets,
