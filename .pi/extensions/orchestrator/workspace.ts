@@ -65,6 +65,11 @@ export const DEFAULT_RESERVATION_TTL_MS = 15 * 60_000;
 export const MIN_RESERVATION_TTL_MS = 5_000;
 export const MAX_RESERVATION_TTL_MS = 24 * 60 * 60_000;
 
+/** A peer message is short-lived: it is a nudge, not a mailbox. */
+export const DEFAULT_MESSAGE_TTL_MS = 10 * 60_000;
+export const MIN_MESSAGE_TTL_MS = 5_000;
+export const MAX_MESSAGE_TTL_MS = 60 * 60_000;
+export const MAX_MESSAGE_BODY_BYTES = 8 * 1024;
 export const MAX_REASON_BYTES = 2 * 1024;
 export const MAX_PRESENCE_PEERS = 200;
 
@@ -912,3 +917,190 @@ export async function liveReservations(registryDir: string, now: number): Promis
 	}
 	return { live, expired, invalid };
 }
+
+// --- Peer messages ----------------------------------------------------------
+
+export interface PeerMessage {
+	version: number;
+	id: string;
+	from: { sessionId: string; cwd: string; branch: string | null };
+	to: string;
+	body: string;
+	createdAt: number;
+	expiresAt: number;
+}
+
+export interface SendMessageRequest {
+	id?: string;
+	sessionId: string;
+	cwd: string;
+	branch: string | null;
+	to: string;
+	body: string;
+	now: number;
+	ttlMs?: number;
+}
+
+export function clampMessageTtl(ttlMs: number): number {
+	if (!Number.isFinite(ttlMs)) return DEFAULT_MESSAGE_TTL_MS;
+	return Math.min(MAX_MESSAGE_TTL_MS, Math.max(MIN_MESSAGE_TTL_MS, Math.round(ttlMs)));
+}
+
+export function buildPeerMessage(request: SendMessageRequest): PeerMessage {
+	const body = request.body.trim();
+	if (!body) throw new Error("a peer message needs a non-empty body");
+	if (Buffer.byteLength(body, "utf8") > MAX_MESSAGE_BODY_BYTES) {
+		throw new Error(`a peer message may be at most ${MAX_MESSAGE_BODY_BYTES} bytes`);
+	}
+	return {
+		version: WORKSPACE_VERSION,
+		id: request.id ?? randomUUID(),
+		from: { sessionId: safeId(request.sessionId), cwd: request.cwd, branch: request.branch },
+		to: safeId(request.to),
+		body,
+		createdAt: request.now,
+		expiresAt: request.now + clampMessageTtl(request.ttlMs ?? DEFAULT_MESSAGE_TTL_MS),
+	};
+}
+
+export function validatePeerMessage(value: unknown): PeerMessage | null {
+	if (!isRecord(value)) return null;
+	if (value.version !== WORKSPACE_VERSION) return null;
+	if (typeof value.id !== "string" || !isSafeId(value.id)) return null;
+	if (typeof value.body !== "string" || !value.body.trim()) return null;
+	if (Buffer.byteLength(value.body, "utf8") > MAX_MESSAGE_BODY_BYTES) return null;
+	if (typeof value.to !== "string" || !isSafeId(value.to)) return null;
+	if (!finiteNumber(value.createdAt) || !finiteNumber(value.expiresAt)) return null;
+	if (!isRecord(value.from)) return null;
+	if (typeof value.from.sessionId !== "string" || !isSafeId(value.from.sessionId)) return null;
+	if (typeof value.from.cwd !== "string" || !value.from.cwd) return null;
+	if (value.from.branch !== null && typeof value.from.branch !== "string") return null;
+	return {
+		version: WORKSPACE_VERSION,
+		id: value.id,
+		from: { sessionId: value.from.sessionId, cwd: value.from.cwd, branch: value.from.branch },
+		to: value.to,
+		body: value.body,
+		createdAt: value.createdAt,
+		expiresAt: value.expiresAt,
+	};
+}
+
+export function messagePath(registryDir: string, recipient: string, id: string): string {
+	return join(inboxDir(registryDir, recipient), `${safeId(id)}.json`);
+}
+
+export function deliveredMarkerPath(registryDir: string, recipient: string, id: string): string {
+	return join(deliveredDir(registryDir, recipient), `${safeId(id)}.json`);
+}
+
+export async function writePeerMessage(registryDir: string, message: PeerMessage): Promise<void> {
+	await writeJsonAtomic(messagePath(registryDir, message.to, message.id), message);
+}
+
+export async function readPeerMessage(
+	registryDir: string,
+	recipient: string,
+	id: string,
+): Promise<PeerMessage | null> {
+	const read = await readJson(messagePath(registryDir, recipient, id));
+	if (!read.ok) return null;
+	const message = validatePeerMessage(read.value);
+	if (!message || message.to !== recipient || message.id !== id) return null;
+	return message;
+}
+
+/** Oldest first: a peer's first message is not starved by a chatty one. */
+export function sortMessages(messages: PeerMessage[]): PeerMessage[] {
+	return [...messages].sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+}
+
+export interface InboxRead {
+	live: PeerMessage[];
+	expired: PeerMessage[];
+	invalid: string[];
+	/** Ids already delivered: the idempotence ledger, not a second mailbox. */
+	delivered: Set<string>;
+}
+
+export async function readInbox(registryDir: string, recipient: string, now: number): Promise<InboxRead> {
+	const dir = inboxDir(registryDir, recipient);
+	const result: InboxRead = { live: [], expired: [], invalid: [], delivered: new Set() };
+	let names: string[];
+	try {
+		names = await readdir(dir);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return result;
+		throw error;
+	}
+	const delivered = new Set<string>();
+	try {
+		for (const name of await readdir(deliveredDir(registryDir, recipient))) {
+			if (name.endsWith(".json")) delivered.add(name.slice(0, -".json".length));
+		}
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+	for (const name of names) {
+		if (!name.endsWith(".json") || name.startsWith(".")) continue;
+		const id = name.slice(0, -".json".length);
+		if (!isSafeId(id)) {
+			result.invalid.push(name);
+			continue;
+		}
+		const read = await readJson(join(dir, name));
+		if (!read.ok) {
+			if (read.kind === "invalid") result.invalid.push(name);
+			continue;
+		}
+		const message = validatePeerMessage(read.value);
+		if (!message || message.to !== recipient || message.id !== id) {
+			result.invalid.push(name);
+			continue;
+		}
+		if (delivered.has(id)) {
+			// A previously delivered file that outlived its deletion (a crash
+			// between send and unlink) is removed, never delivered twice.
+			await unlink(join(dir, name)).catch(() => undefined);
+			continue;
+		}
+		if (message.expiresAt <= now) result.expired.push(message);
+		else result.live.push(message);
+	}
+	result.live = sortMessages(result.live);
+	result.expired = sortMessages(result.expired);
+	result.delivered = delivered;
+	return result;
+}
+
+export async function markMessageDelivered(
+	registryDir: string,
+	recipient: string,
+	message: PeerMessage,
+	now: number,
+): Promise<void> {
+	await writeJsonAtomic(deliveredMarkerPath(registryDir, recipient, message.id), {
+		version: WORKSPACE_VERSION,
+		id: message.id,
+		from: message.from.sessionId,
+		deliveredAt: now,
+	});
+}
+
+export async function removePeerMessage(registryDir: string, recipient: string, id: string): Promise<void> {
+	await unlink(messagePath(registryDir, recipient, id)).catch(() => undefined);
+}
+
+export function formatPeerMessage(message: PeerMessage): string {
+	const branch = message.from.branch ? ` on branch ${message.from.branch}` : "";
+	const at = new Date(message.createdAt).toISOString();
+	return [
+		`Peer message from session ${message.from.sessionId} in ${message.from.cwd}${branch} at ${at}:`,
+		"",
+		message.body,
+		"",
+		`This message was sent by another pi session in the same repository, not by the human at this keyboard. Reply with \`orchestrator_message\` to ${message.from.sessionId} if a reply is needed.`,
+	].join("\n");
+}
+
+

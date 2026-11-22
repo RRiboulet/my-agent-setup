@@ -6,6 +6,19 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
+- **A session can send one targeted message to a peer, delivered at the peer's
+  next safe boundary.** The new `orchestrator_message` tool queues a bounded,
+  expiring message in the recipient's inbox; the recipient's own poller wakes an
+  idle session with a turn, steers a busy one without aborting it, and waits
+  while a human prompt or queued human input is pending. One peer message is
+  released per turn, delivery is idempotent per message id (a replayed id is
+  delivered once; an undelivered message that expires is reported rather than
+  silently dropped), and the message appears in the recipient's session with the
+  sender's id and directory. The poller starts when the session joins and is
+  cleared and unref'd on leave, shutdown and session replacement, so no timer
+  keeps the process alive. A peer that left or expired is reported as gone.
+  Tests: `orchestrator-steering.test.ts`.
+
 - **A reserved workspace path refuses another session's `write` or `edit`
   before it runs, naming the holder and the reason.** The new
   `orchestrator_reserve` tool reserves a file, a directory (trailing slash) or a
