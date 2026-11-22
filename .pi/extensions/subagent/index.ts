@@ -194,6 +194,27 @@
 //     fail a run. The pointer is what `subagent_status` and `runs.json` expose,
 //     so the full report is one file read away without parsing a transcript.
 //
+// 21. Fan-out and dependency plans (see plan.ts, plus `advancePlanForRun`,
+//     `reconcileLoadedPlans` and the cancel path here): one `subagent` call can
+//     launch several children as a plan with per-step overrides and
+//     `dependsOn` edges, sharing the standalone concurrency queue. Plan records
+//     are persisted BESIDE the runs (`plans.json`) because one plan owns several
+//     runs and outlives each of them. THREE places settle a step, and a fourth
+//     invented in passing is how a plan wedges: the existing settle path, the
+//     cancel path (a cancel produces no `result.json`, so the finaliser never
+//     sees it), and one-shot load reconciliation. `runs.json` and `plans.json`
+//     are two renames under one chain, so a crash between them leaves the plan
+//     index OLDER than the run index; reconciliation therefore adopts a run the
+//     plan has no record of, folds in a settlement the plan missed, and leaves a
+//     step alone only while its run is queued/running/interrupted — the
+//     statuses whose child can outlive a parent reload and for which the watcher
+//     re-arms. Only a step with no live run is reported interrupted, never
+//     complete. A plan id resolves through the management tools as well:
+//     `subagent_wait({ plan })` (later waves have no run ids to name),
+//     `subagent_status({ id })` and `subagent_cancel({ id })`. The status list
+//     shows a plan as ONE row with its step runs folded into it, so a ten-step
+//     plan cannot spend the list's detail budget ten times.
+//
 // The child reporter (CHILD_ENV) still reports completion the same way; patch 11
 // only adds the activity snapshot to it, patch 13 only diverts the aborted
 // settle onto the marker, and patch 20 adds the report field.
@@ -277,13 +298,17 @@ import { renderRunList, runHeadline, type ListRow } from "./listview.ts";
 import { buildEscapeBindArgs, buildPanelLaunch } from "./panel.ts";
 import {
 	buildPlan,
+	cancelPlan,
+	cancelPlanStep,
 	failPlanStep,
 	markStepLaunched,
 	queuedStopCandidates,
 	readyStepIds,
+	reconcilePlan,
 	settlePlanStep,
 	type FailurePolicy,
 	type PlanRecord,
+	type PlanStepRun,
 	type PlanStepSpec,
 	type PlanStepState,
 } from "./plan.ts";
@@ -355,7 +380,7 @@ type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "
  * to it when — and only when — the management tools are hidden from the model.
  */
 const SUBAGENT_DESCRIPTION =
-	"Start a delegated task in a separate interactive Pi process inside a detached tmux session and return immediately. The main agent is not blocked and may start more subagents or keep working. Runs execute concurrently (bounded by PI_SUBAGENT_MAX_CONCURRENT, default 4); extra runs are queued. Children inherit the current provider/model/thinking, defaulting the provider to OpenRouter. Start the run, then wait once: subagent_wait({ id }) blocks until that run settles and returns its record (subagent_wait({ ids }) waits for a fan-out together). Keep subagent_status for the live 'what is it doing right now' question, subagent_interrupt to abort a run's current turn while keeping its child alive, and subagent_cancel to stop a run outright. For a fan-out or a dependency plan, pass `tasks` with per-step overrides (task, cwd, provider, model, thinking, handoff, dependsOn, retries), an optional failurePolicy (continue by default, or stop) and retryLimit; the runs share the same concurrency budget and come back in the requested order. Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.";
+	"Start a delegated task in a separate interactive Pi process inside a detached tmux session and return immediately. The main agent is not blocked and may start more subagents or keep working. Runs execute concurrently (bounded by PI_SUBAGENT_MAX_CONCURRENT, default 4); extra runs are queued. Children inherit the current provider/model/thinking, defaulting the provider to OpenRouter. Start the run, then wait once: subagent_wait({ id }) blocks until that run settles and returns its record (subagent_wait({ ids }) waits for a fan-out together, and subagent_wait({ plan }) waits for a whole dependency plan). Keep subagent_status for the live 'what is it doing right now' question, subagent_interrupt to abort a run's current turn while keeping its child alive, and subagent_cancel to stop a run outright — or a whole plan when given a plan id. For a fan-out or a dependency plan, pass `tasks` with per-step overrides (task, cwd, provider, model, thinking, handoff, dependsOn, retries), an optional failurePolicy (continue by default, or stop) and retryLimit; the runs share the same concurrency budget and come back in the requested order. A plan is persisted: reload the session and it resumes at the first unfinished step without re-running a completed one. Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.";
 
 interface RunActivity {
 	phase: SubagentActivityPhase;
@@ -1227,11 +1252,91 @@ function interruptedAttachNote(run: RunRecord): string | undefined {
 	return run.status === "interrupted" ? `attach: ${run.attachCommand}` : undefined;
 }
 
+/** A message's first line, clipped to `max` characters, or nothing. */
+function oneLineNote(text: string | undefined, max = 60): string | undefined {
+	const detail = text?.split("\n", 1)[0]?.trim();
+	if (!detail) return undefined;
+	return detail.length <= max ? detail : `${detail.slice(0, max - 1)}…`;
+}
+
 /** A failure reason, clipped to the first line, or nothing. */
 function errorNote(run: RunRecord): string | undefined {
-	const detail = run.error?.split("\n", 1)[0]?.trim();
-	if (!detail) return undefined;
-	return detail.length <= 60 ? `! ${detail}` : `! ${detail.slice(0, 59)}…`;
+	const detail = oneLineNote(run.error);
+	return detail === undefined ? undefined : `! ${detail}`;
+}
+
+/** How many steps a plan has in each of a few coarse buckets. */
+function planProgress(plan: PlanRecord): string {
+	const total = plan.steps.length;
+	const done = plan.steps.filter((step) => step.status === "completed").length;
+	const failed = plan.steps.filter((step) => step.status === "failed").length;
+	const cancelled = plan.steps.filter((step) => step.status === "cancelled").length;
+	const running = plan.steps.filter((step) => step.status === "running").length;
+	const parts = [`${done}/${total} step(s) done`];
+	if (running > 0) parts.push(`${running} running`);
+	if (failed > 0) parts.push(`${failed} failed`);
+	if (cancelled > 0) parts.push(`${cancelled} cancelled`);
+	return parts.join(" · ");
+}
+
+/**
+ * The list view's projection of a PLAN — one row, whatever its step count.
+ *
+ * A plan is one piece of work, so it is one row: a ten-step plan must not spend
+ * the list's detail budget ten times (R25). Its step runs are not listed
+ * separately either — the plan block names every step's latest run id, so no run
+ * becomes unreachable, and `subagent_status({ id })` still takes any of them.
+ *
+ * The note is what a one-line row has to carry: progress while the plan runs,
+ * and the REASON once it is over (a stop reason otherwise reaches nobody — the
+ * error is on a run and the reason on the plan).
+ */
+function planListRow(plan: PlanRecord): ListRow {
+	const durationText = formatDuration(plan.createdAt, plan.finishedAt);
+	const note = plan.status === "running" ? planProgress(plan) : plan.reason ?? planProgress(plan);
+	const firstLine = oneLineNote(note, 100);
+	return {
+		id: plan.id,
+		label: "plan",
+		status: plan.status,
+		...(durationText === undefined ? {} : { durationText }),
+		createdAt: plan.createdAt,
+		// A running plan competes with the live runs for the same budget slots;
+		// a finished one is a one-liner unless nothing better is on offer.
+		detailWorthy: plan.status === "running",
+		...(firstLine ? { note: firstLine } : {}),
+	};
+}
+
+/**
+ * The plan in full: every step, its latest run and why it stopped.
+ *
+ * One block for the whole plan, which is what the detail budget buys: the steps
+ * are lines, not rows, so a ten-step plan costs one slot. Each step carries its
+ * own error, because a failure reason that lives only on the abandoned run is a
+ * reason nobody reads. `runs` is optional and only sharpens a RUNNING step: a
+ * queued or interrupted child is a different thing from a working one, and the
+ * step's own status cannot say which it is.
+ */
+function planSummary(plan: PlanRecord, runs?: Map<string, RunRecord>): string {
+	const duration = formatDuration(plan.createdAt, plan.finishedAt);
+	const lines = [
+		`plan ${plan.id}  ${plan.status}${duration ? ` · ${duration}` : ""}`,
+		`  policy: ${plan.policy} · ${planProgress(plan)}`,
+	];
+	if (plan.reason) lines.push(`  reason: ${plan.reason}`);
+	for (const [index, step] of plan.steps.entries()) {
+		const runId = step.runIds.at(-1);
+		const attempt = step.attempts > 1 ? ` · attempt ${step.attempts}/${step.retries + 1}` : "";
+		const waits = step.status === "pending" && step.dependsOn.length > 0 ? ` (waits for ${step.dependsOn.join(", ")})` : "";
+		const run = runId ? runs?.get(runId) : undefined;
+		const runState = step.status === "running" && run && run.status !== "running" ? ` · run ${run.status}` : "";
+		const error = oneLineNote(step.error, 120);
+		lines.push(
+			`  ${index + 1}. ${step.id}  ${step.status}${waits}  ${runId ?? "—"}${attempt}${runState}${error ? ` — ${error}` : ""}`,
+		);
+	}
+	return lines.join("\n");
 }
 
 function runSummary(run: RunRecord, options: { pane?: boolean; output?: boolean } = {}): string {
@@ -1358,9 +1463,9 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	 * persist chain as `runs.json`: one lock, one ordering, no second store that
 	 * could disagree with the runs it points at.
 	 *
-	 * Loading a persisted plan does NOT advance it. Ticket 06 owns resuming a plan
-	 * after reload; here the record only has to exist, be readable and keep every
-	 * step's state and attempt history so that resumption is additive.
+	 * Loading a persisted plan does NOT advance it by itself. `reconcileLoadedPlans`
+	 * does so once, after the run index is loaded too: a plan is only meaningful
+	 * next to the runs it points at.
 	 */
 	const plans = new Map<string, PlanRecord>();
 	/**
@@ -1400,6 +1505,18 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	 * released by its own timeout instead, which returns the current record.
 	 */
 	const settleWaiters = new Map<string, Set<(run: RunRecord) => void>>();
+	/**
+	 * Resolvers for pending `subagent_wait({ plan })` calls, keyed by plan id.
+	 *
+	 * A plan spans several waves, so its later run ids do not exist when the reply
+	 * is written and cannot be named there. The plan id is therefore the handle
+	 * that covers the whole thing (finding 3 from ticket 05), and this is where a
+	 * waiter on it is held. Resolved by the same place that makes the plan
+	 * terminal — `applyPlanAdvance`, the cancel cascade — so no wait adds a timer.
+	 */
+	const planWaiters = new Map<string, Set<() => void>>();
+	/** Set once the persisted plans have been reconciled against the loaded runs. */
+	let plansReconciled = false;
 	// Released at session end, before kill-on-shutdown flips any status: a waiter
 	// pending when the session ends must say "ended", never "settled".
 	const endWaiters = new Set<() => void>();
@@ -1446,6 +1563,86 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		settleWaiters.delete(run.id);
 		for (const waiter of waiters) waiter(run);
 	};
+
+	/**
+	 * Release every `subagent_wait({ plan })` call once the plan is over.
+	 *
+	 * A plan is over when nothing is running or pending, which only `plan.ts` can
+	 * decide; every caller that applies a reduction calls this afterwards. Called
+	 * only on a terminal plan: a plan that is still running has nothing to report
+	 * yet, and its waiters keep waiting on later waves.
+	 */
+	const notifyPlanWaiters = (plan: PlanRecord): void => {
+		if (plan.status === "running") return;
+		const waiters = planWaiters.get(plan.id);
+		if (!waiters) return;
+		planWaiters.delete(plan.id);
+		for (const waiter of waiters) waiter();
+	};
+
+	/**
+	 * Wait until a plan is terminal, or `timeoutMs` elapses, whichever first.
+	 *
+	 * The plan-level wait from ticket 05's finding 3: a dependency plan's reply
+	 * can only name the first wave's run ids, because later waves do not exist yet,
+	 * so the plan id is the only handle that covers the whole graph. One registered
+	 * resolver, no poll: `notifyPlanWaiters` releases it from whichever path made
+	 * the plan terminal — a settlement, a cancel, a reconciliation at load.
+	 *
+	 * Same contract as `waitForRunsSettled`: a timeout returns the current state
+	 * rather than an error, a session end releases the call early, and an aborted
+	 * tool call rejects.
+	 */
+	const waitForPlanSettled = (
+		plan: PlanRecord,
+		timeoutMs: number,
+		signal: AbortSignal | undefined,
+	): Promise<{ timedOut: boolean; ended: boolean }> =>
+		new Promise<{ timedOut: boolean; ended: boolean }>((resolve, reject) => {
+			if (plan.status !== "running") return resolve({ timedOut: false, ended: false });
+			let settled = false;
+			let sawEnded = false;
+			const waiter = (): void => finish(false);
+			const cleanup = (): void => {
+				const set = planWaiters.get(plan.id);
+				if (set) {
+					set.delete(waiter);
+					if (set.size === 0) planWaiters.delete(plan.id);
+				}
+				endWaiters.delete(end);
+				clearTimeout(timer);
+				signal?.removeEventListener("abort", onAbort);
+			};
+			const timer = setTimeout(() => finish(true), Math.max(0, timeoutMs));
+			const end = (): void => {
+				sawEnded = true;
+				finish(false);
+			};
+			const finish = (timedOut: boolean): void => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				resolve({ timedOut, ended: sawEnded });
+			};
+			const onAbort = (): void => {
+				if (settled) return;
+				settled = true;
+				cleanup();
+				reject(new Error("Subagent wait aborted."));
+			};
+			if (signal?.aborted) {
+				onAbort();
+				return;
+			}
+			endWaiters.add(end);
+			let set = planWaiters.get(plan.id);
+			if (!set) {
+				set = new Set();
+				planWaiters.set(plan.id, set);
+			}
+			set.add(waiter);
+			signal?.addEventListener("abort", onAbort, { once: true });
+		});
 
 	/**
 	 * Wait until every named run is terminal, or `timeoutMs` elapses, whichever
@@ -2437,6 +2634,11 @@ const noteInterrupt = async (
 				mode: 0o600,
 			});
 			if (usesSessionFile(run.mode ?? "standalone")) {
+				// `sessionContext` is the CURRENT session's ctx, refreshed by every
+				// `ensureSessionPaths` call. A plan resumed after a reload must hand off
+				// from the branch the loading session is on, never from whatever context
+				// created the plan — that context is stale, and forking it would seed the
+				// child with a conversation the user has already left.
 				if (!sessionContext) throw new Error("No parent session context is available for a handoff step.");
 				await prepareHandoffSession(run, sessionContext);
 			}
@@ -2452,8 +2654,9 @@ const noteInterrupt = async (
 	const abandonQueuedStep = async (step: PlanStepState, reason: string): Promise<void> => {
 		const runId = step.runIds.at(-1);
 		const run = runId ? runs.get(runId) : undefined;
-		// A step whose child is already alive is left to record its own outcome:
-		// `stop` only prevents further starts, and the cancel cascade is ticket 06's.
+		// A step whose child is already alive is left to record its own outcome: the
+		// failure policy only prevents further STARTS, and cancelling a live child is
+		// `subagent_cancel`'s job (which also settles the plan step).
 		// `launching` covers the admitted-but-not-submitted window: the queue flipped
 		// the run to `running` before its child command went out, and `launchRun`
 		// re-checks this cancellation before submitting.
@@ -2475,13 +2678,17 @@ const noteInterrupt = async (
 		plan: PlanRecord,
 		advance: ReturnType<typeof settlePlanStep>,
 	): Promise<void> => {
+		// Whatever this reduction did, a plan that is no longer running releases the
+		// callers waiting on `subagent_wait({ plan })`. Done before the early return
+		// so a reduction that only recorded a late step outcome still releases them.
+		notifyPlanWaiters(plan);
 		if (!advance.changed) return;
 
 		if (advance.stop) {
 			// `stop` means no further step STARTS. Queued runs belong to steps that
 			// were admitted but never got a child, so they are abandoned here; live
-			// children keep running and record their own outcome (a cancel cascade is
-			// ticket 06's job).
+			// children keep running and record their own outcome — cancelling a live
+			// child is `subagent_cancel`'s job, not a failure policy's.
 			for (const stepId of queuedStopCandidates(plan)) {
 				const step = plan.steps.find((candidate) => candidate.id === stepId);
 				if (step) await abandonQueuedStep(step, "Abandoned: the plan stopped after another step failed.");
@@ -2498,9 +2705,14 @@ const noteInterrupt = async (
 		for (const stepId of advance.launch) {
 			if (plan.status !== "running") break;
 			const step = plan.steps.find((candidate) => candidate.id === stepId);
+			// Re-checked here, synchronously with `launchPlanStep`'s own guard: a
+			// second advance (a settlement landing right after `session_start`, or a
+			// reconciliation) may have launched this step already, and `pending` is
+			// the only truthful state to launch from.
 			if (!step || step.status !== "pending") continue;
 			await launchPlanStep(plan, step);
 		}
+		notifyPlanWaiters(plan);
 		refreshStatusWidget();
 	};
 
@@ -2508,23 +2720,56 @@ const noteInterrupt = async (
 	 * The settle path's plan hook: called once per settled run, right where the
 	 * run's own finalisation has already been persisted and announced.
 	 *
-	 * Non-completed outcomes are treated as `failed` for planning purposes. A run
-	 * the user cancelled is not finalised through this path at all (ticket 06 owns
-	 * the cancel cascade), so nothing here can mistake a cancellation for a
-	 * successful dependency.
+	 * Two outcomes reach the plan from here. `completed` / `failed` go through
+	 * `settlePlanStep`. `cancelled` goes through `cancelPlanStep`, because a cancel
+	 * produces no result file and never reaches the finaliser: without this the
+	 * step would stay `running` with nothing left able to settle it.
 	 */
-	const advancePlanForRun = async (run: RunRecord): Promise<void> => {
-		if (!run.planId || !run.stepId) return;
-		if (run.status !== "completed" && run.status !== "failed") return;
+	const advancePlanForRun = async (run: RunRecord): Promise<ReturnType<typeof settlePlanStep> | undefined> => {
+		if (!run.planId || !run.stepId) return undefined;
 		const plan = plans.get(run.planId);
-		if (!plan) return;
-		const advance = settlePlanStep(plan, {
-			stepId: run.stepId,
-			runId: run.id,
-			outcome: run.status,
-			error: run.error,
-		});
+		if (!plan) return undefined;
+		const advance =
+			run.status === "cancelled"
+				? cancelPlanStep(plan, run.stepId, `Cancelled: step "${run.stepId}" was cancelled.`)
+				: run.status === "completed" || run.status === "failed"
+					? settlePlanStep(plan, {
+							stepId: run.stepId,
+							runId: run.id,
+							outcome: run.status,
+							error: run.error,
+						})
+					: undefined;
+		if (!advance) return undefined;
 		await applyPlanAdvance(plan, advance);
+		return advance;
+	};
+
+	/**
+	 * Take a run out of service: kill its child, mark it cancelled and read the
+	 * usage it already burned.
+	 *
+	 * Shared by `subagent_cancel` and the plan-level cascade so both cancel the
+	 * same way. The caller persists and wakes waiters, because a plan cancel does
+	 * both once for several runs.
+	 *
+	 * Returns false for a run that is already settled and owns no child, so an
+	 * idempotent cascade cannot report work it did not do.
+	 */
+	const cancelRunRecord = async (run: RunRecord, reason?: string): Promise<boolean> => {
+		if (isTerminal(run.status) && !holdsChild(run.status)) return false;
+		clearTimer(run.id);
+		resultFailures.delete(run.id);
+		run.interruptRequestedAt = undefined;
+		await killTmuxSession(run);
+		run.status = "cancelled";
+		run.finishedAt = Date.now();
+		if (reason) run.error ??= reason;
+		// A cancelled run is very often one that had already spent real tokens;
+		// read them before the terminal status is persisted, not never. The session
+		// file survives the tmux kill, so this is still readable.
+		await captureRunUsage(run);
+		return true;
 	};
 
 	const loadPersistedRuns = async (): Promise<void> => {
@@ -2543,14 +2788,16 @@ const noteInterrupt = async (
 			// result.json written after the reload could never finalize it.
 			if (run.status === "running" || run.status === "interrupted") scheduleWatch(run);
 		}
-		await drainQueue();
+		// The drain is the CALLER's step, not this one: admitting a queued run before
+		// reconciliation has folded the plan in launches work a `stop` policy already
+		// refused (a crash between the two index writes leaves exactly that state).
 	};
 
 	/**
-	 * Read persisted plans so a later persist does not erase them and ticket 06 can
-	 * resume from them. Deliberately does NOT advance or launch anything: resuming
-	 * after reload is ticket 06's scope, and launching from here would start steps
-	 * the moment a session opens.
+	 * Read persisted plans so a later persist does not erase them.
+	 *
+	 * Loading does NOT reduce a plan by itself; `reconcileLoadedPlans` runs once
+	 * after the run index is loaded and is the only thing that may resume one.
 	 */
 	const loadPersistedPlans = async (): Promise<void> => {
 		if (!plansIndexPath) return;
@@ -2563,6 +2810,47 @@ const noteInterrupt = async (
 		for (const plan of parsed) {
 			if (!plan?.id || !Array.isArray(plan.steps)) continue;
 			plans.set(plan.id, plan);
+		}
+	};
+
+	/**
+	 * One-shot, load-time reconciliation of every persisted plan (R23).
+	 *
+	 * The rules live in `plan.ts` (`reconcilePlan`) because they are pure. What
+	 * matters here is WHERE the run view comes from: `runs` as loaded, which is
+	 * the whole truth about what a child is doing — and the reason the plan index
+	 * can be behind it. A test that seeded a plan index by hand (or a crash
+	 * between the two renames) lands here.
+	 *
+	 * Runs are matched by `planId` + `stepId` rather than by the step's recorded
+	 * `runIds`, so a run the plan index never wrote is still found. An `interrupted`
+	 * run is matched too and counts as live: its child still exists.
+	 *
+	 * Idempotent against the settle path. Every reduction goes through the same
+	 * guarded plan functions, and a step is launched only while it is `pending`, so
+	 * a settlement landing right after `session_start` cannot double-launch one.
+	 * This runs once per loaded session; the settle path stays the advance source
+	 * and no timer is created here.
+	 */
+	const reconcileLoadedPlans = async (): Promise<void> => {
+		if (plansReconciled) return;
+		plansReconciled = true;
+		for (const plan of [...plans.values()]) {
+			const runsByStep: Record<string, PlanStepRun[]> = {};
+			for (const run of runs.values()) {
+				if (run.planId !== plan.id || !run.stepId) continue;
+				(runsByStep[run.stepId] ??= []).push({
+					runId: run.id,
+					status: run.status,
+					error: run.error,
+					createdAt: run.createdAt,
+				});
+			}
+			const { advance, recovered } = reconcilePlan(plan, runsByStep);
+			if (recovered.length > 0) {
+				console.error(`[tmux-subagent] plan ${plan.id} reconciled after reload: ${recovered.join("; ")}`);
+			}
+			await applyPlanAdvance(plan, advance);
 		}
 	};
 
@@ -2596,11 +2884,17 @@ const noteInterrupt = async (
 		runsIndexPath = path.join(sessionRunsDir, "runs.json");
 		plansIndexPath = path.join(sessionRunsDir, "plans.json");
 		await mkdir(sessionRunsDir, { recursive: true, mode: 0o700 });
-		// Plans FIRST: `loadPersistedRuns` ends by draining the queue, and draining
-		// persists — with an empty plans map that write would erase `plans.json`
-		// before it was ever read.
+		// Plans FIRST: everything below may persist (reconciliation, then the drain),
+		// and persisting with an empty plans map would erase `plans.json` before it
+		// was ever read.
 		await loadPersistedPlans();
 		await loadPersistedRuns();
+		// Then, once, reconcile what the reload missed. After BOTH indexes are in
+		// memory, because reconciliation's job is to make them agree.
+		await reconcileLoadedPlans();
+		// Only now may queued runs be admitted: a queued plan step whose failure is
+		// still only in `runs.json` must be abandoned by the policy first.
+		await drainQueue();
 		void gcRunDirectories();
 	};
 
@@ -2713,8 +3007,8 @@ const noteInterrupt = async (
 		promptSnippet: "Start delegated, non-blocking, tmux-backed Pi subagents (one or a dependency plan)",
 		promptGuidelines: [
 			"Use subagent to delegate an isolated task without blocking: it returns immediately, so start several when useful and keep working.",
-			"For a fan-out, pass `tasks` with per-step overrides instead of several calls: the runs share the same concurrency budget and come back in the order requested. Add `dependsOn` step ids to make a step wait for its dependencies, and choose `failurePolicy` (`continue` by default, or `stop`).",
-			"Start, then wait once: collect a finished run's output with subagent_wait({ id }) as soon as you have started the run — or subagent_wait({ ids }) for a whole fan-out. Keep subagent_status for the live 'what is it doing right now' question, and for runs you deliberately left unwaited.",
+			"For a fan-out, pass `tasks` with per-step overrides instead of several calls: the runs share the same concurrency budget and come back in the order requested. Add `dependsOn` step ids to make a step wait for its dependencies, and choose `failurePolicy` (`continue` by default, or `stop`). A plan is persisted and resumes after a reload at the first unfinished step.",
+			"Start, then wait once: collect a finished run's output with subagent_wait({ id }) as soon as you have started the run — or subagent_wait({ ids }) for several runs. For a fan-out or dependency plan use subagent_wait({ plan }) once: later waves have no run ids yet, so the plan id is the only handle that covers all of them. Keep subagent_status for the live 'what is it doing right now' question, and for runs you deliberately left unwaited.",
 			"To stop a run that is going the wrong way, prefer subagent_interrupt (keeps the child and its transcript, then attach to steer it) over subagent_cancel (throws the run away). An interrupted run still occupies a concurrency slot until it is cancelled, so cancel the ones you are done with.",
 			"subagent_resume needs a run whose child is really gone: cancel or finish it first, or attach to an interrupted run and type the follow-up there.",
 		],
@@ -2811,9 +3105,13 @@ const noteInterrupt = async (
 					.filter((id): id is string => Boolean(id))
 					.map((id) => runs.get(id))
 					.filter((run): run is RunRecord => Boolean(run));
-				if (ordered.length > 0) {
-					lines.push(`Wait: call subagent_wait({ ids: [${ordered.map((run) => `"${run.id}"`).join(", ")}] }) once to collect this fan-out.`);
-				}
+				// The plan id, not the first wave's run ids: a dependency plan's later
+				// steps have no run yet, so no list of ids can cover the whole thing
+				// (finding 3 from ticket 05).
+				lines.push(
+					`Wait: call subagent_wait({ plan: "${plan.id}" }) once — it returns when every step is over, with each step's status and run id.`,
+				);
+				lines.push(`Inspect or cancel the whole plan with subagent_status({ id }) and subagent_cancel({ id }) on the plan id.`);
 				return { content: [{ type: "text", text: lines.join("\n") }], details: { plan, runs: ordered } };
 			}
 
@@ -2952,10 +3250,13 @@ const noteInterrupt = async (
 			name: "subagent_wait",
 			label: "Subagent Wait",
 			description:
-				"subagent_wait blocks once until a subagent run settles and returns its result, instead of polling subagent_status. With an id: resolves as soon as that run reaches a terminal state (completed, failed, cancelled, interrupted) and returns the same record subagent_status({ id }) returns; if timeoutMs elapses first, returns the current record plus the latest pane output — a timed-out wait is a normal result, never an error. A run still queued at the timeout is reported as queued; a run that failed to start, was cancelled, died or was interrupted is terminal and returns immediately. With ids: waits until all of the named runs are terminal (or the timeout) and returns every settled run plus the still-running ones, in the order given; a settled run whose child is gone returns its output (when it has one) without the dead pane, which is carried only for a run whose child is still alive (running or interrupted). If the session ends before the run settles, the call returns early with the current record and reports that the session ended (details.ended), never that the run settled. Built on the existing settle watcher, so results land within about a second of the child's settle event; there is no second poll loop. To ask what a run is doing right now without waiting, use subagent_status.",
-			promptSnippet: "Wait once for a subagent run to settle and collect its result",
+				"subagent_wait blocks once until a subagent run settles and returns its result, instead of polling subagent_status. With an id: resolves as soon as that run reaches a terminal state (completed, failed, cancelled, interrupted) and returns the same record subagent_status({ id }) returns; if timeoutMs elapses first, returns the current record plus the latest pane output — a timed-out wait is a normal result, never an error. A run still queued at the timeout is reported as queued; a run that failed to start, was cancelled, died or was interrupted is terminal and returns immediately. With plan: waits until a whole dependency plan is over — every step completed, failed or cancelled — and returns the plan's status, its reason and every step's status and latest run id. Use it for a fan-out or a dependency plan instead of ids: later waves' run ids do not exist when the plan's reply is written, so the plan id is the only handle that covers all of them, while ids can only name the runs that exist now. With ids: waits until all of the named runs are terminal (or the timeout) and returns every settled run plus the still-running ones, in the order given; a settled run whose child is gone returns its output (when it has one) without the dead pane, which is carried only for a run whose child is still alive (running or interrupted). If the session ends before the run settles, the call returns early with the current record and reports that the session ended (details.ended), never that the run settled. Built on the existing settle watcher, so results land within about a second of the child's settle event; there is no second poll loop. To ask what a run is doing right now without waiting, use subagent_status.",
+			promptSnippet: "Wait once for a subagent run or a whole plan to settle and collect its result",
 			parameters: Type.Object({
-				id: Type.Optional(Type.String({ description: "Run id to wait for. Omit when passing ids." })),
+				id: Type.Optional(Type.String({ description: "Run id to wait for. Omit when passing ids or plan." })),
+				plan: Type.Optional(
+					Type.String({ description: "Plan id to wait for: resolves when the whole plan is terminal, whatever waves are still to launch." }),
+				),
 				ids: Type.Optional(
 					Type.Array(Type.String(), {
 						description:
@@ -2972,10 +3273,28 @@ const noteInterrupt = async (
 
 			async execute(_toolCallId, params, signal, _onUpdate, ctx) {
 				await ensureSessionPaths(ctx);
-				if (params.id !== undefined && params.ids !== undefined) {
-					throw new Error("subagent_wait takes either id or ids, not both.");
+				const given = [params.id, params.plan, params.ids].filter((value) => value !== undefined).length;
+				if (given > 1) {
+					throw new Error("subagent_wait takes either id or ids, not both — or plan on its own.");
 				}
 				const timeoutMs = resolveWaitTimeout(params.timeoutMs);
+				if (params.plan !== undefined) {
+					const id = params.plan.trim();
+					const plan = plans.get(id);
+					if (!plan) throw new Error(`Unknown subagent plan: ${id}`);
+					const { timedOut, ended } = await waitForPlanSettled(plan, timeoutMs, signal);
+					const pending = plan.steps.filter((step) => step.status === "running" || step.status === "pending").length;
+					const lines = [
+						ended
+							? `Session ended before plan ${id} finished (status: ${plan.status}, ${pending} step(s) still live). The plan is persisted: reload this session and it resumes at the first unfinished step.`
+							: timedOut
+								? `Plan ${id} did not finish within ${timeoutMs}ms (status: ${plan.status}, ${pending} step(s) still live). It keeps running; wait again, or inspect it with subagent_status({ id: "${id}" }).`
+								: `Plan ${id} finished: ${plan.status}.`,
+						"",
+						planSummary(plan, runs),
+					];
+					return { content: [{ type: "text", text: lines.join("\n") }], details: { plan, timedOut, ended, status: plan.status } };
+				}
 				if (params.id !== undefined) {
 					const id = params.id.trim();
 					const run = runs.get(id);
@@ -2994,7 +3313,12 @@ const noteInterrupt = async (
 					const targets: RunRecord[] = [];
 					for (const id of ids) {
 						const run = runs.get(id);
-						if (!run) throw new Error(`Unknown subagent run: ${id}`);
+						if (!run) {
+							throw new Error(
+								`Unknown subagent run: ${id}` +
+									(plans.has(id) ? ". That is a plan id: pass it as plan to wait for the whole plan." : ""),
+							);
+						}
 						targets.push(run);
 					}
 					const { timedOut, ended } = await waitForRunsSettled(targets, timeoutMs, signal);
@@ -3019,7 +3343,7 @@ const noteInterrupt = async (
 					}
 					return { content: [{ type: "text", text: lines.join("\n") }], details: { runs: targets, timedOut, ended } };
 				}
-				throw new Error("subagent_wait needs an id or a list of ids.");
+				throw new Error("subagent_wait needs an id or a list of ids, or plan.");
 			},
 		},
 
@@ -3027,10 +3351,10 @@ const noteInterrupt = async (
 			name: "subagent_status",
 			label: "Subagent Status",
 			description:
-				"Answer 'what is this run doing right now', or list this session's runs. With an id: that run's status, model, tmux attach command, its final output once finished and its latest pane output while running. Without an id: every run's status, duration and usage, with the full detail — pane, activity, attach command — for at most the two runs that still hold a child, and a one-line row for the rest. Pass compact: true for one line per run and no pane. To wait for a run to finish, use subagent_wait instead of polling this. Non-blocking.",
-			promptSnippet: "Inspect non-blocking subagent runs and their output",
+				"Answer 'what is this run doing right now', or list this session's runs and plans. With an id: that run's status, model, tmux attach command, its final output once finished and its latest pane output while running — or, for a PLAN id, the plan's status, its reason and every step's status, latest run id and error. Without an id: one row per run and one row per plan, each step run of a plan folded into its plan's row so the list stays bounded, with the full detail — pane, activity, attach command, or every plan step — for at most two of them and a one-line row for the rest. Pass compact: true for one line per run and per plan and no pane. To wait for a run or a whole plan to finish, use subagent_wait instead of polling this. Non-blocking.",
+			promptSnippet: "Inspect non-blocking subagent runs, plans and their output",
 			parameters: Type.Object({
-				id: Type.Optional(Type.String({ description: "Run id to inspect. Omit to list all runs in this session." })),
+				id: Type.Optional(Type.String({ description: "Run id to inspect, or a plan id to inspect that plan. Omit to list all runs and plans in this session." })),
 				include_output: Type.Optional(
 					Type.Boolean({
 						description:
@@ -3040,7 +3364,7 @@ const noteInterrupt = async (
 				compact: Type.Optional(
 					Type.Boolean({
 						description:
-							"List view only. One short line per run (id, status, elapsed, usage) and no pane or detail block. Defaults to false. Use it for a cheap poll; inspect a specific run by id for its output. Ignored together with an id, which always returns the full record.",
+							"List view only. One short line per run and per plan (id, status, elapsed, usage) and no pane or detail block. Defaults to false. Use it for a cheap poll; inspect a specific run or plan by id for its output. Ignored together with an id, which always returns the full record.",
 					}),
 				),
 			}),
@@ -3049,34 +3373,58 @@ const noteInterrupt = async (
 				await ensureSessionPaths(ctx);
 				const includeOutput = params.include_output ?? false;
 				const runsArray = [...runs.values()].sort((a, b) => a.createdAt - b.createdAt);
+				const plansArray = [...plans.values()].sort((a, b) => a.createdAt - b.createdAt);
 				if (params.id) {
 					const run = runs.get(params.id.trim());
-					if (!run) throw new Error(`Unknown subagent run: ${params.id}`);
-					// `subagent_wait` is the blocking path, but a finished run's result must
-					// still come back here: `include_output` is a LIST-view control and
-					// never suppresses the output for a single run.
-					//
-					// The pane is included either way. For a live run it is the only view of
-					// the child there is, and for a finished one it is usually the answer —
-					// so gating it behind the flag would make `include_output: true` return
-					// strictly less than the default call.
-					return {
-						content: [{ type: "text", text: runSummary(run, { pane: true, output: true }) }],
-						details: { runs: [run] },
-					};
+					if (run) {
+						// `subagent_wait` is the blocking path, but a finished run's result must
+						// still come back here: `include_output` is a LIST-view control and
+						// never suppresses the output for a single run.
+						//
+						// The pane is included either way. For a live run it is the only view of
+						// the child there is, and for a finished one it is usually the answer —
+						// so gating it behind the flag would make `include_output: true` return
+						// strictly less than the default call.
+						return {
+							content: [{ type: "text", text: runSummary(run, { pane: true, output: true }) }],
+							details: { runs: [run] },
+						};
+					}
+					// The same tool inspects a plan by id: the plan IS the record for its steps,
+					// and making a caller guess that step runs are the only handle would hide
+					// exactly the status this ticket is about.
+					const plan = plans.get(params.id.trim());
+					if (plan) {
+						return { content: [{ type: "text", text: planSummary(plan, runs) }], details: { plan } };
+					}
+					throw new Error(`Unknown subagent run or plan: ${params.id}`);
 				}
-				if (runsArray.length === 0) {
-					return { content: [{ type: "text", text: "No subagent runs in this session." }], details: { runs: [] } };
+				if (runsArray.length === 0 && plansArray.length === 0) {
+					return { content: [{ type: "text", text: "No subagent runs in this session." }], details: { runs: [], plans: [] } };
 				}
 				// The budget spans the WHOLE list (see listview.ts): without it a poll
 				// pays PANE_PREVIEW_LINES for every live run, which at four concurrent
 				// runs is most of the payload and says little a status line does not.
-				// `compact` drops the detail blocks entirely. Each row carries its run so
-				// the detail renderer needs no second lookup.
+				// `compact` drops the detail blocks entirely.
+				//
+				// A plan and its steps are ONE row, not one row per step: a ten-step plan
+				// must not spend the budget ten times (R25), and the plan block names
+				// every step's latest run id, so no run becomes unreachable. A run whose
+				// plan is gone (or whose plan file was pruned) stays a row of its own.
+				const planIds = new Set(plansArray.map((plan) => plan.id));
+				const stepRuns = runsArray.filter((run) => run.planId !== undefined && planIds.has(run.planId));
+				const entries: (ListRow & { run?: RunRecord; plan?: PlanRecord })[] = [
+					...runsArray
+						.filter((run) => !(run.planId !== undefined && planIds.has(run.planId)))
+						.map((run) => ({ ...listRow(run), run })),
+					...plansArray.map((plan) => ({ ...planListRow(plan), plan })),
+				].sort((a, b) => a.createdAt - b.createdAt);
 				const text = renderRunList({
-					runs: runsArray.map((run) => ({ ...listRow(run), run })),
+					runs: entries,
 					compact: params.compact === true,
-					renderDetail: ({ run }) => {
+					renderDetail: (entry) => {
+						if (entry.plan) return planSummary(entry.plan, runs);
+						const run = entry.run as RunRecord;
 						// An interrupted run has no final output yet but its pane is the
 						// only view of the child's prompt, so it is shown like a running one.
 						const live = showsPane(run.status);
@@ -3087,30 +3435,77 @@ const noteInterrupt = async (
 					// ask. Only include_output can be withheld this way, so only it needs
 					// saying; the pane is a nicety the caller did not ask for by name.
 					omittedNote: (omitted) => {
-						const withheld = omitted.filter(({ run }) => !showsPane(run.status) && run.output !== undefined);
-						if (withheld.length === 0) return undefined;
-						return (
-							`${withheld.length} finished run(s) have output that this list's detail budget left out. ` +
-							`Call subagent_status({ id }) for each; omit include_output to see status only.`
-						);
+						const withheld = omitted.filter((entry) => entry.run && !showsPane(entry.run.status) && entry.run.output !== undefined);
+						const notes: string[] = [];
+						if (withheld.length > 0) {
+							notes.push(
+								`${withheld.length} finished run(s) have output that this list's detail budget left out. ` +
+									`Call subagent_status({ id }) for each; omit include_output to see status only.`,
+							);
+						}
+						// Plan steps are folded into their plan's row, so `include_output` cannot
+						// reach them from here. Say where they went rather than dropping them
+						// silently — the plan block in compact/detail form never carries output.
+						const folded = includeOutput ? stepRuns.filter((run) => run.output !== undefined) : [];
+						if (folded.length > 0) {
+							notes.push(
+								`${folded.length} plan step run(s) are folded into their plan's row; ` +
+									`inspect the plan by id to see each step's run id, then inspect that run by id.`,
+							);
+						}
+						return notes.length > 0 ? notes.join("\n") : undefined;
 					},
 				});
-				return { content: [{ type: "text", text }], details: { runs: runsArray } };
+				return { content: [{ type: "text", text }], details: { runs: runsArray, plans: plansArray } };
 			},
 		},
 
 		{
 			name: "subagent_cancel",
 			label: "Subagent Cancel",
-			description: "Cancel a subagent run by id: kill its tmux session and mark it cancelled.",
-			promptSnippet: "Cancel a running non-blocking subagent",
+			description:
+				"Cancel a subagent run by id: kill its tmux session and mark it cancelled. A plan step's plan is settled from the cancellation, so a plan whose only step you cancelled ends there instead of staying running. Pass a PLAN id instead to cancel the whole plan: its live steps are cancelled, steps that never started are cancelled, and completed steps keep their records. Cancelling one step of a `continue` plan leaves independent branches running and cancels only what depended on it, because those steps can never run now; under `stop` nothing further starts.",
+			promptSnippet: "Cancel a running non-blocking subagent or a whole plan",
 			parameters: Type.Object({
-				id: Type.String({ description: "Run id to cancel." }),
+				id: Type.String({ description: "Run id to cancel, or a plan id to cancel the whole plan." }),
 			}),
 
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				await ensureSessionPaths(ctx);
 				const id = params.id.trim();
+
+				const plan = plans.get(id);
+				if (plan) {
+					const cancelled = cancelPlan(plan, "Cancelled: the plan was cancelled by subagent_cancel.");
+					if (!cancelled.changed) {
+						return { content: [{ type: "text", text: `Plan ${id} is already ${plan.status}.` }], details: { plan } };
+					}
+					const dropped = cancelled.cancelled.filter((stepId) => !cancelled.live.includes(stepId));
+					const kept = plan.steps.filter((step) => step.status === "completed" || step.status === "failed").map((step) => step.id);
+					const cancelledRuns: RunRecord[] = [];
+					const liveNotes: string[] = [];
+					for (const stepId of cancelled.live) {
+						const runId = plan.steps.find((step) => step.id === stepId)?.runIds.at(-1);
+						const run = runId ? runs.get(runId) : undefined;
+						liveNotes.push(`${stepId} (${runId ?? "no run"})`);
+						if (run && (await cancelRunRecord(run, `Cancelled: plan ${plan.id} was cancelled.`))) cancelledRuns.push(run);
+					}
+					await persist();
+					for (const run of cancelledRuns) notifyWaiters(run);
+					notifyPlanWaiters(plan);
+					refreshStatusWidget();
+					void drainQueue();
+					const lines = [
+						plan.status === "cancelled"
+							? `Plan ${id} cancelled.`
+							: `Plan ${id} was already ${plan.status}; released the children it still owned.`,
+						`  live steps cancelled: ${liveNotes.join(", ") || "none"}`,
+						`  not started, cancelled: ${dropped.join(", ") || "none"}`,
+						`  kept with their records: ${kept.join(", ") || "none"}`,
+					];
+					return { content: [{ type: "text", text: lines.join("\n") }], details: { plan, runs: cancelledRuns } };
+				}
+
 				const run = runs.get(id);
 				if (!run) throw new Error(`Unknown subagent run: ${id}`);
 				// An interrupted run is terminal but still owns a live child, so cancel
@@ -3119,21 +3514,25 @@ const noteInterrupt = async (
 				if (isTerminal(run.status) && !holdsChild(run.status)) {
 					return { content: [{ type: "text", text: `Subagent ${id} is already ${run.status}.` }], details: run };
 				}
-				clearTimer(run.id);
-				resultFailures.delete(run.id);
-				run.interruptRequestedAt = undefined;
-				await pi.exec("tmux", tmuxArgs("kill-session", "-t", run.tmuxSession)).catch(() => undefined);
-				run.status = "cancelled";
-				run.finishedAt = Date.now();
-				// A cancelled run is very often one that had already spent real tokens;
-				// read them before the terminal status is persisted, not never. The
-				// session file survives the tmux kill, so this is still readable.
-				await captureRunUsage(run);
+				await cancelRunRecord(run);
 				await persist();
 				notifyWaiters(run);
+				// The cancel path is the second place that knows a step ended: settle it,
+				// or a plan whose only step was cancelled waits forever for a result that
+				// will never exist.
+				const advance = await advancePlanForRun(run);
 				refreshStatusWidget();
 				void drainQueue();
-				return { content: [{ type: "text", text: `Subagent ${id} cancelled.` }], details: run };
+				const lines = [`Subagent ${id} cancelled.`];
+				const parentPlan = run.planId ? plans.get(run.planId) : undefined;
+				if (advance?.changed && parentPlan) {
+					lines.push(`Plan ${parentPlan.id} step "${run.stepId}": cancelled.`);
+					if (advance.cancelled.length > 0) {
+						lines.push(`Also cancelled, because they can never run now: ${advance.cancelled.join(", ")}.`);
+					}
+					lines.push(`Plan status: ${parentPlan.status}${parentPlan.reason ? ` — ${parentPlan.reason}` : ""}.`);
+				}
+				return { content: [{ type: "text", text: lines.join("\n") }], details: run };
 			},
 		},
 
@@ -3212,6 +3611,12 @@ const noteInterrupt = async (
 				// the tool's own cancellation says nothing about whether it landed.
 				const outcome = await awaitInterruptMarker(run, baseline, interruptConfirmMs, signal);
 
+				// No plan hook here, deliberately. A plan step is settled by the finaliser,
+				// by `subagent_cancel` and by load reconciliation — not by an interrupt,
+				// because an interrupted child is still alive with the watcher still
+				// polling: the step stays `running` and can still settle from a later
+				// result. It is the cancel that eventually releases that child, and that
+				// is the call which settles the step.
 				const lines =
 					outcome.state === "confirmed"
 						? [

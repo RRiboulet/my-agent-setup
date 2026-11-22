@@ -63,8 +63,9 @@ Added:
   exists. A permanently failed step follows `failurePolicy`: `continue` (the
   default) cancels only its transitive dependents and keeps independent branches
   running, while `stop` starts nothing further, abandons a step whose run was
-  still queued, and marks the plan failed (live children are not killed — that
-  cascade is a later change). A stop that lands while a child is being
+  still queued, and marks the plan failed (the failure policy does not kill live
+  children; `subagent_cancel` is what stops a run). A stop that lands while a
+  child is being
   submitted kills that child instead of writing the abandoned run back as
   running. `retries` per step, or a plan-level `retryLimit`,
   is enforced as a new run per attempt with its own run id, report and usage, so
@@ -76,6 +77,36 @@ Added:
   readiness/graph/policy/retry rules and `lifecycle-plan.test.ts` covers fan-out
   ordering, budget sharing, dependency order, rejection, both policies and the
   retry cap.
+
+- **A dependency plan now survives reload, cancels cleanly and is inspectable as
+  one row.** Loading a session reconciles each persisted plan against the run
+  index once: a step whose run is still queued, running or interrupted is left
+  alone — its child can outlive the parent reload and the watcher re-arms for it —
+  while a step whose run already completed, failed or was cancelled is folded in
+  rather than re-run. A run the plan index never recorded, which is exactly the
+  state a crash between the two `runs.json`/`plans.json` renames leaves, is
+  adopted instead of being launched a second time; only a step with no live run at
+  all is reported as interrupted and follows the plan's policy, and it is never
+  reported as complete. A resumed step that needs a fork snapshot hands off from
+  the session that is loading, not the one that created the plan.
+  `subagent_cancel` now settles a plan step. A cancel produces no `result.json`,
+  so the finaliser never saw it, and a `continue` plan whose only step was
+  cancelled used to sit `running` with a `running` step and nothing able to settle
+  it. Cancelling one step cancels its transitive dependents, which can never run
+  now and so must not be left `pending`, and keeps independent branches alive;
+  under `stop` it starts nothing further and ends the plan as `cancelled`, because
+  a deliberate cancel is not a failure. A plan id is a handle wherever it matters:
+  `subagent_cancel({ id })` cancels the whole plan and its live children and keeps
+  completed steps' records, `subagent_status({ id })` shows every step with its
+  latest run id and error, and `subagent_wait({ plan })` blocks until the plan is
+  over — added because a dependency plan's later waves have no run ids to name in
+  the reply, so the plan id is the only handle that covers them. The status list
+  shows a plan as one row with its step runs folded into it, so a ten-step plan
+  spends the list's detail budget once rather than once per step; the one-line
+  form carries progress while it runs and the stop reason once it ends. Tests:
+  `plan.test.ts` pins the cancellation and reconciliation rules, and
+  `lifecycle-plan-reload.test.ts`, `lifecycle-plan-cancel.test.ts` and
+  `lifecycle-plan-status.test.ts` drive the real factory through each one.
 
 Maintenance:
 

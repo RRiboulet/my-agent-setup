@@ -7,13 +7,18 @@ import { test } from "node:test";
 
 import {
 	buildPlan,
+	cancelPlan,
+	cancelPlanStep,
 	failPlanStep,
 	markStepLaunched,
 	queuedStopCandidates,
 	readyStepIds,
+	reconcilePlan,
+	resolvePlan,
 	settlePlanStep,
 	type PlanOptions,
 	type PlanRecord,
+	type PlanStepRun,
 	type PlanStepSpec,
 } from "../plan.ts";
 
@@ -39,6 +44,12 @@ function build(specs: PlanStepSpec[], options: PlanOptions = {}): PlanRecord {
 
 function launch(plan: PlanRecord, stepId: string, runId: string): void {
 	assert.equal(markStepLaunched(plan, stepId, runId), true, `step ${stepId} must be launchable`);
+}
+
+function step(plan: PlanRecord, id: string) {
+	const found = plan.steps.find((candidate) => candidate.id === id);
+	assert.ok(found, `plan has no step ${id}`);
+	return found;
 }
 
 test("fan-out with no edges makes every step ready in the requested order", () => {
@@ -223,4 +234,172 @@ test("a stop plan names its still-running steps so queued runs are abandoned", (
 	settlePlanStep(plan, { stepId: "b", runId: "run-b", outcome: "completed" });
 	assert.equal(plan.steps.find((step) => step.id === "b")?.status, "completed");
 	assert.equal(plan.status, "failed");
+});
+
+// --- Cancellation: the second settlement source (ticket 06) ------------------
+
+test("cancelling a step's run settles a continue plan instead of wedging it", () => {
+	const plan = build([spec("a")]);
+	launch(plan, "a", "run-a");
+
+	const advance = cancelPlanStep(plan, "a", "Cancelled: the user cancelled it.");
+	assert.equal(advance.changed, true);
+	assert.equal(advance.terminal, "cancelled");
+	assert.equal(plan.status, "cancelled");
+	assert.equal(plan.steps[0].status, "cancelled");
+	assert.equal(plan.steps[0].error, "Cancelled: the user cancelled it.");
+	assert.match(plan.reason ?? "", /step "a" was cancelled/);
+	assert.ok(plan.finishedAt, "a plan ended by a cancel records when");
+});
+
+test("continue cancels only the cancelled step's dependents and keeps independent branches", () => {
+	const plan = build([spec("a"), spec("b", { dependsOn: ["a"] }), spec("c")]);
+	launch(plan, "a", "run-a");
+	launch(plan, "c", "run-c");
+
+	const advance = cancelPlanStep(plan, "a", "Cancelled.");
+	assert.deepEqual(advance.cancelled, ["b"]);
+	assert.deepEqual(advance.launch, []);
+	assert.equal(plan.status, "running", "an independent branch is still live");
+	assert.equal(step(plan, "b").status, "cancelled");
+	assert.deepEqual(step(plan, "b").runIds, [], "a dependent that never ran is not launched now");
+	assert.equal(step(plan, "c").status, "running");
+
+	settlePlanStep(plan, { stepId: "c", runId: "run-c", outcome: "completed" });
+	assert.equal(plan.status, "cancelled", "a plan with a cancelled step and nothing live is cancelled");
+	assert.equal(step(plan, "c").status, "completed");
+});
+
+test("stop cancels everything pending and ends the plan as cancelled, not failed", () => {
+	const plan = build([spec("a"), spec("b", { dependsOn: ["a"] })], { policy: "stop" });
+	launch(plan, "a", "run-a");
+
+	const advance = cancelPlanStep(plan, "a", "Cancelled.");
+	assert.deepEqual(advance.cancelled, ["b"]);
+	assert.equal(advance.terminal, "cancelled");
+	assert.equal(plan.status, "cancelled");
+	assert.deepEqual(readyStepIds(plan), [], "nothing further is ready");
+});
+
+test("cancelling a whole plan takes live and pending steps and keeps completed records", () => {
+	const plan = build([spec("a"), spec("b"), spec("c")]);
+	launch(plan, "a", "run-a");
+	settlePlanStep(plan, { stepId: "a", runId: "run-a", outcome: "completed" });
+	launch(plan, "b", "run-b");
+
+	const result = cancelPlan(plan, "Cancelled: the plan was cancelled.");
+	assert.equal(result.changed, true);
+	assert.deepEqual(result.live, ["b"]);
+	assert.deepEqual(result.cancelled, ["b", "c"]);
+	assert.equal(plan.status, "cancelled");
+	assert.equal(step(plan, "a").status, "completed");
+	assert.deepEqual(step(plan, "a").runIds, ["run-a"], "a completed step keeps its record");
+	assert.equal(step(plan, "b").status, "cancelled");
+	assert.equal(step(plan, "c").status, "cancelled");
+});
+
+// --- Reload reconciliation (R23) ---------------------------------------------
+
+function relaid(specs: PlanStepSpec[], launches: [string, string][], options: PlanOptions = {}): PlanRecord {
+	const plan = build(specs, options);
+	for (const [stepId, runId] of launches) launch(plan, stepId, runId);
+	return plan;
+}
+
+function run(runId: string, status: string, createdAt: number, error?: string): PlanStepRun {
+	return { runId, status, createdAt, ...(error === undefined ? {} : { error }) };
+}
+
+test("reload leaves a step whose run is still live running and launches nothing", () => {
+	const plan = relaid([spec("a"), spec("b", { dependsOn: ["a"] })], [["a", "run-a"]]);
+
+	const { advance } = reconcilePlan(plan, { a: [run("run-a", "running", 1)] }, 2_000);
+	assert.equal(advance.changed, false, "a live child is not a reconciliation");
+	assert.deepEqual(advance.launch, []);
+	assert.equal(step(plan, "a").status, "running");
+	assert.deepEqual(step(plan, "a").runIds, ["run-a"]);
+});
+
+test("an interrupted run still counts as live across a reload", () => {
+	const plan = relaid([spec("a")], [["a", "run-a"]]);
+	const { advance } = reconcilePlan(plan, { a: [run("run-a", "interrupted", 1)] }, 2_000);
+	assert.equal(advance.changed, false);
+	assert.equal(step(plan, "a").status, "running");
+});
+
+test("a run the plan never recorded is adopted instead of launched a second time", () => {
+	// The plan index is older than the run index: the launch was written to
+	// runs.json and the crash came before plans.json.
+	const plan = build([spec("a")]);
+	const { advance, recovered } = reconcilePlan(plan, { a: [run("run-a", "completed", 1)] }, 2_000);
+	assert.equal(advance.changed, true);
+	assert.deepEqual(advance.launch, []);
+	assert.deepEqual(step(plan, "a").runIds, ["run-a"]);
+	assert.equal(step(plan, "a").status, "completed", "a completed step is never launched again");
+	assert.equal(plan.status, "completed");
+	assert.match(recovered.join("\n"), /adopted 1 run/);
+});
+
+test("a settlement that landed only in the run index is folded in, and the next wave launches", () => {
+	const plan = relaid([spec("a"), spec("b", { dependsOn: ["a"] })], [["a", "run-a"]]);
+	const { advance } = reconcilePlan(plan, { a: [run("run-a", "completed", 1)] }, 2_000);
+	assert.equal(step(plan, "a").status, "completed");
+	assert.deepEqual(advance.launch, ["b"], "the plan resumes at the first unfinished step");
+	assert.equal(step(plan, "b").status, "pending", "plan.ts launches nothing itself");
+});
+
+test("a running step with no live run is reported interrupted, never complete", () => {
+	const plan = relaid([spec("a"), spec("b", { dependsOn: ["a"] }), spec("c")], [
+		["a", "run-a"],
+		["c", "run-c"],
+	]);
+	const { advance, recovered } = reconcilePlan(plan, { c: [run("run-c", "running", 2)] }, 2_000);
+	assert.equal(step(plan, "a").status, "failed");
+	assert.match(step(plan, "a").error ?? "", /Interrupted: the session ended while step "a" was running/);
+	assert.equal(step(plan, "b").status, "cancelled", "continue cancels what can never run");
+	assert.equal(step(plan, "c").status, "running", "the live branch is untouched");
+	assert.equal(plan.status, "running");
+	assert.match(recovered.join("\n"), /no live run/);
+	assert.deepEqual(advance.launch, []);
+});
+
+test("an orphaned attempt spends the retry budget like any other failure", () => {
+	const plan = relaid([spec("a", { retries: 1 })], [["a", "run-a"]]);
+	const { advance } = reconcilePlan(plan, {}, 2_000);
+	assert.deepEqual(advance.launch, ["a"], "a retry is the policy's answer, not a silent relaunch");
+	assert.equal(step(plan, "a").status, "pending");
+	assert.equal(step(plan, "a").attempts, 1);
+
+	launch(plan, "a", "run-a2");
+	const capped = reconcilePlan(plan, {}, 3_000);
+	assert.equal(step(plan, "a").status, "failed");
+	assert.deepEqual(capped.advance.launch, []);
+});
+
+test("a cancelled run is folded in as a cancelled step", () => {
+	const plan = relaid([spec("a"), spec("b", { dependsOn: ["a"] })], [["a", "run-a"]]);
+	reconcilePlan(plan, { a: [run("run-a", "cancelled", 1)] }, 2_000);
+	assert.equal(step(plan, "a").status, "cancelled");
+	assert.equal(step(plan, "b").status, "cancelled");
+	assert.equal(plan.status, "cancelled");
+});
+
+test("reconciliation is idempotent: a second pass launches and settles nothing", () => {
+	const plan = relaid([spec("a"), spec("b", { dependsOn: ["a"] })], [["a", "run-a"]]);
+	const first = reconcilePlan(plan, { a: [run("run-a", "completed", 1)] }, 2_000);
+	assert.deepEqual(first.advance.launch, ["b"]);
+
+	// The settle path got there first: b was launched before a second pass could.
+	launch(plan, "b", "run-b");
+	const second = reconcilePlan(plan, { a: [run("run-a", "completed", 1)], b: [run("run-b", "running", 2)] }, 2_000);
+	assert.equal(second.advance.changed, false);
+	assert.deepEqual(second.advance.launch, []);
+	assert.equal(plan.steps.length, 2);
+});
+
+test("a plan whose last settlement landed only in the run index becomes terminal", () => {
+	const plan = relaid([spec("a")], [["a", "run-a"]]);
+	reconcilePlan(plan, { a: [run("run-a", "failed", 1, "boom")] }, 2_000);
+	assert.equal(plan.status, "failed");
+	assert.match(plan.reason ?? "", /Step "a" failed: boom/);
 });
