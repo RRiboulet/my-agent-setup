@@ -361,8 +361,9 @@ and `cd`-ing inside each command is the fallback: it starts, but it runs the mai
 checkout's extensions and skills, not the branch's — which is enough for file
 edits and wrong for anything that tests the branch itself.
 
-The six management tools — `subagent_wait`, `subagent_status`,
-`subagent_cancel`, `subagent_interrupt`, `subagent_resume`, `subagent_clean` —
+The seven management tools — `subagent_wait`, `subagent_status`,
+`subagent_answer`, `subagent_cancel`, `subagent_interrupt`, `subagent_resume`,
+`subagent_clean` —
 are **not declared** in this repo's sessions: `defaultTools: ["+tool_search"]` in
 `~/.pi/agent/settings.json` puts them behind `tool_search` so their descriptions
 and schemas stop riding along on every request (measured: ~890 tokens a
@@ -380,6 +381,24 @@ timed-out wait returns the current state rather than an error. Keep
 (`subagent_status({ compact: true })` is the cheap one-line-per-run form, and
 the single-run path is the one that returns output), not for collecting a result
 you could have waited on.
+
+A delegated child that is blocked can ask, and one blocking wait is deliberate.
+It registers `subagent_ask` only when the parent gave it a channel, so a parent
+pays nothing for a tool it can never call and a child of an older parent simply
+cannot ask. The parent's existing watcher tick reads the request (no second
+timer), `subagent_status` shows the run as `? waiting on a question` rather than
+active, stalled or interrupted, and `subagent_answer({ id, answer })` writes the
+reply after `ctx.ui.confirm`. A decision is confirmed by a human or refused:
+with no UI the tool says why and the child times out and reports the blocker.
+The gate is the tool, not the filesystem: the channel is same-uid, so a model with
+`write` or `bash` on this host could forge a reply (or a child could forge its
+own). The honest path is human-confirmed and says so; it does not claim a file
+can authenticate its writer, and in RPC mode the client is what puts the confirm
+to a person. A
+child with no parent left — shut-down watcher, expired request, aborted turn —
+is told the same thing, so it never hangs. That is the only exception to "a
+child is non-blocking"; a progress update (`kind: "progress"`) is fire-and-forget
+and needs no answer.
 
 ## Reviews: one per change, and only when asked
 

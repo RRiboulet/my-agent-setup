@@ -39,6 +39,8 @@ export interface Harness {
 	events: { channel: string; data: unknown }[];
 	/** Every ctx.ui.notify call, so guard messages can be asserted. */
 	notifications: { message: string; type: string | undefined }[];
+	/** Every ctx.ui.confirm call, so the human gate can be asserted. */
+	confirmCalls: { title: string; message: string }[];
 	/** Make every tmux call against the run's pane fail as if the session were gone. */
 	removeTarget: () => void;
 	/** Fail pane calls once with an unclassifiable error, then behave normally. */
@@ -102,6 +104,13 @@ export interface HarnessOptions {
 	/** Override ctx.mode, so the TUI-only widget guard can be exercised. */
 	mode?: string;
 	/**
+	 * ctx.hasUI. True by default (a TUI or RPC session has one); false models print
+	 * and JSON mode, where a decision cannot be confirmed by anyone.
+	 */
+	hasUI?: boolean;
+	/** What a `ctx.ui.confirm` dialog answers. Defaults to true: the human agrees. */
+	confirmAnswer?: boolean;
+	/**
 	 * Present a real live branch as the parent session (fork/lineage tests). The
 	 * manager is built from the temp agent dir `withHarness` has already set, so
 	 * callers do not thread `agentDir` through the options by hand.
@@ -136,6 +145,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const messages: CompletionMessage[] = [];
 	const orchestrationEvents: { channel: string; data: unknown }[] = [];
 	const notifications: { message: string; type: string | undefined }[] = [];
+	const confirmCalls: { title: string; message: string }[] = [];
 	// Flipped by removeTarget() to simulate the user killing the tmux session (or
 	// the server dying) out from under a run.
 	let targetMissing = options.missingTarget === true;
@@ -264,7 +274,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const ctx = {
 		cwd: process.cwd(),
 		mode: options.mode ?? "tui",
-		hasUI: true,
+		hasUI: options.hasUI ?? true,
 		isProjectTrusted: () => true,
 		sessionManager:
 			options.sessionManager === "liveBranch"
@@ -278,6 +288,13 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		ui: {
 			notify: (message: string, type?: string) => {
 				notifications.push({ message, type });
+			},
+			// The human gate (local patch 23). Recorded rather than rendered, and the
+			// answer is scripted, so both the confirmed and the declined path are
+			// deterministic; `hasUI: false` models a session where there is nobody to ask.
+			confirm: async (title: string, message: string, _opts?: unknown) => {
+				confirmCalls.push({ title, message });
+				return options.confirmAnswer ?? true;
 			},
 			custom: async () => undefined,
 			setWidget: (key: string, content: unknown, opts?: { placement?: string }) => {
@@ -325,6 +342,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		execCalls,
 		messages,
 		notifications,
+		confirmCalls,
 		removeTarget: () => {
 			targetMissing = true;
 		},

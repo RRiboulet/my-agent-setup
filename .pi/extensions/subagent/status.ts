@@ -46,7 +46,21 @@ export const DEFAULT_STALL_AFTER_MS = 180_000;
  */
 export const DEFAULT_TOOL_STALL_AFTER_MS = 900_000;
 
-export type SubagentStatusKind = "queued" | "starting" | "active" | "waiting" | "stalled" | "interrupted";
+export type SubagentStatusKind =
+	| "queued"
+	| "starting"
+	| "active"
+	| "waiting"
+	| "stalled"
+	| "interrupted"
+	/**
+	 * A child blocked on a question to its parent (local patch 23). Not a
+	 * classifier output: `classifyStatus` never returns it, because the evidence
+	 * is the parent's own record of a pending request, not the child's snapshot.
+	 * It exists so the widget and the list can render a blocked run distinctly
+	 * from a stalled one or an idle one.
+	 */
+	| "question";
 export type StatusSnapshotState = "unseen" | "present" | "missing" | "invalid" | "wrong-id";
 export type StatusActivityPhase = "starting" | "active" | "waiting" | "done";
 

@@ -117,6 +117,10 @@ test("the widget is cleared when the last run finishes", async () => {
 		const run = (await h.call("subagent", { task: "finish and clear" })).details as unknown as RunRecord;
 		await h.writeResult(run, { version: 1, status: "completed", output: "ok", finishedAt: Date.now() });
 		await waitFor(async () => (await h.readRuns())[0].status === "completed");
+		// Wait for the CLEAR, not for a simultaneity with the status: `settleRun`
+		// persists first and refreshes the widget afterwards, so a read of the index
+		// that lands between the two is a correct status with the strip still up.
+		await waitFor(() => h.widgetCalls.at(-1)?.hasContent === false);
 		assert.deepEqual(
 			h.widgetCalls.at(-1),
 			{ key: "subagent-status", hasContent: false, placement: undefined },

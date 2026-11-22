@@ -117,6 +117,37 @@ Added:
   written at settlement, the run index stays bounded, and every degradation and
   skew path still completes.
 
+- **A blocked subagent can ask its parent a question, and only a human answers
+  it.** A child launched by this build can call `subagent_ask`: a question is
+  written atomically to `<runDir>/escalation/<id>.request.json`, and the tool
+  waits — honouring the call's abort signal and a deadline (300 s by default) —
+  for the reply, which arrives as its tool result so it continues in the same
+  turn. The parent's existing watcher tick reads the channel, so escalation adds
+  no timer of its own; it records the question on the run record, delivers it to
+  the parent session, and `subagent_answer({ id, answer })` asks
+  `ctx.ui.confirm` before writing the reply. The gate is that tool, not the
+  filesystem: the channel is same-uid, so a model able to write files could forge
+  a reply — the honest path is human-confirmed, and the docs say so rather than
+  pretending a file protocol authenticates its writer. A decision is therefore
+  confirmed by a human or refused: with no UI (print and JSON mode) the tool says why and
+  writes nothing, and the child reaches its deadline and is told to report the
+  blocker and its partial result and stop. Every other non-answer path says the
+  same thing, so a blocked child never hangs: a request past its deadline is
+  never delivered, and a parent that stopped ticking is detected from a stale
+  heartbeat in seconds rather than at the deadline. `kind: "progress"` is the
+  non-blocking half — the update reaches the session with no human gate and no
+  answer. A blocked child keeps its concurrency slot, and `subagent_status`
+  reports `? waiting on a question`, distinctly from a stalled or interrupted
+  run; the widget gets its own glyph. The channel is a file protocol across
+  builds, like `result.json`: the shape is the gate and the version advisory, a
+  partial write is never read as a request, a replayed request or reply is
+  handled once, and a child of an older parent registers no tool at all because
+  such a parent sets no channel. Tests: `escalation.test.ts` covers atomicity,
+  bounds, expiry, replay and every exit from the wait;
+  `lifecycle-escalation.test.ts` drives the round trip through the real child
+  tool and parent tick, both UI modes, the no-parent path, the no-timer
+  assertion and the status rendering.
+
 - **A launcher wrapper gives non-interactive invocations the agent dir a login
   shell would have picked.** `bin/pi-wrapped` exists because the `--shell` hook
   `bin/pi-agent-dir` installs lives in `~/.bashrc`, and a tmux child, a CI step
