@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.15.2 — 2026-11-22
+
 Fixed:
 
 - **A nested `pi` can no longer hijack a subagent run's `result.json`, and the
