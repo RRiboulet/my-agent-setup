@@ -91,6 +91,7 @@ import {
 	type LoopVerdict,
 } from "./gate.ts";
 import { ORCHESTRATION_EVENTS, publishOrchestrationEvent } from "./events.ts";
+import { registerWorkspace } from "./workspace-runtime.ts";
 import { readOpenTodos } from "./todo-state.ts";
 import { runVerification, type VerificationExec, type VerificationOutcome } from "./verify.ts";
 import {
@@ -144,6 +145,8 @@ function continuationText(verdict: GateVerdict): string {
 }
 
 export default function orchestratorExtension(pi: ExtensionAPI) {
+	registerWorkspace(pi);
+
 	/** The loop breaker's config cache. One read per session, not per call. */
 	let cachedConfig: { cwd: string; read: GateConfigRead } | null = null;
 	/** A granted override, waiting for the next block. In-memory and one-shot: a

@@ -154,6 +154,18 @@ const MODULES: Record<string, string[]> = {
 		"verificationFailedOpen",
 		"verificationInvocation",
 	],
+	"../../orchestrator/workspace.ts": [
+		"buildPresence",
+		"listPresence",
+		"presenceHeartbeatMs",
+		"presenceIsLive",
+		"readPresence",
+		"resolveWorkspaceScope",
+		"validatePresence",
+		"withWorkspaceLock",
+		"writePresence",
+	],
+	"../../orchestrator/workspace-runtime.ts": ["registerWorkspace"],
 	"../panel.ts": ["buildEscapeBindArgs", "buildAttachCommand", "buildPanelLaunch"],
 	"../plan.ts": [
 		"buildPlan",
