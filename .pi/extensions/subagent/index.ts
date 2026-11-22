@@ -181,9 +181,22 @@
 //     used to teach polling now teach "start, then wait once"; `subagent_status`
 //     stays for the live "what is it doing right now" question.
 //
+// 20. Report artifact (see report.ts): every child is asked to end with a
+//     fenced `subagent-report` envelope (status/summary/files/commands/
+//     unresolved), and the child adds it to `result.json` as the optional
+//     `report` field. When a run reports a final answer (completed or failed) the
+//     parent writes the child's complete final text to `<runDir>/report.md` and
+//     stores a bounded copy (`head`, the
+//     envelope fields) plus the path and full byte count in `RunRecord.report`.
+//     `output` keeps its exact previous meaning and truncation, so a reader
+//     built before the artifact still works. Missing, malformed and skew-shaped
+//     reports degrade to the plain text with `degradation` set; none of them can
+//     fail a run. The pointer is what `subagent_status` and `runs.json` expose,
+//     so the full report is one file read away without parsing a transcript.
+//
 // The child reporter (CHILD_ENV) still reports completion the same way; patch 11
-// only adds the activity snapshot to it, and patch 13 only diverts the aborted
-// settle onto the marker.
+// only adds the activity snapshot to it, patch 13 only diverts the aborted
+// settle onto the marker, and patch 20 adds the report field.
 
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -248,6 +261,18 @@ import {
 } from "./activity.ts";
 import { formatUsage, readSessionUsage, type RunUsage } from "./usage.ts";
 import { CHILD_RESULT_VERSION, readChildResultFile, type ChildResult } from "./result.ts";
+import {
+	buildChildTaskPrompt,
+	buildRunReport,
+	parseChildReportText,
+	readReportHead,
+	REPORT_FILE_NAME,
+	resolveChildReport,
+	writeReportArtifact,
+	type ChildReportValidation,
+	type ReportHead,
+	type RunReport,
+} from "./report.ts";
 import { renderRunList, runHeadline, type ListRow } from "./listview.ts";
 import { buildEscapeBindArgs, buildPanelLaunch } from "./panel.ts";
 import { currentTmuxPointer, currentTmuxSocket, defaultPanelLauncher, resolvePaneClient, type PanelLauncher } from "./popup.ts";
@@ -378,6 +403,13 @@ interface RunRecord {
 	interruptedAt?: number;
 	/** Aborted turns this run has settled, taken from the child's marker. */
 	interrupts?: number;
+	/**
+	 * The child's final report, as the parent could read it (report.ts): a pointer
+	 * to the standalone artifact, a bounded copy of its head, and the envelope's
+	 * own fields when they parsed. Persisted in `runs.json`, so a consumer that
+	 * never opens the artifact still works.
+	 */
+	report?: RunReport;
 }
 
 /**
@@ -650,6 +682,11 @@ function registerChildReporter(pi: ExtensionAPI, resultPath: string, runId: stri
 		const assistantError = typeof assistant?.errorMessage === "string" ? assistant.errorMessage : undefined;
 		const failed = !assistant || stopReason === "error" || stopReason === "aborted" || Boolean(fallbackError);
 		const output = assistant ? textFromAssistant(assistant) : "";
+		// The child parses its own envelope while it still has the text; the
+		// parent validates it again (report.ts). Omitted when the child did not
+		// end with a usable block — the text is still in `output`, and an older
+		// parent ignores the field entirely.
+		const parsedReport = parseChildReportText(output);
 		const result: ChildResult = {
 			version: CHILD_RESULT_VERSION,
 			status: failed ? "failed" : "completed",
@@ -661,6 +698,7 @@ function registerChildReporter(pi: ExtensionAPI, resultPath: string, runId: stri
 			model: typeof assistant?.model === "string" ? assistant.model : ctx.model?.id,
 			thinking: pi.getThinkingLevel(),
 			finishedAt: Date.now(),
+			...(parsedReport.ok ? { report: parsedReport.report } : {}),
 		};
 
 		try {
@@ -1198,6 +1236,22 @@ function runSummary(run: RunRecord, options: { pane?: boolean; output?: boolean 
 	if (activity) lines.push(`  activity: ${activity}`);
 	lines.push(`  tmux: ${run.tmuxSession}`, `  attach: ${run.attachCommand}`);
 	if (run.sessionFile) lines.push(`  child session: ${run.sessionFile}`);
+	if (run.report) {
+		// The pointer first: it is what a consumer follows for the complete text.
+		// The bounded head already lives in the record; this line only says where
+		// the rest is and whether the reader had to degrade.
+		lines.push(
+			`  report: ${run.report.artifactPath} (${run.report.artifactBytes} bytes${run.report.truncated ? ", bounded copy in this record" : ""})`,
+		);
+		if (run.report.degradation) lines.push(`  report degraded: ${run.report.degradation}`);
+		else if (run.report.status) {
+			const firstLine = run.report.summary?.split("\n", 1)[0]?.slice(0, 140);
+			lines.push(`  reported: ${run.report.status}${firstLine ? ` — ${firstLine}` : ""}`);
+		}
+		if (run.report.skew) {
+			lines.push(`  report protocol: writer ${run.report.skew.writer}, reader ${run.report.skew.reader}`);
+		}
+	}
 	if (run.status === "interrupted") {
 		// The child can be driven again after an interrupt, so "idle at its prompt"
 		// is a claim about now, not about the run: read it off the live activity
@@ -1578,6 +1632,39 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		scheduleReap(run);
 	};
 
+	/**
+	 * Publish a run's complete final text as its standalone report artifact and
+	 * build the bounded copy that goes into the run record.
+	 *
+	 * The head is read back from the file through `readReportHead` rather than
+	 * copied from the text in memory: that is the same path a consumer takes, and
+	 * it proves a very long report is bounded to a truncation window in the run
+	 * index. Any failure here degrades the report; it never fails the run.
+	 */
+	const publishRunReport = async (
+		run: RunRecord,
+		text: string,
+		parsed: ChildReportValidation,
+	): Promise<RunReport> => {
+		const artifactPath = path.join(run.runDir, REPORT_FILE_NAME);
+		try {
+			await writeReportArtifact(artifactPath, text);
+			const head = await readReportHead(artifactPath);
+			return buildRunReport({ artifactPath, head, parsed });
+		} catch (error) {
+			// The in-memory text is the only copy left, so keep a bounded head of it
+			// and make the broken pointer visible instead of failing the settlement.
+			const bounded = truncateHead(text, { maxBytes: DEFAULT_MAX_BYTES, maxLines: DEFAULT_MAX_LINES });
+			const head: ReportHead = { head: bounded.content, bytes: 0, truncated: bounded.truncated };
+			return buildRunReport({
+				artifactPath,
+				head,
+				parsed,
+				degradation: `the report artifact could not be written: ${error instanceof Error ? error.message : String(error)}`,
+			});
+		}
+	};
+
 	const finalizeRun = async (run: RunRecord, result: ChildResult): Promise<void> => {
 		if (isSettledRun(run)) return;
 		run.status = result.status === "completed" ? "completed" : "failed";
@@ -1598,7 +1685,11 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 			output += `${output ? "\n\n" : ""}Error: ${result.error.trim()}`;
 			run.error = result.error.trim();
 		}
-		run.output = truncateToolText(output || "(no text output)");
+		const reportText = output || "(no text output)";
+		// The artifact holds everything, including what `output` is about to lose to
+		// the display cap; the record keeps only a bounded head and the pointer.
+		run.report = await publishRunReport(run, reportText, resolveChildReport(result.report, result.output));
+		run.output = truncateToolText(reportText);
 		await settleRun(run);
 		notifyWaiters(run);
 		void drainQueue();
@@ -1615,6 +1706,10 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		run.interruptRequestedAt = undefined;
 		run.error = message;
 		run.finishedAt = Date.now();
+		// A run that failed before its child reported still leaves a readable
+		// artifact: the failure text is its complete final report, and the plain
+		// text is marked as degraded rather than pretending an envelope existed.
+		run.report = await publishRunReport(run, message, resolveChildReport(undefined, ""));
 		await settleRun(run);
 		notifyWaiters(run);
 	};
@@ -2395,7 +2490,7 @@ const noteInterrupt = async (
 
 			await mkdir(runDir, { recursive: true, mode: 0o700 });
 			await mkdir(path.join(runDir, "session"), { recursive: true, mode: 0o700 });
-			await writeFile(path.join(runDir, "task.md"), `# Delegated task\n\n${params.task}\n`, {
+			await writeFile(path.join(runDir, "task.md"), buildChildTaskPrompt(params.task), {
 				encoding: "utf8",
 				mode: 0o600,
 			});
@@ -2850,6 +2945,11 @@ const noteInterrupt = async (
 						finishedAt: undefined,
 						pane: undefined,
 						output: undefined,
+						// The ancestor's artifact belongs to the ancestor's run dir and
+						// describes the ancestor's answer; inheriting it would report a
+						// previous attempt's report as this one's from the moment it is
+						// queued, and keep it if this attempt is cancelled.
+						report: undefined,
 						error: undefined,
 						usage: undefined,
 						activity: undefined,
@@ -2868,7 +2968,7 @@ const noteInterrupt = async (
 
 					await mkdir(runDir, { recursive: true, mode: 0o700 });
 					await mkdir(path.join(runDir, "session"), { recursive: true, mode: 0o700 });
-					await writeFile(path.join(runDir, "task.md"), `# Delegated task\n\n${message}\n`, {
+					await writeFile(path.join(runDir, "task.md"), buildChildTaskPrompt(message), {
 						encoding: "utf8",
 						mode: 0o600,
 					});

@@ -6,6 +6,29 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
+- **A finished subagent run now leaves a standalone report artifact, so its
+  complete answer is readable without opening the child's transcript.** Each
+  child is asked to end with a fenced `subagent-report` block carrying `status`
+  (`ok`/`blocked`/`failed`), a `summary`, and optional `files`, `commands` and
+  `unresolved` lists. When a run reports a final answer — completed, or failed
+  with an error — the parent writes the child's complete final text to
+  `<runDir>/report.md`, beside `result.json`, and puts a bounded copy in the run
+  record: the artifact path and full byte count, a head bounded with
+  pi's own `truncateHead` limits (a very long report is never loaded whole into
+  `runs.json`), and the parsed fields. The existing `output` field keeps its
+  meaning and cap, so a reader built before this change still works, and the
+  optional `report` field added to `result.json` is ignored by an older parent.
+  A cancelled or shutdown-killed run has no artifact, because its child never
+  reported an answer.
+  Validation is lenient because a child may run another branch's build: a
+  missing, malformed or incompatible report degrades to the plain final text
+  with the reason recorded rather than failing the run, while a compatible
+  older or newer version is accepted and its skew reported. `subagent_status`
+  prints the artifact path, size and any degradation. Tests: `report.test.ts`
+  covers the contract and `lifecycle-report.test.ts` proves the artifact is
+  written at settlement, the run index stays bounded, and every degradation and
+  skew path still completes.
+
 - **A launcher wrapper gives non-interactive invocations the agent dir a login
   shell would have picked.** `bin/pi-wrapped` exists because the `--shell` hook
   `bin/pi-agent-dir` installs lives in `~/.bashrc`, and a tmux child, a CI step
