@@ -2,15 +2,15 @@
  * The pi-facing half of workspace coordination.
  *
  * `workspace.ts` owns the store, the records and the decisions; this file owns
- * the session: the tools, the heartbeat, the write guard and every timer's
- * lifetime. Keeping the two apart is what lets the store be
+ * the session: the tools, the heartbeat, the inbox poller, the write guard and
+ * every timer's lifetime. Keeping the two apart is what lets the store be
  * tested against real temporary repositories without a pi host.
  *
  * Three rules this file exists to keep:
  *
  *   - **Joining is explicit.** Loading the extension starts no timer and writes
  *     nothing. A session joins through `orchestrator_workspace`, which is the
- *     only path that starts the heartbeat.
+ *     only path that starts the heartbeat and the inbox poller.
  *   - **No timer outlives the session.** Every interval is `unref`'d and held in
  *     one place; `session_shutdown` clears it, removes the presence entry and
  *     releases this session's reservations. The subagent watcher already paid
@@ -30,29 +30,40 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { unlink } from "node:fs/promises";
+import { join as joinPath } from "node:path";
 
 import {
 	DEFAULT_PRESENCE_TTL_MS,
+	MAX_MESSAGE_BODY_BYTES,
 	MAX_REASON_BYTES,
 	WORKSPACE_VERSION,
+	buildPeerMessage,
 	buildPresence,
 	buildReservationPaths,
 	canonicalPath,
+	clampMessageTtl,
 	clampPresenceTtl,
 	clampReservationTtl,
+	formatPeerMessage,
+	inboxDir,
 	listPresence,
 	liveReservations,
+	markMessageDelivered,
 	presenceHeartbeatMs,
 	presencePath,
+	readInbox,
 	releaseReservations,
+	removePeerMessage,
 	reservationMatches,
 	reservationsDir,
 	reservePaths,
 	resolveWorkspaceScope,
 	reservationPathMatches,
 	touchPresence,
+	writePeerMessage,
 	writePresence,
 	type GitRun,
+	type PeerMessage,
 	type PresenceRecord,
 	type ReservationRecord,
 	type ScopeResult,
@@ -61,8 +72,14 @@ import {
 
 export const WORKSPACE_TOOL = "orchestrator_workspace";
 export const RESERVE_TOOL = "orchestrator_reserve";
+export const MESSAGE_TOOL = "orchestrator_message";
 
 export const RESERVATION_OVERRIDE_ENTRY_TYPE = "orchestrator-workspace-reservation-override";
+export const PEER_MESSAGE_TYPE = "orchestrator-peer-message";
+export const PEER_MESSAGE_EXPIRED_TYPE = "orchestrator-peer-message-expired";
+
+const DEFAULT_POLL_MS = 1_000;
+const MAX_POLL_MS = 60_000;
 
 export interface WorkspaceRuntimeOptions {
 	/** `pi.exec` in production; a real-git double in tests. */
@@ -72,6 +89,10 @@ export interface WorkspaceRuntimeOptions {
 	presenceTtlMs?: number;
 	/** Heartbeat period; defaults to a third of the TTL. */
 	heartbeatMs?: number;
+	/** Inbox poll period; tests use a short one. */
+	pollMs?: number;
+	/** Test seam for a deterministic message id. */
+	messageId?: () => string;
 	/** Test seam: make a heartbeat observable and delayable. */
 	touch?: typeof touchPresence;
 }
@@ -83,7 +104,9 @@ interface Joined {
 	ctx: ExtensionContext;
 	heartbeat: ReturnType<typeof setInterval> | null;
 	heartbeatMs: number;
+	poller: ReturnType<typeof setInterval> | null;
 	heartbeatInFlight: boolean;
+	polling: boolean;
 }
 
 export interface WorkspaceRuntime {
@@ -94,6 +117,9 @@ export interface WorkspaceRuntime {
 	release(ctx: ExtensionContext, id?: string): Promise<string>;
 	listReservations(ctx: ExtensionContext): Promise<string>;
 	armOverride(ctx: ExtensionContext, reason: string): Promise<string>;
+	send(ctx: ExtensionContext, input: SendInput): Promise<string>;
+	/** The poller's single tick, exposed so tests do not have to race a timer. */
+	tick(): Promise<void>;
 	/** The write/edit guard, exposed so tests can drive it without a model turn. */
 	checkToolCall(
 		event: { toolName?: string; input?: unknown },
@@ -107,6 +133,12 @@ export interface WorkspaceRuntime {
 export interface ReserveInput {
 	paths: string[];
 	reason: string;
+	ttlMs?: number;
+}
+
+export interface SendInput {
+	to: string;
+	body: string;
 	ttlMs?: number;
 }
 
@@ -174,6 +206,7 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 	const heartbeatMs = options.heartbeatMs ?? Math.round(presenceTtlMs / 3);
 	const touch = options.touch ?? touchPresence;
 	const heartbeatFor = (ttlMs: number): number => presenceHeartbeatMs(ttlMs, heartbeatMs);
+	const pollMs = Math.min(MAX_POLL_MS, Math.max(1, options.pollMs ?? DEFAULT_POLL_MS));
 	const run: GitRun =
 		options.run ??
 		(async (args, cwd) => {
@@ -198,12 +231,19 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 
 	let joined: Joined | null = null;
 	let shuttingDown = false;
+	let humanPromptOpen = false;
+	let releasedThisTurn = false;
 	let overrideArmed: { reason: string; at: number } | null = null;
+	const deliveredIds = new Set<string>();
 
-	const clearHeartbeat = (state: Joined): void => {
+	const clearJoinedTimers = (state: Joined): void => {
 		if (state.heartbeat) {
 			clearInterval(state.heartbeat);
 			state.heartbeat = null;
+		}
+		if (state.poller) {
+			clearInterval(state.poller);
+			state.poller = null;
 		}
 	};
 
@@ -221,7 +261,7 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 		if (!joined) return;
 		const state = joined;
 		joined = null;
-		clearHeartbeat(state);
+		clearJoinedTimers(state);
 		await releaseOwnReservations(state.scope.registryDir, state.sessionId);
 		try {
 			await writeJsonPresenceRemoval(state.scope.registryDir, state.sessionId);
@@ -230,7 +270,7 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 		}
 	};
 
-	const startHeartbeat = (state: Joined): void => {
+	const startTimers = (state: Joined): void => {
 		const heartbeat = setInterval(() => {
 			if (shuttingDown || state.heartbeatInFlight) return;
 			state.heartbeatInFlight = true;
@@ -251,6 +291,12 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 		}, state.heartbeatMs);
 		heartbeat.unref?.();
 		state.heartbeat = heartbeat;
+
+		const poller = setInterval(() => {
+			void runtime.tick();
+		}, pollMs);
+		poller.unref?.();
+		state.poller = poller;
 	};
 
 	const join = async (ctx: ExtensionContext, joinOptions: { ttlMs?: number } = {}): Promise<string> => {
@@ -261,9 +307,9 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 				joined.record = { ...joined.record, ttlMs: clampPresenceTtl(joinOptions.ttlMs) };
 				const nextBeat = heartbeatFor(joined.record.ttlMs);
 				if (nextBeat !== joined.heartbeatMs) {
-					clearHeartbeat(joined);
+					clearJoinedTimers(joined);
 					joined.heartbeatMs = nextBeat;
-					startHeartbeat(joined);
+					startTimers(joined);
 				}
 			}
 			joined.record = await touch(joined.scope.registryDir, joined.record, now());
@@ -272,7 +318,7 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 		}
 		const scope = await scopeFor(ctx.cwd, true);
 		if (!scope.ok) {
-			return `Workspace not joined: ${scope.reason}. Presence and reservations are a no-op outside a git repository.`;
+			return `Workspace not joined: ${scope.reason}. Presence, reservations and peer messages are a no-op outside a git repository.`;
 		}
 		const record = buildPresence({
 			sessionId,
@@ -294,12 +340,14 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 			ctx,
 			heartbeat: null,
 			heartbeatMs: heartbeatFor(record.ttlMs),
+			poller: null,
 			heartbeatInFlight: false,
 			polling: false,
 		};
 		joined = state;
 		shuttingDown = false;
-		startHeartbeat(state);
+		releasedThisTurn = false;
+		startTimers(state);
 		const peers = await listPresence(scope.scope.registryDir, now());
 		return [
 			`Joined the workspace for ${scope.scope.commonDir} as ${sessionId}${scope.scope.branch ? ` on branch ${scope.scope.branch}` : " (detached HEAD)"}.`,
@@ -328,7 +376,7 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 		}
 		const state = joined;
 		joined = null;
-		clearHeartbeat(state);
+		clearJoinedTimers(state);
 		const released = await releaseOwnReservations(state.scope.registryDir, state.sessionId);
 		try {
 			await writeJsonPresenceRemoval(state.scope.registryDir, state.sessionId);
@@ -443,11 +491,149 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 		return `Reservation override granted once: ${overrideArmed.reason}. The next write or edit blocked by a reservation will proceed, and the override is recorded.`;
 	};
 
-;
+	const send = async (ctx: ExtensionContext, input: SendInput): Promise<string> => {
+		if (!joined) return `Sending requires a joined workspace: call \`${WORKSPACE_TOOL}\` with action "join" first.`;
+		const body = input.body.trim();
+		if (!body) return "A peer message needs a non-empty body.";
+		if (Buffer.byteLength(body, "utf8") > MAX_MESSAGE_BODY_BYTES) {
+			return `A peer message may be at most ${MAX_MESSAGE_BODY_BYTES} bytes; this one is ${Buffer.byteLength(body, "utf8")}.`;
+		}
+		const self = joined.sessionId;
+		const to = input.to.trim();
+		if (!to) return "A peer message needs a recipient session id (see `orchestrator_workspace` action \"peers\").";
+		if (to === self) return "Refusing to message this session; pick a peer from `orchestrator_workspace` action \"peers\".";
+		const peers = await listPresence(joined.scope.registryDir, now());
+		const matched = peers.peers.filter((peer) => peer.sessionId === to || peer.sessionId.startsWith(to));
+		const others = matched.filter((peer) => peer.sessionId !== self);
+		if (others.length === 0) {
+			if (matched.some((peer) => peer.sessionId === self) || self.startsWith(to)) {
+				return "Refusing to message this session; pick a peer from `orchestrator_workspace` action \"peers\".";
+			}
+			return `Peer ${to} is gone: no live presence entry in ${joined.scope.registryDir}. The session left, was killed, or its TTL passed.`;
+		}
+		if (others.length > 1 && !others.some((peer) => peer.sessionId === to)) {
+			return `Peer id ${to} is ambiguous; it matches ${others.map((peer) => peer.sessionId).join(", ")}.`;
+		}
+		const target = others.find((peer) => peer.sessionId === to) ?? others[0]!;
+		let message: PeerMessage;
+		try {
+			message = buildPeerMessage({
+				id: options.messageId?.(),
+				sessionId: self,
+				cwd: ctx.cwd,
+				branch: joined.scope.branch,
+				to: target.sessionId,
+				body,
+				now: now(),
+				ttlMs: input.ttlMs,
+			});
+			await writePeerMessage(joined.scope.registryDir, message);
+		} catch (error) {
+			return `Could not queue the message: ${(error as Error).message}`;
+		}
+		return [
+			`Queued message ${message.id} for ${target.sessionId} (${target.cwd}${target.branch ? `, branch ${target.branch}` : ""}).`,
+			`It is delivered by the recipient's own poller: at its next safe boundary if idle or busy, and after any pending human input. One peer message is released per turn. It expires at ${new Date(message.expiresAt).toISOString()}.`,
+		].join("\n");
+	};
 
-;
+	const deliver = (message: PeerMessage, state: Joined): void => {
+		pi.sendMessage(
+			{
+				customType: PEER_MESSAGE_TYPE,
+				content: formatPeerMessage(message),
+				display: true,
+				details: {
+					version: WORKSPACE_VERSION,
+					id: message.id,
+					from: message.from,
+					to: message.to,
+					createdAt: message.createdAt,
+					expiresAt: message.expiresAt,
+				},
+			},
+			// Always steer *and* allow a turn. `isIdle()` sampled here can flip before
+			// sendMessage runs; a steer without triggerTurn would then sit in an idle
+			// session without waking it, and no turn_end would reset
+			// `releasedThisTurn`. The docs ignore triggerTurn while streaming, so one
+			// option set is correct in both states.
+			{ deliverAs: "steer", triggerTurn: true },
+		);
+		deliveredIds.add(message.id);
+	};
 
-;
+	const tick = async (): Promise<void> => {
+		const state = joined;
+		if (!state || shuttingDown || state.polling) return;
+		state.polling = true;
+		try {
+			const read = await readInbox(state.scope.registryDir, state.sessionId, now());
+			// A shutdown can land while the inbox read was in flight; do not deliver
+			// into a session that is already gone.
+			if (shuttingDown || joined !== state) return;
+			for (const invalid of read.invalid.slice(0, 5)) {
+				// An unusable file is reported once and removed; leaving it would
+				// append the same warning every poll for the life of the session.
+				await unlink(joinPath(inboxDir(state.scope.registryDir, state.sessionId), invalid)).catch(() => undefined);
+				pi.appendEntry(PEER_MESSAGE_EXPIRED_TYPE, {
+					version: WORKSPACE_VERSION,
+					kind: "invalid",
+					file: invalid,
+					at: now(),
+				});
+			}
+			for (const message of read.expired.slice(0, 5)) {
+				await removePeerMessage(state.scope.registryDir, state.sessionId, message.id);
+				pi.appendEntry(PEER_MESSAGE_EXPIRED_TYPE, {
+					version: WORKSPACE_VERSION,
+					kind: "expired",
+					id: message.id,
+					from: message.from,
+					expiresAt: message.expiresAt,
+					at: now(),
+				});
+				if (state.ctx.hasUI) {
+					state.ctx.ui.notify(
+						`Peer message ${message.id} from ${message.from.sessionId} expired before it could be delivered.`,
+						"warning",
+					);
+				}
+			}
+			if (releasedThisTurn || read.live.length === 0) return;
+			// A human prompt or queued input owns the next boundary. The message
+			// waits rather than pre-empting it.
+			if (humanPromptOpen) return;
+			let pending = true;
+			try {
+				pending = state.ctx.hasPendingMessages();
+			} catch {
+				// Not knowing whether a human is waiting is a reason to wait, not to
+				// pre-empt them.
+			}
+			if (pending) return;
+			const next = read.live.find((message) => !deliveredIds.has(message.id));
+			if (!next) return;
+			if (state.ctx.signal?.aborted) return;
+			deliver(next, state);
+			releasedThisTurn = true;
+			let marked = false;
+			try {
+				await markMessageDelivered(state.scope.registryDir, state.sessionId, next, now());
+				marked = true;
+			} catch {
+				// Without the durable marker, remove the file only when a later read
+				// cannot deliver it twice. The in-memory ledger covers this process;
+				// keeping the file makes a crash at-most-once-but-retryable rather
+				// than silently losing the message.
+			}
+			if (marked) await removePeerMessage(state.scope.registryDir, state.sessionId, next.id);
+		} catch {
+			// The poller is a convenience; a bad record must not kill it. The next
+			// tick retries and the TTL bounds a permanently broken entry.
+		} finally {
+			state.polling = false;
+		}
+	};
 
 	const guard = async (
 		event: { toolName?: string; input?: unknown },
@@ -501,8 +687,8 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 			"See and announce this session in the repository-wide workspace shared by the main checkout and every linked worktree. Actions: join publishes a presence entry (pid, session, working directory, branch) and starts the heartbeat; leave removes it and releases this session's reservations; peers lists live sessions with their directory, branch and last-seen time. Joining is explicit: loading the extension writes nothing. The registry lives in the git common directory, never in the working tree. Outside a git repository the action is a no-op that says why.",
 		promptSnippet: "Join, leave, or list peer sessions in this repository's shared workspace",
 		promptGuidelines: [
-			"Join the workspace before reserving paths; reservations require it.",
-			"Use `orchestrator_workspace` action \"peers\" to see which sessions are live in this repository.",
+			"Join the workspace before reserving paths or messaging peers; both require it.",
+			"Use `orchestrator_workspace` action \"peers\" to find a peer's session id before messaging it.",
 		],
 		parameters: Type.Object({
 			action: Type.Union([Type.Literal("join"), Type.Literal("leave"), Type.Literal("peers")], {
@@ -566,6 +752,27 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 		},
 	});
 
+	pi.registerTool({
+		name: MESSAGE_TOOL,
+		label: "Workspace message",
+		description:
+			"Send one targeted message to another live session in this repository's workspace. The recipient's own poller decides when it lands: an idle session is woken, a busy one is steered at its next safe boundary, and pending human input is never pre-empted. One peer message is released per turn, delivery is once per message id, and an undelivered message expires. A peer that left or expired is reported as gone. Requires a joined workspace; use `orchestrator_workspace` action \"peers\" for the id.",
+		promptSnippet: "Send a targeted message to one peer pi session in this repository",
+		promptGuidelines: [
+			"Message a peer only for coordination another session needs now; the message appears in its session with your id and directory.",
+			"Check live peers with `orchestrator_workspace` before messaging; a gone peer is reported, not queued.",
+		],
+		parameters: Type.Object({
+			to: Type.String({ description: "Recipient session id (an unambiguous prefix is accepted)." }),
+			body: Type.String({ description: `Message body, at most ${MAX_MESSAGE_BODY_BYTES} bytes.` }),
+			ttlSeconds: Type.Optional(Type.Number({ description: "How long an undelivered message stays valid, in seconds (default 600, bounded 5–3600)." })),
+		}),
+		async execute(_id, params, _signal, _onUpdate, ctx) {
+			const ttlMs = typeof params.ttlSeconds === "number" ? clampMessageTtl(params.ttlSeconds * 1000) : undefined;
+			return toolResult(await send(ctx, { to: String(params.to ?? ""), body: String(params.body ?? ""), ttlMs }), {});
+		},
+	});
+
 	// --- session wiring ----------------------------------------------------
 
 	pi.on("session_start", async () => {
@@ -574,6 +781,8 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 		// writes nothing until it asks.
 		await shutdown();
 		shuttingDown = false;
+		humanPromptOpen = false;
+		releasedThisTurn = false;
 		overrideArmed = null;
 	});
 
@@ -581,6 +790,15 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 		await shutdown();
 	});
 
+	pi.on("ui_prompt_start", async () => {
+		humanPromptOpen = true;
+	});
+	pi.on("ui_prompt_end", async () => {
+		humanPromptOpen = false;
+	});
+	pi.on("turn_end", async () => {
+		releasedThisTurn = false;
+	});
 
 	pi.on("tool_call", async (event, ctx) => guard(event, ctx));
 
@@ -592,6 +810,8 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 		release,
 		listReservations: listOwnReservations,
 		armOverride,
+		send,
+		tick,
 		checkToolCall: guard,
 		isJoined: () => joined !== null,
 		shutdown,
