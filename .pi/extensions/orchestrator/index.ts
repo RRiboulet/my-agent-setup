@@ -145,6 +145,9 @@ function continuationText(verdict: GateVerdict): string {
 }
 
 export default function orchestratorExtension(pi: ExtensionAPI) {
+	// Registered first on purpose: pi stops at the first `tool_call` handler
+	// that blocks, so a reserved path must refuse the call before the loop
+	// breaker starts counting it.
 	registerWorkspace(pi);
 
 	/** The loop breaker's config cache. One read per session, not per call. */

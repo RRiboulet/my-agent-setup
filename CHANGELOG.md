@@ -6,6 +6,23 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
+- **A reserved workspace path refuses another session's `write` or `edit`
+  before it runs, naming the holder and the reason.** The new
+  `orchestrator_reserve` tool reserves a file, a directory (trailing slash) or a
+  wildcard (`*` within a segment, `**` across) with a reason and a TTL. Paths are
+  canonicalised through their deepest existing ancestor, so relative, absolute
+  and symlinked spellings of one file cannot slip past as a second name. A
+  refusal names the holder, its reason and the one-shot override, which is
+  granted and then consumed as two recorded session entries. Reservations expire,
+  are released on leave or shutdown, and a directory lock refreshed by its holder
+  makes two reservers' overlap check and write one critical section across
+  processes, so two reservers cannot both believe they hold the same path.
+  Re-reserving supersedes this session's earlier overlapping record instead of
+  leaking a second one. Deliberately advisory:
+  the tool description and every refusal say that shell commands and nested tool
+  execution are not prevented, and the host's per-file mutation queue is
+  untouched. Tests: `orchestrator-reservations.test.ts`.
+
 - **Pi sessions working in one repository, including linked worktrees, can now
   see each other.** Joining is explicit: the new `orchestrator_workspace` tool
   publishes a presence entry with the session id, pid, working directory, branch,
