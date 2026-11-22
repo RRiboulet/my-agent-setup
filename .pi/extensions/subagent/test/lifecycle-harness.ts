@@ -17,6 +17,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 
 import subagentExtension, { type RunRecord } from "../index.ts";
+import type { PlanRecord } from "../plan.ts";
 import { getActivityFilePath } from "../activity.ts";
 import { getInterruptFilePath } from "../interrupt.ts";
 import { waitFor, withEnv, withTempAgentDir } from "./helpers.ts";
@@ -70,6 +71,8 @@ export interface Harness {
 	shutdown: () => Promise<void>;
 	call: (tool: string, params: Record<string, unknown>) => Promise<{ text: string; details: Record<string, unknown> }>;
 	readRuns: () => Promise<RunRecord[]>;
+	/** The persisted plan records beside the runs (`plans.json`). */
+	readPlans: () => Promise<PlanRecord[]>;
 	writeResult: (run: RunRecord, result: Record<string, unknown>) => Promise<void>;
 	writeActivity: (run: RunRecord, activity: Record<string, unknown>) => Promise<void>;
 	writeInterrupt: (run: RunRecord, marker?: Record<string, unknown>) => Promise<void>;
@@ -110,6 +113,12 @@ export interface HarnessOptions {
 	 * that order.
 	 */
 	afterEscapeSent?: () => Promise<void>;
+	/**
+	 * Invoked while a child's submission (`send-keys … Enter`) is in flight. Lets a
+	 * test settle a sibling inside that window, which is the only way to reproduce
+	 * a stop policy abandoning a run mid-launch deterministically.
+	 */
+	duringEnterSent?: () => Promise<void>;
 	/**
 	 * Invoked when the pane probe reports the pane dead (`paneDead: true`), before
 	 * `finalizeMissingChild` runs. Lets a test write a result into the window
@@ -190,6 +199,9 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			const joined = args.join(" ");
 			if (options.afterEscapeSent && joined.includes("send-keys") && args.includes("Escape")) {
 				await options.afterEscapeSent();
+			}
+			if (options.duringEnterSent && joined.includes("send-keys") && args.includes("Enter")) {
+				await options.duringEnterSent();
 			}
 			// The version probe is the only tmux call with no socket in its argv, and
 			// the socket path can itself contain "-V" (mkdtemp may name the agent dir
@@ -290,7 +302,9 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		},
 	);
 
-	const runsIndex = path.join(process.env.PI_CODING_AGENT_DIR ?? "/tmp", "tmux-subagents", SESSION_ID, "runs.json");
+	const sessionDir = path.join(process.env.PI_CODING_AGENT_DIR ?? "/tmp", "tmux-subagents", SESSION_ID);
+	const runsIndex = path.join(sessionDir, "runs.json");
+	const plansIndex = path.join(sessionDir, "plans.json");
 
 	return {
 		pi,
@@ -369,6 +383,13 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			return { text: result.content[0]?.text ?? "", details: result.details ?? {} };
 		},
 		readRuns: async () => JSON.parse(await readFile(runsIndex, "utf8")) as RunRecord[],
+		readPlans: async () => {
+			try {
+				return JSON.parse(await readFile(plansIndex, "utf8")) as PlanRecord[];
+			} catch {
+				return [];
+			}
+		},
 		writeResult: async (run, result) => {
 			await writeFile(run.resultPath, `${JSON.stringify(result)}\n`, "utf8");
 		},

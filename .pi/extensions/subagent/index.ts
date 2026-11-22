@@ -275,6 +275,18 @@ import {
 } from "./report.ts";
 import { renderRunList, runHeadline, type ListRow } from "./listview.ts";
 import { buildEscapeBindArgs, buildPanelLaunch } from "./panel.ts";
+import {
+	buildPlan,
+	failPlanStep,
+	markStepLaunched,
+	queuedStopCandidates,
+	readyStepIds,
+	settlePlanStep,
+	type FailurePolicy,
+	type PlanRecord,
+	type PlanStepSpec,
+	type PlanStepState,
+} from "./plan.ts";
 import { currentTmuxPointer, currentTmuxSocket, defaultPanelLauncher, resolvePaneClient, type PanelLauncher } from "./popup.ts";
 import { shellQuote } from "./shell.ts";
 
@@ -343,7 +355,7 @@ type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "
  * to it when — and only when — the management tools are hidden from the model.
  */
 const SUBAGENT_DESCRIPTION =
-	"Start a delegated task in a separate interactive Pi process inside a detached tmux session and return immediately. The main agent is not blocked and may start more subagents or keep working. Runs execute concurrently (bounded by PI_SUBAGENT_MAX_CONCURRENT, default 4); extra runs are queued. Children inherit the current provider/model/thinking, defaulting the provider to OpenRouter. Start the run, then wait once: subagent_wait({ id }) blocks until that run settles and returns its record (subagent_wait({ ids }) waits for a fan-out together). Keep subagent_status for the live 'what is it doing right now' question, subagent_interrupt to abort a run's current turn while keeping its child alive, and subagent_cancel to stop a run outright. Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.";
+	"Start a delegated task in a separate interactive Pi process inside a detached tmux session and return immediately. The main agent is not blocked and may start more subagents or keep working. Runs execute concurrently (bounded by PI_SUBAGENT_MAX_CONCURRENT, default 4); extra runs are queued. Children inherit the current provider/model/thinking, defaulting the provider to OpenRouter. Start the run, then wait once: subagent_wait({ id }) blocks until that run settles and returns its record (subagent_wait({ ids }) waits for a fan-out together). Keep subagent_status for the live 'what is it doing right now' question, subagent_interrupt to abort a run's current turn while keeping its child alive, and subagent_cancel to stop a run outright. For a fan-out or a dependency plan, pass `tasks` with per-step overrides (task, cwd, provider, model, thinking, handoff, dependsOn, retries), an optional failurePolicy (continue by default, or stop) and retryLimit; the runs share the same concurrency budget and come back in the requested order. Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.";
 
 interface RunActivity {
 	phase: SubagentActivityPhase;
@@ -410,6 +422,10 @@ interface RunRecord {
 	 * never opens the artifact still works.
 	 */
 	report?: RunReport;
+	/** The dependency plan this run's step belongs to, if it was a fan-out step. */
+	planId?: string;
+	/** The step inside that plan this run is one attempt of. */
+	stepId?: string;
 }
 
 /**
@@ -1328,6 +1344,26 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 
 	const runs = new Map<string, RunRecord>();
 	/**
+	 * Runs the queue has ADMITTED (status `running`) but whose child command has
+	 * not been submitted yet. A stop-policy abort uses this to tell "reserved a
+	 * slot" from "child already working": the former is still abandoned.
+	 */
+	const launching = new Set<string>();
+	/**
+	 * Dependency plans, persisted BESIDE the runs they reference.
+	 *
+	 * The plan is a sibling record (`plans.json` in the same per-session run
+	 * directory) rather than a field on a run because one plan owns several runs
+	 * and outlives each of them. It reuses the same atomic writer and the same
+	 * persist chain as `runs.json`: one lock, one ordering, no second store that
+	 * could disagree with the runs it points at.
+	 *
+	 * Loading a persisted plan does NOT advance it. Ticket 06 owns resuming a plan
+	 * after reload; here the record only has to exist, be readable and keep every
+	 * step's state and attempt history so that resumption is additive.
+	 */
+	const plans = new Map<string, PlanRecord>();
+	/**
 	 * Session files a resume has claimed but not yet registered a run for.
 	 *
 	 * A resume does I/O (`mkdir`, `countSessionLines`) between the "is another
@@ -1500,13 +1536,25 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	let sessionId = "";
 	let sessionRunsDir = "";
 	let runsIndexPath = "";
+	let plansIndexPath = "";
+	/**
+	 * The context the current tool call or session belongs to. Held so a plan
+	 * advance triggered by a settlement can prepare a retry's handoff session
+	 * without a tool call in scope. Set by `ensureSessionPaths`, which every tool
+	 * entry point calls before doing anything else.
+	 */
+	let sessionContext: ExtensionContext | undefined;
 	let persistChain: Promise<void> = Promise.resolve();
 
 	const persist = (): Promise<void> => {
 		if (!runsIndexPath) return Promise.resolve();
-		const snapshot = [...runs.values()];
+		const runSnapshot = [...runs.values()];
+		const planSnapshot = [...plans.values()];
 		persistChain = persistChain
-			.then(() => writeJsonAtomic(runsIndexPath, snapshot))
+			.then(async () => {
+				await writeJsonAtomic(runsIndexPath, runSnapshot);
+				if (plansIndexPath) await writeJsonAtomic(plansIndexPath, planSnapshot);
+			})
 			.catch((error) => {
 				console.error(`[tmux-subagent] Failed to persist runs: ${error instanceof Error ? error.message : String(error)}`);
 			});
@@ -1692,6 +1740,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		run.output = truncateToolText(reportText);
 		await settleRun(run);
 		notifyWaiters(run);
+		await advancePlanForRun(run);
 		void drainQueue();
 	};
 
@@ -1712,6 +1761,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		run.report = await publishRunReport(run, message, resolveChildReport(undefined, ""));
 		await settleRun(run);
 		notifyWaiters(run);
+		await advancePlanForRun(run);
 	};
 
 	/**
@@ -2270,10 +2320,29 @@ const noteInterrupt = async (
 				piArgs.map(shellQuote).join(" "),
 			].join(" ");
 
+			// A stop policy may have abandoned this run while its tmux session was being
+			// prepared. No child has started yet, so cancel here rather than launch a
+			// step the plan already marked cancelled.
+			if (run.status === "cancelled") {
+				await pi.exec("tmux", tmuxArgs("kill-session", "-t", run.tmuxSession)).catch(() => undefined);
+				return;
+			}
 			const sent = await pi.exec("tmux", tmuxArgs("send-keys", "-t", run.tmuxTarget, "-l", "--", childCommand));
 			if (sent.code !== 0) throw new Error(sent.stderr.trim() || "Failed to start child Pi.");
+			if (run.status === "cancelled") {
+				await pi.exec("tmux", tmuxArgs("kill-session", "-t", run.tmuxSession)).catch(() => undefined);
+				return;
+			}
 			const entered = await pi.exec("tmux", tmuxArgs("send-keys", "-t", run.tmuxTarget, "Enter"));
 			if (entered.code !== 0) throw new Error(entered.stderr.trim() || "Failed to submit child command.");
+			// The submission itself is also a window: a stop policy can abandon this
+			// step while Enter is in flight. Without this check the run resurrects
+			// from cancelled to running, a child the policy refused is left running,
+			// and the plan step it belongs to can never learn the outcome.
+			if (run.status === "cancelled") {
+				await pi.exec("tmux", tmuxArgs("kill-session", "-t", run.tmuxSession)).catch(() => undefined);
+				return;
+			}
 
 			run.status = "running";
 			run.startedAt = Date.now();
@@ -2292,8 +2361,13 @@ const noteInterrupt = async (
 			if (!next) return;
 			next.status = "running";
 			next.startedAt = Date.now();
+			launching.add(next.id);
 			await persist();
-			await launchRun(next);
+			try {
+				await launchRun(next);
+			} finally {
+				launching.delete(next.id);
+			}
 		}
 	};
 
@@ -2304,6 +2378,153 @@ const noteInterrupt = async (
 		// Show the run in the widget now rather than up to 500ms later on the first
 		// watcher tick: "I started something" deserves an immediate answer.
 		refreshStatusWidget();
+	};
+
+	// --- Dependency plans -----------------------------------------------------
+	//
+	// A plan's steps are launched through the SAME `startRun`/`drainQueue` path as
+	// a standalone run, so fan-out children share the one concurrency budget
+	// instead of opening a second queue. The plan record is advanced from the
+	// settle path (see `advancePlanForRun`), never from a scheduler of its own.
+
+	/** Build the run record for one attempt of a plan step. No I/O, no launch. */
+	const buildPlanRun = (plan: PlanRecord, step: PlanStepState): RunRecord => {
+		const id = randomUUID();
+		const runDir = path.join(sessionRunsDir, id);
+		const tmuxSession = tmuxSessionName(id);
+		const run: RunRecord = {
+			id,
+			task: step.task,
+			cwd: step.cwd,
+			provider: step.provider,
+			model: step.model,
+			thinking: step.thinking,
+			tmuxSession,
+			tmuxTarget: `${tmuxSession}:0.0`,
+			attachCommand: "",
+			captureCommand: "",
+			runDir,
+			resultPath: path.join(runDir, "result.json"),
+			trusted: step.trusted,
+			status: "queued",
+			createdAt: Date.now(),
+			mode: step.handoff as LaunchMode,
+			attempt: step.attempts + 1,
+			planId: plan.id,
+			stepId: step.id,
+		};
+		updateTmuxCommands(run);
+		return run;
+	};
+
+	/**
+	 * Prepare and start one attempt of a plan step.
+	 *
+	 * The attempt is counted (`markStepLaunched`) BEFORE any filesystem work, so a
+	 * launch that throws still consumes retry budget and cannot loop forever. The
+	 * handoff snapshot for a retry is taken when that retry launches, because each
+	 * attempt owns a fresh run dir and its seeded session file lives inside it.
+	 */
+	const launchPlanStep = async (plan: PlanRecord, step: PlanStepState): Promise<void> => {
+		if (plan.status !== "running" || step.status !== "pending") return;
+		const run = buildPlanRun(plan, step);
+		if (!markStepLaunched(plan, step.id, run.id)) return;
+		try {
+			await mkdir(run.runDir, { recursive: true, mode: 0o700 });
+			await mkdir(path.join(run.runDir, "session"), { recursive: true, mode: 0o700 });
+			await writeFile(path.join(run.runDir, "task.md"), buildChildTaskPrompt(run.task), {
+				encoding: "utf8",
+				mode: 0o600,
+			});
+			if (usesSessionFile(run.mode ?? "standalone")) {
+				if (!sessionContext) throw new Error("No parent session context is available for a handoff step.");
+				await prepareHandoffSession(run, sessionContext);
+			}
+			await startRun(run);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			await persist();
+			await applyPlanAdvance(plan, failPlanStep(plan, step.id, `Failed to launch step ${step.id}: ${message}`));
+		}
+	};
+
+	/** Abandon a step's run while it is still only queued: it never started. */
+	const abandonQueuedStep = async (step: PlanStepState, reason: string): Promise<void> => {
+		const runId = step.runIds.at(-1);
+		const run = runId ? runs.get(runId) : undefined;
+		// A step whose child is already alive is left to record its own outcome:
+		// `stop` only prevents further starts, and the cancel cascade is ticket 06's.
+		// `launching` covers the admitted-but-not-submitted window: the queue flipped
+		// the run to `running` before its child command went out, and `launchRun`
+		// re-checks this cancellation before submitting.
+		if (!run || (run.status !== "queued" && !launching.has(run.id))) return;
+		step.status = "cancelled";
+		step.finishedAt = Date.now();
+		clearTimer(run.id);
+		run.status = "cancelled";
+		run.finishedAt = Date.now();
+		run.error = run.error ?? reason;
+		notifyWaiters(run);
+	};
+
+	/**
+	 * Apply a plan reduction: abandon what the policy cancelled, then start what
+	 * is ready. Idempotent because the reduction itself is (see plan.ts).
+	 */
+	const applyPlanAdvance = async (
+		plan: PlanRecord,
+		advance: ReturnType<typeof settlePlanStep>,
+	): Promise<void> => {
+		if (!advance.changed) return;
+
+		if (advance.stop) {
+			// `stop` means no further step STARTS. Queued runs belong to steps that
+			// were admitted but never got a child, so they are abandoned here; live
+			// children keep running and record their own outcome (a cancel cascade is
+			// ticket 06's job).
+			for (const stepId of queuedStopCandidates(plan)) {
+				const step = plan.steps.find((candidate) => candidate.id === stepId);
+				if (step) await abandonQueuedStep(step, "Abandoned: the plan stopped after another step failed.");
+			}
+		}
+		for (const stepId of advance.cancelled) {
+			const step = plan.steps.find((candidate) => candidate.id === stepId);
+			if (!step) continue;
+			if (step.runIds.length > 0) await abandonQueuedStep(step, "Abandoned: a dependency failed.");
+		}
+
+		await persist();
+
+		for (const stepId of advance.launch) {
+			if (plan.status !== "running") break;
+			const step = plan.steps.find((candidate) => candidate.id === stepId);
+			if (!step || step.status !== "pending") continue;
+			await launchPlanStep(plan, step);
+		}
+		refreshStatusWidget();
+	};
+
+	/**
+	 * The settle path's plan hook: called once per settled run, right where the
+	 * run's own finalisation has already been persisted and announced.
+	 *
+	 * Non-completed outcomes are treated as `failed` for planning purposes. A run
+	 * the user cancelled is not finalised through this path at all (ticket 06 owns
+	 * the cancel cascade), so nothing here can mistake a cancellation for a
+	 * successful dependency.
+	 */
+	const advancePlanForRun = async (run: RunRecord): Promise<void> => {
+		if (!run.planId || !run.stepId) return;
+		if (run.status !== "completed" && run.status !== "failed") return;
+		const plan = plans.get(run.planId);
+		if (!plan) return;
+		const advance = settlePlanStep(plan, {
+			stepId: run.stepId,
+			runId: run.id,
+			outcome: run.status,
+			error: run.error,
+		});
+		await applyPlanAdvance(plan, advance);
 	};
 
 	const loadPersistedRuns = async (): Promise<void> => {
@@ -2323,6 +2544,26 @@ const noteInterrupt = async (
 			if (run.status === "running" || run.status === "interrupted") scheduleWatch(run);
 		}
 		await drainQueue();
+	};
+
+	/**
+	 * Read persisted plans so a later persist does not erase them and ticket 06 can
+	 * resume from them. Deliberately does NOT advance or launch anything: resuming
+	 * after reload is ticket 06's scope, and launching from here would start steps
+	 * the moment a session opens.
+	 */
+	const loadPersistedPlans = async (): Promise<void> => {
+		if (!plansIndexPath) return;
+		let parsed: PlanRecord[];
+		try {
+			parsed = JSON.parse(await readFile(plansIndexPath, "utf8")) as PlanRecord[];
+		} catch {
+			return;
+		}
+		for (const plan of parsed) {
+			if (!plan?.id || !Array.isArray(plan.steps)) continue;
+			plans.set(plan.id, plan);
+		}
 	};
 
 	const gcRunDirectories = async (): Promise<void> => {
@@ -2348,11 +2589,17 @@ const noteInterrupt = async (
 	};
 
 	const ensureSessionPaths = async (ctx: ExtensionContext): Promise<void> => {
+		sessionContext = ctx;
 		if (runsIndexPath) return;
 		sessionId = ctx.sessionManager.getSessionId();
 		sessionRunsDir = path.join(getAgentDir(), RUNS_DIR, sessionId);
 		runsIndexPath = path.join(sessionRunsDir, "runs.json");
+		plansIndexPath = path.join(sessionRunsDir, "plans.json");
 		await mkdir(sessionRunsDir, { recursive: true, mode: 0o700 });
+		// Plans FIRST: `loadPersistedRuns` ends by draining the queue, and draining
+		// persists — with an empty plans map that write would erase `plans.json`
+		// before it was ever read.
+		await loadPersistedPlans();
 		await loadPersistedRuns();
 		void gcRunDirectories();
 	};
@@ -2420,19 +2667,61 @@ const noteInterrupt = async (
 		return new Text(`${icon} ${String(message.content)}`, 0, 0);
 	});
 
+	/**
+	 * Per-step shape shared by the fan-out surface.
+	 *
+	 * `tasks` is the ONE plan shape: an item with no `dependsOn` is a fan-out
+	 * step with no edges, so a plain fan-out and a dependency graph take the same
+	 * validation path and produce the same plan record. The top-level `task`
+	 * parameter is retained as sugar for a one-step plan because it is the
+	 * standalone contract existing callers already use; the two are mutually
+	 * exclusive.
+	 */
+	const stepParameters = Type.Object({
+		id: Type.Optional(
+			Type.String({ description: "Optional step id, referenced by other steps' dependsOn. Defaults to step-1, step-2, … in request order." }),
+		),
+		task: Type.String({ description: "The complete task for this child Pi process." }),
+		cwd: Type.Optional(Type.String({ description: "Working directory for this step. Defaults to the current project." })),
+		provider: Type.Optional(Type.String({ description: "Provider override for this step." })),
+		model: Type.Optional(Type.String({ description: "Model id override for this step." })),
+		thinking: Type.Optional(
+			StringEnum(THINKING_LEVELS, { description: "Thinking level override for this step." }),
+		),
+		handoff: Type.Optional(
+			StringEnum(HANDOFF_MODES, {
+				description: "Context handoff for this step. Same meanings as the single-task handoff parameter.",
+			}),
+		),
+		dependsOn: Type.Optional(
+			Type.Array(Type.String(), {
+				description: "Step ids that must COMPLETE SUCCESSFULLY before this step starts. Omit for an independent fan-out step.",
+			}),
+		),
+		retries: Type.Optional(
+			Type.Integer({
+				minimum: 0,
+				description: "Retries allowed AFTER the first attempt for this step. Overrides retryLimit. 0 means one attempt.",
+			}),
+		),
+	});
+
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
 		description: SUBAGENT_DESCRIPTION,
-		promptSnippet: "Start a delegated, non-blocking, tmux-backed Pi subagent",
+		promptSnippet: "Start delegated, non-blocking, tmux-backed Pi subagents (one or a dependency plan)",
 		promptGuidelines: [
 			"Use subagent to delegate an isolated task without blocking: it returns immediately, so start several when useful and keep working.",
-			"Start, then wait once: collect a finished run's output with subagent_wait({ id }) as soon as you have started the run. Keep subagent_status for the live 'what is it doing right now' question, and for runs you deliberately left unwaited.",
+			"For a fan-out, pass `tasks` with per-step overrides instead of several calls: the runs share the same concurrency budget and come back in the order requested. Add `dependsOn` step ids to make a step wait for its dependencies, and choose `failurePolicy` (`continue` by default, or `stop`).",
+			"Start, then wait once: collect a finished run's output with subagent_wait({ id }) as soon as you have started the run — or subagent_wait({ ids }) for a whole fan-out. Keep subagent_status for the live 'what is it doing right now' question, and for runs you deliberately left unwaited.",
 			"To stop a run that is going the wrong way, prefer subagent_interrupt (keeps the child and its transcript, then attach to steer it) over subagent_cancel (throws the run away). An interrupted run still occupies a concurrency slot until it is cancelled, so cancel the ones you are done with.",
 			"subagent_resume needs a run whose child is really gone: cancel or finish it first, or attach to an interrupted run and type the follow-up there.",
 		],
 		parameters: Type.Object({
-			task: Type.String({ description: "The complete task for the child Pi process" }),
+			// The standalone contract. Kept optional because a fan-out request
+			// supplies `tasks` instead; exactly one of the two is accepted.
+			task: Type.Optional(Type.String({ description: "The complete task for one child Pi process. Use `tasks` instead for a fan-out or a dependency plan." })),
 			cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to the current project." })),
 			provider: Type.Optional(Type.String({ description: "Provider override. Defaults to the current provider, then OpenRouter." })),
 			model: Type.Optional(
@@ -2449,12 +2738,86 @@ const noteInterrupt = async (
 						"Context handoff for the child. 'standalone' (default) starts with no context. 'lineage' links the child to this session via its header but shares no context. 'fork' seeds the child with this conversation's live branch, so it already knows the task's background; the child's own usage is then counted separately from the inherited turns.",
 				}),
 			),
+			tasks: Type.Optional(Type.Array(stepParameters, { description: "A fan-out or dependency plan: several children with per-step overrides. Cannot be combined with `task`." })),
+			failurePolicy: Type.Optional(
+				StringEnum(["stop", "continue"] as const, {
+					description:
+						"What a permanently failed step does to the plan. 'continue' (default) cancels only that step's dependents and keeps independent branches running; 'stop' starts nothing further and marks the plan failed.",
+				}),
+			),
+			retryLimit: Type.Optional(
+				Type.Integer({ minimum: 0, description: "Default retries after the first attempt for every step. A step's own `retries` overrides it. Default 0." }),
+			),
 		}),
 
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			if (!params.task.trim()) throw new Error("Subagent task must not be empty.");
 			if (signal?.aborted) throw new Error("Subagent aborted.");
 			await ensureSessionPaths(ctx);
+
+			if (params.tasks !== undefined) {
+				if (params.task !== undefined) throw new Error("Pass either `task` (one run) or `tasks` (a fan-out/plan), not both.");
+
+				// Everything is resolved and validated BEFORE the plan is recorded or
+				// any run exists: a rejected cwd, model or dependency graph must leave
+				// nothing launched and nothing half-written.
+				const specs: PlanStepSpec[] = [];
+				for (const item of params.tasks) {
+					const cwd = path.resolve(ctx.cwd, item.cwd?.trim() || ".");
+					await validateCwd(cwd);
+					const selectedModel = resolveModel(ctx, item.provider, item.model);
+					specs.push({
+						id: item.id,
+						task: item.task,
+						cwd,
+						provider: selectedModel.provider,
+						model: selectedModel.model,
+						thinking: item.thinking ?? pi.getThinkingLevel(),
+						handoff: item.handoff ?? "standalone",
+						trusted: isSameOrDescendant(path.resolve(ctx.cwd), cwd) && ctx.isProjectTrusted(),
+						dependsOn: item.dependsOn,
+						retries: item.retries,
+					});
+				}
+
+				const built = buildPlan(randomUUID(), specs, {
+					policy: params.failurePolicy as FailurePolicy | undefined,
+					retryLimit: params.retryLimit,
+				});
+				if (!built.ok) throw new Error(`Plan rejected: ${built.error}`);
+				const plan = built.plan;
+				plans.set(plan.id, plan);
+				await persist();
+
+				for (const stepId of readyStepIds(plan)) {
+					const step = plan.steps.find((candidate) => candidate.id === stepId);
+					if (step) await launchPlanStep(plan, step);
+				}
+				await persist();
+
+				const lines = [
+					`Plan ${plan.id} started: ${plan.steps.length} step(s), policy ${plan.policy}` +
+						`${plan.steps.some((step) => step.retries > 0) ? `, retry cap ${Math.max(...plan.steps.map((step) => step.retries))}` : ""}.`,
+				];
+				for (const [index, step] of plan.steps.entries()) {
+					const runId = step.runIds.at(-1);
+					const state =
+						step.status === "pending"
+							? `pending (waits for ${step.dependsOn.join(", ")})`
+							: `${step.status}${step.attempts > 1 ? ` attempt ${step.attempts}/${step.retries + 1}` : ""}`;
+					lines.push(`  ${index + 1}. ${step.id}  ${runId ?? "—"}  ${state}`);
+				}
+				const ordered = plan.steps
+					.map((step) => step.runIds.at(-1))
+					.filter((id): id is string => Boolean(id))
+					.map((id) => runs.get(id))
+					.filter((run): run is RunRecord => Boolean(run));
+				if (ordered.length > 0) {
+					lines.push(`Wait: call subagent_wait({ ids: [${ordered.map((run) => `"${run.id}"`).join(", ")}] }) once to collect this fan-out.`);
+				}
+				return { content: [{ type: "text", text: lines.join("\n") }], details: { plan, runs: ordered } };
+			}
+
+			if (!params.task?.trim()) throw new Error("Subagent task must not be empty. Pass `task` for one run or `tasks` for a fan-out.");
 
 			const cwd = path.resolve(ctx.cwd, params.cwd?.trim() || ".");
 			await validateCwd(cwd);
@@ -2537,6 +2900,15 @@ const noteInterrupt = async (
 		},
 
 		renderCall(args, theme) {
+			if (Array.isArray(args.tasks)) {
+				const steps = args.tasks as { dependsOn?: string[] }[];
+				let text =
+					theme.fg("toolTitle", theme.bold("subagent plan ")) + theme.fg("dim", `${steps.length} step(s)`);
+				const edges = steps.reduce((count, step) => count + (step.dependsOn?.length ?? 0), 0);
+				if (edges > 0) text += theme.fg("muted", ` · ${edges} dependency edge(s)`);
+				if (args.failurePolicy) text += theme.fg("muted", ` · ${args.failurePolicy}`);
+				return new Text(text, 0, 0);
+			}
 			const task = args.task?.trim() || "...";
 			const firstLine = task.split("\n", 1)[0] ?? task;
 			const preview = firstLine.length > 100 ? `${firstLine.slice(0, 100)}…` : firstLine;
@@ -2547,7 +2919,19 @@ const noteInterrupt = async (
 		},
 
 		renderResult(result, _options, theme) {
-			const run = result.details as RunRecord | undefined;
+			const details = result.details as (RunRecord & { plan?: PlanRecord; runs?: RunRecord[] }) | undefined;
+			if (details?.plan) {
+				const plan = details.plan;
+				let text = `${theme.fg("warning", "●")} ${theme.fg("toolTitle", theme.bold(`plan ${plan.id}`))}`;
+				text += theme.fg("muted", ` · ${plan.status} · ${plan.policy}`);
+				for (const step of plan.steps) {
+					const runId = step.runIds.at(-1) ?? "(pending)";
+					const attempt = step.attempts > 1 ? ` · attempt ${step.attempts}/${step.retries + 1}` : "";
+					text += `\n  ${step.id} ${runId} ${step.status}${attempt}`;
+				}
+				return new Text(text, 0, 0);
+			}
+			const run = details as RunRecord | undefined;
 			if (!run) {
 				const content = result.content.find((part) => part.type === "text");
 				return new Text(content?.type === "text" ? content.text : "(no output)", 0, 0);
