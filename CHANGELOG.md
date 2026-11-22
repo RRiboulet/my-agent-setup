@@ -6,6 +6,21 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
+- **Pi sessions working in one repository, including linked worktrees, can now
+  see each other.** Joining is explicit: the new `orchestrator_workspace` tool
+  publishes a presence entry with the session id, pid, working directory, branch,
+  heartbeat and TTL, and `peers` lists the other live sessions with their
+  directory, branch and last-seen time. The registry lives at
+  `<git-common-dir>/pi-agents/` — the one key that makes the main checkout and
+  every linked worktree share state without making unrelated projects share it —
+  and never in the working tree or the agent directory, so a checkout stays
+  clean and `.git` stays invisible to git. Each record is one atomically written
+  JSON file, so concurrent joins and heartbeats never expose a half-written
+  registry. `leave` removes the entry promptly; a killed session is swept as soon
+  as its pid is gone or, failing that, within its TTL. Outside a git repository
+  every action is a no-op that says why. Tests:
+  `orchestrator-workspace.test.ts`.
+
 - **The settlement gate can ask a stronger model for one bounded second opinion
   when it keeps failing the same way.** A committed `advisor` block in
   `.pi/orchestrator.json` names the provider and model; the consultation runs at
