@@ -828,6 +828,23 @@ child consults nothing. The attempt's usage is appended to the session's own
 accounting, so `/session-breakdown` bills it once alongside the messages it was
 asked about.
 
+**Compaction is pi's; the model is what forgets.** Gate and advisor state are
+rebuilt from the session branch, so a compaction cannot lose them — but the
+model's own context is replaced by pi's summary, and with it its awareness of an
+open goal, open todos, a pending verification, live delegated runs or a spent
+advisor budget. After a *successful* compaction the extension appends one
+`orchestrator:compact-snapshot` `custom_message` (with `display: false` and no
+turn triggered) naming the active goal, the open todo ids and titles, the gate
+attempts and `attemptCap` with the evidence of every blocked condition and the
+last verdict's reason, the live delegated run ids with their status, and the
+advisor's budget, recorded attempts and consumed trigger keys, bounded to 4 KB
+with a truncation note. A session with nothing to report gets no message, and a
+failed or cancelled compaction gets none either. It is context repair, not a
+record: no `session_before_compact` handler is registered and no compaction
+result is returned, so pi's compaction is neither cancelled nor replaced, and
+nothing is ever read back from the snapshot — `/gate` and the next settlement
+still reconstruct exactly what they did before.
+
 **What a blocking check cannot see.** The gate reads this session's own tool
 calls. A run that delegated every edit to subagents reports no unverified edits
 over a worktree full of them, because a child is another process with another
