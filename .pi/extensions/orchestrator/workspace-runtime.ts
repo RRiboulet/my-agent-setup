@@ -52,6 +52,8 @@ import {
 	presenceHeartbeatMs,
 	presencePath,
 	readInbox,
+	readPresence,
+	readWorkspaceBranch,
 	releaseReservations,
 	removePeerMessage,
 	reservationMatches,
@@ -274,7 +276,14 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 		const heartbeat = setInterval(() => {
 			if (shuttingDown || state.heartbeatInFlight) return;
 			state.heartbeatInFlight = true;
-			void touch(state.scope.registryDir, state.record, now())
+			void (async () => {
+				// A checkout can change branch mid-session; a peer list that keeps
+				// advertising the join-time branch is stale for as long as the session
+				// lives. One git call per beat is cheap next to the file write.
+				const branch = await readWorkspaceBranch(state.scope.cwd, run).catch(() => state.record.branch);
+				if (branch !== state.record.branch) state.record = { ...state.record, branch };
+				return touch(state.scope.registryDir, state.record, now());
+			})()
 				.then(async (next) => {
 					if (shuttingDown || joined === null || joined.sessionId !== state.sessionId) {
 						await writeJsonPresenceRemoval(state.scope.registryDir, state.sessionId).catch(() => undefined);
@@ -314,7 +323,7 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 			}
 			joined.record = await touch(joined.scope.registryDir, joined.record, now());
 			const peers = await listPresence(joined.scope.registryDir, now());
-			return `Already joined ${joined.scope.registryDir} as ${sessionId}.\n${peerSummary(peers.peers, now(), sessionId)}`;
+			return `Already joined ${joined.scope.registryDir} as ${sessionId}.\n${peerSummary(peers.peers, now(), sessionId, peers.truncated)}`;
 		}
 		const scope = await scopeFor(ctx.cwd, true);
 		if (!scope.ok) {
@@ -354,18 +363,20 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 			`Registry: ${scope.scope.registryDir} (outside the working tree).`,
 			`Presence expires in ${Math.round(record.ttlMs / 1000)}s without a heartbeat; this session heartbeats every ${Math.round(state.heartbeatMs / 1000)}s.`,
 			"",
-			peerSummary(peers.peers, now(), sessionId),
+			peerSummary(peers.peers, now(), sessionId, peers.truncated),
 		].join("\n");
 	};
 
-	const peerSummary = (peers: PresenceRecord[], at: number, self: string | null): string => {
+	const peerSummary = (peers: PresenceRecord[], at: number, self: string | null, truncated = 0): string => {
 		const others = peers.filter((peer) => peer.sessionId !== self);
 		if (others.length === 0) {
 			return peers.some((peer) => peer.sessionId === self)
 				? "No other session is in this repository's workspace."
 				: "No live sessions are in this repository's workspace.";
 		}
-		return [`Live peers (${others.length}):`, ...others.map((peer) => peerLine(peer, at, self))].join("\n");
+		const lines = [`Live peers (${others.length}):`, ...others.map((peer) => peerLine(peer, at, self))];
+		if (truncated > 0) lines.push(`(${truncated} older live peer(s) omitted by the list cap.)`);
+		return lines.join("\n");
 	};
 
 	const leave = async (ctx?: ExtensionContext): Promise<string> => {
@@ -396,11 +407,23 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 		if (!scope.ok) return `Workspace unavailable: ${scope.reason}. Nothing is read or written outside a git repository.`;
 		const result = await listPresence(scope.scope.registryDir, now());
 		const lines = [`Registry: ${scope.scope.registryDir}`];
+		let ownListed = false;
 		if (sessionId) {
 			const own = result.peers.find((peer) => peer.sessionId === sessionId);
-			lines.push(own ? `You: ${sessionId} (${own.cwd}${own.branch ? `, branch ${own.branch}` : ", detached"})` : `You: ${sessionId} — not joined (call \`${WORKSPACE_TOOL}\` with action "join")`);
+			ownListed = own !== undefined;
+			// Self may be one of the oldest records the cap dropped. It is still
+			// joined, and readPresence can see it beyond the capped list.
+			const beyondCap = own ?? (joined?.sessionId === sessionId ? await readPresence(scope.scope.registryDir, sessionId) : null);
+			if (beyondCap) {
+				const note = ownListed ? "" : " — joined; outside this capped list";
+				lines.push(`You: ${sessionId} (${beyondCap.cwd}${beyondCap.branch ? `, branch ${beyondCap.branch}` : ", detached"}${note})`);
+			} else {
+				lines.push(`You: ${sessionId} — not joined (call \`${WORKSPACE_TOOL}\` with action "join")`);
+			}
 		}
-		lines.push("", peerSummary(result.peers, now(), sessionId));
+		const selfDroppedByCap = joined?.sessionId === sessionId && !ownListed;
+		const truncatedOthers = Math.max(0, result.truncated - (selfDroppedByCap ? 1 : 0));
+		lines.push("", peerSummary(result.peers, now(), sessionId, truncatedOthers));
 		if (result.invalid.length > 0) lines.push("", `Ignored ${result.invalid.length} unparsable presence file(s).`);
 		return lines.join("\n");
 	};
@@ -419,7 +442,7 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 			result = await reservePaths(joined.scope.registryDir, {
 				sessionId: joined.sessionId,
 				cwd: ctx.cwd,
-				branch: joined.scope.branch,
+				branch: joined.record.branch,
 				paths,
 				reason: input.reason,
 				now: now(),
@@ -521,7 +544,7 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 				id: options.messageId?.(),
 				sessionId: self,
 				cwd: ctx.cwd,
-				branch: joined.scope.branch,
+				branch: joined.record.branch,
 				to: target.sessionId,
 				body,
 				now: now(),
