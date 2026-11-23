@@ -201,11 +201,11 @@ as a session `custom` entry at `agent_before_settle`, publishes
 `orchestrator:gate-decided`, and **acts only where a project opted in** by
 committing `.pi/orchestrator.json`: an open todo, a repeated failure, a project
 verification command the gate runs, or the tool-call loop breaker can then commit
-one more turn instead of settling. A condition blocks once per piece of evidence
-(the same unverified files or todo set cannot block twice, a new edit re-arms it)
-and every
-block spends one of the branch's `attemptCap`; every block reason names
-`orchestrator_override`, which grants a one-shot override. It yields `continue`
+one more turn instead of settling. An unresolved condition keeps blocking while
+its evidence is unchanged (a new edit, todo or failure re-arms it), every block
+spends one of the branch's `attemptCap`, and `orchestrator_override` is consumed
+by the next block it prevents without spending an attempt; `attemptCap` is the
+hard stop that keeps the gate from trapping a run. It yields `continue`
 when a goal owns it and never returns `continue: false`, so the goal extension
 keeps ownership of continuation. A check that cannot be evaluated fails open, and
 a delegated child records `scope: child` and blocks nothing. The same config's

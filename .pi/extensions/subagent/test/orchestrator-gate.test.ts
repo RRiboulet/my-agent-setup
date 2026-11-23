@@ -165,12 +165,20 @@ function gateVerdictOf(result: unknown): GateVerdict {
 	return found.data;
 }
 
-async function startHost(options: { branch?: Entry[]; hasUI?: boolean; cwd?: string } = {}) {
+async function startHost(
+	options: {
+		branch?: Entry[];
+		hasUI?: boolean;
+		cwd?: string;
+		exec?: (command: string, args: string[], options: Record<string, unknown>) => Promise<Record<string, unknown>>;
+	} = {},
+) {
 	const host = createFakeHost({
 		sessionId: "orchestrator-gate-test",
 		branch: options.branch ?? [],
 		hasUI: options.hasUI,
 		cwd: options.cwd,
+		exec: options.exec as never,
 	});
 	orchestratorExtension(host.pi);
 	return host;
@@ -257,7 +265,7 @@ test("evaluateGate marks an unevaluable condition unknown but still reports", ()
 	assert.equal(verdict.reasons[0]?.code, "unevaluated");
 });
 
-test("the same evidence cannot block twice, but new evidence re-arms it", () => {
+test("the same evidence keeps blocking until overridden, and new evidence re-arms it", () => {
 	const input = {
 		outcome: "completed",
 		attemptCap: 3,
@@ -270,17 +278,31 @@ test("the same evidence cannot block twice, but new evidence re-arms it", () => 
 	assert.equal(blocked.attempts, 1);
 	assert.match(blocked.reason, new RegExp(GATE_OVERRIDE_TOOL));
 
-	// The same evidence, next settlement: the branch remembers it blocked.
-	const reported = evaluateGate({
+	// Same evidence, next settlement: a condition that must be resolved blocks
+	// again and spends another attempt. This is what makes the override needed.
+	const repeated = evaluateGate({
 		...input,
 		attempts: 1,
 		policy: { kinds: ["todos"], alreadyBlocked: ["todos"], alreadyBlockedEvidence: blocked.blockedEvidence },
 		now: 2,
 	});
-	assert.equal(reported.decision, "report", "the same evidence cannot block twice");
-	assert.equal(reported.attempts, 1);
-	assert.deepEqual(reported.blockedBy, []);
-	assert.deepEqual(reported.blockedConditions, ["todos"]);
+	assert.equal(repeated.decision, "continue", "an unresolved condition blocks again");
+	assert.equal(repeated.attempts, 2);
+	assert.deepEqual(repeated.blockedBy, ["todos"]);
+
+	// The override is consumed by that repeated block and settles without another
+	// attempt being spent.
+	const overridden = evaluateGate({
+		...input,
+		attempts: 2,
+		policy: { kinds: ["todos"], alreadyBlocked: ["todos"], alreadyBlockedEvidence: repeated.blockedEvidence },
+		override: { reason: "ship anyway", at: 3 },
+		now: 3,
+	});
+	assert.equal(overridden.decision, "report");
+	assert.equal(overridden.attempts, 2, "an override spends no attempt");
+	assert.deepEqual(overridden.override, { reason: "ship anyway", at: 3 });
+	assert.ok(overridden.reasons.some((reason) => reason.code === "override-used"));
 
 	// A new open todo is new evidence: the check re-arms, still bounded by the cap.
 	const rearmed = evaluateGate({
@@ -291,10 +313,28 @@ test("the same evidence cannot block twice, but new evidence re-arms it", () => 
 		],
 		attempts: 1,
 		policy: { kinds: ["todos"], alreadyBlocked: ["todos"], alreadyBlockedEvidence: blocked.blockedEvidence },
-		now: 3,
+		now: 4,
 	});
 	assert.equal(rearmed.decision, "continue", "a new open todo must be able to block again");
 	assert.equal(rearmed.attempts, 2);
+});
+
+test("a repeated failure condition also keeps blocking until overridden", () => {
+	const input = {
+		outcome: "completed",
+		attemptCap: 3,
+		failure: { signature: "bash|npm test|boom", tool: "bash", detail: "boom", count: 2 },
+	} as const;
+	const first = evaluateGate({ ...input, attempts: 0, policy: { kinds: ["failure"], alreadyBlocked: [] }, now: 1 });
+	assert.equal(first.decision, "continue");
+	const repeated = evaluateGate({
+		...input,
+		attempts: 1,
+		policy: { kinds: ["failure"], alreadyBlocked: ["failure"], alreadyBlockedEvidence: first.blockedEvidence },
+		now: 2,
+	});
+	assert.equal(repeated.decision, "continue", "the same failure signature is still unresolved");
+	assert.equal(repeated.attempts, 2);
 });
 
 test("the attempt budget bounds every block on the branch", () => {
@@ -403,6 +443,24 @@ test("a verification run that passed still continues once with the result", () =
 	assert.equal(verdict.reasons.find((reason) => reason.code === "verification-ran")?.details?.exitCode, 0);
 });
 
+test("a passed verification is informational once, not a condition that keeps blocking", () => {
+	const input = {
+		outcome: "completed",
+		attemptCap: 3,
+		edits: { editedFiles: ["src/a.ts"], verificationRuns: 1 },
+		verification: verification("passed"),
+	} as const;
+	const first = evaluateGate({ ...input, attempts: 0, policy: { kinds: ["verification"], alreadyBlocked: [] }, now: 1 });
+	assert.equal(first.decision, "continue");
+	const second = evaluateGate({
+		...input,
+		attempts: 1,
+		policy: { kinds: ["verification"], alreadyBlocked: ["verification"], alreadyBlockedEvidence: first.blockedEvidence },
+		now: 2,
+	});
+	assert.equal(second.decision, "report", "nothing is left to fix, so a pass must not demand an override");
+});
+
 test("a verification run that failed blocks, naming the exit code", () => {
 	const verdict = evaluateGate({
 		outcome: "completed",
@@ -485,7 +543,7 @@ test("scanEditVerification clears an edit once a shell command succeeds", () => 
 		assistantCall("b1", "bash", { command: "npm test" }),
 		toolResult("b1", "bash"),
 	];
-	assert.deepEqual(scanEditVerification(branch), { editedFiles: [], verificationRuns: 1 });
+	assert.deepEqual(scanEditVerification(branch), { editedFiles: [], verificationRuns: 1, editResults: 1 });
 });
 
 test("scanEditVerification keeps an edit made after the last verification run", () => {
@@ -497,7 +555,7 @@ test("scanEditVerification keeps an edit made after the last verification run", 
 		assistantCall("w1", "write", { path: "src/b.ts" }),
 		toolResult("w1", "write"),
 	];
-	assert.deepEqual(scanEditVerification(branch), { editedFiles: ["src/a.ts", "src/b.ts"], verificationRuns: 1 });
+	assert.deepEqual(scanEditVerification(branch), { editedFiles: ["src/a.ts", "src/b.ts"], verificationRuns: 1, editResults: 2 });
 });
 
 test("scanEditVerification ignores a failed edit", () => {
@@ -505,7 +563,7 @@ test("scanEditVerification ignores a failed edit", () => {
 		assistantCall("e1", "edit", { path: "src/a.ts" }),
 		toolResult("e1", "edit", { isError: true, text: "no match" }),
 	];
-	assert.deepEqual(scanEditVerification(branch), { editedFiles: [], verificationRuns: 0 });
+	assert.deepEqual(scanEditVerification(branch), { editedFiles: [], verificationRuns: 0, editResults: 0 });
 });
 
 test("with a configured command only that command verifies, not any shell call", () => {
@@ -532,6 +590,7 @@ test("with a configured command only that command verifies, not any shell call",
 	assert.deepEqual(scanEditVerification(verified, { verificationCommand: "node --test" }), {
 		editedFiles: [],
 		verificationRuns: 1,
+		editResults: 1,
 	});
 });
 
@@ -541,11 +600,13 @@ test("the gate's own passing verification clears the edits it covered, and a fai
 	assert.deepEqual(scanEditVerification(passed, { verificationCommand: "node --test" }), {
 		editedFiles: [],
 		verificationRuns: 1,
+		editResults: 1,
 	});
 	const failed = [...edits, custom(GATE_ENTRY_TYPE, { verification: { status: "failed" }, attempts: 1 })];
 	assert.deepEqual(scanEditVerification(failed, { verificationCommand: "node --test" }), {
 		editedFiles: ["src/a.ts"],
 		verificationRuns: 0,
+		editResults: 1,
 	});
 });
 
@@ -806,7 +867,7 @@ test("when a goal already owns the continuation the gate does not request anothe
 	assert.equal(result.continue, undefined, "yield by leaving the field alone; never return continue: false");
 });
 
-test("a configured open-todo check blocks once, carries the draft forward, and settles next time", async () => {
+test("a configured open-todo check blocks until overridden, carrying drafts forward", async () => {
 	await withTempDir(async (todosDir) => {
 		await writeFile(path.join(todosDir, "aaaaaaaa.md"), `${JSON.stringify({ id: "aaaaaaaa", title: "finish", status: "open" })}\n`);
 		await withEnv({ PI_TODO_PATH: todosDir }, async () => {
@@ -826,15 +887,27 @@ test("a configured open-todo check blocks once, carries the draft forward, and s
 				assert.match(String(message?.content ?? ""), /did not settle/);
 				assert.match(String(message?.content ?? ""), new RegExp(GATE_OVERRIDE_TOOL));
 
-				// The next load sees the committed verdict, so the same condition
-				// cannot block again — that is what makes this a block and not a trap.
+				// The same evidence blocks again: a report-only settlement here would
+				// make the override decorative.
 				const resumed = await startHost({ branch: first.entries as Entry[], cwd });
-				const second = (await resumed.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
-				assert.equal(second.continue, undefined);
-				const settled = gateVerdictOf(second);
-				assert.equal(settled.decision, "report");
-				assert.equal(settled.attempts, 1);
-				assert.deepEqual(settled.blockedConditions, ["todos"]);
+				const repeated = (await resumed.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+				const reblocked = gateVerdictOf(repeated);
+				assert.equal(repeated.continue, true);
+				assert.equal(reblocked.attempts, 2);
+
+				// An armed override is consumed by that repeated block and settles.
+				const withOverride = await startHost({
+					branch: [...(first.entries as Entry[]), ...(repeated.entries as Entry[])],
+					cwd,
+				});
+				await withOverride.fire("session_start", {});
+				await withOverride.callTool(GATE_OVERRIDE_TOOL, { reason: "ship anyway" });
+				const settled = (await withOverride.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+				const verdict = gateVerdictOf(settled);
+				assert.equal(settled.continue, undefined);
+				assert.equal(verdict.decision, "report");
+				assert.equal(verdict.attempts, 2, "the override spends no attempt");
+				assert.equal(verdict.override?.reason, "ship anyway");
 			});
 		});
 	});
@@ -1032,6 +1105,45 @@ test("a run that did not complete is reported, never continued", async () => {
 				assert.ok(gateVerdictOf(result).reasons.some((reason) => reason.code === "blocking-suppressed"));
 			});
 		});
+	});
+});
+
+test("verification re-runs for new edits, not for evidence it already blocked", async () => {
+	// The required-override change keeps the same evidence blocking, so the gate
+	// must re-run the project's command when the files under verification change;
+	// otherwise it would keep blocking on a state it never rechecked.
+	const execCalls: string[][] = [];
+	const exec = async (command: string, args: string[]) => {
+		execCalls.push([command, ...args]);
+		return { code: 0, killed: false, truncated: false, stdout: "ok", stderr: "" };
+	};
+	await withTempDir(async (cwd) => {
+		await mkdir(path.join(cwd, ".pi"), { recursive: true });
+		await writeFile(
+			gateConfigPath(cwd),
+			JSON.stringify({ version: 1, verification: { command: "node --test" } }),
+		);
+		const firstEdit = [assistantCall("w1", "write", { path: "src/a.ts" }), toolResult("w1", "write")];
+		const host = await startHost({ branch: firstEdit, cwd, exec });
+		await host.fire("session_start", {});
+		const first = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+		assert.equal(execCalls.length, 1, "the configured command runs on the first settlement");
+		const firstVerdict = gateVerdictOf(first);
+		assert.equal(firstVerdict.decision, "continue", "a pass is informational once");
+
+		// Same evidence: the command already ran, so it must not run again.
+		const same = await startHost({ branch: [...firstEdit, ...(first.entries as Entry[])], cwd, exec });
+		await same.fire("session_start", {});
+		const repeated = (await same.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+		assert.equal(execCalls.length, 1, "the same evidence is not re-verified");
+		assert.equal(gateVerdictOf(repeated).decision, "report");
+
+		// A new edit changes the evidence: verify it, even though the kind blocked before.
+		const newEdit = [assistantCall("w2", "write", { path: "src/b.ts" }), toolResult("w2", "write")];
+		const changed = await startHost({ branch: [...firstEdit, ...(first.entries as Entry[]), ...newEdit], cwd, exec });
+		await changed.fire("session_start", {});
+		await changed.fire("agent_before_settle", boundaryEvent());
+		assert.equal(execCalls.length, 2, "a new edit re-arms the verification run");
 	});
 });
 
