@@ -2204,9 +2204,14 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	 * is omitted: it is not live, and its own settlement event already said so.
 	 */
 	const publishRunsSnapshot = (): void => {
+		// `interrupted` is deliberately NOT live here. In-process its settlement
+		// event already released the park, and a reloaded parent that treated it as
+		// live would park with no wake left: the interrupt marker does not publish
+		// again. The run keeps its watcher and can still finalize later; that is a
+		// normal `run-settled`, not a reason to wait for this one.
 		const live = [...runs.values()]
-			.filter((run) => run.status === "queued" || run.status === "running" || run.status === "interrupted")
-			.map((run) => ({ runId: run.id, status: run.status as "queued" | "running" | "interrupted" }));
+			.filter((run) => run.status === "queued" || run.status === "running")
+			.map((run) => ({ runId: run.id, status: run.status as "queued" | "running" }));
 		publishOrchestrationEvent(pi, ORCHESTRATION_EVENTS.runsSnapshot, { runs: live, at: Date.now() });
 	};
 

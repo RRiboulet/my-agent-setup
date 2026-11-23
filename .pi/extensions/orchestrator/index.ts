@@ -185,7 +185,9 @@ export default function orchestratorExtension(
 	 */
 	const liveRuns = new Set<string>();
 	/** True from a parked settlement until the wake it earns. In-memory only: a
-	 *  reload rebuilds the live set, not the fact that a particular turn parked. */
+	 *  reload rebuilds the live set, not the fact that a particular turn parked, so
+	 *  a child that finished during the reload produces no wake. The next
+	 *  settlement sees the empty set and blocks normally rather than waking late. */
 	let parked = false;
 	/** Runs that reached a terminal state after the park, named in the wake. */
 	const finishedWhileParked = new Set<string>();
@@ -227,6 +229,15 @@ export default function orchestratorExtension(
 	subscribeOrchestrationEvent(pi, ORCHESTRATION_EVENTS.runsSnapshot, (payload) => {
 		liveRuns.clear();
 		for (const run of payload.runs) liveRuns.add(run.runId);
+	});
+	// An aborted run never reaches `agent_before_settle`, so a park from an earlier
+	// settlement can outlive the turn it was protecting. Clearing it on abort means
+	// a child that finishes later does not pull the user back into a run they chose
+	// to stop.
+	pi.on("agent_settled", (event) => {
+		if (!event.aborted) return;
+		parked = false;
+		finishedWhileParked.clear();
 	});
 
 	/**
@@ -532,11 +543,17 @@ export default function orchestratorExtension(
 		// evidence, "edits without verification" is a weaker rewrite of the same
 		// state after the second block.
 		const carriedVerification = verificationAlreadyBlockedForEvidence ? state.lastVerdict?.verification ?? null : null;
+		// A live delegated run means the work is not finished, so a block would ask
+		// the model to act on information it does not have yet. Its outcome would be
+		// discarded by the park, so the command is not run: the next settlement,
+		// after the run settles, runs it once and acts on the result.
+		const parkingWhileLive = config.block.waitForSubagents === true && liveRuns.size > 0;
 		const shouldVerify =
 			spec !== null &&
 			policy.kinds.includes("verification") &&
 			edits.editedFiles.length > 0 &&
 			!verificationAlreadyBlockedForEvidence &&
+			!parkingWhileLive &&
 			pendingOverride === null;
 		let verification: VerificationOutcome | null = null;
 		if (spec && shouldVerify) {

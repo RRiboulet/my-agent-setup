@@ -1553,3 +1553,40 @@ test("a worker with the same config and a live run never parks", async () => {
 		assert.equal(host.messages.length, 0, "a worker never wakes the parent");
 	});
 });
+
+test("an aborted run clears a park so a later settlement does not wake", async () => {
+	await withParkingProject(async (cwd) => {
+		const host = await startHost({ cwd });
+		await host.fire("session_start", {});
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runStarted, { runId: "run-abort", status: "running", at: 1 });
+		const parked = gateVerdictOf((await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal);
+		assert.equal(parked.parked, true);
+
+		// Aborting skips agent_before_settle, so nothing else would disarm the park.
+		await host.fire("agent_settled", { aborted: true });
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runSettled, { runId: "run-abort", status: "completed", finishedAt: 2 });
+		assert.equal(host.messages.length, 0, "the user aborted; a late child must not pull them back into a run");
+	});
+});
+
+test("a parked settlement does not run the verification command it would discard", async () => {
+	await withTempDir(async (cwd) => {
+		await mkdir(path.join(cwd, ".pi"), { recursive: true });
+		await writeFile(
+			gateConfigPath(cwd),
+			JSON.stringify({ version: 1, block: { waitForSubagents: true }, verification: { command: "node --test" } }),
+		);
+		const exec = async () => ({ stdout: "ok", stderr: "", code: 0, killed: false, truncated: false });
+		const host = await startHost({
+			cwd,
+			exec,
+			branch: [assistantCall("e1", "edit", { path: "src/a.ts" }), toolResult("e1", "edit")],
+		});
+		await host.fire("session_start", {});
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runStarted, { runId: "run-live", status: "running", at: 1 });
+
+		const verdict = gateVerdictOf((await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal);
+		assert.equal(verdict.parked, true);
+		assert.equal(host.execCalls.length, 0, "the outcome would be discarded by the park; the next settlement runs it once");
+	});
+});

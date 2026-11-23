@@ -116,7 +116,10 @@ export interface GateVerdict {
 	/** The override this verdict consumed, when one was pending. */
 	override: GateOverrideUse | null;
 	/** True when a would-be block was parked instead: no continuation, no attempt,
-	 *  because a delegated run is still live. `decision` stays `report`. */
+	 *  because a delegated run is still live. `decision` stays `report`. A park
+	 *  yields the continuation field rather than claiming it, so another boundary
+	 *  handler (the goal extension) may still request a turn; the park saves the
+	 *  gate's attempt, not necessarily the turn. */
 	parked: boolean;
 	/** The live run ids that kept this settlement parked; empty when it did not
 	 *  park (or when the live set was empty). */

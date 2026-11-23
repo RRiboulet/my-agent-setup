@@ -32,6 +32,14 @@ Fixed:
   process — so it cannot outlive the run it was written for. The legacy
   `PI_TMUX_SUBAGENT_CHILD` fallback still assumes the orchestrator loads before
   the subagent factory, which the package manifest's order guarantees.
+- **A parked settlement is released by every terminal state, including after a
+  reload.** An interrupted run is terminal in-process, but the reload snapshot
+  listed it as live, so a parent that parked before a reload could wait forever
+  for an event the interrupt marker can no longer publish; `interrupted` is now
+  excluded from the snapshot. A park also no longer runs the verification command
+  whose result it would discard, and an aborted run clears the park so a late
+  child cannot wake a session the user stopped. The subagent→orchestrator path is
+  covered by a cross-factory test over one live event bus.
 - **A delegated child no longer runs the project's verification command or blocks
   its own settlement.** The orchestrator decided "am I a child?" by reading
   `PI_TMUX_SUBAGENT_CHILD` at every boundary, while the subagent extension reads

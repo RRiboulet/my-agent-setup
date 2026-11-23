@@ -433,3 +433,21 @@ test("a reload publishes the live runs a parent's parking set is rebuilt from", 
 		}
 	});
 });
+
+test("a reload does not list an interrupted run as live", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		// Interrupted is terminal for parking: its in-process settlement event
+		// released the park. Listing it live after a reload would park a parent
+		// whose interrupt event can no longer fire.
+		await seedSession(agentDir, [runFixture(agentDir, { id: "run-int", status: "interrupted" })], []);
+
+		const h = await createHarness({ maxConcurrent: "4" });
+		try {
+			const snapshots = h.events.filter((event) => event.channel === ORCHESTRATION_EVENTS.runsSnapshot);
+			assert.equal(snapshots.length, 1, "one snapshot per session start");
+			assert.deepEqual((snapshots[0]!.data as RunsSnapshotPayload).runs, []);
+		} finally {
+			await h.shutdown();
+		}
+	});
+});

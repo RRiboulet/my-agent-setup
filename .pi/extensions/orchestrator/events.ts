@@ -51,9 +51,11 @@ export interface RunStartedPayload {
 }
 
 /** The live runs a reload rebuilt from disk, so a parent that starts after a
- *  restart knows what is in flight before its first settlement. */
+ *  restart knows what is in flight before its first settlement. `interrupted`
+ *  is not live: it is terminal for parking in-process, and listing it after a
+ *  reload would park a parent whose interrupt event can no longer fire. */
 export interface RunsSnapshotPayload {
-	runs: { runId: string; status: "queued" | "running" | "interrupted" }[];
+	runs: { runId: string; status: "queued" | "running" }[];
 	at: number;
 }
 
