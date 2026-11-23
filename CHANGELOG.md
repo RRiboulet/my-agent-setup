@@ -6,6 +6,20 @@ Versions are git tags. This repository is not published to npm.
 
 Added:
 
+- **Workspace coordination now expires the state a crashed session leaves
+  behind.** A presence record is refreshed with the session's current branch on
+  every heartbeat, so a checkout that changes branch mid-session does not keep
+  advertising the join-time branch. An unparsable presence file is left alone
+  while it is fresh (a newer build may own it) and swept once it is old, instead
+  of being re-reported on every `peers` call. A reservation whose holder process
+  is gone stops blocking immediately rather than waiting out its TTL, matching
+  how presence already treats a dead pid: a reservation is held by a live
+  process, not by the file. The delivered-id ledger is capped and
+  prunes its oldest entries, and the live-peer list says how many old peers its
+  cap omitted rather than dropping them silently. Tests:
+  `orchestrator-workspace.test.ts`, `orchestrator-reservations.test.ts`,
+  `orchestrator-steering.test.ts`.
+
 - **A session can send one targeted message to a peer, delivered at the peer's
   next safe boundary.** The new `orchestrator_message` tool queues a bounded,
   expiring message in the recipient's inbox; the recipient's own poller wakes an

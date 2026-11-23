@@ -13,7 +13,10 @@ import { after, before, beforeEach, test } from "node:test";
 import { registerWorkspace } from "../../orchestrator/workspace-runtime.ts";
 import {
 	buildPeerMessage,
+	deliveredDir,
 	inboxDir,
+	markMessageDelivered,
+	pruneDeliveredMarkers,
 	readInbox,
 	resolveWorkspaceScope,
 	sortMessages,
@@ -275,6 +278,52 @@ test("a self-send through an id prefix is refused too", async () => {
 	const inbox = await readInbox(registry, "abcd-1234", Date.now());
 	assert.equal(inbox.live.length, 0, "nothing was queued");
 	await sender.runtime.shutdown();
+});
+
+test("the delivered ledger is pruned to a bound instead of growing forever", async () => {
+	const recipient = "prune-receiver";
+	for (let index = 0; index < 5; index++) {
+		const message = await messageFor(
+			"sender",
+			recipient,
+			`message ${index}`,
+			Date.now() + index,
+			60_000,
+			`00000000-0000-4000-8000-00000000010${index}`,
+		);
+		await markMessageDelivered(registry, recipient, message, Date.now());
+	}
+	await assert.rejects(() => pruneDeliveredMarkers(registry, recipient, -1), /non-negative finite/);
+	const removed = await pruneDeliveredMarkers(registry, recipient, 3);
+	assert.equal(removed, 2, "only the excess over the cap is removed");
+	const names = (await import("node:fs/promises").then((fs) => fs.readdir(deliveredDir(registry, recipient)))).filter((name) => name.endsWith(".json"));
+	assert.equal(names.length, 3);
+});
+
+test("marking a message delivered prunes the ledger at its cap", async () => {
+	const recipient = "mark-prune-receiver";
+	for (let index = 0; index < 4; index++) {
+		const message = await messageFor(
+			"sender",
+			recipient,
+			`seed ${index}`,
+			Date.now() + index,
+			60_000,
+			`00000000-0000-4000-8000-00000000020${index}`,
+		);
+		await markMessageDelivered(registry, recipient, message, Date.now());
+	}
+	const last = await messageFor(
+		"sender",
+		recipient,
+		"the fifth",
+		Date.now() + 10,
+		60_000,
+		"00000000-0000-4000-8000-000000000209",
+	);
+	await markMessageDelivered(registry, recipient, last, Date.now(), 3);
+	const names = (await import("node:fs/promises").then((fs) => fs.readdir(deliveredDir(registry, recipient)))).filter((name) => name.endsWith(".json"));
+	assert.equal(names.length, 3, "the mark path, not only the prune helper, enforces the cap");
 });
 
 test("an invalid inbox file is reported once and removed, not re-reported every tick", async () => {

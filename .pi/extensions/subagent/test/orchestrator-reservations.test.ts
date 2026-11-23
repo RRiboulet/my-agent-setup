@@ -19,8 +19,11 @@ import {
 	buildReservationPath,
 	buildReservationPaths,
 	canonicalPath,
+	liveReservations,
 	readReservations,
+	reservationPath,
 	reservationPathMatches,
+	reservePaths,
 	withWorkspaceLock,
 	reservationPathsOverlap,
 	resolveWorkspaceScope,
@@ -397,6 +400,29 @@ test("a crashed holder's stale lock is broken so the registry cannot wedge", asy
 	assert.equal(ran, true, "a lock whose holder never refreshed is recoverable");
 });
 
+test("a reservation held by a dead process stops blocking immediately", async () => {
+	// A killed writer leaves a record whose TTL has not passed. Presence already
+	// treats a dead pid as expired; reservations must do the same or a crash blocks
+	// every peer for the reservation's full TTL (default 15 minutes).
+	const registry = await registryDir();
+	const result = await reservePaths(registry, {
+		sessionId: "dead-reserver",
+		pid: 2_147_483_646,
+		cwd: fixture.root,
+		branch: "main",
+		paths: buildReservationPaths(fixture.root, ["src/a.ts"]),
+		reason: "the holder was killed",
+		now: Date.now(),
+	});
+	assert.equal(result.ok, true);
+	const reservation = (result as { ok: true; reservation: { id: string } }).reservation;
+
+	const live = await liveReservations(registry, Date.now());
+	assert.equal(live.live.length, 0, "a dead holder's claim is not live");
+	assert.equal(live.expired.some((record) => record.sessionId === "dead-reserver"), true);
+	assert.equal(existsSync(reservationPath(registry, reservation.id)), false, "the dead record is swept, not just ignored");
+});
+
 test("the lock holds across processes, not just across promises", async () => {
 	// One process's `Promise.all` only proves the event loop serialised the two
 	// checks. The reservation decision is a read-modify-write against the shared
@@ -416,6 +442,10 @@ test("the lock holds across processes, not just across promises", async () => {
 			reason: "cross-process race",
 			now: Date.now(),
 		});
+		// Stay alive until the other process has had its turn: a reservation is
+		// held by a live pid, so exiting immediately would (correctly) expire this
+		// claim before the contender's check.
+		await new Promise((resolve) => setTimeout(resolve, 400));
 		console.log(JSON.stringify({ ok: result.ok }));
 	`;
 	const runChild = (sessionId: string) =>

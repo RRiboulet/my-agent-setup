@@ -9,7 +9,7 @@
 
 import assert from "node:assert/strict";
 import { execFile as execFileCb, execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, utimes, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
@@ -20,6 +20,7 @@ import { registerWorkspace } from "../../orchestrator/workspace-runtime.ts";
 import { waitFor } from "./helpers.ts";
 import {
 	DEFAULT_PRESENCE_TTL_MS,
+	MAX_PRESENCE_TTL_MS,
 	touchPresence,
 	buildPresence,
 	listPresence,
@@ -28,6 +29,7 @@ import {
 	presenceIsLive,
 	presencePath,
 	readPresence,
+	readWorkspaceBranch,
 	resolveWorkspaceScope,
 	validatePresence,
 	writePresence,
@@ -322,6 +324,109 @@ test("a killed session's presence is swept immediately when its pid is gone", as
 	const result = await listPresence(main.registryDir, Date.now());
 	assert.equal(result.peers.some((peer) => peer.sessionId === "dead-session"), false);
 	assert.equal(result.expired.some((peer) => peer.sessionId === "dead-session"), true);
+});
+
+test("a heartbeat refreshes a branch that changed after join", async () => {
+	const base = makeRunner();
+	let branch = "main";
+	const run = async (args: string[], cwd: string) => {
+		const result = await base(args, cwd);
+		if (args[0] === "symbolic-ref") return { ...result, stdout: `${branch}\n`, code: 0 };
+		return result;
+	};
+	const pi = fakePi();
+	const runtime = registerWorkspace(pi as never, { run, heartbeatMs: 10 });
+	const ctx = fakeCtx(pi, "branch-refresh", root);
+	await runtime.join(ctx as never, { ttlMs: 60_000 });
+	try {
+		const { main } = await scopes();
+		const file = presencePath(main.registryDir, "branch-refresh");
+		assert.equal((await readPresence(main.registryDir, "branch-refresh"))?.branch, "main");
+
+		branch = "moved-after-join";
+		await waitFor(async () => (await readPresence(main.registryDir, "branch-refresh"))?.branch === "moved-after-join");
+		assert.equal((await readPresence(main.registryDir, "branch-refresh"))?.branch, "moved-after-join");
+		assert.equal(existsSync(file), true);
+
+		// A transient git failure must keep the last known branch, not advertise
+		// a detached HEAD; readWorkspaceBranch throws for that reason.
+		let failGit = true;
+		const failing = async (args: string[], cwd: string) => {
+			if (failGit && args[0] === "symbolic-ref") throw new Error("spawn EAGAIN");
+			return run(args, cwd);
+		};
+		await assert.rejects(() => readWorkspaceBranch(root, failing), /spawn EAGAIN/);
+		failGit = false;
+		assert.equal(await readWorkspaceBranch(root, run), "moved-after-join");
+	} finally {
+		await runtime.shutdown();
+	}
+});
+
+test("an old unparsable presence file is swept; a fresh one is reported", async () => {
+	const { main } = await scopes();
+	const dir = presenceDir(main.registryDir);
+	await mkdir(dir, { recursive: true });
+	const oldFile = path.join(dir, "corrupt-old.json");
+	const freshFile = path.join(dir, "corrupt-fresh.json");
+	await writeFile(oldFile, "not json\n");
+	await writeFile(freshFile, "not json\n");
+	const old = new Date(Date.now() - MAX_PRESENCE_TTL_MS - 60_000);
+	await utimes(oldFile, old, old);
+
+	const listed = await listPresence(main.registryDir, Date.now());
+	assert.equal(existsSync(oldFile), false, "a stale corrupt file is removed instead of re-reported forever");
+	assert.equal(listed.invalid.includes("corrupt-old.json"), false);
+	assert.equal(existsSync(freshFile), true, "a fresh record may belong to a newer build; leave it to its owner");
+	assert.equal(listed.invalid.includes("corrupt-fresh.json"), true);
+});
+
+test("an unparsable presence entry that cannot be unlinked stays visible", async () => {
+	const { main } = await scopes();
+	const dir = presenceDir(main.registryDir);
+	await mkdir(dir, { recursive: true });
+	// A directory named like a record cannot be read or unlinked as a file; the
+	// sweep must not claim it is gone just because removal failed.
+	const stubborn = path.join(dir, "stubborn.json");
+	await mkdir(stubborn, { recursive: true });
+	const old = new Date(Date.now() - MAX_PRESENCE_TTL_MS - 60_000);
+	await utimes(stubborn, old, old);
+	const listed = await listPresence(main.registryDir, Date.now());
+	assert.equal(listed.invalid.includes("stubborn.json"), true, "an unremovable stale entry is reported, not hidden");
+	await rm(stubborn, { recursive: true, force: true });
+});
+
+test("the presence list cap is reported, not silent", async () => {
+	const { main } = await scopes();
+	const at = Date.now();
+	await Promise.all(
+		Array.from({ length: 205 }, (_, index) => writePresence(main.registryDir, recordFor(`cap-${index}`, at))),
+	);
+	const listed = await listPresence(main.registryDir, at + 100);
+	assert.equal(listed.peers.length, 200);
+	assert.equal(listed.truncated, 5, "the oldest five live peers are omitted and the count is reported");
+});
+
+test("the peers tool still names a joined self the cap dropped, and counts only omitted others", async () => {
+	const pi = fakePi();
+	const runtime = registerWorkspace(pi as never, { run: makeRunner(), heartbeatMs: 60_000 });
+	const ctx = fakeCtx(pi, "cap-self", root);
+	await runtime.join(ctx as never, { ttlMs: 600_000 });
+	const { main } = await scopes();
+	const at = Date.now();
+	// Make self the oldest record, then add more peers than the cap.
+	await writePresence(main.registryDir, {
+		...buildPresence({ sessionId: "cap-self", pid: process.pid, cwd: root, branch: "main", now: at - 100_000, ttlMs: 600_000 }),
+	});
+	await Promise.all(
+		Array.from({ length: 205 }, (_, index) => writePresence(main.registryDir, recordFor(`cap-peer-${index}`, at + 1_000 + index))),
+	);
+	const text = await runtime.peers(ctx as never);
+	assert.match(text, /You: cap-self .*outside this capped list/, "a joined session is never reported as not joined");
+	assert.match(text, /omitted by the list cap/);
+	// 206 live records, cap 200: 6 dropped, one is self, so 5 peers are omitted.
+	assert.match(text, /5 older live peer\(s\) omitted/);
+	await runtime.shutdown();
 });
 
 test("concurrent joins and heartbeats never leave an unparsable registry", async () => {

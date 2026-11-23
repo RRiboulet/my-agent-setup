@@ -146,25 +146,25 @@ export async function resolveWorkspaceScope(cwd: string, run: GitRun): Promise<S
 	} catch {
 		return { ok: false, reason: `the git common directory does not exist: ${commonDir}` };
 	}
-	const branch = await readBranch(cwd, run);
+	// The branch is display metadata; a failed branch read must not turn a valid
+	// repository into a no-op join.
+	const branch = await readWorkspaceBranch(cwd, run).catch(() => null);
 	return {
 		ok: true,
 		scope: { registryDir: join(commonDir, WORKSPACE_DIRNAME), commonDir, cwd, branch },
 	};
 }
 
-async function readBranch(cwd: string, run: GitRun): Promise<string | null> {
-	try {
-		const symbolic = await run(["symbolic-ref", "--short", "-q", "HEAD"], cwd);
-		const name = symbolic.stdout.trim();
-		if (symbolic.code === 0 && name) return name;
-		const rev = await run(["rev-parse", "--abbrev-ref", "HEAD"], cwd);
-		const fallback = rev.stdout.trim();
-		if (rev.code === 0 && fallback && fallback !== "HEAD") return fallback;
-	} catch {
-		// A detached HEAD or a git failure both mean "no branch name"; presence
-		// does not depend on one.
-	}
+export async function readWorkspaceBranch(cwd: string, run: GitRun): Promise<string | null> {
+	// A detached HEAD is `null`; a git that failed to run throws. The caller's
+	// heartbeat keeps the last known branch on a throw, but must be able to
+	// distinguish that from a genuine detached HEAD.
+	const symbolic = await run(["symbolic-ref", "--short", "-q", "HEAD"], cwd);
+	const name = symbolic.stdout.trim();
+	if (symbolic.code === 0 && name) return name;
+	const rev = await run(["rev-parse", "--abbrev-ref", "HEAD"], cwd);
+	const fallback = rev.stdout.trim();
+	if (rev.code === 0 && fallback && fallback !== "HEAD") return fallback;
 	return null;
 }
 
@@ -366,6 +366,8 @@ export interface PresenceList {
 	expired: PresenceRecord[];
 	/** Files that exist but do not parse as this version's record. */
 	invalid: string[];
+	/** Live peers dropped by MAX_PRESENCE_PEERS (oldest heartbeat first). */
+	truncated: number;
 }
 
 /**
@@ -377,7 +379,7 @@ export interface PresenceList {
  * which is still correct because `presenceIsLive` uses the timestamp.
  */
 export async function listPresence(registryDir: string, now: number): Promise<PresenceList> {
-	const result: PresenceList = { peers: [], expired: [], invalid: [] };
+	const result: PresenceList = { peers: [], expired: [], invalid: [], truncated: 0 };
 	const dir = presenceDir(registryDir);
 	let names: string[];
 	try {
@@ -390,13 +392,18 @@ export async function listPresence(registryDir: string, now: number): Promise<Pr
 		if (!name.endsWith(".json") || name.startsWith(".")) continue;
 		const sessionId = name.slice(0, -".json".length);
 		if (!isSafeId(sessionId)) continue;
-		const read = await readJson(join(dir, name));
+		const file = join(dir, name);
+		const read = await readJson(file);
 		if (!read.ok) {
+			if (read.kind === "invalid" && (await sweepOldInvalidPresence(file, now))) continue;
 			if (read.kind === "invalid") result.invalid.push(name);
 			continue;
 		}
 		const record = validatePresence(read.value);
 		if (!record || record.sessionId !== sessionId) {
+			// A newer build's record is unknown, not corrupt. Leave it while its
+			// mtime is recent; a stale one is swept like any other dead record.
+			if (await sweepOldInvalidPresence(file, now)) continue;
 			result.invalid.push(name);
 			continue;
 		}
@@ -408,8 +415,35 @@ export async function listPresence(registryDir: string, now: number): Promise<Pr
 		result.peers.push(record);
 	}
 	result.peers.sort((a, b) => b.lastSeenAt - a.lastSeenAt || a.sessionId.localeCompare(b.sessionId));
-	if (result.peers.length > MAX_PRESENCE_PEERS) result.peers.length = MAX_PRESENCE_PEERS;
+	if (result.peers.length > MAX_PRESENCE_PEERS) {
+		result.truncated = result.peers.length - MAX_PRESENCE_PEERS;
+		result.peers.length = MAX_PRESENCE_PEERS;
+	}
 	return result;
+}
+
+/**
+ * Remove an unparsable presence file once it is old enough that no live writer
+ * can still own it. A future-version peer heartbeats (updating the mtime), so it
+ * survives; a corrupt file left by a crash is eventually cleaned instead of
+ * being re-reported forever.
+ */
+async function sweepOldInvalidPresence(file: string, now: number): Promise<boolean> {
+	try {
+		const info = await stat(file);
+		if (now - info.mtimeMs <= MAX_PRESENCE_TTL_MS) return false;
+		// Re-stat immediately before unlinking: a writer may have renamed a fresh
+		// record over this path since the first look. Not airtight, but it shrinks
+		// the window to the unlink syscall.
+		const again = await stat(file);
+		if (again.mtimeMs !== info.mtimeMs) return false;
+		await unlink(file);
+		return true;
+	} catch {
+		// A file that cannot be removed stays visible in `invalid`; silently
+		// claiming it was swept would hide the problem forever.
+		return false;
+	}
 }
 
 function pidLooksAlive(pid: number): boolean {
@@ -564,6 +598,13 @@ export interface ReservationRecord {
 	version: number;
 	id: string;
 	sessionId: string;
+	/**
+	 * The process that held it. Absent on records written before this field.
+	 * A reservation is held by a live process, not by the file: once the pid is
+	 * gone the claim stops blocking, so a killed writer cannot hold a path for its
+	 * full TTL.
+	 */
+	pid?: number;
 	cwd: string;
 	branch: string | null;
 	paths: ReservationPath[];
@@ -724,6 +765,7 @@ export function validateReservation(value: unknown): ReservationRecord | null {
 	if (typeof value.cwd !== "string" || !value.cwd) return null;
 	if (value.branch !== null && typeof value.branch !== "string") return null;
 	if (typeof value.reason !== "string" || !value.reason) return null;
+	if (value.pid !== undefined && !finiteNumber(value.pid)) return null;
 	if (!finiteNumber(value.createdAt) || !finiteNumber(value.expiresAt)) return null;
 	if (!Array.isArray(value.paths) || value.paths.length === 0) return null;
 	const paths: ReservationPath[] = [];
@@ -737,6 +779,7 @@ export function validateReservation(value: unknown): ReservationRecord | null {
 		version: WORKSPACE_VERSION,
 		id: value.id,
 		sessionId: value.sessionId,
+		...(value.pid === undefined ? {} : { pid: Math.trunc(value.pid) }),
 		cwd: value.cwd,
 		branch: value.branch,
 		paths,
@@ -784,7 +827,7 @@ async function sweepReservationsLocked(registryDir: string, now: number): Promis
 	const { reservations } = await readReservations(registryDir);
 	const expired: ReservationRecord[] = [];
 	for (const record of reservations) {
-		if (record.expiresAt <= now) {
+		if (record.expiresAt <= now || (record.pid !== undefined && !pidLooksAlive(record.pid))) {
 			await unlink(reservationPath(registryDir, record.id)).catch(() => undefined);
 			expired.push(record);
 		}
@@ -794,6 +837,8 @@ async function sweepReservationsLocked(registryDir: string, now: number): Promis
 
 export interface ReserveRequest {
 	sessionId: string;
+	/** Defaults to this process; tests use a dead pid to exercise the sweep. */
+	pid?: number;
 	cwd: string;
 	branch: string | null;
 	paths: ReservationPath[];
@@ -851,6 +896,7 @@ export async function reservePaths(registryDir: string, request: ReserveRequest)
 			version: WORKSPACE_VERSION,
 			id: randomUUID(),
 			sessionId: safeId(request.sessionId),
+			pid: request.pid ?? process.pid,
 			cwd: request.cwd,
 			branch: request.branch,
 			paths: request.paths,
@@ -900,7 +946,11 @@ export function partitionReservations(
 ): { live: ReservationRecord[]; expired: ReservationRecord[] } {
 	const live: ReservationRecord[] = [];
 	const expired: ReservationRecord[] = [];
-	for (const record of records) (record.expiresAt > now ? live : expired).push(record);
+	for (const record of records) {
+		const deadHolder = record.pid !== undefined && !pidLooksAlive(record.pid);
+		if (record.expiresAt > now && !deadHolder) live.push(record);
+		else expired.push(record);
+	}
 	return { live, expired };
 }
 
@@ -1073,11 +1123,59 @@ export async function readInbox(registryDir: string, recipient: string, now: num
 	return result;
 }
 
+/** How many delivered ids one recipient keeps before the oldest are pruned. */
+export const MAX_DELIVERED_MARKERS = 512;
+
+/**
+ * Keep the delivered ledger bounded. The ledger exists to make a replay
+ * idempotent, not to be a permanent archive, and a long-lived repository would
+ * otherwise accumulate one file per peer message forever.
+ */
+export async function pruneDeliveredMarkers(
+	registryDir: string,
+	recipient: string,
+	max = MAX_DELIVERED_MARKERS,
+): Promise<number> {
+	if (!Number.isFinite(max) || max < 0) {
+		throw new RangeError(`delivered-marker cap must be a non-negative finite number, got ${max}`);
+	}
+	const cap = Math.floor(max);
+	const dir = deliveredDir(registryDir, recipient);
+	let names: string[];
+	try {
+		names = (await readdir(dir)).filter((name) => name.endsWith(".json"));
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return 0;
+		throw error;
+	}
+	if (names.length <= cap) return 0;
+	const stamped: { name: string; mtimeMs: number }[] = [];
+	for (const name of names) {
+		try {
+			stamped.push({ name, mtimeMs: (await stat(join(dir, name))).mtimeMs });
+		} catch {
+			// A marker removed by another recipient's prune is already gone.
+		}
+	}
+	stamped.sort((a, b) => a.mtimeMs - b.mtimeMs || a.name.localeCompare(b.name));
+	let removed = 0;
+	for (const entry of stamped.slice(0, Math.max(0, stamped.length - cap))) {
+		try {
+			await unlink(join(dir, entry.name));
+			removed++;
+		} catch {
+			// A concurrent prune may have removed it first; do not count it.
+		}
+	}
+	return removed;
+}
+
 export async function markMessageDelivered(
 	registryDir: string,
 	recipient: string,
 	message: PeerMessage,
 	now: number,
+	maxDelivered = MAX_DELIVERED_MARKERS,
 ): Promise<void> {
 	await writeJsonAtomic(deliveredMarkerPath(registryDir, recipient, message.id), {
 		version: WORKSPACE_VERSION,
@@ -1085,6 +1183,7 @@ export async function markMessageDelivered(
 		from: message.from.sessionId,
 		deliveredAt: now,
 	});
+	await pruneDeliveredMarkers(registryDir, recipient, maxDelivered).catch(() => undefined);
 }
 
 export async function removePeerMessage(registryDir: string, recipient: string, id: string): Promise<void> {
