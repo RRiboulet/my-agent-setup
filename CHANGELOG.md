@@ -105,6 +105,11 @@ Added:
 
 Fixed:
 
+- **The advisor's provider call now carries the parent session id.** OpenCode Go
+  requires `x-opencode-session` and rejected the consultation with
+  `MissingSessionID`; the registry derives that header from a `sessionId` option,
+  which the side call omitted. The primary and the fallback use the parent
+  session's id, so a provider that routes by conversation can answer.
 - **A failed advisor call's reported usage is no longer dropped when a fallback
   answers.** The record is still one attempt, but its usage and cost are the sum
   of both provider calls; a provider that reports none on a failed call

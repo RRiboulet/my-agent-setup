@@ -490,7 +490,13 @@ export default function orchestratorExtension(
 			}),
 			redact: advisor.redact,
 		});
-		const call = await consultAdvisor({ registry: ctx.modelRegistry, config: advisor, digest, signal: ctx.signal });
+		const call = await consultAdvisor({
+			registry: ctx.modelRegistry,
+			config: advisor,
+			digest,
+			signal: ctx.signal,
+			sessionId: ctx.sessionManager.getSessionId(),
+		});
 		const record: AdvisorRecord = {
 			version: ADVISOR_VERSION,
 			at: Date.now(),

@@ -648,6 +648,9 @@ export interface ConsultAdvisorArgs {
 	config: AdvisorConfig;
 	digest: AdvisorDigest;
 	signal?: AbortSignal;
+	/** The parent session's id. Providers that route by conversation (OpenCode
+	 *  requires `x-opencode-session`) reject a request without it. */
+	sessionId?: string;
 	/** Injected so tests never read real credentials. */
 	env?: NodeJS.ProcessEnv;
 }
@@ -677,6 +680,7 @@ async function callAdvisorModel(args: {
 	timeoutMs: number;
 	digest: AdvisorDigest;
 	signal?: AbortSignal;
+	sessionId?: string;
 	env?: NodeJS.ProcessEnv;
 }): Promise<AdvisorAttempt> {
 	const { provider, model: modelId } = args;
@@ -737,7 +741,11 @@ async function callAdvisorModel(args: {
 
 	let message: AssistantMessage;
 	try {
-		message = await args.registry.complete(model, context, { signal: args.signal, timeoutMs: args.timeoutMs });
+		message = await args.registry.complete(model, context, {
+			signal: args.signal,
+			timeoutMs: args.timeoutMs,
+			sessionId: args.sessionId,
+		});
 	} catch (error) {
 		return attemptResult({
 			called: true,
@@ -841,6 +849,7 @@ export async function consultAdvisor(args: ConsultAdvisorArgs): Promise<AdvisorC
 		timeoutMs: args.config.timeoutMs,
 		digest: args.digest,
 		signal: args.signal,
+		sessionId: args.sessionId,
 		env: args.env,
 	});
 	const fallback = args.config.fallback;
@@ -853,6 +862,7 @@ export async function consultAdvisor(args: ConsultAdvisorArgs): Promise<AdvisorC
 		timeoutMs: args.config.timeoutMs,
 		digest: args.digest,
 		signal: args.signal,
+		sessionId: args.sessionId,
 		env: args.env,
 	});
 	const primaryLabel = `${args.config.provider}/${args.config.model}`;
