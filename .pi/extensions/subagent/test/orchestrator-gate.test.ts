@@ -13,7 +13,7 @@
 // carries every earlier handler's entries forward.
 
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
@@ -36,7 +36,9 @@ import {
 	readGateConfig,
 	DEFAULT_VERIFICATION_MAX_OUTPUT_BYTES,
 } from "../../orchestrator/config.ts";
+import { ADVISOR_SECTION } from "../../orchestrator/advisor.ts";
 import { ORCHESTRATION_EVENTS } from "../../orchestrator/events.ts";
+import type { OrchestratorRole } from "../../orchestrator/role.ts";
 import { readOpenTodos, todoDirectory } from "../../orchestrator/todo-state.ts";
 import type { VerificationOutcome } from "../../orchestrator/verify.ts";
 import orchestratorExtension from "../../orchestrator/index.ts";
@@ -73,7 +75,11 @@ function assistantCall(id: string, name: string, args: Record<string, unknown>):
 	};
 }
 
-function toolResult(id: string, toolName: string, options: { text?: string; isError?: boolean } = {}): Entry {
+function toolResult(
+	id: string,
+	toolName: string,
+	options: { text?: string; isError?: boolean; details?: Record<string, unknown> } = {},
+): Entry {
 	return {
 		type: "message",
 		id: `result-${id}`,
@@ -82,6 +88,7 @@ function toolResult(id: string, toolName: string, options: { text?: string; isEr
 			toolCallId: id,
 			toolName,
 			content: [{ type: "text", text: options.text ?? "ok" }],
+			...(options.details ? { details: options.details } : {}),
 			isError: options.isError ?? false,
 		},
 	};
@@ -171,6 +178,7 @@ async function startHost(
 		hasUI?: boolean;
 		cwd?: string;
 		exec?: (command: string, args: string[], options: Record<string, unknown>) => Promise<Record<string, unknown>>;
+		role?: OrchestratorRole;
 	} = {},
 ) {
 	const host = createFakeHost({
@@ -180,7 +188,10 @@ async function startHost(
 		cwd: options.cwd,
 		exec: options.exec as never,
 	});
-	orchestratorExtension(host.pi);
+	// The role is a process-level fact resolved at module load; the seam exists so
+	// a test can drive the worker path without mutating this process's environment
+	// after the module was loaded (which is exactly the bug under test).
+	orchestratorExtension(host.pi, { role: options.role });
 	return host;
 }
 
@@ -192,6 +203,40 @@ async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 		await rm(dir, { recursive: true, force: true });
 	}
 }
+
+test("normalizeGateConfig validates verification.successPattern and leaves it off when absent", () => {
+	const base = { version: 1, verification: { command: "node --test" } };
+	assert.equal(normalizeGateConfig(base).config.verification?.successPattern, null, "absent means no pattern");
+	assert.deepEqual(normalizeGateConfig(base).warnings, []);
+
+	const valid = normalizeGateConfig({ version: 1, verification: { command: "node --test", successPattern: "fail 0" } });
+	assert.equal(valid.config.verification?.successPattern, "fail 0");
+	assert.deepEqual(valid.warnings, []);
+
+	const empty = normalizeGateConfig({ version: 1, verification: { command: "node --test", successPattern: "  " } });
+	assert.equal(empty.config.verification?.successPattern, null);
+
+	const invalid = normalizeGateConfig({ version: 1, verification: { command: "node --test", successPattern: "(" } });
+	assert.equal(invalid.config.verification?.successPattern, null, "an uncompilable pattern is not a pattern");
+	assert.match(invalid.warnings.join(" "), /verification\.successPattern/);
+
+	const nonString = normalizeGateConfig({ version: 1, verification: { command: "node --test", successPattern: 42 } });
+	assert.equal(nonString.config.verification?.successPattern, null);
+	assert.match(nonString.warnings.join(" "), /verification\.successPattern/);
+
+	const long = normalizeGateConfig({ version: 1, verification: { command: "node --test", successPattern: "a".repeat(600) } });
+	assert.equal(long.config.verification?.successPattern, null, "an over-long pattern is refused, not truncated");
+	assert.match(long.warnings.join(" "), /verification\.successPattern/);
+});
+
+test("the example config stays a valid, complete reference", async () => {
+	const examplePath = path.join(import.meta.dirname, "..", "..", "orchestrator", "orchestrator.example.json");
+	const example = JSON.parse(await readFile(examplePath, "utf8"));
+	const { config, warnings } = normalizeGateConfig(example);
+	assert.deepEqual(warnings, []);
+	assert.ok(config.verification);
+	assert.match(String(config.verification.successPattern), /fail\s+0/, "the example shows a realistic success pattern");
+});
 
 function verification(status: VerificationOutcome["status"], extra: Partial<VerificationOutcome> = {}): VerificationOutcome {
 	return {
@@ -610,6 +655,76 @@ test("the gate's own passing verification clears the edits it covered, and a fai
 	});
 });
 
+test("a matching shell result clears edits only when its evidence is a real pass", () => {
+	const options = { verificationCommand: "node --test" };
+	const shellRun = (result: { text?: string; isError?: boolean; details?: Record<string, unknown> }, extra: Entry[] = []) => [
+		assistantCall("e1", "edit", { path: "src/a.ts" }),
+		toolResult("e1", "edit"),
+		...extra,
+		assistantCall("b1", "bash", { command: "node --test" }),
+		toolResult("b1", "bash", result),
+	];
+
+	assert.deepEqual(scanEditVerification(shellRun({ text: "pass 3" }), options), {
+		editedFiles: [],
+		verificationRuns: 1,
+		editResults: 1,
+	});
+
+	const notPasses = [
+		["a failed shell result", shellRun({ text: "1 failing", isError: true })],
+		["an exit code in the details", shellRun({ text: "pass 3", details: { exitCode: 1 } })],
+		["zero-test output", shellRun({ text: "0 passing" })],
+		["a zero-test indicator for a runner that found no files", shellRun({ text: "No test files found" })],
+	] as const;
+	for (const [name, branch] of notPasses) {
+		const state = scanEditVerification(branch, options);
+		assert.deepEqual(state.editedFiles, ["src/a.ts"], `${name} does not clear the edits`);
+		assert.equal(state.verificationRuns, 0, `${name} is not a verification run`);
+		assert.equal(state.editResults, 1, "the edit is still evidence, so a later real pass re-arms");
+	}
+
+	// The configured command itself can be weak; running it proves nothing.
+	const weak = scanEditVerification(shellRun({ text: "pass 3" }), { verificationCommand: "node --test || true" });
+	assert.deepEqual(weak.editedFiles, ["src/a.ts"], "a weak command never clears edits");
+
+	// An opt-in pattern must match the output the model's run reported.
+	const pattern = { verificationCommand: "node --test", successPattern: "fail 0" };
+	assert.deepEqual(scanEditVerification(shellRun({ text: "pass 3" }), pattern).editedFiles, ["src/a.ts"]);
+	assert.deepEqual(scanEditVerification(shellRun({ text: "pass 3\nfail 0" }), pattern).editedFiles, []);
+});
+
+test("a persisted passed verdict clears edits only when it was a real pass", () => {
+	const edits = [assistantCall("e1", "edit", { path: "src/a.ts" }), toolResult("e1", "edit")];
+	const persisted = (verification: Record<string, unknown>, options: Parameters<typeof scanEditVerification>[1] = {}) =>
+		scanEditVerification([...edits, custom(GATE_ENTRY_TYPE, { verification, attempts: 1 })], {
+			verificationCommand: "node --test",
+			...options,
+		});
+
+	assert.deepEqual(persisted({ status: "passed", command: "node --test", output: "pass 3" }).editedFiles, []);
+	assert.deepEqual(
+		persisted({ status: "passed", command: "node --test", output: "0 passing" }).editedFiles,
+		["src/a.ts"],
+		"a verdict whose run reported zero tests predates the inconclusive status, so it is re-checked",
+	);
+	assert.deepEqual(
+		persisted({ status: "passed", command: "node --test || true", output: "pass 3" }).editedFiles,
+		["src/a.ts"],
+		"a weak persisted run is not a pass either",
+	);
+	assert.deepEqual(
+		persisted({ status: "passed", command: "node --test", output: "pass 3" }, { successPattern: "fail 0" }).editedFiles,
+		["src/a.ts"],
+		"a configured pattern applies to a persisted pass too",
+	);
+	assert.equal(
+		persisted({ status: "passed", command: "node --test || true", output: "pass 3" }).verificationRuns,
+		0,
+		"a re-checked false pass is not counted as a verification run",
+	);
+});
+
 test("scanFailures reports the same failing invocation repeated, not two different failures", () => {
 	const repeated = [
 		assistantCall("b1", "bash", { command: "npm test" }),
@@ -700,7 +815,8 @@ test("readGateConfig defaults when absent, and reports a malformed file rather t
 		assert.equal(missing.source, "default");
 		assert.equal(missing.config.attemptCap, 3);
 		assert.equal(missing.config.verification, null);
-		assert.deepEqual(missing.config.block, { openTodos: false, repeatedFailure: false, loops: false });
+		assert.deepEqual(missing.config.block, { openTodos: false, repeatedFailure: false, loops: false, waitForSubagents: false });
+		assert.deepEqual(missing.config.workspace, { lockScope: "worktree" }, "reservations stay worktree-scoped unless a project opts in");
 		assert.equal(missing.warning, undefined);
 
 		await withTempDir(async (configDir) => {
@@ -718,7 +834,7 @@ test("normalizeGateConfig validates the block keys, the verification command and
 		normalizeGateConfig({
 			version: 1,
 			attemptCap: 5,
-			block: { openTodos: true, loops: true, future: true },
+			block: { openTodos: true, loops: true, waitForSubagents: true, future: true },
 			verification: { command: "node --test" },
 			future: true,
 		}),
@@ -726,9 +842,15 @@ test("normalizeGateConfig validates the block keys, the verification command and
 			config: {
 				version: 1,
 				attemptCap: 5,
-				block: { openTodos: true, repeatedFailure: false, loops: true },
-				verification: { command: "node --test", timeoutMs: 300_000, maxOutputBytes: DEFAULT_VERIFICATION_MAX_OUTPUT_BYTES },
+				block: { openTodos: true, repeatedFailure: false, loops: true, waitForSubagents: true },
+				verification: {
+					command: "node --test",
+					timeoutMs: 300_000,
+					maxOutputBytes: DEFAULT_VERIFICATION_MAX_OUTPUT_BYTES,
+					successPattern: null,
+				},
 				advisor: null,
+				workspace: { lockScope: "worktree" },
 			},
 			warnings: [],
 		},
@@ -738,14 +860,16 @@ test("normalizeGateConfig validates the block keys, the verification command and
 	const invalid = normalizeGateConfig({
 		version: 1,
 		attemptCap: -1,
-		block: { openTodos: "yes" },
+		block: { openTodos: "yes", waitForSubagents: "yes" },
 		verification: { command: "" },
 	});
 	assert.equal(invalid.config.attemptCap, 3);
 	assert.equal(invalid.config.block.openTodos, false);
+	assert.equal(invalid.config.block.waitForSubagents, false);
 	assert.equal(invalid.config.verification, null);
 	assert.match(invalid.warnings.join(" "), /attemptCap must be a non-negative integer/);
 	assert.match(invalid.warnings.join(" "), /block\.openTodos must be a boolean/);
+	assert.match(invalid.warnings.join(" "), /block\.waitForSubagents must be a boolean/);
 	assert.match(invalid.warnings.join(" "), /verification\.command must be a non-empty string/);
 
 	const capped = normalizeGateConfig({ version: 1, verification: { command: "x", timeoutMs: 1e9, maxOutputBytes: 1e9 } });
@@ -945,7 +1069,7 @@ test("an override lets a blocked settlement settle, and is recorded in the sessi
 
 function newHostFrom(cwd: string, branch: Entry[]) {
 	const host = createFakeHost({ sessionId: "orchestrator-gate-test", cwd, branch });
-	orchestratorExtension(host.pi);
+	orchestratorExtension(host.pi, { role: "parent" });
 	return host;
 }
 
@@ -1013,6 +1137,112 @@ test("an untrusted project's config is never executed and never blocks", async (
 			"a project the gate will not act in gets no escape hatch",
 		);
 	});
+});
+
+// --- Worker role ------------------------------------------------------------
+
+/**
+ * A delegated child that loads the orchestrator and then has its child markers
+ * scrubbed still reports, runs nothing and blocks nothing.
+ *
+ * This is the regression the role module exists for. The old guard read
+ * `PI_TMUX_SUBAGENT_CHILD` at every call site, and the subagent factory deletes
+ * it during startup, so by this boundary the guard was gone and the child ran
+ * the project's verification command and blocked its own settlement — while the
+ * parent was still waiting on it.
+ */
+test("a delegated worker reports, runs no command and blocks nothing after its child markers are scrubbed", async () => {
+	await withTempDir(async (cwd) => {
+		await mkdir(path.join(cwd, ".pi", "todos"), { recursive: true });
+		await writeFile(gateConfigPath(cwd), JSON.stringify({ version: 1, block: { openTodos: true } }));
+		await writeFile(
+			path.join(cwd, ".pi", "todos", "aaaaaaaa.md"),
+			`${JSON.stringify({ id: "aaaaaaaa", title: "finish", status: "open" })}\n`,
+		);
+
+		await withEnv({ PI_TODO_PATH: undefined }, async () => {
+			// The real order: the launcher sets the markers, the subagent factory
+			// reads them, and then it scrubs them from the process so a `pi` spawned
+			// from the child's shell tool cannot re-enter child mode.
+			await withEnv({ PI_TMUX_SUBAGENT_CHILD: "1", PI_ORCHESTRATOR_ROLE: "worker" }, async () => {
+				await withEnv({ PI_TMUX_SUBAGENT_CHILD: undefined, PI_ORCHESTRATOR_ROLE: undefined }, async () => {
+					const host = await startHost({ branch: [], cwd, role: "worker" });
+					await host.fire("session_start", {});
+
+					const result = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+					const verdict = gateVerdictOf(result);
+
+					assert.equal(verdict.decision, "report", "a child never blocks its own settlement");
+					assert.equal(verdict.scope, "child");
+					assert.equal(result.continue, undefined, "no continuation is requested from a child");
+					assert.equal(host.execCalls.length, 0, "the verification command must not run as a child");
+					const suppressed = verdict.reasons.find((reason) => reason.code === "blocking-suppressed");
+					assert.match(String(suppressed?.summary ?? ""), /PI_ORCHESTRATOR_ROLE=worker/);
+					assert.match(String(suppressed?.summary ?? ""), /PI_TMUX_SUBAGENT_CHILD/);
+					assert.equal(
+						host.tools.has(GATE_OVERRIDE_TOOL),
+						false,
+						"a child gets no escape hatch, at session start or at the boundary",
+					);
+				});
+			});
+		});
+	});
+});
+
+/**
+ * The control for the worker test: the same project, as a parent, blocks and
+ * runs the configured command. Without this, "report" above could be a
+ * misconfigured fixture rather than the role doing its job.
+ */
+test("the same project blocks a parent and runs its verification command", async () => {
+	await withTempDir(async (cwd) => {
+		await mkdir(path.join(cwd, ".pi"), { recursive: true });
+		await writeFile(
+			gateConfigPath(cwd),
+			JSON.stringify({ version: 1, verification: { command: "node --test", timeoutMs: 30_000 } }),
+		);
+		await withEnv({ PI_TODO_PATH: undefined }, async () => {
+			const exec = async () => ({ stdout: "ok", stderr: "", code: 0, killed: false, truncated: false });
+			const parent = await startHost({
+				cwd,
+				role: "parent",
+				exec,
+				branch: [assistantCall("e1", "edit", { path: "src/a.ts" }), toolResult("e1", "edit")],
+			});
+			const parentVerdict = gateVerdictOf((await parent.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal);
+			assert.equal(parentVerdict.scope, "parent");
+			assert.equal(parentVerdict.decision, "continue", "a parent is held to the project's policy");
+			assert.equal(parent.execCalls.length, 1, "a parent runs the configured command");
+
+			const worker = await startHost({
+				cwd,
+				role: "worker",
+				exec,
+				branch: [assistantCall("e1", "edit", { path: "src/a.ts" }), toolResult("e1", "edit")],
+			});
+			const workerVerdict = gateVerdictOf((await worker.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal);
+			assert.equal(workerVerdict.scope, "child");
+			assert.equal(workerVerdict.decision, "report");
+			assert.equal(worker.execCalls.length, 0);
+		});
+	});
+});
+
+// --- Prompt stability -------------------------------------------------------
+
+test("before_agent_start returns no systemPrompt and no handler writes to it", async () => {
+	const host = await startHost({ branch: [] });
+	const event = { systemPrompt: "base", systemPromptOptions: { sections: {} } };
+	const result = await host.fire("before_agent_start", event);
+	const proposal = (result ?? {}) as Record<string, unknown>;
+
+	// A returned `systemPrompt` would fold run-time state into the cached prefix.
+	assert.equal("systemPrompt" in proposal, false);
+	assert.equal(event.systemPrompt, "base", "no handler may rewrite the run's system prompt");
+	assert.deepEqual(Object.keys((event.systemPromptOptions as { sections: Record<string, string> }).sections), []);
+	// The only prompt mutation the orchestrator has is a namespaced section.
+	assert.equal(ADVISOR_SECTION, "advisor");
 });
 
 test("an override is not burned on a settlement that could not block", () => {
@@ -1178,5 +1408,301 @@ test("/gate shows the last verdict, and --json returns the verdict, the last loo
 		await host.runCommand("gate", "--json");
 		const json = String(host.messages.at(-1)?.message.content ?? "");
 		assert.deepEqual(JSON.parse(json), { verdict, loop: null, advisor: null });
+	});
+});
+
+// --- Delegated-run parking (ticket 02) --------------------------------------
+
+/**
+ * Emit one orchestration event through the fake host's bus. The fake now
+ * dispatches as well as records, so this drives the factory's subscriptions the
+ * same way the subagent extension's publications would in one process.
+ */
+function emitOrchestration(host: Awaited<ReturnType<typeof startHost>>, channel: string, data: unknown): void {
+	(host.pi.events as unknown as { emit: (name: string, payload: unknown) => void }).emit(channel, data);
+}
+
+/** A project that opted into parking: an open todo plus `waitForSubagents`. */
+async function withParkingProject<T>(fn: (cwd: string) => Promise<T>): Promise<T> {
+	return withTempDir(async (cwd) => {
+		const todosDir = path.join(cwd, "todos");
+		await mkdir(todosDir, { recursive: true });
+		await writeFile(
+			path.join(todosDir, "aaaaaaaa.md"),
+			`${JSON.stringify({ id: "aaaaaaaa", title: "finish", status: "open" })}\n`,
+		);
+		await mkdir(path.join(cwd, ".pi"), { recursive: true });
+		await writeFile(gateConfigPath(cwd), JSON.stringify({ version: 1, block: { openTodos: true, waitForSubagents: true } }));
+		return await withEnv({ PI_TODO_PATH: todosDir }, () => fn(cwd));
+	});
+}
+
+test("waitForSubagents is off by default: a live run still blocks and spends an attempt", () => {
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 0,
+		attemptCap: 3,
+		openTodos: [{ id: "aaaaaaaa", title: "t", status: "open" }],
+		policy: { kinds: ["todos"], alreadyBlocked: [] },
+		liveRuns: ["run-1"],
+		now: 1,
+	});
+	assert.equal(verdict.decision, "continue");
+	assert.equal(verdict.parked, false);
+	assert.deepEqual(verdict.liveRuns, [], "live ids are reported only when they parked the settlement");
+	assert.equal(verdict.attempts, 1);
+});
+
+test("a live run parks a would-be block: no continuation, no attempt, the ids in the verdict", () => {
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 1,
+		attemptCap: 3,
+		openTodos: [{ id: "aaaaaaaa", title: "t", status: "open" }],
+		policy: { kinds: ["todos"], alreadyBlocked: ["todos"], alreadyBlockedEvidence: { todos: "aaaaaaaa" } },
+		liveRuns: ["run-1", "run-2"],
+		waitForSubagents: true,
+		now: 1,
+	});
+	assert.equal(verdict.decision, "report");
+	assert.equal(verdict.parked, true);
+	assert.deepEqual(verdict.liveRuns, ["run-1", "run-2"]);
+	assert.equal(verdict.kind, "attention");
+	assert.equal(verdict.attempts, 1, "parking spends no attempt");
+	assert.deepEqual(verdict.blockedBy, [], "parking did not block");
+	assert.deepEqual(verdict.blockedConditions, ["todos"], "the already-blocked set is unchanged");
+	assert.deepEqual(verdict.blockedEvidence, { todos: "aaaaaaaa" }, "the already-blocked evidence is unchanged");
+	const parked = verdict.reasons.find((reason) => reason.code === "settlement-parked");
+	assert.ok(parked, "the verdict names why it parked");
+	assert.match(parked!.summary, /run-1/);
+	assert.match(parked!.summary, /open todo/);
+	assert.match(verdict.reason, /parked/);
+});
+
+test("with waitForSubagents but no live run, the same settlement blocks as today", () => {
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 0,
+		attemptCap: 3,
+		openTodos: [{ id: "aaaaaaaa", title: "t", status: "open" }],
+		policy: { kinds: ["todos"], alreadyBlocked: [] },
+		liveRuns: [],
+		waitForSubagents: true,
+		now: 1,
+	});
+	assert.equal(verdict.decision, "continue");
+	assert.equal(verdict.parked, false);
+	assert.equal(verdict.attempts, 1);
+});
+
+test("an override wins over parking and is consumed", () => {
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 0,
+		attemptCap: 3,
+		openTodos: [{ id: "aaaaaaaa", title: "t", status: "open" }],
+		policy: { kinds: ["todos"], alreadyBlocked: [] },
+		override: { reason: "deliberately settling", at: 7 },
+		liveRuns: ["run-1"],
+		waitForSubagents: true,
+		now: 1,
+	});
+	assert.equal(verdict.decision, "report");
+	assert.equal(verdict.parked, false, "an override is an action, not a park");
+	assert.deepEqual(verdict.override, { reason: "deliberately settling", at: 7 });
+	assert.equal(verdict.attempts, 0);
+});
+
+test("an exhausted budget does not park: there is nothing left to save", () => {
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 3,
+		attemptCap: 3,
+		openTodos: [{ id: "aaaaaaaa", title: "t", status: "open" }],
+		policy: { kinds: ["todos"], alreadyBlocked: ["todos"] },
+		liveRuns: ["run-1"],
+		waitForSubagents: true,
+		now: 1,
+	});
+	assert.equal(verdict.decision, "report");
+	assert.equal(verdict.parked, false);
+	assert.equal(verdict.attempts, 3);
+	assert.ok(verdict.reasons.some((reason) => reason.code === "attempt-cap-reached"));
+});
+
+test("a persisted verdict without the parking fields reconstructs as not parked", () => {
+	const state = reconstructGateState([gateStateEntry(1)]);
+	assert.equal(state.lastVerdict?.parked, false);
+	assert.deepEqual(state.lastVerdict?.liveRuns, []);
+
+	const parkedEntry = gateStateEntry(0, 3, {
+		parked: true,
+		liveRuns: ["run-1"],
+	});
+	const parkedState = reconstructGateState([parkedEntry]);
+	assert.equal(parkedState.lastVerdict?.parked, true);
+	assert.deepEqual(parkedState.lastVerdict?.liveRuns, ["run-1"]);
+});
+
+test("formatVerdict says a parked settlement parked rather than blocked", () => {
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 0,
+		attemptCap: 3,
+		openTodos: [{ id: "deadbeef", title: "t", status: "open" }],
+		policy: { kinds: ["todos"], alreadyBlocked: [] },
+		liveRuns: ["run-1"],
+		waitForSubagents: true,
+		now: 1,
+	});
+	const text = formatVerdict(verdict);
+	assert.match(text, /Parked:/);
+	assert.match(text, /run-1/);
+});
+
+test("a settlement with a live run parks, and the last run settling wakes the parent exactly once", async () => {
+	await withParkingProject(async (cwd) => {
+		const host = await startHost({ cwd });
+		await host.fire("session_start", {});
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runStarted, { runId: "run-live-1", status: "queued", at: 1 });
+
+		const result = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+		const verdict = gateVerdictOf(result);
+		assert.equal(result.continue, undefined, "a park returns no continuation");
+		assert.equal(verdict.parked, true);
+		assert.deepEqual(verdict.liveRuns, ["run-live-1"]);
+		assert.equal(verdict.attempts, 0);
+		assert.equal(host.messages.length, 0, "parking sends nothing");
+
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runSettled, {
+			runId: "run-live-1",
+			status: "completed",
+			finishedAt: 2,
+		});
+		assert.equal(host.messages.length, 1, "the last settled run wakes the parked parent");
+		const sent = host.messages[0]!;
+		assert.equal(sent.message.customType, "orchestrator-resume");
+		assert.equal(sent.options?.triggerTurn, true);
+		assert.equal(sent.options?.deliverAs, "followUp");
+		assert.match(String(sent.message.content), /run-live-1/);
+
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runSettled, {
+			runId: "run-live-1",
+			status: "completed",
+			finishedAt: 3,
+		});
+		assert.equal(host.messages.length, 1, "a second settle in the same state does not wake again");
+	});
+});
+
+test("a parked parent stays parked while another run is live, then wakes on the last one", async () => {
+	await withParkingProject(async (cwd) => {
+		const host = await startHost({ cwd });
+		await host.fire("session_start", {});
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runStarted, { runId: "run-a", status: "running", at: 1 });
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runStarted, { runId: "run-b", status: "running", at: 1 });
+		const verdict = gateVerdictOf((await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal);
+		assert.deepEqual(verdict.liveRuns, ["run-a", "run-b"]);
+
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runSettled, { runId: "run-a", status: "failed", finishedAt: 2 });
+		assert.equal(host.messages.length, 0, "one sibling finishing does not wake the parent");
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runSettled, { runId: "run-b", status: "completed", finishedAt: 3 });
+		assert.equal(host.messages.length, 1);
+	});
+});
+
+test("a cancelled only-run releases the park", async () => {
+	await withParkingProject(async (cwd) => {
+		const host = await startHost({ cwd });
+		await host.fire("session_start", {});
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runStarted, { runId: "run-cancelled", status: "running", at: 1 });
+		const verdict = gateVerdictOf((await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal);
+		assert.equal(verdict.parked, true);
+
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runSettled, { runId: "run-cancelled", status: "cancelled", finishedAt: 2 });
+		assert.equal(host.messages.length, 1, "cancelled is terminal for parking");
+		assert.equal(host.messages[0]!.message.customType, "orchestrator-resume");
+	});
+});
+
+test("without a live run the settlement blocks normally: parking is not a blanket suppression", async () => {
+	await withParkingProject(async (cwd) => {
+		const host = await startHost({ cwd });
+		await host.fire("session_start", {});
+		const result = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+		const verdict = gateVerdictOf(result);
+		assert.equal(result.continue, true);
+		assert.equal(verdict.parked, false);
+		assert.equal(verdict.attempts, 1);
+		assert.equal(host.messages.length, 0, "no wake when nothing ever parked");
+	});
+});
+
+test("a runs snapshot rebuilds the live set before the first settlement after a reload", async () => {
+	await withParkingProject(async (cwd) => {
+		const host = await startHost({ cwd });
+		await host.fire("session_start", {});
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runsSnapshot, {
+			runs: [{ runId: "run-after-reload", status: "running" }],
+			at: 5,
+		});
+
+		const verdict = gateVerdictOf((await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal);
+		assert.equal(verdict.parked, true);
+		assert.deepEqual(verdict.liveRuns, ["run-after-reload"]);
+	});
+});
+
+test("a worker with the same config and a live run never parks", async () => {
+	await withParkingProject(async (cwd) => {
+		const host = await startHost({ cwd, role: "worker" });
+		await host.fire("session_start", {});
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runStarted, { runId: "run-live", status: "running", at: 1 });
+
+		const result = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+		const verdict = gateVerdictOf(result);
+		assert.equal(verdict.scope, "child");
+		assert.equal(verdict.parked, false);
+		assert.equal(result.continue, undefined);
+
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runSettled, { runId: "run-live", status: "completed", finishedAt: 2 });
+		assert.equal(host.messages.length, 0, "a worker never wakes the parent");
+	});
+});
+
+test("an aborted run clears a park so a later settlement does not wake", async () => {
+	await withParkingProject(async (cwd) => {
+		const host = await startHost({ cwd });
+		await host.fire("session_start", {});
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runStarted, { runId: "run-abort", status: "running", at: 1 });
+		const parked = gateVerdictOf((await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal);
+		assert.equal(parked.parked, true);
+
+		// Aborting skips agent_before_settle, so nothing else would disarm the park.
+		await host.fire("agent_settled", { aborted: true });
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runSettled, { runId: "run-abort", status: "completed", finishedAt: 2 });
+		assert.equal(host.messages.length, 0, "the user aborted; a late child must not pull them back into a run");
+	});
+});
+
+test("a parked settlement does not run the verification command it would discard", async () => {
+	await withTempDir(async (cwd) => {
+		await mkdir(path.join(cwd, ".pi"), { recursive: true });
+		await writeFile(
+			gateConfigPath(cwd),
+			JSON.stringify({ version: 1, block: { waitForSubagents: true }, verification: { command: "node --test" } }),
+		);
+		const exec = async () => ({ stdout: "ok", stderr: "", code: 0, killed: false, truncated: false });
+		const host = await startHost({
+			cwd,
+			exec,
+			branch: [assistantCall("e1", "edit", { path: "src/a.ts" }), toolResult("e1", "edit")],
+		});
+		await host.fire("session_start", {});
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runStarted, { runId: "run-live", status: "running", at: 1 });
+
+		const verdict = gateVerdictOf((await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal);
+		assert.equal(verdict.parked, true);
+		assert.equal(host.execCalls.length, 0, "the outcome would be discarded by the park; the next settlement runs it once");
 	});
 });

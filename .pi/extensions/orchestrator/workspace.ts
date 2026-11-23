@@ -35,11 +35,23 @@
 import { randomUUID } from "node:crypto";
 import { lstatSync, realpathSync, statSync } from "node:fs";
 import { mkdir, open, readdir, readFile, rename, rm, stat, unlink, utimes } from "node:fs/promises";
-import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
 /** Bumped only when an older reader could misread a newer record. */
 export const WORKSPACE_VERSION = 1;
+/**
+ * Reservations version separately from presence and messages, and had to: a
+ * v1 reservation is a bare absolute path, while a v2 one carries the namespace
+ * its patterns live in. Bumping the shared version instead would also invalidate
+ * every presence entry and undelivered peer message for a session on the other
+ * build. A build that predates the field ignores a v2 record (an unknown
+ * version is unusable, so it blocks nothing) rather than misreading a
+ * shared-root pattern as a concrete absolute path.
+ */
+export const RESERVATION_VERSION = 2;
+/** v2 added `scope` and `root`; a v1 record is a worktree-scoped claim. */
+const RESERVATION_VERSION_LEGACY = 1;
 /** One directory under the git common dir holds everything this feature owns. */
 export const WORKSPACE_DIRNAME = "pi-agents";
 
@@ -96,6 +108,18 @@ export interface WorkspaceScope {
 	commonDir: string;
 	/** The session's working directory (a worktree or the main checkout). */
 	cwd: string;
+	/**
+	 * The session's own worktree top level (`git rev-parse --show-toplevel`, made
+	 * canonical). This is the root a `"repo"` lock scope makes paths relative to,
+	 * so it must be the worktree rather than the common dir: two linked worktrees
+	 * have one common dir and two roots.
+	 */
+	root: string;
+	/**
+	 * The main checkout's root — the directory that owns the git common dir, and
+	 * therefore the one namespace every linked worktree can map into.
+	 */
+	sharedRoot: string;
 	/** Current branch short name, or `null` for a detached HEAD. */
 	branch: string | null;
 }
@@ -149,10 +173,30 @@ export async function resolveWorkspaceScope(cwd: string, run: GitRun): Promise<S
 	// The branch is display metadata; a failed branch read must not turn a valid
 	// repository into a no-op join.
 	const branch = await readWorkspaceBranch(cwd, run).catch(() => null);
+	// The root is load-bearing for a `"repo"` lock scope, but a failed read must
+	// not turn a valid repository into a no-op: the session's cwd is the honest
+	// fallback, and a worktree-scoped reservation ignores the value entirely.
+	const topLevel = await readWorkspaceTopLevel(cwd, run);
+	const root = canonicalPath(cwd, topLevel ?? ".");
+	// Both sides of a repo-scoped comparison are spelled from this string, so it
+	// is canonicalised too: a symlinked checkout would otherwise make the main
+	// tree's identity differ from its own worktrees'.
+	const sharedRoot = canonicalPath(commonDir, dirname(commonDir));
 	return {
 		ok: true,
-		scope: { registryDir: join(commonDir, WORKSPACE_DIRNAME), commonDir, cwd, branch },
+		scope: { registryDir: join(commonDir, WORKSPACE_DIRNAME), commonDir, cwd, root, sharedRoot, branch },
 	};
+}
+
+/** The worktree top level, or `null` when git cannot name one. */
+async function readWorkspaceTopLevel(cwd: string, run: GitRun): Promise<string | null> {
+	try {
+		const top = await run(["rev-parse", "--show-toplevel"], cwd);
+		const value = top.stdout.trim();
+		return top.code === 0 && value && isAbsolute(value) ? value : null;
+	} catch {
+		return null;
+	}
 }
 
 export async function readWorkspaceBranch(cwd: string, run: GitRun): Promise<string | null> {
@@ -588,6 +632,13 @@ async function breakStaleLock(dir: string, now: () => number, staleMs: number): 
 
 export type ReservationKind = "file" | "dir" | "glob";
 
+/**
+ * Which namespace a record's patterns live in. Kept as a string union rather
+ * than imported from `config.ts` so the store does not depend on the reader;
+ * the two spellings are the same two values.
+ */
+export type ReservationScope = "worktree" | "repo";
+
 export interface ReservationPath {
 	/** Absolute, canonical path. A glob keeps its `*`/`?` characters. */
 	pattern: string;
@@ -607,6 +658,20 @@ export interface ReservationRecord {
 	pid?: number;
 	cwd: string;
 	branch: string | null;
+	/**
+	 * Which namespace `paths` is in. `"worktree"` (the default) means the paths
+	 * are canonical absolute paths in the reserving session's own tree;
+	 * `"repo"` means they were mapped into `sharedRoot` before storage, so every
+	 * worktree compares the same repository-relative path.
+	 */
+	scope: ReservationScope;
+	/**
+	 * The reserving session's worktree root. A `"repo"` record's patterns are
+	 * already shared-root based, but a `"worktree"` record has no other way to
+	 * be mapped into the shared namespace later, and the record outlives the
+	 * session that wrote it.
+	 */
+	root: string;
 	paths: ReservationPath[];
 	reason: string;
 	createdAt: number;
@@ -645,8 +710,60 @@ function hasGlob(input: string): boolean {
 	return input.includes("*") || input.includes("?");
 }
 
+// --- Lock-scope path mapping ------------------------------------------------
+//
+// A reservation is compared in one namespace, chosen by the config's
+// `workspace.lockScope`. The default (`"worktree"`) is the canonical absolute
+// path this module always used, so linked worktrees never collide. `"repo"`
+// makes the path relative to the reserving worktree and re-anchors it at the
+// shared root (the main checkout), which is the one spelling every linked
+// worktree can agree on.
+//
+// A path outside the worktree has no repository-relative form, so it keeps its
+// absolute pattern: `../../secrets` does not acquire cross-tree meaning just
+// because a project asked for repository-wide locking.
+
+/**
+ * The path relative to `root`, or `null` when it is outside it (or not
+ * absolute). Textual only — the file need not exist, and a glob is a string like
+ * any other, so `src/*.ts` maps exactly as a concrete path would.
+ */
+export function repoRelative(root: string, absolute: string): string | null {
+	if (!root || !isAbsolute(absolute)) return null;
+	const relativePath = relative(root, absolute);
+	if (relativePath === "") return ".";
+	if (relativePath === ".." || relativePath.startsWith(`..${sep}`) || isAbsolute(relativePath)) return null;
+	return relativePath;
+}
+
+/**
+ * Re-anchor an absolute path from `root`'s tree at `sharedRoot`. A path outside
+ * `root` is returned unchanged, which is what makes it stay absolute.
+ */
+export function mapToSharedRoot(root: string, sharedRoot: string, absolute: string): string {
+	const relativePath = repoRelative(root, absolute);
+	if (relativePath === null) return absolute;
+	if (relativePath === ".") return sharedRoot;
+	return join(sharedRoot, relativePath);
+}
+
+/** Options that decide which namespace a built pattern is stored in. */
+export interface ReservationPathOptions {
+	scope?: ReservationScope;
+	/** The session's worktree root; required for `"repo"`. */
+	root?: string;
+	/** The main checkout root; required for `"repo"`. */
+	sharedRoot?: string;
+}
+
+function scopePattern(path: ReservationPath, options: ReservationPathOptions): ReservationPath {
+	if (options.scope !== "repo" || !options.root || !options.sharedRoot) return path;
+	const pattern = mapToSharedRoot(options.root, options.sharedRoot, path.pattern);
+	return pattern === path.pattern ? path : { pattern, kind: path.kind };
+}
+
 /** Classify and canonicalise one user-supplied path. */
-export function buildReservationPath(cwd: string, input: string): ReservationPath {
+export function buildReservationPath(cwd: string, input: string, options: ReservationPathOptions = {}): ReservationPath {
 	const trimmed = input.trim();
 	if (!trimmed) throw new Error("a reservation path may not be empty");
 	if (hasGlob(trimmed)) {
@@ -660,7 +777,7 @@ export function buildReservationPath(cwd: string, input: string): ReservationPat
 		// A prefix that ends mid-segment (`src/fi*`) must not get a separator; an
 		// empty prefix and a directory prefix both must.
 		const needsSep = !base.endsWith(sep) && (prefix === "" || prefix.endsWith("/"));
-		return { pattern: `${base}${needsSep ? sep : ""}${rest}`.replace(/\/+/g, "/"), kind: "glob" };
+		return scopePattern({ pattern: `${base}${needsSep ? sep : ""}${rest}`.replace(/\/+/g, "/"), kind: "glob" }, options);
 	}
 	const canonical = canonicalPath(cwd, trimmed);
 	const wantsDir = trimmed.endsWith("/") || trimmed === "." || trimmed === "..";
@@ -670,14 +787,18 @@ export function buildReservationPath(cwd: string, input: string): ReservationPat
 	} catch {
 		// Missing path: a trailing slash is the only signal that it is a directory.
 	}
-	return { pattern: canonical, kind: isDir ? "dir" : "file" };
+	return scopePattern({ pattern: canonical, kind: isDir ? "dir" : "file" }, options);
 }
 
-export function buildReservationPaths(cwd: string, inputs: string[]): ReservationPath[] {
+export function buildReservationPaths(
+	cwd: string,
+	inputs: string[],
+	options: ReservationPathOptions = {},
+): ReservationPath[] {
 	const seen = new Set<string>();
 	const paths: ReservationPath[] = [];
 	for (const input of inputs) {
-		const built = buildReservationPath(cwd, input);
+		const built = buildReservationPath(cwd, input, options);
 		const key = `${built.kind}:${built.pattern}`;
 		if (seen.has(key)) continue;
 		seen.add(key);
@@ -726,6 +847,57 @@ export function reservationMatches(record: ReservationRecord, candidate: string)
 	return record.paths.some((path) => reservationPathMatches(path, candidate));
 }
 
+/** The writer's own position, which decides how its candidate is re-anchored. */
+export interface ReservationWriter {
+	root: string;
+	sharedRoot: string;
+}
+
+/**
+ * The candidate in the **holder's** namespace: the hook that makes a
+ * repository-scoped claim enforceable against a writer that never opted in.
+ *
+ * A worktree-scoped holder compares the canonical absolute path, exactly as
+ * before. A repo-scoped holder's patterns are shared-root based, so the
+ * writer's candidate is made relative to the writer's own worktree and
+ * re-anchored at the shared root — the same relative path in two linked trees
+ * then compares equal. A candidate outside the writer's worktree keeps its
+ * absolute form and therefore cannot match a repo claim.
+ */
+export function reservationCandidateFor(
+	record: ReservationRecord,
+	candidate: string,
+	writer: ReservationWriter,
+): string {
+	if (record.scope !== "repo") return candidate;
+	return mapToSharedRoot(writer.root, writer.sharedRoot, candidate);
+}
+
+/**
+ * One conflict check needs both sides in the same namespace, and only the repo
+ * side knows which namespace that is. A worktree record is mapped through the
+ * root it stored; a worktree request through the root it has now.
+ */
+function reservationComparisonPair(
+	request: { scope: ReservationScope; root: string; sharedRoot?: string },
+	record: ReservationRecord,
+	requestPaths: ReservationPath[],
+): { requestPaths: ReservationPath[]; holderPaths: ReservationPath[] } {
+	// Without a shared root the two namespaces cannot be reconciled. Comparing them
+	// as they are is the fail-open choice: a mixed-scope collision is missed rather
+	// than invented. Every runtime caller supplies it; only a direct store caller
+	// can omit it.
+	if (request.scope === record.scope || !request.sharedRoot) {
+		return { requestPaths, holderPaths: record.paths };
+	}
+	const sharedRoot = request.sharedRoot;
+	const toShared = (paths: ReservationPath[], root: string): ReservationPath[] =>
+		paths.map((path) => ({ pattern: mapToSharedRoot(root, sharedRoot, path.pattern), kind: path.kind }));
+	return request.scope === "repo"
+		? { requestPaths, holderPaths: toShared(record.paths, record.root) }
+		: { requestPaths: toShared(requestPaths, request.root), holderPaths: record.paths };
+}
+
 function within(child: string, parent: string): boolean {
 	return child === parent || child.startsWith(parent + sep);
 }
@@ -759,7 +931,7 @@ export function reservationPathsOverlap(a: ReservationPath, b: ReservationPath):
 
 export function validateReservation(value: unknown): ReservationRecord | null {
 	if (!isRecord(value)) return null;
-	if (value.version !== WORKSPACE_VERSION) return null;
+	if (value.version !== RESERVATION_VERSION && value.version !== RESERVATION_VERSION_LEGACY) return null;
 	if (typeof value.id !== "string" || !isSafeId(value.id)) return null;
 	if (typeof value.sessionId !== "string" || !isSafeId(value.sessionId)) return null;
 	if (typeof value.cwd !== "string" || !value.cwd) return null;
@@ -768,6 +940,19 @@ export function validateReservation(value: unknown): ReservationRecord | null {
 	if (value.pid !== undefined && !finiteNumber(value.pid)) return null;
 	if (!finiteNumber(value.createdAt) || !finiteNumber(value.expiresAt)) return null;
 	if (!Array.isArray(value.paths) || value.paths.length === 0) return null;
+	// A v1 record predates the scope field, and its paths are canonical absolute
+	// paths: reading it as worktree-scoped with its own cwd as the root is the
+	// only honest interpretation, and no migration write is needed. A record
+	// written from a subdirectory therefore maps from that subdirectory, not the
+	// worktree top level; nothing better can be recovered without inventing data.
+	let scope: ReservationScope = "worktree";
+	let root = value.cwd;
+	if (value.version === RESERVATION_VERSION) {
+		if (value.scope !== "worktree" && value.scope !== "repo") return null;
+		if (typeof value.root !== "string" || !isAbsolute(value.root)) return null;
+		scope = value.scope;
+		root = value.root;
+	}
 	const paths: ReservationPath[] = [];
 	for (const raw of value.paths) {
 		if (!isRecord(raw)) return null;
@@ -776,12 +961,14 @@ export function validateReservation(value: unknown): ReservationRecord | null {
 		paths.push({ pattern: raw.pattern, kind: raw.kind });
 	}
 	return {
-		version: WORKSPACE_VERSION,
+		version: RESERVATION_VERSION,
 		id: value.id,
 		sessionId: value.sessionId,
 		...(value.pid === undefined ? {} : { pid: Math.trunc(value.pid) }),
 		cwd: value.cwd,
 		branch: value.branch,
+		scope,
+		root,
 		paths,
 		reason: value.reason.slice(0, MAX_REASON_BYTES),
 		createdAt: value.createdAt,
@@ -841,10 +1028,22 @@ export interface ReserveRequest {
 	pid?: number;
 	cwd: string;
 	branch: string | null;
+	/**
+	 * Reserved patterns **already in this request's namespace**: canonical
+	 * absolute for `"worktree"`, shared-root based for `"repo"`. The caller
+	 * builds them with `buildReservationPaths` and the same options, so the store
+	 * does not remap a pattern the caller already placed.
+	 */
 	paths: ReservationPath[];
 	reason: string;
 	now: number;
 	ttlMs?: number;
+	/** Defaults to `"worktree"`, the behaviour that shipped before the key. */
+	scope?: ReservationScope;
+	/** The reserving session's worktree root; defaults to `cwd`. */
+	root?: string;
+	/** The main checkout root, needed to compare with a worktree-scoped record. */
+	sharedRoot?: string;
 }
 
 export type ReserveResult =
@@ -869,36 +1068,47 @@ export async function reservePaths(registryDir: string, request: ReserveRequest)
 	if (!reason) throw new Error("a reservation needs a non-empty reason");
 	const now = request.now;
 	const expiresAt = now + clampReservationTtl(request.ttlMs ?? DEFAULT_RESERVATION_TTL_MS);
+	const scope: ReservationScope = request.scope === "repo" ? "repo" : "worktree";
+	const root = request.root ?? request.cwd;
+	const comparison = { scope, root, ...(request.sharedRoot ? { sharedRoot: request.sharedRoot } : {}) };
 	return withWorkspaceLock(registryDir, async () => {
 		const expired = await sweepReservationsLocked(registryDir, now);
 		const { reservations } = await readReservations(registryDir);
 		const conflicts: ReservationConflict[] = [];
 		for (const reservation of reservations) {
 			if (reservation.sessionId === request.sessionId) continue;
-			for (const path of request.paths) {
-				const holderPath = reservation.paths.find((held) => reservationPathsOverlap(held, path));
-				if (holderPath) conflicts.push({ reservation, path: holderPath });
+			const pair = reservationComparisonPair(comparison, reservation, request.paths);
+			for (const path of pair.requestPaths) {
+				const index = pair.holderPaths.findIndex((held) => reservationPathsOverlap(held, path));
+				// The holder's own pattern is reported, not the mapped one: a refusal
+				// should name the path the holder actually reserved in its own tree.
+				if (index >= 0) conflicts.push({ reservation, path: reservation.paths[index] ?? pair.holderPaths[index]! });
 			}
 		}
 		if (conflicts.length > 0) return { ok: false, conflicts, expired };
 		// Re-reserving is how a session extends or widens its own claim. Supersede
 		// its overlapping records in the same critical section rather than leaving
 		// every earlier TTL behind as a duplicate that list shows and peers trip on.
+		// The same namespace comparison applies: a session that changed lock scope
+		// must not leave a stale claim behind in the other namespace.
 		const replaced: ReservationRecord[] = [];
 		for (const reservation of reservations) {
 			if (reservation.sessionId !== request.sessionId) continue;
-			const overlaps = reservation.paths.some((held) => request.paths.some((path) => reservationPathsOverlap(held, path)));
+			const pair = reservationComparisonPair(comparison, reservation, request.paths);
+			const overlaps = pair.holderPaths.some((held) => pair.requestPaths.some((path) => reservationPathsOverlap(held, path)));
 			if (!overlaps) continue;
 			await unlink(reservationPath(registryDir, reservation.id)).catch(() => undefined);
 			replaced.push(reservation);
 		}
 		const reservation: ReservationRecord = {
-			version: WORKSPACE_VERSION,
+			version: RESERVATION_VERSION,
 			id: randomUUID(),
 			sessionId: safeId(request.sessionId),
 			pid: request.pid ?? process.pid,
 			cwd: request.cwd,
 			branch: request.branch,
+			scope,
+			root,
 			paths: request.paths,
 			reason: reason.slice(0, MAX_REASON_BYTES),
 			createdAt: now,

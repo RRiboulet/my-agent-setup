@@ -50,7 +50,13 @@
  */
 
 import type { OpenTodo } from "./todo-state.ts";
-import { verificationFailedOpen, type VerificationOutcome } from "./verify.ts";
+import {
+	detectWeakCommand,
+	detectZeroTests,
+	successPatternMatches,
+	verificationFailedOpen,
+	type VerificationOutcome,
+} from "./verify.ts";
 
 export const GATE_ENTRY_TYPE = "orchestrator-gate";
 export const GATE_LOOP_ENTRY_TYPE = "orchestrator-gate-loop";
@@ -115,6 +121,15 @@ export interface GateVerdict {
 	verification: VerificationOutcome | null;
 	/** The override this verdict consumed, when one was pending. */
 	override: GateOverrideUse | null;
+	/** True when a would-be block was parked instead: no continuation, no attempt,
+	 *  because a delegated run is still live. `decision` stays `report`. A park
+	 *  yields the continuation field rather than claiming it, so another boundary
+	 *  handler (the goal extension) may still request a turn; the park saves the
+	 *  gate's attempt, not necessarily the turn. */
+	parked: boolean;
+	/** The live run ids that kept this settlement parked; empty when it did not
+	 *  park (or when the live set was empty). */
+	liveRuns: string[];
 	/** One-line summary of the decision, used in the continuation message. */
 	reason: string;
 	reasons: GateReason[];
@@ -370,6 +385,12 @@ function normalizePersistedVerdict(data: unknown): GateVerdict | null {
 		override: isRecord(data.override) && typeof data.override.reason === "string"
 			? { reason: data.override.reason, at: optionalFinite(data.override.at) ?? 0 }
 			: null,
+		// A verdict written before parking existed is not parked; the live set is
+		// a snapshot of one evaluation, never reconstructed as current state.
+		parked: data.parked === true,
+		liveRuns: Array.isArray(data.liveRuns)
+			? data.liveRuns.filter((id): id is string => typeof id === "string")
+			: [],
 		reason: typeof data.reason === "string" ? data.reason : "",
 		reasons,
 		conditions,
@@ -405,6 +426,48 @@ export interface EditScanOptions {
 	 *  this exact command (or the gate's own passing run) counts as verification;
 	 *  when absent, ticket 08's "any successful shell call" proxy is kept. */
 	verificationCommand?: string | null;
+	/** The opt-in `verification.successPattern`: a matching command's output must
+	 *  match it for the run to clear edits, including a persisted verdict's. */
+	successPattern?: string | null;
+}
+
+/**
+ * The exit code a tool result reported, when the host put one in `details`.
+ * pi's `BashToolDetails` carries only truncation fields today, so this is the
+ * forward-compatible read: when there is no number, the caller falls back to
+ * `isError` as the failure signal.
+ */
+function exitCodeFromDetails(details: unknown): number | null {
+	if (!isRecord(details)) return null;
+	for (const key of ["exitCode", "code"] as const) {
+		const value = details[key];
+		if (typeof value === "number" && Number.isFinite(value)) return value;
+	}
+	return null;
+}
+
+/**
+ * Is this evidence a real pass under the current rules?
+ *
+ * Shared by a model's own run of the configured command and by a persisted
+ * verdict, because both can predate the `weak-command` and `inconclusive`
+ * statuses: a stored `status: "passed"` is re-checked against today's rules
+ * rather than trusted. A missing command or output is not evidence against the
+ * run (an older verdict does not carry them); a configured pattern still has to
+ * match.
+ */
+function evidenceIsRealPass(input: {
+	status: unknown;
+	command?: unknown;
+	output?: unknown;
+	successPattern?: string | null;
+}): boolean {
+	if (input.status !== "passed") return false;
+	const command = typeof input.command === "string" ? input.command : "";
+	const output = typeof input.output === "string" ? input.output : "";
+	if (command && detectWeakCommand(command)) return false;
+	if (output && detectZeroTests(output)) return false;
+	return successPatternMatches(input.successPattern, output) !== false;
 }
 
 /**
@@ -420,6 +483,12 @@ export interface EditScanOptions {
  * verified it itself), and a persisted gate verdict whose own verification run
  * passed. The last one is why a blocked-then-verified run settles on its next
  * boundary instead of running the command again.
+ *
+ * A green exit status is not enough for the second and third. The result's own
+ * text is classified with the same rules as the gate's run — a weak command, a
+ * zero-test report, a configured `successPattern` that does not match — and only
+ * a real pass clears the edits. Nobody read the model's output before this, so a
+ * matching call that printed `0 passing` used to count as verification.
  */
 export function scanEditVerification(branch: readonly unknown[], options: EditScanOptions = {}): EditState {
 	const calls = new Map<string, ToolCallRecord>();
@@ -427,11 +496,21 @@ export function scanEditVerification(branch: readonly unknown[], options: EditSc
 	let verificationRuns = 0;
 	let editResults = 0;
 	const wanted = options.verificationCommand?.trim() ? collapse(options.verificationCommand) : null;
+	const successPattern = options.successPattern ?? null;
 
 	for (const item of branch) {
 		if (!isRecord(item)) continue;
 		if (item.type === "custom" && item.customType === GATE_ENTRY_TYPE && isRecord(item.data)) {
-			if (isRecord(item.data.verification) && item.data.verification.status === "passed") {
+			const stored = isRecord(item.data.verification) ? item.data.verification : null;
+			if (
+				stored &&
+				evidenceIsRealPass({
+					status: stored.status,
+					command: stored.command,
+					output: stored.output,
+					successPattern,
+				})
+			) {
 				edited.clear();
 				verificationRuns += 1;
 			}
@@ -446,25 +525,39 @@ export function scanEditVerification(branch: readonly unknown[], options: EditSc
 			}
 			continue;
 		}
-		if (message.role !== "toolResult" || message.isError === true) continue;
+		if (message.role !== "toolResult") continue;
 		const call = typeof message.toolCallId === "string" ? calls.get(message.toolCallId) : undefined;
 		const tool = typeof message.toolName === "string" ? message.toolName : call?.name;
 		if (!tool) continue;
 		if (EDIT_TOOLS.has(tool)) {
+			if (message.isError === true) continue;
 			const path = call?.arguments.path;
 			edited.add(typeof path === "string" && path.trim() ? path : "(unknown file)");
 			editResults += 1;
 			continue;
 		}
 		if (!SHELL_TOOLS.has(tool)) continue;
+		// A failed shell call is not a pass, and a host that reports the exit code
+		// in `details` is believed even when `isError` disagrees.
+		if (message.isError === true) continue;
+		const reportedExit = exitCodeFromDetails(message.details);
+		if (reportedExit !== null && reportedExit !== 0) continue;
 		const command = call?.arguments.command;
-		const ranVerification = wanted
-			? typeof command === "string" && collapse(command) === wanted
-			: true;
-		if (ranVerification) {
-			edited.clear();
-			verificationRuns += 1;
+		if (typeof command !== "string") continue;
+		const ranVerification = wanted ? collapse(command) === wanted : true;
+		if (!ranVerification) continue;
+		if (
+			!evidenceIsRealPass({
+				status: "passed",
+				command,
+				output: textFromContent(message.content),
+				successPattern: wanted ? successPattern : null,
+			})
+		) {
+			continue;
 		}
+		edited.clear();
+		verificationRuns += 1;
 	}
 
 	return { editedFiles: [...edited].sort(), verificationRuns, editResults };
@@ -533,6 +626,11 @@ export interface GateEvaluationInput {
 	verificationCommand?: string | null;
 	/** An override consumed by this evaluation. */
 	override?: GateOverrideUse | null;
+	/** Delegated runs still live when this settlement was evaluated. Combined with
+	 *  `waitForSubagents`, a would-be block is parked instead of spent. */
+	liveRuns?: string[];
+	/** The project opted into parking on live delegated runs (`block.waitForSubagents`). */
+	waitForSubagents?: boolean;
 	/** Conditions the project allows to block, and those already spent. */
 	policy?: GateBlockPolicy;
 	/** Why blocking was not attempted at all (a child session, an outcome pi will
@@ -664,6 +762,19 @@ export function evaluateGate(input: GateEvaluationInput): GateVerdict {
 	// while nothing is open stays pending for the settlement that needs it.
 	const wouldBlock = candidates.length > 0 && previousAttempts < attemptCap;
 	const override = input.override && wouldBlock && !input.suppressed ? input.override : null;
+	// A live delegated run means the work is not finished, so a block would ask the
+	// model to act on information it does not have yet — and spend an attempt doing
+	// it. Park instead: no continuation, no attempt, and the ids in the verdict.
+	// Deliberately independent of `alreadyBlocked`: the point is not to spend
+	// another attempt on the same unchanged condition.
+	const liveRuns = unique((input.liveRuns ?? []).filter((id): id is string => typeof id === "string" && id.trim().length > 0));
+	const parked =
+		input.waitForSubagents === true &&
+		liveRuns.length > 0 &&
+		candidates.length > 0 &&
+		!input.suppressed &&
+		!override &&
+		previousAttempts < attemptCap;
 
 	if (input.suppressed) {
 		reasons.push({ code: "blocking-suppressed", summary: input.suppressed });
@@ -672,6 +783,14 @@ export function evaluateGate(input: GateEvaluationInput): GateVerdict {
 			code: "override-used",
 			summary: `an override was granted and used instead of blocking: ${override.reason}`,
 			details: { at: override.at },
+		});
+	} else if (parked) {
+		reasons.push({
+			code: "settlement-parked",
+			summary: `parked the settlement rather than blocking it: ${candidates
+				.map((condition) => condition.summary)
+				.join("; ")}; waiting for the live delegated run${liveRuns.length === 1 ? "" : "s"} ${liveRuns.join(", ")}`,
+			details: { kinds: candidates.map((condition) => condition.kind), liveRuns },
 		});
 	} else if (candidates.length > 0) {
 		if (previousAttempts >= attemptCap) {
@@ -720,8 +839,11 @@ export function evaluateGate(input: GateEvaluationInput): GateVerdict {
 
 	const blockedConditions = unique([...alreadyBlocked, ...blockedBy]) as GateConditionKind[];
 	const blockedEvidence: Partial<Record<GateConditionKind, string>> = { ...alreadyBlockedEvidence, ...blockedEvidenceNow };
-	const reason =
-		decision === "continue"
+	const reason = parked
+		? `the gate parked this settlement rather than blocking it: ${candidates
+				.map((condition) => condition.summary)
+				.join("; ")}. ${liveRuns.length === 1 ? "A delegated run is" : "Delegated runs are"} still live (${liveRuns.join(", ")}), so the model has nothing to act on yet; it is woken once when the last one settles. No gate block was spent (${attempts} of ${attemptCap} gate blocks used).`
+		: decision === "continue"
 			? `the gate did not settle this run: ${candidates
 					.map((condition) => condition.summary)
 					.join("; ")}. Address it, or call \`${GATE_OVERRIDE_TOOL}\` with a reason to settle anyway; it will block again until the condition changes, is overridden, or the attempt budget runs out (${attempts} of ${attemptCap} gate blocks used).`
@@ -742,6 +864,8 @@ export function evaluateGate(input: GateEvaluationInput): GateVerdict {
 		blockedEvidence,
 		verification,
 		override,
+		parked,
+		liveRuns: parked ? liveRuns : [],
 		reason,
 		reasons,
 		conditions,
@@ -769,6 +893,11 @@ export function formatVerdict(verdict: GateVerdict): string {
 		`Attempt ${verdict.attempts} of ${verdict.attemptCap} gate blocks · ${verdict.remainingAttempts} remaining · outcome ${verdict.outcome}`,
 		`Scope: ${verdict.scope === "child" ? "delegated child session (reports only; the parent decides)" : "this session's own tool calls — edits made by delegated children are not visible"}`,
 	];
+	if (verdict.parked) {
+		lines.push(
+			`Parked: waiting for the live delegated run${verdict.liveRuns.length === 1 ? "" : "s"} ${verdict.liveRuns.join(", ")} — no gate block was spent; the parent is woken once when the last one settles.`,
+		);
+	}
 	if (verdict.reasons.length === 0) {
 		lines.push("No open condition: no active goal, no open todos, no unverified edits, no repeated failure.");
 	} else {

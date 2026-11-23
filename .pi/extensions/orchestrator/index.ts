@@ -45,13 +45,18 @@
  * budget, the digest and the credential rule. The advisor runs in the same
  * trusted project the gate acts in, and only there.
  *
- * **Delegated children report and never act.** `PI_TMUX_SUBAGENT_CHILD=1` marks a
- * child session, whose project config is the same file as the parent's. A child
- * that blocked itself would stall a delegation the parent is waiting on, and a
- * parent's policy applied to a child's own work is a decision made with less
- * context than the parent has. So the gate records a verdict with `scope: child`,
- * runs no command, blocks nothing; the same guard stops the loop breaker from
- * blocking a child's tool call, and the advisor from consulting.
+ * **Delegated workers report and never act.** The process role comes from
+ * `role.ts`, resolved once at module load: a process launched with
+ * `PI_ORCHESTRATOR_ROLE=worker` (or, from an older launcher, the legacy
+ * `PI_TMUX_SUBAGENT_CHILD=1`) is a worker whose project config is the same file
+ * as the parent's. A worker that blocked itself would stall the delegation its
+ * parent is waiting on, and a parent's policy applied to a worker's own work is
+ * a decision made with less context than the parent has. So the gate records a
+ * verdict with `scope: child`, runs no command, blocks nothing, registers no
+ * override tool; the same guard stops the loop breaker from blocking a worker's
+ * tool call, and the advisor from consulting. Resolving the role at load time is
+ * the fix for a real bug: the old guard re-read `PI_TMUX_SUBAGENT_CHILD` at every
+ * boundary, and the subagent factory had already deleted it.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -90,7 +95,9 @@ import {
 	type GateVerdict,
 	type LoopVerdict,
 } from "./gate.ts";
-import { ORCHESTRATION_EVENTS, publishOrchestrationEvent } from "./events.ts";
+import { ORCHESTRATION_EVENTS, ORCHESTRATOR_CUSTOM_TYPES, publishOrchestrationEvent, subscribeOrchestrationEvent, type LiveRunStatus } from "./events.ts";
+import { buildCompactSnapshot } from "./compact-snapshot.ts";
+import { isWorkerRole, ORCHESTRATOR_ROLE, type OrchestratorRole } from "./role.ts";
 import { registerWorkspace } from "./workspace-runtime.ts";
 import { readOpenTodos } from "./todo-state.ts";
 import { runVerification, type VerificationExec, type VerificationOutcome } from "./verify.ts";
@@ -110,12 +117,6 @@ import {
 const GATE_REPORT_TYPE = "orchestrator-gate-report";
 const GATE_CONTINUATION_TYPE = "orchestrator-gate-continuation";
 const ADVISOR_NOTICE_TYPE = "orchestrator-advisor-notice";
-const CHILD_ENV = "PI_TMUX_SUBAGENT_CHILD";
-
-/** A delegated child reports and never acts; see the header. */
-function inChildSession(): boolean {
-	return process.env[CHILD_ENV] === "1";
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -144,7 +145,16 @@ function continuationText(verdict: GateVerdict): string {
 	return lines.join("\n");
 }
 
-export default function orchestratorExtension(pi: ExtensionAPI) {
+export default function orchestratorExtension(
+	pi: ExtensionAPI,
+	// A test seam, and nothing else: the role is a process-level fact, so the only
+	// caller that overrides it is a test that needs the worker path without
+	// mutating this process's environment after the module was loaded.
+	deps: { role?: OrchestratorRole } = {},
+) {
+	/** A delegated worker reports and never acts; see the header. */
+	const worker = isWorkerRole(deps.role ?? ORCHESTRATOR_ROLE);
+
 	// Registered first on purpose: pi stops at the first `tool_call` handler
 	// that blocks, so a reserved path must refuse the call before the loop
 	// breaker starts counting it.
@@ -168,6 +178,72 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 	const loop = createLoopState();
 
 	/**
+	 * The delegated runs this parent believes are live, with the status each
+	 * reported. Rebuilt before the first settlement after a reload by
+	 * `orchestrator:runs-snapshot`, then maintained from the run lifecycle events.
+	 * A non-empty map is what makes an opted-in settlement PARK instead of
+	 * spending an attempt on a turn that has nothing new to act on. The status is
+	 * carried for the post-compaction snapshot, which names what is in flight;
+	 * parking only asks whether the map is empty.
+	 */
+	const liveRuns = new Map<string, LiveRunStatus>();
+	/** True from a parked settlement until the wake it earns. In-memory only: a
+	 *  reload rebuilds the live set, not the fact that a particular turn parked, so
+	 *  a child that finished during the reload produces no wake. The next
+	 *  settlement sees the empty set and blocks normally rather than waking late. */
+	let parked = false;
+	/** Runs that reached a terminal state after the park, named in the wake. */
+	const finishedWhileParked = new Set<string>();
+
+	/**
+	 * Wake a parked parent exactly once, after its last live run settles. This is
+	 * the only place `triggerTurn` is used by this extension: a normal completion
+	 * notice must stay non-waking, but a parent that parked has no turn of its own
+	 * left to receive it otherwise.
+	 */
+	const wakeParkedParent = (finished: string[]): void => {
+		parked = false;
+		const named = finished.length > 0 ? finished.join(", ") : "the delegated run";
+		pi.sendMessage(
+			{
+				customType: "orchestrator-resume",
+				content: `The last live delegated run finished (${named}); no delegated runs remain. You parked this settlement while it was still running, so collect the result with subagent_status and continue the work.`,
+				display: true,
+			},
+			{ triggerTurn: true, deliverAs: "followUp" },
+		);
+	};
+
+	// Registered at factory load, before any session event: the subagent factory's
+	// reload snapshot is published from its `session_start`, and every factory is
+	// evaluated before those handlers run. The initial set is therefore rebuilt
+	// before this parent's first settlement, whatever the discovery order.
+	subscribeOrchestrationEvent(pi, ORCHESTRATION_EVENTS.runStarted, (payload) => {
+		liveRuns.set(payload.runId, payload.status);
+	});
+	subscribeOrchestrationEvent(pi, ORCHESTRATION_EVENTS.runSettled, (payload) => {
+		liveRuns.delete(payload.runId);
+		if (parked) finishedWhileParked.add(payload.runId);
+		if (!parked || liveRuns.size > 0) return;
+		const finished = [...finishedWhileParked];
+		finishedWhileParked.clear();
+		wakeParkedParent(finished);
+	});
+	subscribeOrchestrationEvent(pi, ORCHESTRATION_EVENTS.runsSnapshot, (payload) => {
+		liveRuns.clear();
+		for (const run of payload.runs) liveRuns.set(run.runId, run.status);
+	});
+	// An aborted run never reaches `agent_before_settle`, so a park from an earlier
+	// settlement can outlive the turn it was protecting. Clearing it on abort means
+	// a child that finishes later does not pull the user back into a run they chose
+	// to stop.
+	pi.on("agent_settled", (event) => {
+		if (!event.aborted) return;
+		parked = false;
+		finishedWhileParked.clear();
+	});
+
+	/**
 	 * Register the override tool on demand.
 	 *
 	 * A registered tool's declaration rides on every request, so a report-only
@@ -179,6 +255,8 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 	 */
 	let overrideToolRegistered = false;
 	const registerOverrideTool = (trusted: boolean): void => {
+		// A worker never acts, so it must never get the escape hatch from a block.
+		if (worker) return;
 		if (!trusted) return; // never offer an escape hatch in a project the gate will not act in
 		if (overrideToolRegistered) return;
 		overrideToolRegistered = true;
@@ -247,6 +325,91 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 	pi.on("turn_start", async () => resetLoopTurn(loop));
 	pi.on("agent_start", async () => resetLoopTurn(loop));
 
+	// --- The post-compaction snapshot --------------------------------------
+
+	/**
+	 * Re-surface the orchestrator's state to the model after a *successful*
+	 * compaction.
+	 *
+	 * Compaction itself stays pi's: this extension registers no
+	 * `session_before_compact` handler and returns no compaction result, so it can
+	 * neither cancel nor replace what pi wrote. The gate's and the advisor's state
+	 * is branch-derived, and `getBranch()` at `session_compact` still holds the
+	 * pre-compaction ancestors, so nothing has to be stashed: the readers below are
+	 * called exactly as `/gate` and the next settlement call them. Only the model's
+	 * context lost the state, and one `custom_message` repairs it.
+	 *
+	 * `display: false` is deliberate. A `custom_message` enters the model's context
+	 * either way; this is bookkeeping the human did not write, not a transcript
+	 * message. `triggerTurn: false` because a compaction must not start a turn of
+	 * its own. A failure is a different event (`session_compact_failed`), which
+	 * this extension does not handle at all: a failed or cancelled compaction sends
+	 * nothing.
+	 */
+	pi.on("session_compact", async (_event, ctx) => {
+		try {
+			const branch = ctx.sessionManager.getBranch();
+			const gate = reconstructGateState(branch);
+			const advisorState = readAdvisorState(branch);
+			const goal = activeGoalFromBranch(branch);
+			const todos = await readOpenTodos(ctx.cwd);
+
+			// The config supplies the advisor budget and, when the branch holds no
+			// verdict yet, the attempt cap. An unreadable config is not an error here:
+			// the snapshot is context repair, so the branch-derived sections are still
+			// worth sending without it.
+			let config: GateConfig | null = null;
+			try {
+				config = cachedConfigAt(ctx.cwd);
+			} catch {
+				config = null;
+			}
+			// An untrusted project's advisor key is ignored entirely (see `advise`), so
+			// reporting a budget the advisor would never spend would be misleading.
+			const advisorConfig = ctx.isProjectTrusted() ? config?.advisor ?? null : null;
+
+			const snapshot = buildCompactSnapshot({
+				goal: goal ? { objective: goal.objective } : null,
+				openTodos: todos.todos,
+				gate: {
+					attempts: gate.attempts,
+					attemptCap: gate.lastVerdict?.attemptCap ?? gate.lastLoopVerdict?.attemptCap ?? config?.attemptCap ?? 0,
+					blocked: gate.blockedConditions.map((kind) => ({
+						kind,
+						evidence: gate.blockedEvidence[kind] ?? null,
+					})),
+					lastReason: gate.lastVerdict?.reason ?? null,
+				},
+				liveRuns: [...liveRuns].map(([runId, status]) => ({ runId, status })),
+				advisor: advisorConfig
+					? {
+							budget: advisorConfig.budget,
+							attempts: advisorState.attempts,
+							consumedKeys: advisorState.consumedKeys,
+						}
+					: null,
+			});
+			// Nothing to report: no empty message, which would only spend context on a
+			// sentence saying there is nothing to say.
+			if (snapshot.empty) return;
+			pi.sendMessage(
+				{
+					customType: ORCHESTRATOR_CUSTOM_TYPES.compactSnapshot,
+					content: snapshot.text,
+					display: false,
+				},
+				{ triggerTurn: false },
+			);
+		} catch (error) {
+			// Compaction already succeeded; a snapshot that cannot be built must not
+			// turn that into a failure. The next settlement still reads the branch.
+			ctx.ui.notify(
+				`orchestrator snapshot: ${error instanceof Error ? error.message : String(error)}`,
+				"warning",
+			);
+		}
+	});
+
 	// --- The advisor -------------------------------------------------------
 
 	/**
@@ -290,9 +453,9 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 		event: { systemPromptOptions?: { sections?: Record<string, string> } },
 		ctx: ExtensionContext,
 	): Promise<void> => {
-		// A delegated child reports and never acts, exactly like the gate: the
+		// A delegated worker reports and never acts, exactly like the gate: the
 		// parent owns the run's decisions, and its spend.
-		if (inChildSession()) return;
+		if (worker) return;
 		// The advisor is a model call configured by a committed file. In a project
 		// pi has never trusted that file came from whoever wrote the repository, so
 		// its advisor key is ignored entirely: no call, no entry, no section.
@@ -321,14 +484,27 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 			loop: match.loop,
 			goal: activeGoalFromBranch(branch),
 			openTodos: todos.todos,
-			edits: scanEditVerification(branch, { verificationCommand: config.verification?.command ?? null }),
+			edits: scanEditVerification(branch, {
+				verificationCommand: config.verification?.command ?? null,
+				successPattern: config.verification?.successPattern ?? null,
+			}),
+			redact: advisor.redact,
 		});
-		const call = await consultAdvisor({ registry: ctx.modelRegistry, config: advisor, digest, signal: ctx.signal });
+		const call = await consultAdvisor({
+			registry: ctx.modelRegistry,
+			config: advisor,
+			digest,
+			signal: ctx.signal,
+			sessionId: ctx.sessionManager.getSessionId(),
+		});
 		const record: AdvisorRecord = {
 			version: ADVISOR_VERSION,
 			at: Date.now(),
 			trigger: match.trigger,
-			model: { provider: advisor.provider, model: advisor.model },
+			// The model that answered, and the primary a fallback replaced: one record
+			// is one attempt, so the budget counts the consultation, not the calls.
+			model: call.model,
+			fallbackFrom: call.fallbackFrom,
 			called: call.called,
 			status: call.status,
 			reason: call.reason,
@@ -406,7 +582,7 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 		lastVerdict = state.lastVerdict ?? lastVerdict;
 		lastLoopVerdict = state.lastLoopVerdict ?? lastLoopVerdict;
 
-		const child = inChildSession();
+		const child = worker;
 		const outcome = String(event.outcome ?? "unknown");
 		const unevaluated: string[] = [];
 		if (configRead.warning) unevaluated.push(`config: ${configRead.warning}`);
@@ -423,7 +599,7 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 		let suppressed: string | null = null;
 		if (child) {
 			suppressed =
-				"this is a delegated child session (PI_TMUX_SUBAGENT_CHILD=1): the gate reports and never blocks, because the parent owns the decision";
+				"this is a delegated worker session (PI_ORCHESTRATOR_ROLE=worker, or the legacy PI_TMUX_SUBAGENT_CHILD=1): the gate reports and never blocks, because the parent owns the decision";
 		} else if (!ctx.isProjectTrusted()) {
 			// The verification command comes from a committed project file. This
 			// extension ships as a user-level package, so it also loads in a checkout
@@ -453,7 +629,10 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 			if (config.verification) policy.kinds.push("verification");
 		}
 
-		const edits = scanEditVerification(branch, { verificationCommand: config.verification?.command ?? null });
+		const edits = scanEditVerification(branch, {
+			verificationCommand: config.verification?.command ?? null,
+			successPattern: config.verification?.successPattern ?? null,
+		});
 		const failure = scanFailures(branch);
 
 		const spec = config.verification;
@@ -468,23 +647,36 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 		// evidence, "edits without verification" is a weaker rewrite of the same
 		// state after the second block.
 		const carriedVerification = verificationAlreadyBlockedForEvidence ? state.lastVerdict?.verification ?? null : null;
+		// A live delegated run means the work is not finished, so a block would ask
+		// the model to act on information it does not have yet. Its outcome would be
+		// discarded by the park, so the command is not run: the next settlement,
+		// after the run settles, runs it once and acts on the result.
+		const parkingWhileLive = config.block.waitForSubagents === true && liveRuns.size > 0;
 		const shouldVerify =
 			spec !== null &&
 			policy.kinds.includes("verification") &&
 			edits.editedFiles.length > 0 &&
 			!verificationAlreadyBlockedForEvidence &&
+			!parkingWhileLive &&
 			pendingOverride === null;
 		let verification: VerificationOutcome | null = null;
 		if (spec && shouldVerify) {
 			const exec: VerificationExec | null =
 				typeof pi.exec === "function" ? (command, args, options) => pi.exec(command, args, options) : null;
-			verification = await runVerification(spec, {
-				cwd: ctx.cwd,
-				signal: ctx.signal,
-				exec: exec ?? (async () => Promise.reject(new Error("this host does not provide pi.exec"))),
-			});
+			verification = await runVerification(
+				{ ...spec, successPattern: spec.successPattern ?? null },
+				{
+					cwd: ctx.cwd,
+					signal: ctx.signal,
+					exec: exec ?? (async () => Promise.reject(new Error("this host does not provide pi.exec"))),
+				},
+			);
 		}
 
+		// Read immediately BEFORE the evaluation, after the awaits above: a run
+		// that settled while verification was running is no longer live, and one
+		// admitted during it is.
+		const liveRunIds = [...liveRuns.keys()];
 		const verdict = evaluateGate({
 			outcome,
 			attempts: state.attempts,
@@ -500,8 +692,14 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 			policy,
 			suppressed,
 			unevaluated,
+			liveRuns: liveRunIds,
+			waitForSubagents: config.block.waitForSubagents,
 		});
 		if (verdict.override) pendingOverride = null;
+		// A parked settlement earns one wake, sent when the live set empties. A
+		// worker never reaches here with `parked` true: `suppressed` empties its
+		// candidate set, so parking needs no special case.
+		if (verdict.parked) parked = true;
 		attempts = verdict.attempts;
 		lastVerdict = verdict;
 
@@ -541,7 +739,7 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 				outcome: String(event.outcome ?? "unknown"),
 				attempts,
 				attemptCap: 0,
-				scope: inChildSession() ? "child" : "parent",
+				scope: worker ? "child" : "parent",
 				suppressed: "the gate failed before it could act; this settlement is not blocked",
 				unevaluated: [`gate: ${error instanceof Error ? error.message : String(error)}`],
 			});
@@ -565,7 +763,7 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		const tool = typeof event.toolName === "string" ? event.toolName : "";
 		if (!tool || tool === GATE_OVERRIDE_TOOL) return;
-		if (inChildSession()) return;
+		if (worker) return;
 		// Same boundary as the settlement: a project pi does not trust supplies the
 		// config, so its policy is not honoured here either.
 		if (!ctx.isProjectTrusted()) return;
@@ -651,7 +849,7 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 		// Nothing to record unless the loop breaker is armed, and reading the
 		// cache (never the file) keeps that check free.
 		if (!cachedConfig?.read.config.block.loops) return;
-		if (inChildSession()) return;
+		if (worker) return;
 		const tool = typeof event.toolName === "string" ? event.toolName : "";
 		if (!tool) return;
 		const call = loopCallOf(tool, isRecord(event.input) ? event.input : {});

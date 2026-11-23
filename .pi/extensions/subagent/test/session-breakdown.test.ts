@@ -8,7 +8,8 @@
 //      reads the developer's real ~/.pi/agent tree.
 //   2. The three LOCAL PATCH hunks, which are ours and therefore ours to pin:
 //      the roots (LOCAL PATCH 1), the inherited-prefix exclusion (LOCAL PATCH 2)
-//      and the footer note (LOCAL PATCH 3).
+//      and the footer note (LOCAL PATCH 3) — plus the model-attributed usage
+//      entries upstream's parser walks past (LOCAL PATCH 5).
 //
 // Why patch 2 needs tests at all: summing whole session files double counts the
 // prefix a forked file inherits from its parent. Measured on this machine, one
@@ -59,6 +60,26 @@ function assistant(u: Usage, role = "assistant") {
 		parentId: "mc1",
 		timestamp: new Date().toISOString(),
 		message: { role, provider: "openrouter", model: "test/model", usage: usage(u) },
+	};
+}
+
+/**
+ * A `type: "usage"` entry, as pi's `SessionManager.appendUsage` writes it: the
+ * model that was billed, its usage, and no message. The orchestrator's advisor
+ * appends one per consultation.
+ */
+function usageEntry(u: Usage, extra: { kind?: string; provider?: string; model?: string; id?: string } = {}) {
+	seq += 1;
+	return {
+		type: "usage",
+		id: extra.id ?? `u${seq}`,
+		parentId: "mc1",
+		timestamp: new Date().toISOString(),
+		kind: extra.kind ?? "advisor",
+		provider: extra.provider ?? "openrouter",
+		model: extra.model ?? "test/model",
+		usage: usage(u),
+		note: "orchestrator advisor consultation",
 	};
 }
 
@@ -480,6 +501,79 @@ test("LOCAL PATCH 2: a malformed line does not abort the scan", async () => {
 		);
 		const t = await totals([path.join(agentDir, "sessions")]);
 		assert.equal(t.tokens, 9);
+	});
+});
+
+// --- LOCAL PATCH 5: model-attributed usage entries ---------------------------
+
+// pi's `appendUsage` writes a `type: "usage"` entry: tokens and cost attributed
+// to a model, with no message. The orchestrator's advisor appends one per
+// consultation, so before this patch its cost was recorded in the session and
+// invisible in every breakdown total.
+
+test("LOCAL PATCH 5: a `usage` entry is billed once and is not a message", async () => {
+	await withFixtureDir(async (agentDir) => {
+		const roots = defaultSessionRoots(agentDir);
+		const sessions = path.join(agentDir, "sessions", "--tmp-fixture--");
+
+		await writeSession(path.join(sessions, `${stamp()}_plain.jsonl`), [
+			header("plain"),
+			MODEL_CHANGE,
+			assistant({ totalTokens: 100, cost: 0.1 }),
+		]);
+		const before = await totals(roots);
+		assert.deepEqual(
+			{ sessions: before.sessions, messages: before.messages, tokens: before.tokens, cost: round(before.cost) },
+			{ sessions: 1, messages: 1, tokens: 100, cost: 0.1 },
+		);
+
+		// A second session: one request, plus the advisor's usage entry, which names
+		// a different model on purpose (the consultation is another model's call).
+		await writeSession(path.join(sessions, `${stamp()}_advised.jsonl`), [
+			header("advised"),
+			MODEL_CHANGE,
+			assistant({ totalTokens: 100, cost: 0.1 }),
+			usageEntry({ totalTokens: 160, cost: 0.002 }, { provider: "backup", model: "advisor-model" }),
+		]);
+		const data = await computeBreakdown(undefined, undefined, { roots });
+		const range = data.ranges.get(30)!;
+
+		assert.equal(range.totalMessages, 2, "one message per file: the usage entry is not a request");
+		assert.equal(range.totalTokens, 100 + 100 + 160, "but its tokens are counted, once");
+		assert.equal(round(range.totalCost), 0.202, "and so is its cost");
+		assert.equal(range.sessions, 2);
+
+		// The entry's own model bucket is filled; its message bucket stays empty.
+		assert.equal(round(range.modelCost.get("backup/advisor-model")!), 0.002);
+		assert.equal(range.modelTokens.get("backup/advisor-model"), 160);
+		assert.equal(range.modelMessages.get("backup/advisor-model"), undefined, "no invented message");
+		assert.equal(range.modelSessions.get("backup/advisor-model"), 1, "the model is named in the view");
+		assert.equal(data.inherited.entries, 0, "a file without a parent excludes nothing");
+	});
+});
+
+test("LOCAL PATCH 5: an inherited usage entry is excluded like any other inherited entry", async () => {
+	await withFixtureDir(async (agentDir) => {
+		const parentFile = await writeSession(path.join(agentDir, "sessions", "--tmp-fixture--", `${stamp()}_parent.jsonl`), [
+			header("parent"),
+			MODEL_CHANGE,
+			assistant({ totalTokens: 100, cost: 0.1 }),
+			usageEntry({ totalTokens: 160, cost: 0.002 }),
+		]);
+		// A fork copies the parent's non-header lines verbatim, usage entry included.
+		await writeSession(path.join(agentDir, "tmux-subagents", "sid", "rid", "session", "fork.jsonl"), [
+			header("fork", parentFile),
+			...(await inheritedPrefix(parentFile)),
+			assistant({ totalTokens: 50, cost: 0.05 }),
+		]);
+
+		const t = await totals(defaultSessionRoots(agentDir));
+		assert.equal(t.messages, 2, "the parent's request and the child's own");
+		assert.equal(t.tokens, 100 + 160 + 50, "the inherited usage is counted by its own file, once");
+		assert.equal(round(t.cost), 0.152);
+		assert.equal(round(t.inherited.cost), 0.102, "the excluded amount includes the usage entry");
+		assert.equal(t.inherited.tokens, 260);
+		assert.equal(t.inherited.entries, 3, "model change, message and usage entry");
 	});
 });
 

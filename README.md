@@ -711,12 +711,33 @@ never returns `continue`. Each opt-in key buys one check:
 | `block.openTodos` | An open todo stops the run settling. |
 | `block.repeatedFailure` | A repeated failure signature stops it. |
 | `block.loops` | The tool-call loop breaker, below. |
+| `block.waitForSubagents` | Opt-in parking: while a delegated run is live, a settlement that would block returns no continuation, spends no attempt, and the parent is woken once when the last run settles. |
 | `verification.command` | The project's verification command, run by the gate at the boundary, and the edits-without-verification check that goes with it. |
 | `advisor.provider` + `advisor.model` | The model a second opinion is asked of when the gate keeps failing the same way or a loop was broken. Off unless both are set. |
 | `advisor.cooldownMs` | Minimum gap between recorded advisor attempts (default 10 minutes). |
 | `advisor.budget` | Recorded attempts allowed on one branch, calls and refusals alike (default 2); `0` disables the advisor. |
 | `advisor.minGateBlocks` | Settlement blocks reporting the same conditions before that counts as a repeated failure (default 2). |
 | `advisor.timeoutMs` | Bound on the consultation call (default 60 s); it is awaited at run start. |
+| `advisor.redact` | Redact credential shapes from every field the digest keeps (default `true`). `false` sends the evidence verbatim. |
+| `advisor.fallback` | One `provider`/`model` used only when the primary call fails with a provider error or rate limit — never for a missing credential or an abort. One attempt either way, so the budget counts the consultation, not the calls. |
+| `workspace.lockScope` | `"worktree"` (default) or `"repo"`: which namespace a workspace reservation is compared in. Not a gate key — see below. |
+
+**Reservations are per-worktree unless a project says otherwise.** A reserved path
+(`orchestrator_reserve`) is keyed by its canonical absolute path, so the main checkout
+and a linked worktree can each claim the same repository-relative file: branch-isolated
+agents working on different branches collide only when they share a tree.
+`workspace.lockScope: "repo"` re-anchors every reservation at the shared repository root
+(the main checkout, resolved from the git common directory), so the same relative path is
+one claim across all linked worktrees. A repository-scoped claim is enforced against a
+session that kept the default scope too — the write guard maps its path into the holder's
+namespace before matching — while a path outside the worktree stays absolute and gains no
+cross-tree meaning. The mapping is from the writer's own tree: a writer that names a
+sibling worktree's file by absolute path keeps that absolute path, so a repo claim binds
+edits inside the tree the writer is working in, not an arbitrary path it can name. The key
+is read from the same committed file as the gate settings and
+changes nothing else: presence, peer messaging, TTLs, pid liveness, globs and the advisory
+fail-open guard are unaffected. It is not part of `block`, so it neither blocks a
+settlement nor registers `orchestrator_override`.
 
 A block is `continue: true` plus a `custom_message` carrying the reason and the
 verification output, so the model gets one more turn with the evidence. It never
@@ -740,7 +761,13 @@ config. The model's own run of the same command also counts, so a run that
 already verified is not asked twice. A command that times out, exceeds its output
 cap, cannot be started, or returns a result that cannot be parsed is **fail-open**:
 the run settles, and the verdict names the timeout. Only a command that ran to
-completion with a non-zero exit is evidence against the change.
+completion with a non-zero exit is evidence against the change. A command that
+syntactically discards its own failure (`|| true`, `; exit 0`, `set +e`, a
+trailing `2>/dev/null`) is reported as `weak-command`, and a run whose bounded
+output reports zero tests (`0 passing`, `no tests found`, `0 tests`, `no test
+files`) as `inconclusive` — both fail open, because exit code 0 is not the same
+as verified — while the opt-in `verification.successPattern` is the regular
+expression the bounded output must match for `passed`.
 
 **Committing the config is the opt-in, and it runs code.** `verification.command`
 executes at settlement with your permissions, which is why the gate acts only in a
@@ -785,19 +812,65 @@ provider is checked first: no credentials means no call, and a notice names the
 provider and the fix. The digest is bounded to 4 KB and built only from
 structured evidence — the gate's reasons, the verification *summary*, failure
 signatures, edited file names, open todos and the goal — never tool output
-bodies. Every attempt is an `orchestrator-advisor` session entry, and `/gate`
-shows the last one; the section is attached to the run being prepared, so a
-reload does not re-inject a stale verdict. Like the rest of the gate it acts only
-in a trusted project (an untrusted clone's advisor key is ignored entirely), and
-a delegated child consults nothing.
+bodies. Every field it does keep is passed through a documented redactor first
+(`advisor.redact`, on by default), which removes the common credential shapes: an
+`sk-…` key, a GitHub token, an `AKIA…` access key id, a Slack `xox…` token, a
+`Bearer`/`Basic` header's token, URL userinfo (`user:password@`), and the value of
+an `api_key`/`access_token`/`secret`/`password` assignment. A quoted value may
+contain spaces; an unquoted one is redacted through the end of the assignment, so
+a sentence that uses one of those words as a key is over-redacted — the safe
+direction. It replaces characters, not fields, so the digest's shape and bound
+are unchanged; ordinary prose and file paths are not touched. If the primary
+provider is down or rate-limits, `advisor.fallback` names one other provider/model
+tried once, off unless both of its keys are set; a missing credential or an
+abort is not retried, because one is a configuration error and the other means
+nobody is waiting. The record names the model that *answered* and the primary it
+replaced, and the whole consultation is still one entry and one budget unit; its
+usage and cost are the sum of both calls when the failed primary reported any.
+Every attempt is an `orchestrator-advisor` session entry, and `/gate` shows the
+last one; the section is attached to the run being prepared, so a reload does not
+re-inject a stale verdict. Like the rest of the gate it acts only in a trusted
+project (an untrusted clone's advisor key is ignored entirely), and a delegated
+child consults nothing. The attempt's usage is appended to the session's own
+accounting, so `/session-breakdown` bills it once alongside the messages it was
+asked about.
+
+**Compaction is pi's; the model is what forgets.** Gate and advisor state are
+rebuilt from the session branch, so a compaction cannot lose them — but the
+model's own context is replaced by pi's summary, and with it its awareness of an
+open goal, open todos, a pending verification, live delegated runs or a spent
+advisor budget. After a *successful* compaction the extension appends one
+`orchestrator:compact-snapshot` `custom_message` (with `display: false` and no
+turn triggered) naming the active goal, the open todo ids and titles, the gate
+attempts and `attemptCap` with the evidence of every blocked condition and the
+last verdict's reason, the live delegated run ids with their status, and the
+advisor's budget, recorded attempts and consumed trigger keys, bounded to 4 KB
+with a truncation note. A session with nothing to report gets no message, and a
+failed or cancelled compaction gets none either. It is context repair, not a
+record: no `session_before_compact` handler is registered and no compaction
+result is returned, so pi's compaction is neither cancelled nor replaced, and
+nothing is ever read back from the snapshot — `/gate` and the next settlement
+still reconstruct exactly what they did before.
 
 **What a blocking check cannot see.** The gate reads this session's own tool
 calls. A run that delegated every edit to subagents reports no unverified edits
 over a worktree full of them, because a child is another process with another
-session log; the gate says so in its scope line. A delegated child
-(`PI_TMUX_SUBAGENT_CHILD=1`) records a verdict with `scope: child`, runs no command
-and blocks nothing — parent and child share the project config, and a child that
-blocked itself would stall the delegation its parent is waiting on.
+session log; the gate says so in its scope line. A delegated worker
+(`PI_ORCHESTRATOR_ROLE=worker`, or the legacy `PI_TMUX_SUBAGENT_CHILD=1` that
+older launchers set) records a verdict with `scope: child`, runs no command, blocks
+nothing and registers no override tool — parent and child share the project
+config, and a child that blocked itself would stall the delegation its parent is
+waiting on. The role is resolved **once, at module load**, into a constant: the
+subagent extension deletes `PI_TMUX_SUBAGENT_CHILD` from the child's environment
+during startup so a `pi` spawned from the child's shell tool cannot re-enter child
+mode, and a guard that re-read the variable at the settlement boundary was gone by
+the time it mattered. The separate `PI_ORCHESTRATOR_ROLE` marker is written by the
+launcher as a literal in the child command, so scrubbing the child-mode variable
+does not erase the role, and a top-level run (`pi -p`, RPC, CI) carries no marker
+and settles normally. The child removes that marker at `session_start` — after
+every factory has read it, before any tool can spawn a process — so a `pi`
+launched from the worker's shell does not inherit the worker role and skip its own
+gate.
 
 **What the event means.** `gate-decided` is published from the boundary, before
 the entry is committed, because pi offers no post-commit hook there. Nothing acts

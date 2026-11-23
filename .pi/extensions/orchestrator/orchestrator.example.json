@@ -4,12 +4,14 @@
   "block": {
     "openTodos": false,
     "repeatedFailure": false,
-    "loops": false
+    "loops": false,
+    "waitForSubagents": false
   },
   "verification": {
     "command": "node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts",
     "timeoutMs": 300000,
-    "maxOutputBytes": 16000
+    "maxOutputBytes": 16000,
+    "successPattern": "fail 0"
   },
   "advisor": {
     "provider": "opencode-go",
@@ -17,6 +19,14 @@
     "cooldownMs": 600000,
     "budget": 2,
     "minGateBlocks": 2,
-    "timeoutMs": 60000
+    "timeoutMs": 60000,
+    "redact": true,
+    "fallback": {
+      "provider": "openrouter",
+      "model": "anthropic/claude-haiku-5-5"
+    }
+  },
+  "workspace": {
+    "lockScope": "worktree"
   }
 }

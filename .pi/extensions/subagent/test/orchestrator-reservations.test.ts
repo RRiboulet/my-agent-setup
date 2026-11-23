@@ -14,20 +14,28 @@ import { after, before, beforeEach, test } from "node:test";
 
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 
+import { normalizeGateConfig } from "../../orchestrator/config.ts";
 import { registerWorkspace } from "../../orchestrator/workspace-runtime.ts";
 import {
+	RESERVATION_VERSION,
 	buildReservationPath,
 	buildReservationPaths,
 	canonicalPath,
 	liveReservations,
+	mapToSharedRoot,
 	readReservations,
+	repoRelative,
+	reservationCandidateFor,
 	reservationPath,
 	reservationPathMatches,
 	reservePaths,
+	validateReservation,
 	withWorkspaceLock,
 	reservationPathsOverlap,
 	resolveWorkspaceScope,
 	type ReservationPath,
+	type ReservationRecord,
+	type WorkspaceScope,
 } from "../../orchestrator/workspace.ts";
 import {
 	callTool,
@@ -60,12 +68,35 @@ beforeEach(async () => {
 	gitIn(fixture.root, "checkout", "--", ".");
 	gitIn(fixture.linked, "checkout", "--", ".");
 	await rm(path.join(fixture.root, "src-link"), { recursive: true, force: true });
+	// A lock-scope test writes an untracked config file; the clean-tree test
+	// asserts on `git status`, so the file must not outlive the test that wrote it.
+	await rm(path.join(fixture.root, ".pi", "orchestrator.json"), { force: true });
+	await rm(path.join(fixture.linked, ".pi", "orchestrator.json"), { force: true });
 });
 
 async function registryDir(): Promise<string> {
 	const scope = await resolveWorkspaceScope(fixture.root, makeRunner());
 	assert.equal(scope.ok, true);
 	return (scope as { ok: true; scope: { registryDir: string } }).scope.registryDir;
+}
+
+async function workspaceScope(tree: string): Promise<WorkspaceScope> {
+	const scope = await resolveWorkspaceScope(tree, makeRunner());
+	assert.equal(scope.ok, true);
+	return (scope as { ok: true; scope: WorkspaceScope }).scope;
+}
+
+/** A committed `.pi/orchestrator.json` opts a tree into `workspace.lockScope`. */
+async function configureLockScope(tree: string, lockScope: "worktree" | "repo"): Promise<void> {
+	await mkdir(path.join(tree, ".pi"), { recursive: true });
+	await writeFile(path.join(tree, ".pi", "orchestrator.json"), `${JSON.stringify({ version: 1, workspace: { lockScope } })}\n`);
+}
+
+async function writeRawReservation(record: Record<string, unknown>): Promise<string> {
+	const registry = await registryDir();
+	await mkdir(path.dirname(reservationPath(registry, String(record.id))), { recursive: true });
+	await writeFile(reservationPath(registry, String(record.id)), `${JSON.stringify(record)}\n`);
+	return registry;
 }
 
 async function joinedRuntime(
@@ -137,6 +168,87 @@ test("overlap detection is conservative for wildcards and exact for files", () =
 	assert.equal(reservationPathsOverlap(a, dir), true);
 	assert.equal(reservationPathsOverlap(a, glob), true);
 	assert.equal(reservationPathsOverlap({ pattern: path.join(fixture.root, "docs/x"), kind: "file" }, glob), false);
+});
+
+// --- Lock scope: path mapping ---------------------------------------------
+
+test("a repo-scoped path maps into the shared root; a path outside the worktree stays absolute", async () => {
+	const tree = await workspaceScope(fixture.linked);
+	assert.equal(repoRelative(tree.root, path.join(tree.root, "src/a.ts")), path.join("src", "a.ts"));
+	assert.equal(repoRelative(tree.root, path.join(tree.sharedRoot, "src/a.ts")), null, "the main checkout is outside this worktree");
+	assert.equal(repoRelative(tree.root, path.join(tree.root, "..")), null, "`..` is not a repo mapping");
+	assert.equal(mapToSharedRoot(tree.root, tree.sharedRoot, path.join(tree.root, "src/a.ts")), path.join(tree.sharedRoot, "src/a.ts"));
+	assert.equal(
+		mapToSharedRoot(tree.root, tree.sharedRoot, path.join(fixture.outside, "x.ts")),
+		path.join(fixture.outside, "x.ts"),
+		"a path outside the worktree acquires no cross-tree meaning",
+	);
+	// The main checkout is its own shared root, so mapping is the identity there.
+	const main = await workspaceScope(fixture.root);
+	assert.equal(mapToSharedRoot(main.root, main.sharedRoot, path.join(fixture.root, "src/a.ts")), path.join(fixture.root, "src/a.ts"));
+});
+
+test("a repo-scoped pattern maps its static prefix and keeps the glob, anchored at the shared root", async () => {
+	const tree = await workspaceScope(fixture.linked);
+	const options = { scope: "repo" as const, root: tree.root, sharedRoot: tree.sharedRoot };
+
+	const worktreeDefault = buildReservationPath(fixture.linked, "src/a.ts");
+	assert.equal(worktreeDefault.pattern, path.join(fixture.linked, "src/a.ts"), "the default pattern is unchanged");
+
+	const file = buildReservationPath(fixture.linked, "src/a.ts", options);
+	assert.deepEqual(file, { pattern: path.join(tree.sharedRoot, "src/a.ts"), kind: "file" });
+
+	const glob = buildReservationPath(fixture.linked, "src/**/*.ts", options);
+	assert.equal(glob.kind, "glob");
+	assert.equal(glob.pattern, path.join(tree.sharedRoot, "src/**/*.ts"));
+	assert.equal(reservationPathMatches(glob, path.join(tree.sharedRoot, "src/nested/b.ts")), true);
+
+	const directory = buildReservationPath(fixture.linked, "src/", options);
+	assert.equal(directory.kind, "dir");
+	assert.equal(directory.pattern, path.join(tree.sharedRoot, "src"));
+
+	const outside = buildReservationPath(fixture.linked, "../outside/*.ts", options);
+	assert.equal(outside.pattern, path.join(fixture.outside, "*.ts"), "a glob outside the worktree keeps its absolute pattern");
+
+	const paths = buildReservationPaths(fixture.linked, ["src/a.ts", "./src/a.ts"], options);
+	assert.equal(paths.length, 1, "mapped spellings still collapse to one pattern");
+});
+
+test("the guard's candidate is the holder's namespace: absolute for a worktree holder, shared for a repo holder", async () => {
+	const tree = await workspaceScope(fixture.linked);
+	const main = await workspaceScope(fixture.root);
+	const at = Date.now();
+	const base: ReservationRecord = {
+		version: RESERVATION_VERSION,
+		id: "candidate-record",
+		sessionId: "candidate-holder",
+		pid: process.pid,
+		cwd: tree.cwd,
+		branch: "linked-branch",
+		scope: "repo",
+		root: tree.root,
+		paths: [{ pattern: path.join(tree.sharedRoot, "src/a.ts"), kind: "file" }],
+		reason: "mapping",
+		createdAt: at,
+		expiresAt: at + 60_000,
+	};
+	const writer = { root: main.root, sharedRoot: main.sharedRoot };
+
+	assert.equal(
+		reservationCandidateFor(base, path.join(main.root, "src/a.ts"), writer),
+		path.join(main.sharedRoot, "src/a.ts"),
+		"a write in the main checkout is anchored at the shared root a repo holder used",
+	);
+	assert.equal(
+		reservationCandidateFor({ ...base, scope: "worktree" }, path.join(main.root, "src/a.ts"), writer),
+		path.join(main.root, "src/a.ts"),
+		"a worktree holder compares the canonical absolute path, as before",
+	);
+	assert.equal(
+		reservationCandidateFor(base, path.join(fixture.outside, "x.ts"), writer),
+		path.join(fixture.outside, "x.ts"),
+		"a path outside the writer's worktree has no repo mapping",
+	);
 });
 
 // --- The guard -------------------------------------------------------------
@@ -463,6 +575,191 @@ test("the lock holds across processes, not just across promises", async () => {
 	assert.equal(results.filter((result) => result.ok).length, 1, "exactly one process wins the lock race");
 	const records = await readReservations(`${fixture.root}/.git/pi-agents`);
 	assert.equal(records.reservations.length, 1);
+});
+
+// --- Lock scope: default is worktree, `"repo"` opts into one namespace ---
+
+test("by default two linked worktrees may reserve the same relative path, and one worktree may not do it twice", async () => {
+	const mainFirst = await joinedRuntime("parity-main-first");
+	const mainSecond = await joinedRuntime("parity-main-second");
+	const tree = await joinedRuntime("parity-linked", fixture.linked);
+
+	const first = await callTool(mainFirst.pi, "orchestrator_reserve", { action: "reserve", paths: ["src/a.ts"], reason: "main checkout claim" }, mainFirst.ctx);
+	assert.match(first.text, /^Reserved /m);
+	const linked = await callTool(tree.pi, "orchestrator_reserve", { action: "reserve", paths: ["src/a.ts"], reason: "linked worktree claim" }, tree.ctx);
+	assert.match(linked.text, /^Reserved /m, "branch-isolated worktrees do not share absolute paths");
+
+	const sameTree = await callTool(mainSecond.pi, "orchestrator_reserve", { action: "reserve", paths: ["src/a.ts"], reason: "second claim in the same tree" }, mainSecond.ctx);
+	assert.match(sameTree.text, /^Reservation refused:/m, "one worktree still refuses the same path twice");
+	assert.match(sameTree.text, /parity-main-first/);
+	const stored = (await readReservations(await registryDir())).reservations;
+	assert.equal(stored.length, 2);
+	assert.equal(stored.every((record) => record.scope === "worktree"), true, "the default records worktree scope");
+	assert.deepEqual(
+		stored.map((record) => record.root).sort(),
+		[fixture.linked, fixture.root].sort(),
+		"each record keeps the reserving tree's own root",
+	);
+});
+
+test("lockScope repo refuses the other worktree's reservation of the same relative path and names the holder", async () => {
+	await configureLockScope(fixture.root, "repo");
+	await configureLockScope(fixture.linked, "repo");
+	const holder = await joinedRuntime("repo-scope-holder");
+	const linked = await joinedRuntime("repo-scope-linked", fixture.linked);
+
+	const first = await callTool(holder.pi, "orchestrator_reserve", { action: "reserve", paths: ["src/a.ts"], reason: "repo-wide claim" }, holder.ctx);
+	assert.match(first.text, /^Reserved /m);
+	const refused = await callTool(linked.pi, "orchestrator_reserve", { action: "reserve", paths: ["src/a.ts"], reason: "same relative path, other tree" }, linked.ctx);
+	assert.match(refused.text, /^Reservation refused:/m);
+	assert.match(refused.text, /repo-scope-holder/, "the refusal names the holder");
+
+	const stored = (await readReservations(await registryDir())).reservations;
+	assert.equal(stored.length, 1, "only the first claim is stored");
+	assert.equal(stored[0]!.scope, "repo");
+	assert.equal(stored[0]!.root, fixture.root, "a repo-scoped record keeps the reserving worktree's root");
+	assert.equal(stored[0]!.paths[0]!.pattern, path.join(fixture.root, "src/a.ts"), "the pattern is stored in the shared-root namespace");
+});
+
+test("a repo record and a worktree record conflict on the same relative path, in either direction", async () => {
+	// A repo-scoped holder and a default-scope reserver do not share a namespace,
+	// so the comparison maps the worktree side through its own root. Both
+	// directions matter: the opt-in and the default session each have to see it.
+	await configureLockScope(fixture.linked, "repo");
+	const repoHolder = await joinedRuntime("mixed-repo-holder", fixture.linked);
+	const defaultReserver = await joinedRuntime("mixed-default-reserver");
+	await callTool(repoHolder.pi, "orchestrator_reserve", { action: "reserve", paths: ["src/a.ts"], reason: "repo claim first" }, repoHolder.ctx);
+	const refused = await callTool(defaultReserver.pi, "orchestrator_reserve", { action: "reserve", paths: ["src/a.ts"], reason: "default claim second" }, defaultReserver.ctx);
+	assert.match(refused.text, /^Reservation refused:/m);
+	assert.match(refused.text, /mixed-repo-holder/);
+
+	await resetRegistries(fixture);
+	await configureLockScope(fixture.linked, "worktree");
+	const defaultHolder = await joinedRuntime("mixed-default-holder", fixture.linked);
+	await configureLockScope(fixture.root, "repo");
+	const repoReserver = await joinedRuntime("mixed-repo-reserver");
+	await callTool(defaultHolder.pi, "orchestrator_reserve", { action: "reserve", paths: ["src/a.ts"], reason: "default claim first" }, defaultHolder.ctx);
+	const second = await callTool(repoReserver.pi, "orchestrator_reserve", { action: "reserve", paths: ["src/a.ts"], reason: "repo claim second" }, repoReserver.ctx);
+	assert.match(second.text, /^Reservation refused:/m);
+	assert.match(second.text, /mixed-default-holder/);
+	assert.ok(
+		second.text.includes(path.join(fixture.linked, "src/a.ts")),
+		"the refusal names the holder's own pattern, not the mapped one",
+	);
+});
+
+test("a repo-scoped holder blocks a same-relative-path write from a default-scope session", async () => {
+	// The holder opts in; the writer keeps the default scope and still has to
+	// see the claim, because the guard maps its candidate into the holder's
+	// namespace before matching. The writer sits in the linked tree on purpose:
+	// the mapping is only observable when its absolute path is not already the
+	// shared root.
+	await configureLockScope(fixture.root, "repo");
+	const holder = await joinedRuntime("repo-tree-holder");
+	const writer = await joinedRuntime("default-scope-writer", fixture.linked);
+	await callTool(holder.pi, "orchestrator_reserve", { action: "reserve", paths: ["src/a.ts"], reason: "repo-wide edit" }, holder.ctx);
+
+	const blocked = await writer.runtime.checkToolCall(
+		{ toolName: "write", input: { path: path.join(fixture.linked, "src/a.ts") } },
+		writer.ctx as never,
+	);
+	assert.ok(blocked?.block, "the other worktree's same relative path is one path under repo scope");
+	assert.match(blocked.reason, /repo-tree-holder/);
+	assert.match(blocked.reason, /repo-wide edit/);
+
+	const elsewhere = await writer.runtime.checkToolCall(
+		{ toolName: "write", input: { path: path.join(fixture.linked, "src/nested/b.ts") } },
+		writer.ctx as never,
+	);
+	assert.equal(elsewhere, undefined, "a different relative path is unaffected");
+});
+
+test("a path outside the worktree does not match a repo-scoped reservation", async () => {
+	await configureLockScope(fixture.root, "repo");
+	const holder = await joinedRuntime("repo-outside-holder");
+	const writer = await joinedRuntime("repo-outside-writer", fixture.linked);
+	await callTool(holder.pi, "orchestrator_reserve", { action: "reserve", paths: ["src/a.ts"], reason: "repo-wide edit" }, holder.ctx);
+
+	// A relative path that climbs out of the writer's worktree has no repository
+	// mapping, so the write is not refused by a same-named path inside the repo.
+	for (const promised of [path.join(fixture.outside, "src/a.ts"), "../outside/src/a.ts"]) {
+		const allowed = await writer.runtime.checkToolCall({ toolName: "write", input: { path: promised } }, writer.ctx as never);
+		assert.equal(allowed, undefined, `${promised} stays absolute and acquires no cross-tree meaning`);
+	}
+});
+
+test("a version 1 record is still read and enforced, as a worktree-scoped claim", async () => {
+	const at = Date.now();
+	const target = path.join(fixture.root, "src/a.ts");
+	const registry = await writeRawReservation({
+		version: 1,
+		id: "legacy-record",
+		sessionId: "legacy-holder",
+		pid: process.pid,
+		cwd: fixture.root,
+		branch: "main",
+		paths: [{ pattern: target, kind: "file" }],
+		reason: "written by a build without scope",
+		createdAt: at,
+		expiresAt: at + 60_000,
+	});
+
+	const read = await readReservations(registry);
+	assert.deepEqual(read.invalid, [], "a v1 record is readable, never invalid");
+	assert.equal(read.reservations.length, 1);
+	assert.equal(read.reservations[0]!.scope, "worktree");
+	assert.equal(read.reservations[0]!.root, fixture.root, "a v1 record's root is its own cwd");
+
+	const writer = await joinedRuntime("legacy-writer");
+	const blocked = await writer.runtime.checkToolCall({ toolName: "write", input: { path: target } }, writer.ctx as never);
+	assert.ok(blocked?.block, "an existing v1 claim still refuses a colliding write");
+	assert.match(blocked.reason, /legacy-holder/);
+});
+
+test("an unknown scope makes a record unusable rather than guessed", async () => {
+	const at = Date.now();
+	const record = {
+		version: RESERVATION_VERSION,
+		id: "unknown-scope",
+		sessionId: "future-holder",
+		pid: process.pid,
+		cwd: fixture.root,
+		branch: "main",
+		scope: "branch",
+		root: fixture.root,
+		paths: [{ pattern: path.join(fixture.root, "src/a.ts"), kind: "file" }],
+		reason: "a scope this build does not know",
+		createdAt: at,
+		expiresAt: at + 60_000,
+	};
+	assert.equal(validateReservation(record), null, "an unknown scope is not read as worktree or repo");
+	assert.equal(validateReservation({ ...record, scope: "repo", root: "relative/path" }), null, "a repo record needs an absolute root");
+
+	const registry = await writeRawReservation(record);
+	const read = await readReservations(registry);
+	assert.deepEqual(read.invalid, ["unknown-scope.json"]);
+	const writer = await joinedRuntime("unknown-scope-writer");
+	assert.equal(
+		await writer.runtime.checkToolCall({ toolName: "write", input: { path: path.join(fixture.root, "src/a.ts") } }, writer.ctx as never),
+		undefined,
+		"an unusable record fails open: it blocks nothing",
+	);
+});
+
+test("the workspace lock scope config is validated strictly and defaults to worktree", () => {
+	assert.deepEqual(normalizeGateConfig({ version: 1 }).config.workspace, { lockScope: "worktree" });
+	assert.equal(normalizeGateConfig({ version: 1, workspace: { lockScope: "repo" } }).config.workspace.lockScope, "repo");
+
+	for (const value of ["branch", 3, true, ["repo"], null]) {
+		const result = normalizeGateConfig({ version: 1, workspace: { lockScope: value } });
+		assert.equal(result.config.workspace.lockScope, "worktree", `${JSON.stringify(value)} falls back to the default`);
+		assert.match(result.warnings.join(" "), /workspace\.lockScope/);
+	}
+	for (const raw of ["repo", 1, ["repo"]]) {
+		const result = normalizeGateConfig({ version: 1, workspace: raw });
+		assert.equal(result.config.workspace.lockScope, "worktree", "a non-object workspace block is the default with a warning");
+		assert.match(result.warnings.join(" "), /workspace must be an object/);
+	}
 });
 
 test("nothing is written into the working tree, and the registry is not git-visible", async () => {

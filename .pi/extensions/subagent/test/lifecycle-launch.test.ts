@@ -14,6 +14,7 @@ import { test } from "node:test";
 
 import { type RunRecord } from "../index.ts";
 import { LIST_DETAIL_BUDGET } from "../listview.ts";
+import { ORCHESTRATION_EVENTS, type RunSettledPayload } from "../../orchestrator/events.ts";
 import { waitFor, withEnv, withTempAgentDir } from "./helpers.ts";
 import { createHarness, withHarness } from "./lifecycle-harness.ts";
 
@@ -84,10 +85,14 @@ test("subagent launches a child in a detached tmux session and returns immediate
 		assert.ok(launched, "a tmux session is created");
 		const keys = h.execCalls.filter((call) => call.args.includes("send-keys"));
 		assert.ok(keys.length >= 2, "the child command is typed and submitted");
-		assert.ok(
-			keys.some((call) => call.args.some((arg) => arg.includes("--provider"))),
-			"the child invocation carries the provider",
-		);
+		const childCommand = keys
+			.flatMap((call) => call.args)
+			.find((arg) => typeof arg === "string" && arg.includes("--provider"));
+		assert.ok(childCommand, "the child invocation carries the provider");
+		// The role marker is written as a literal, beside the child-mode variables:
+		// the orchestrator resolves it once at module load, so a later scrub of
+		// PI_TMUX_SUBAGENT_CHILD cannot turn a delegated child back into a parent.
+		assert.match(childCommand, /PI_ORCHESTRATOR_ROLE=worker/);
 
 		const runs = await h.readRuns();
 		assert.equal(runs.length, 1);
@@ -127,9 +132,21 @@ test("subagent_cancel kills the tmux session and is idempotent once terminal", a
 			"the tmux session is killed",
 		);
 
+		// Cancellation is terminal for a parked parent too, so it publishes the same
+		// in-process settlement event a finished run does — once.
+		const settled = h.events.filter(
+			(event) => event.channel === ORCHESTRATION_EVENTS.runSettled && (event.data as RunSettledPayload).runId === run.id,
+		);
+		assert.equal(settled.length, 1, "one terminal event per run id");
+		assert.equal((settled[0]!.data as RunSettledPayload).status, "cancelled");
+
 		const again = await h.call("subagent_cancel", { id: run.id });
 		assert.match(again.text, /already cancelled/);
 		await assert.rejects(() => h.call("subagent_cancel", { id: "no-such-run" }), /Unknown subagent run/);
+		const after = h.events.filter(
+			(event) => event.channel === ORCHESTRATION_EVENTS.runSettled && (event.data as RunSettledPayload).runId === run.id,
+		);
+		assert.equal(after.length, 1, "a repeated cancel does not publish a second terminal event");
 	});
 });
 

@@ -12,6 +12,9 @@
  * async-wrapped, errors are swallowed by the host, and the call does not await
  * them. There is no cross-process, cross-worktree or cross-session delivery —
  * a child Pi process has its own bus, and a linked worktree has its own session.
+ * The run lifecycle channels are for one process watching its own delegations:
+ * the settlement gate keeps a live-run set from them so it can park instead of
+ * spending an attempt, and a reload rebuilds that set from `runs-snapshot`.
  *
  * The wrapper below is deliberately total: a missing bus, a bus whose `emit`
  * throws, or a subscriber that throws synchronously must never change the
@@ -26,6 +29,8 @@ import type { GateVerdict, LoopVerdict } from "./gate.ts";
 /** The documented channels. The `orchestrator:` prefix keeps them out of the
  *  collision set of third-party extension event names. */
 export const ORCHESTRATION_EVENTS = {
+	runStarted: "orchestrator:run-started",
+	runsSnapshot: "orchestrator:runs-snapshot",
 	runSettled: "orchestrator:run-settled",
 	planSettled: "orchestrator:plan-settled",
 	todoChanged: "orchestrator:todo-changed",
@@ -35,11 +40,44 @@ export const ORCHESTRATION_EVENTS = {
 
 export type OrchestrationChannel = (typeof ORCHESTRATION_EVENTS)[keyof typeof ORCHESTRATION_EVENTS];
 
-/** A subagent run reached a final state. `settled` means the child reported a
- *  final answer (completed or failed), matching the report artifact's rule. */
+/**
+ * The session entry types this extension writes besides its `custom` records.
+ * `compactSnapshot` is a `custom_message`, the only channel that enters the
+ * model's context without replacing the system prompt; see `compact-snapshot.ts`.
+ */
+export const ORCHESTRATOR_CUSTOM_TYPES = {
+	compactSnapshot: "orchestrator:compact-snapshot",
+} as const;
+
+/** The status of a run that is still live. `interrupted` is terminal for parking
+ *  and is never published as live, so it is not part of this union. */
+export type LiveRunStatus = "queued" | "running";
+
+/** A run was admitted, before its child is necessarily alive. Published once per
+ *  run id: a plan retry creates a new id and therefore publishes its own. */
+export interface RunStartedPayload {
+	runId: string;
+	status: LiveRunStatus;
+	planId?: string;
+	stepId?: string;
+	at: number;
+}
+
+/** The live runs a reload rebuilt from disk, so a parent that starts after a
+ *  restart knows what is in flight before its first settlement. `interrupted`
+ *  is not live: it is terminal for parking in-process, and listing it after a
+ *  reload would park a parent whose interrupt event can no longer fire. */
+export interface RunsSnapshotPayload {
+	runs: { runId: string; status: LiveRunStatus }[];
+	at: number;
+}
+
+/** A subagent run reached a final state. `settled` means terminal, and every
+ *  terminal status is reported, because a parked parent must be released by a
+ *  cancellation or an interrupt as well as by a completed or failed run. */
 export interface RunSettledPayload {
 	runId: string;
-	status: "completed" | "failed";
+	status: "completed" | "failed" | "cancelled" | "interrupted";
 	planId?: string;
 	stepId?: string;
 	error?: string;
@@ -89,6 +127,8 @@ export type GateDecidedPayload =
 	| { action: "loop-block"; loop: LoopVerdict };
 
 export interface OrchestrationEventMap {
+	"orchestrator:run-started": RunStartedPayload;
+	"orchestrator:runs-snapshot": RunsSnapshotPayload;
 	"orchestrator:run-settled": RunSettledPayload;
 	"orchestrator:plan-settled": PlanSettledPayload;
 	"orchestrator:todo-changed": TodoChangedPayload;
