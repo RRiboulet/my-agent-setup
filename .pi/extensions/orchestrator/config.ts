@@ -61,6 +61,9 @@ export const DEFAULT_VERIFICATION_MAX_OUTPUT_BYTES = 16_000;
 export const MAX_VERIFICATION_TIMEOUT_MS = 3_600_000;
 /** Bounded on purpose: the output ends up in a model message. */
 export const MAX_VERIFICATION_OUTPUT_BYTES = 1_048_576;
+/** A success pattern is compiled and echoed in the verdict; 512 characters is
+ *  already longer than any runner summary it needs to match. */
+export const MAX_VERIFICATION_SUCCESS_PATTERN_LENGTH = 512;
 /** The ticket-08 spelling of `attemptCap`, honoured for the warning only. */
 export const LEGACY_ATTEMPT_CAP_KEY = "retryCap";
 
@@ -88,6 +91,10 @@ export interface VerificationConfig {
 	/** Combined stdout/stderr byte cap, used as `pi.exec`'s `maxBuffer` and as
 	 *  the bound on what reaches the continuation message. */
 	maxOutputBytes: number;
+	/** Opt-in regular expression the bounded output must match for a run to count
+	 *  as `passed`. `null` means the exit code (qualified by the weak-command and
+	 *  zero-test checks) is the whole story. */
+	successPattern: string | null;
 }
 
 /** Which conditions may stop a settlement. Every key defaults to `false`. */
@@ -213,6 +220,35 @@ function nonNegativeInteger(value: unknown, fallback: number, max: number, name:
 	return { value };
 }
 
+/**
+ * Validate the opt-in success pattern. A pattern that does not compile is not a
+ * pattern: it is dropped with a warning rather than left to throw at settlement,
+ * where a bad regex in a committed file would become a trapped session.
+ */
+function normalizeSuccessPattern(value: unknown): { value: string | null; warning?: string } {
+	if (value === undefined || value === null) return { value: null };
+	if (typeof value !== "string") {
+		return { value: null, warning: "verification.successPattern must be a string; no pattern is configured" };
+	}
+	const pattern = value.trim();
+	if (!pattern) return { value: null };
+	if (pattern.length > MAX_VERIFICATION_SUCCESS_PATTERN_LENGTH) {
+		return {
+			value: null,
+			warning: `verification.successPattern longer than ${MAX_VERIFICATION_SUCCESS_PATTERN_LENGTH} characters; no pattern is configured`,
+		};
+	}
+	try {
+		new RegExp(pattern);
+	} catch (error) {
+		return {
+			value: null,
+			warning: `verification.successPattern is not a valid regular expression (${error instanceof Error ? error.message : String(error)}); no pattern is configured`,
+		};
+	}
+	return { value: pattern };
+}
+
 function normalizeVerification(raw: unknown): { verification: VerificationConfig | null; warnings: string[] } {
 	const warnings: string[] = [];
 	if (raw === undefined || raw === null) return { verification: null, warnings };
@@ -238,8 +274,15 @@ function normalizeVerification(raw: unknown): { verification: VerificationConfig
 	);
 	if (timeout.warning) warnings.push(timeout.warning);
 	if (output.warning) warnings.push(output.warning);
+	const successPattern = normalizeSuccessPattern(record.successPattern);
+	if (successPattern.warning) warnings.push(successPattern.warning);
 	return {
-		verification: { command: command.trim(), timeoutMs: timeout.value, maxOutputBytes: output.value },
+		verification: {
+			command: command.trim(),
+			timeoutMs: timeout.value,
+			maxOutputBytes: output.value,
+			successPattern: successPattern.value,
+		},
 		warnings,
 	};
 }

@@ -10,7 +10,8 @@
   "verification": {
     "command": "node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts",
     "timeoutMs": 300000,
-    "maxOutputBytes": 16000
+    "maxOutputBytes": 16000,
+    "successPattern": "fail 0"
   },
   "advisor": {
     "provider": "opencode-go",

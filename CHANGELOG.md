@@ -22,6 +22,25 @@ Added:
   cancelled or interrupted only-run releases the park; a worker never parks.
   Tests: `orchestrator-gate.test.ts`, `lifecycle-launch.test.ts`.
 
+- **"Passed" now means the verification command actually verified something.**
+  The settlement gate used to trust exit code 0, which made three common
+  misconfigurations read as green: a configured `npm test || true`, a runner that
+  matched no test files, and a model's own matching shell call whose output
+  nobody read. A command that syntactically discards its own failure (`|| true`,
+  `|| :`, `; true`, `; exit 0`, a trailing `2>/dev/null`, `set +e`) is now
+  reported as `weak-command` and names the construct; a run whose bounded output
+  matches a documented zero-test indicator (`0 passing`, `no tests found`,
+  `ran 0 tests`, `0 tests`, `no test files` — not `0 tests failed`) is
+  `inconclusive` and says why. Both new statuses fail open, so a false positive
+  settles the run instead of trapping it. The opt-in
+  `verification.successPattern` is a regular expression the bounded output must
+  match for `passed`; a mismatch is `failed`, with the pattern as the reason. A
+  model-run of the configured command clears the unverified edits only when its
+  result classifies as a real pass, and a persisted `passed` verdict written
+  before these statuses existed is re-checked against today's rules rather than
+  trusted. Tests:
+  `orchestrator-verify.test.ts`, `orchestrator-gate.test.ts`.
+
 Fixed:
 
 - **A delegated worker no longer passes its role to a `pi` its shell starts.**
@@ -58,7 +77,6 @@ Fixed:
   test seam, which is what let the original bug through. A child-side test proves
   the marker is removed at `session_start`. Tests: `orchestrator-role.test.ts`,
   `orchestrator-gate.test.ts`, `lifecycle-launch.test.ts`.
-
 ## v1.16.0 — 2026-11-23
 
 Added:

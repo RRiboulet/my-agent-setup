@@ -396,7 +396,10 @@ export default function orchestratorExtension(
 			loop: match.loop,
 			goal: activeGoalFromBranch(branch),
 			openTodos: todos.todos,
-			edits: scanEditVerification(branch, { verificationCommand: config.verification?.command ?? null }),
+			edits: scanEditVerification(branch, {
+				verificationCommand: config.verification?.command ?? null,
+				successPattern: config.verification?.successPattern ?? null,
+			}),
 		});
 		const call = await consultAdvisor({ registry: ctx.modelRegistry, config: advisor, digest, signal: ctx.signal });
 		const record: AdvisorRecord = {
@@ -528,7 +531,10 @@ export default function orchestratorExtension(
 			if (config.verification) policy.kinds.push("verification");
 		}
 
-		const edits = scanEditVerification(branch, { verificationCommand: config.verification?.command ?? null });
+		const edits = scanEditVerification(branch, {
+			verificationCommand: config.verification?.command ?? null,
+			successPattern: config.verification?.successPattern ?? null,
+		});
 		const failure = scanFailures(branch);
 
 		const spec = config.verification;
@@ -559,11 +565,14 @@ export default function orchestratorExtension(
 		if (spec && shouldVerify) {
 			const exec: VerificationExec | null =
 				typeof pi.exec === "function" ? (command, args, options) => pi.exec(command, args, options) : null;
-			verification = await runVerification(spec, {
-				cwd: ctx.cwd,
-				signal: ctx.signal,
-				exec: exec ?? (async () => Promise.reject(new Error("this host does not provide pi.exec"))),
-			});
+			verification = await runVerification(
+				{ ...spec, successPattern: spec.successPattern ?? null },
+				{
+					cwd: ctx.cwd,
+					signal: ctx.signal,
+					exec: exec ?? (async () => Promise.reject(new Error("this host does not provide pi.exec"))),
+				},
+			);
 		}
 
 		// Read immediately BEFORE the evaluation, after the awaits above: a run
