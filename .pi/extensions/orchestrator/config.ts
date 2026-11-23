@@ -29,6 +29,12 @@
  *     default and separate from `block`, because it is not a blocking check: it
  *     spends tokens on a model call rather than deciding whether to settle.
  *
+ * `workspace.lockScope` is not a gate key at all; it lives in the same file
+ * because a project already commits one. It decides whether workspace
+ * reservations are compared as absolute paths ("worktree", the default, so
+ * linked worktrees never collide) or as repository-relative paths in the shared
+ * repository root ("repo").
+ *
  * **What committing this file means.** It opts the checkout into running
  * `verification.command` at settlement, with the user's permissions. That is why
  * the gate acts only in a TRUSTED project (`ctx.isProjectTrusted()`): this
@@ -66,6 +72,25 @@ export const MAX_VERIFICATION_OUTPUT_BYTES = 1_048_576;
 export const MAX_VERIFICATION_SUCCESS_PATTERN_LENGTH = 512;
 /** The ticket-08 spelling of `attemptCap`, honoured for the warning only. */
 export const LEGACY_ATTEMPT_CAP_KEY = "retryCap";
+
+// --- Workspace -------------------------------------------------------------
+
+/**
+ * Which namespace a reservation's paths are compared in.
+ *
+ * `"worktree"` keeps the canonical absolute path, so the main checkout and a
+ * linked worktree never collide: branch-isolated agents may touch the same
+ * repository-relative file in different trees. `"repo"` maps a reservation into
+ * the shared repository root instead, so the same relative path is one claim
+ * across every linked worktree. The default reproduces the behaviour that
+ * shipped before this key existed.
+ */
+export type LockScope = "worktree" | "repo";
+
+/** The workspace-coordination keys this file carries (they are not gate blocks). */
+export interface WorkspaceConfig {
+	lockScope: LockScope;
+}
 
 // --- Advisor --------------------------------------------------------------
 
@@ -137,6 +162,12 @@ export interface GateConfig {
 	verification: VerificationConfig | null;
 	/** `null` means no second opinion is configured. */
 	advisor: AdvisorConfig | null;
+	/**
+	 * Reservation keys. Not a gate block: it changes where a workspace claim is
+	 * compared, and `gateConfigCanAct` ignores it because it neither blocks a
+	 * settlement nor runs a command.
+	 */
+	workspace: WorkspaceConfig;
 }
 
 export interface GateConfigRead {
@@ -151,6 +182,7 @@ export const DEFAULT_GATE_CONFIG: GateConfig = {
 	block: { openTodos: false, repeatedFailure: false, loops: false, waitForSubagents: false },
 	verification: null,
 	advisor: null,
+	workspace: { lockScope: "worktree" },
 };
 
 /** The committed project file this reader looks for. */
@@ -165,6 +197,7 @@ function defaultConfig(): GateConfig {
 		block: { ...DEFAULT_GATE_CONFIG.block },
 		verification: null,
 		advisor: null,
+		workspace: { ...DEFAULT_GATE_CONFIG.workspace },
 	};
 }
 
@@ -333,6 +366,29 @@ function normalizeAdvisor(raw: unknown): { advisor: AdvisorConfig | null; warnin
 }
 
 /**
+ * Validate the workspace block. A value this build does not know is the
+ * default with a warning, never a guess: a misspelled scope must not silently
+ * widen a project's lock from one worktree to the whole repository.
+ */
+function normalizeWorkspace(raw: unknown): { workspace: WorkspaceConfig; warnings: string[] } {
+	const workspace: WorkspaceConfig = { ...DEFAULT_GATE_CONFIG.workspace };
+	const warnings: string[] = [];
+	if (raw === undefined) return { workspace, warnings };
+	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
+		return { workspace, warnings: ["workspace must be an object; reservations stay worktree-scoped"] };
+	}
+	const value = (raw as Record<string, unknown>).lockScope;
+	if (value === undefined) return { workspace, warnings };
+	if (typeof value !== "string") {
+		return { workspace, warnings: ["workspace.lockScope must be \"worktree\" or \"repo\"; using \"worktree\""] };
+	}
+	if (value !== "worktree" && value !== "repo") {
+		return { workspace, warnings: [`workspace.lockScope must be \"worktree\" or \"repo\"; ignoring ${JSON.stringify(value)}`] };
+	}
+	return { workspace: { lockScope: value }, warnings };
+}
+
+/**
  * Validate a parsed config object. Unknown keys are ignored deliberately: a
  * newer project may commit a key this build does not know.
  */
@@ -349,6 +405,7 @@ export function normalizeGateConfig(raw: unknown): { config: GateConfig; warning
 	const block = normalizeBlock(record.block);
 	const verification = normalizeVerification(record.verification);
 	const advisor = normalizeAdvisor(record.advisor);
+	const workspace = normalizeWorkspace(record.workspace);
 	return {
 		config: {
 			version: GATE_CONFIG_VERSION,
@@ -356,8 +413,16 @@ export function normalizeGateConfig(raw: unknown): { config: GateConfig; warning
 			block: block.block,
 			verification: verification.verification,
 			advisor: advisor.advisor,
+			workspace: workspace.workspace,
 		},
-		warnings: [...warnings, ...attempt.warnings, ...block.warnings, ...verification.warnings, ...advisor.warnings],
+		warnings: [
+			...warnings,
+			...attempt.warnings,
+			...block.warnings,
+			...verification.warnings,
+			...advisor.warnings,
+			...workspace.warnings,
+		],
 	};
 }
 
@@ -369,6 +434,8 @@ export function normalizeGateConfig(raw: unknown): { config: GateConfig; warning
  * blocking should not pay for the escape hatch from a block it cannot get. The
  * advisor is deliberately excluded: it reacts to blocks rather than making one,
  * and a config that only asks for a second opinion has nothing to override.
+ * `workspace` is excluded for the same reason: it scopes reservations, and a
+ * project that only sets it still has nothing for the gate to block on.
  */
 export function gateConfigCanAct(config: GateConfig): boolean {
 	return config.verification !== null || config.block.openTodos || config.block.repeatedFailure || config.block.loops;

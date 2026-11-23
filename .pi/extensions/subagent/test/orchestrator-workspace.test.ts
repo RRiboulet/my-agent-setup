@@ -540,6 +540,19 @@ test("the registry resolves through a linked worktree whose .git is a file", asy
 	assert.equal(gitIn(linked, "rev-parse", "--show-toplevel").trim(), linked);
 });
 
+test("the scope carries the session's own worktree root and the shared root a repo scope maps into", async () => {
+	const { main, linked: tree, other: second } = await scopes();
+	// `root` is the worktree the session sits in; `sharedRoot` is the main
+	// checkout, derived from the git common dir rather than from --show-toplevel,
+	// so a repository whose worktrees are not siblings still resolves.
+	assert.equal(main.root, root);
+	assert.equal(tree.root, linked, "a linked worktree's root is its own tree, not the main checkout's");
+	assert.equal(main.sharedRoot, path.dirname(main.commonDir));
+	assert.equal(main.sharedRoot, root, "the main checkout is the shared root");
+	assert.equal(tree.sharedRoot, root, "a linked worktree's shared root is the main checkout");
+	assert.equal(second.sharedRoot, other, "an unrelated repository has its own shared root");
+});
+
 test("the join command is idempotent and reports the same peers", async () => {
 	const pi = fakePi();
 	const runtime = registerWorkspace(pi as never, { run: makeRunner() });
