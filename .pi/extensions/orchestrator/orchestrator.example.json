@@ -4,7 +4,8 @@
   "block": {
     "openTodos": false,
     "repeatedFailure": false,
-    "loops": false
+    "loops": false,
+    "waitForSubagents": false
   },
   "verification": {
     "command": "node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts",

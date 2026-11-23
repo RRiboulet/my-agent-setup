@@ -14,6 +14,7 @@ import { test } from "node:test";
 
 import { type RunRecord } from "../index.ts";
 import { LIST_DETAIL_BUDGET } from "../listview.ts";
+import { ORCHESTRATION_EVENTS, type RunSettledPayload } from "../../orchestrator/events.ts";
 import { waitFor, withEnv, withTempAgentDir } from "./helpers.ts";
 import { createHarness, withHarness } from "./lifecycle-harness.ts";
 
@@ -131,9 +132,21 @@ test("subagent_cancel kills the tmux session and is idempotent once terminal", a
 			"the tmux session is killed",
 		);
 
+		// Cancellation is terminal for a parked parent too, so it publishes the same
+		// in-process settlement event a finished run does — once.
+		const settled = h.events.filter(
+			(event) => event.channel === ORCHESTRATION_EVENTS.runSettled && (event.data as RunSettledPayload).runId === run.id,
+		);
+		assert.equal(settled.length, 1, "one terminal event per run id");
+		assert.equal((settled[0]!.data as RunSettledPayload).status, "cancelled");
+
 		const again = await h.call("subagent_cancel", { id: run.id });
 		assert.match(again.text, /already cancelled/);
 		await assert.rejects(() => h.call("subagent_cancel", { id: "no-such-run" }), /Unknown subagent run/);
+		const after = h.events.filter(
+			(event) => event.channel === ORCHESTRATION_EVENTS.runSettled && (event.data as RunSettledPayload).runId === run.id,
+		);
+		assert.equal(after.length, 1, "a repeated cancel does not publish a second terminal event");
 	});
 });
 

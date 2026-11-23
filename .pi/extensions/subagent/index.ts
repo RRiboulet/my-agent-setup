@@ -1775,6 +1775,15 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	 */
 	const announcedPlans = new Set<string>();
 	/**
+	 * Runs whose terminal lifecycle event has already been published.
+	 *
+	 * Every terminal path (a child result, a cancel, an interrupt, a shutdown
+	 * kill) reports the same event, and a few of them can observe the same run —
+	 * an interrupt marker folded twice, a cancel after an interrupt. The set makes
+	 * `orchestrator:run-settled` mean "this run reached a terminal state", once.
+	 */
+	const announcedRuns = new Set<string>();
+	/**
 	 * Session files a resume has claimed but not yet registered a run for.
 	 *
 	 * A resume does I/O (`mkdir`, `countSessionLines`) between the "is another
@@ -2174,15 +2183,56 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	};
 
 	/**
-	 * Publish a run's settlement (patch 22). Called after `persist`, so a
-	 * subscriber reading `runs.json` sees the same terminal status. Total by
+	 * Publish that a run was admitted (ticket 02). One event per run id: plan
+	 * retries create new ids and therefore publish their own start. Total by
 	 * construction: `publishOrchestrationEvent` never throws and its result is
 	 * deliberately ignored.
 	 */
+	const publishRunStarted = (run: RunRecord): void => {
+		publishOrchestrationEvent(pi, ORCHESTRATION_EVENTS.runStarted, {
+			runId: run.id,
+			status: run.status === "running" ? "running" : "queued",
+			...(run.planId ? { planId: run.planId } : {}),
+			...(run.stepId ? { stepId: run.stepId } : {}),
+			at: run.createdAt ?? Date.now(),
+		});
+	};
+
+	/**
+	 * Publish the live runs a reload rebuilt, so a parent that starts after a
+	 * restart knows what is in flight before its first settlement. A terminal run
+	 * is omitted: it is not live, and its own settlement event already said so.
+	 */
+	const publishRunsSnapshot = (): void => {
+		const live = [...runs.values()]
+			.filter((run) => run.status === "queued" || run.status === "running" || run.status === "interrupted")
+			.map((run) => ({ runId: run.id, status: run.status as "queued" | "running" | "interrupted" }));
+		publishOrchestrationEvent(pi, ORCHESTRATION_EVENTS.runsSnapshot, { runs: live, at: Date.now() });
+	};
+
+	/**
+	 * Publish a run's terminal transition (patch 22, extended by ticket 02).
+	 *
+	 * Every terminal status is reported — completed, failed, cancelled and
+	 * interrupted — because a parked parent is released by whichever one happens
+	 * last, not only by a child that reported an answer. Published at most once per
+	 * run id: the terminal paths can observe the same run twice (an interrupt
+	 * marker folded again, a cancel after an interrupt). Called after `persist`
+	 * where the path persists, so a subscriber reading `runs.json` sees the same
+	 * status. Total by construction: `publishOrchestrationEvent` never throws and
+	 * its result is deliberately ignored.
+	 */
 	const publishRunSettled = (run: RunRecord): void => {
+		if (announcedRuns.has(run.id)) return;
+		const status =
+			run.status === "completed" || run.status === "failed" || run.status === "cancelled" || run.status === "interrupted"
+				? run.status
+				: null;
+		if (!status) return;
+		announcedRuns.add(run.id);
 		publishOrchestrationEvent(pi, ORCHESTRATION_EVENTS.runSettled, {
 			runId: run.id,
-			status: run.status === "completed" ? "completed" : "failed",
+			status,
 			...(run.planId ? { planId: run.planId } : {}),
 			...(run.stepId ? { stepId: run.stepId } : {}),
 			...(run.error ? { error: run.error } : {}),
@@ -2595,6 +2645,10 @@ const noteInterrupt = async (
 		// No finishedAt: the child is still running, so the elapsed time shown by
 		// formatDuration must keep counting rather than freezing.
 		await persist();
+		// Terminal for wait, and for a parked parent: an interrupt releases the park
+		// even though the tmux session may still need a cancel. Announced once per
+		// run id, so a marker folded again by the watcher is silent.
+		publishRunSettled(run);
 		// `interrupted` is a status the widget renders, and noteInterrupt is the
 		// only writer of it — without this the strip keeps claiming the run is
 		// active for up to a tick after the tool reported it stopped.
@@ -3106,6 +3160,9 @@ const noteInterrupt = async (
 
 	const startRun = async (run: RunRecord): Promise<void> => {
 		runs.set(run.id, run);
+		// Announced before the queue admits it: the parent's live set must include a
+		// run from the moment the tool returned its id, queued or not.
+		publishRunStarted(run);
 		await persist();
 		await drainQueue();
 		// Show the run in the widget now rather than up to 500ms later on the first
@@ -3205,6 +3262,8 @@ const noteInterrupt = async (
 		run.status = "cancelled";
 		run.finishedAt = Date.now();
 		run.error = run.error ?? reason;
+		// A queued run is live to a parked parent too: abandoning it is terminal.
+		publishRunSettled(run);
 		notifyWaiters(run);
 	};
 
@@ -3309,6 +3368,8 @@ const noteInterrupt = async (
 		// read them before the terminal status is persisted, not never. The session
 		// file survives the tmux kill, so this is still readable.
 		await captureRunUsage(run);
+		// Cancellation is terminal for a parked parent, not only for status/wait.
+		publishRunSettled(run);
 		return true;
 	};
 
@@ -3435,6 +3496,10 @@ const noteInterrupt = async (
 		// Only now may queued runs be admitted: a queued plan step whose failure is
 		// still only in `runs.json` must be abandoned by the policy first.
 		await drainQueue();
+		// The reload rebuild: whatever is still queued, running or interrupted after
+		// reconciliation and the drain is the live set a parent needs before its
+		// first settlement in this session.
+		publishRunsSnapshot();
 		void gcRunDirectories();
 	};
 
@@ -3492,6 +3557,8 @@ const noteInterrupt = async (
 				// Kill first, then read: the child has stopped writing, but the tokens it
 				// already burned are still its own. Same reason as subagent_cancel.
 				await captureRunUsage(run);
+				// The parent may be parked on this run; a shutdown kill releases it.
+				publishRunSettled(run);
 				notifyWaiters(run);
 				continue;
 			}

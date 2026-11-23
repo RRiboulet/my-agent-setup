@@ -115,6 +115,12 @@ export interface GateVerdict {
 	verification: VerificationOutcome | null;
 	/** The override this verdict consumed, when one was pending. */
 	override: GateOverrideUse | null;
+	/** True when a would-be block was parked instead: no continuation, no attempt,
+	 *  because a delegated run is still live. `decision` stays `report`. */
+	parked: boolean;
+	/** The live run ids that kept this settlement parked; empty when it did not
+	 *  park (or when the live set was empty). */
+	liveRuns: string[];
 	/** One-line summary of the decision, used in the continuation message. */
 	reason: string;
 	reasons: GateReason[];
@@ -370,6 +376,12 @@ function normalizePersistedVerdict(data: unknown): GateVerdict | null {
 		override: isRecord(data.override) && typeof data.override.reason === "string"
 			? { reason: data.override.reason, at: optionalFinite(data.override.at) ?? 0 }
 			: null,
+		// A verdict written before parking existed is not parked; the live set is
+		// a snapshot of one evaluation, never reconstructed as current state.
+		parked: data.parked === true,
+		liveRuns: Array.isArray(data.liveRuns)
+			? data.liveRuns.filter((id): id is string => typeof id === "string")
+			: [],
 		reason: typeof data.reason === "string" ? data.reason : "",
 		reasons,
 		conditions,
@@ -533,6 +545,11 @@ export interface GateEvaluationInput {
 	verificationCommand?: string | null;
 	/** An override consumed by this evaluation. */
 	override?: GateOverrideUse | null;
+	/** Delegated runs still live when this settlement was evaluated. Combined with
+	 *  `waitForSubagents`, a would-be block is parked instead of spent. */
+	liveRuns?: string[];
+	/** The project opted into parking on live delegated runs (`block.waitForSubagents`). */
+	waitForSubagents?: boolean;
 	/** Conditions the project allows to block, and those already spent. */
 	policy?: GateBlockPolicy;
 	/** Why blocking was not attempted at all (a child session, an outcome pi will
@@ -664,6 +681,19 @@ export function evaluateGate(input: GateEvaluationInput): GateVerdict {
 	// while nothing is open stays pending for the settlement that needs it.
 	const wouldBlock = candidates.length > 0 && previousAttempts < attemptCap;
 	const override = input.override && wouldBlock && !input.suppressed ? input.override : null;
+	// A live delegated run means the work is not finished, so a block would ask the
+	// model to act on information it does not have yet — and spend an attempt doing
+	// it. Park instead: no continuation, no attempt, and the ids in the verdict.
+	// Deliberately independent of `alreadyBlocked`: the point is not to spend
+	// another attempt on the same unchanged condition.
+	const liveRuns = unique((input.liveRuns ?? []).filter((id): id is string => typeof id === "string" && id.trim().length > 0));
+	const parked =
+		input.waitForSubagents === true &&
+		liveRuns.length > 0 &&
+		candidates.length > 0 &&
+		!input.suppressed &&
+		!override &&
+		previousAttempts < attemptCap;
 
 	if (input.suppressed) {
 		reasons.push({ code: "blocking-suppressed", summary: input.suppressed });
@@ -672,6 +702,14 @@ export function evaluateGate(input: GateEvaluationInput): GateVerdict {
 			code: "override-used",
 			summary: `an override was granted and used instead of blocking: ${override.reason}`,
 			details: { at: override.at },
+		});
+	} else if (parked) {
+		reasons.push({
+			code: "settlement-parked",
+			summary: `parked the settlement rather than blocking it: ${candidates
+				.map((condition) => condition.summary)
+				.join("; ")}; waiting for the live delegated run${liveRuns.length === 1 ? "" : "s"} ${liveRuns.join(", ")}`,
+			details: { kinds: candidates.map((condition) => condition.kind), liveRuns },
 		});
 	} else if (candidates.length > 0) {
 		if (previousAttempts >= attemptCap) {
@@ -720,8 +758,11 @@ export function evaluateGate(input: GateEvaluationInput): GateVerdict {
 
 	const blockedConditions = unique([...alreadyBlocked, ...blockedBy]) as GateConditionKind[];
 	const blockedEvidence: Partial<Record<GateConditionKind, string>> = { ...alreadyBlockedEvidence, ...blockedEvidenceNow };
-	const reason =
-		decision === "continue"
+	const reason = parked
+		? `the gate parked this settlement rather than blocking it: ${candidates
+				.map((condition) => condition.summary)
+				.join("; ")}. ${liveRuns.length === 1 ? "A delegated run is" : "Delegated runs are"} still live (${liveRuns.join(", ")}), so the model has nothing to act on yet; it is woken once when the last one settles. No gate block was spent (${attempts} of ${attemptCap} gate blocks used).`
+		: decision === "continue"
 			? `the gate did not settle this run: ${candidates
 					.map((condition) => condition.summary)
 					.join("; ")}. Address it, or call \`${GATE_OVERRIDE_TOOL}\` with a reason to settle anyway; it will block again until the condition changes, is overridden, or the attempt budget runs out (${attempts} of ${attemptCap} gate blocks used).`
@@ -742,6 +783,8 @@ export function evaluateGate(input: GateEvaluationInput): GateVerdict {
 		blockedEvidence,
 		verification,
 		override,
+		parked,
+		liveRuns: parked ? liveRuns : [],
 		reason,
 		reasons,
 		conditions,
@@ -769,6 +812,11 @@ export function formatVerdict(verdict: GateVerdict): string {
 		`Attempt ${verdict.attempts} of ${verdict.attemptCap} gate blocks · ${verdict.remainingAttempts} remaining · outcome ${verdict.outcome}`,
 		`Scope: ${verdict.scope === "child" ? "delegated child session (reports only; the parent decides)" : "this session's own tool calls — edits made by delegated children are not visible"}`,
 	];
+	if (verdict.parked) {
+		lines.push(
+			`Parked: waiting for the live delegated run${verdict.liveRuns.length === 1 ? "" : "s"} ${verdict.liveRuns.join(", ")} — no gate block was spent; the parent is woken once when the last one settles.`,
+		);
+	}
 	if (verdict.reasons.length === 0) {
 		lines.push("No open condition: no active goal, no open todos, no unverified edits, no repeated failure.");
 	} else {

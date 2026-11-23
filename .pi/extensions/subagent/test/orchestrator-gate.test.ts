@@ -706,7 +706,7 @@ test("readGateConfig defaults when absent, and reports a malformed file rather t
 		assert.equal(missing.source, "default");
 		assert.equal(missing.config.attemptCap, 3);
 		assert.equal(missing.config.verification, null);
-		assert.deepEqual(missing.config.block, { openTodos: false, repeatedFailure: false, loops: false });
+		assert.deepEqual(missing.config.block, { openTodos: false, repeatedFailure: false, loops: false, waitForSubagents: false });
 		assert.equal(missing.warning, undefined);
 
 		await withTempDir(async (configDir) => {
@@ -724,7 +724,7 @@ test("normalizeGateConfig validates the block keys, the verification command and
 		normalizeGateConfig({
 			version: 1,
 			attemptCap: 5,
-			block: { openTodos: true, loops: true, future: true },
+			block: { openTodos: true, loops: true, waitForSubagents: true, future: true },
 			verification: { command: "node --test" },
 			future: true,
 		}),
@@ -732,7 +732,7 @@ test("normalizeGateConfig validates the block keys, the verification command and
 			config: {
 				version: 1,
 				attemptCap: 5,
-				block: { openTodos: true, repeatedFailure: false, loops: true },
+				block: { openTodos: true, repeatedFailure: false, loops: true, waitForSubagents: true },
 				verification: { command: "node --test", timeoutMs: 300_000, maxOutputBytes: DEFAULT_VERIFICATION_MAX_OUTPUT_BYTES },
 				advisor: null,
 			},
@@ -744,14 +744,16 @@ test("normalizeGateConfig validates the block keys, the verification command and
 	const invalid = normalizeGateConfig({
 		version: 1,
 		attemptCap: -1,
-		block: { openTodos: "yes" },
+		block: { openTodos: "yes", waitForSubagents: "yes" },
 		verification: { command: "" },
 	});
 	assert.equal(invalid.config.attemptCap, 3);
 	assert.equal(invalid.config.block.openTodos, false);
+	assert.equal(invalid.config.block.waitForSubagents, false);
 	assert.equal(invalid.config.verification, null);
 	assert.match(invalid.warnings.join(" "), /attemptCap must be a non-negative integer/);
 	assert.match(invalid.warnings.join(" "), /block\.openTodos must be a boolean/);
+	assert.match(invalid.warnings.join(" "), /block\.waitForSubagents must be a boolean/);
 	assert.match(invalid.warnings.join(" "), /verification\.command must be a non-empty string/);
 
 	const capped = normalizeGateConfig({ version: 1, verification: { command: "x", timeoutMs: 1e9, maxOutputBytes: 1e9 } });
@@ -1290,5 +1292,264 @@ test("/gate shows the last verdict, and --json returns the verdict, the last loo
 		await host.runCommand("gate", "--json");
 		const json = String(host.messages.at(-1)?.message.content ?? "");
 		assert.deepEqual(JSON.parse(json), { verdict, loop: null, advisor: null });
+	});
+});
+
+// --- Delegated-run parking (ticket 02) --------------------------------------
+
+/**
+ * Emit one orchestration event through the fake host's bus. The fake now
+ * dispatches as well as records, so this drives the factory's subscriptions the
+ * same way the subagent extension's publications would in one process.
+ */
+function emitOrchestration(host: Awaited<ReturnType<typeof startHost>>, channel: string, data: unknown): void {
+	(host.pi.events as unknown as { emit: (name: string, payload: unknown) => void }).emit(channel, data);
+}
+
+/** A project that opted into parking: an open todo plus `waitForSubagents`. */
+async function withParkingProject<T>(fn: (cwd: string) => Promise<T>): Promise<T> {
+	return withTempDir(async (cwd) => {
+		const todosDir = path.join(cwd, "todos");
+		await mkdir(todosDir, { recursive: true });
+		await writeFile(
+			path.join(todosDir, "aaaaaaaa.md"),
+			`${JSON.stringify({ id: "aaaaaaaa", title: "finish", status: "open" })}\n`,
+		);
+		await mkdir(path.join(cwd, ".pi"), { recursive: true });
+		await writeFile(gateConfigPath(cwd), JSON.stringify({ version: 1, block: { openTodos: true, waitForSubagents: true } }));
+		return await withEnv({ PI_TODO_PATH: todosDir }, () => fn(cwd));
+	});
+}
+
+test("waitForSubagents is off by default: a live run still blocks and spends an attempt", () => {
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 0,
+		attemptCap: 3,
+		openTodos: [{ id: "aaaaaaaa", title: "t", status: "open" }],
+		policy: { kinds: ["todos"], alreadyBlocked: [] },
+		liveRuns: ["run-1"],
+		now: 1,
+	});
+	assert.equal(verdict.decision, "continue");
+	assert.equal(verdict.parked, false);
+	assert.deepEqual(verdict.liveRuns, [], "live ids are reported only when they parked the settlement");
+	assert.equal(verdict.attempts, 1);
+});
+
+test("a live run parks a would-be block: no continuation, no attempt, the ids in the verdict", () => {
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 1,
+		attemptCap: 3,
+		openTodos: [{ id: "aaaaaaaa", title: "t", status: "open" }],
+		policy: { kinds: ["todos"], alreadyBlocked: ["todos"], alreadyBlockedEvidence: { todos: "aaaaaaaa" } },
+		liveRuns: ["run-1", "run-2"],
+		waitForSubagents: true,
+		now: 1,
+	});
+	assert.equal(verdict.decision, "report");
+	assert.equal(verdict.parked, true);
+	assert.deepEqual(verdict.liveRuns, ["run-1", "run-2"]);
+	assert.equal(verdict.kind, "attention");
+	assert.equal(verdict.attempts, 1, "parking spends no attempt");
+	assert.deepEqual(verdict.blockedBy, [], "parking did not block");
+	assert.deepEqual(verdict.blockedConditions, ["todos"], "the already-blocked set is unchanged");
+	assert.deepEqual(verdict.blockedEvidence, { todos: "aaaaaaaa" }, "the already-blocked evidence is unchanged");
+	const parked = verdict.reasons.find((reason) => reason.code === "settlement-parked");
+	assert.ok(parked, "the verdict names why it parked");
+	assert.match(parked!.summary, /run-1/);
+	assert.match(parked!.summary, /open todo/);
+	assert.match(verdict.reason, /parked/);
+});
+
+test("with waitForSubagents but no live run, the same settlement blocks as today", () => {
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 0,
+		attemptCap: 3,
+		openTodos: [{ id: "aaaaaaaa", title: "t", status: "open" }],
+		policy: { kinds: ["todos"], alreadyBlocked: [] },
+		liveRuns: [],
+		waitForSubagents: true,
+		now: 1,
+	});
+	assert.equal(verdict.decision, "continue");
+	assert.equal(verdict.parked, false);
+	assert.equal(verdict.attempts, 1);
+});
+
+test("an override wins over parking and is consumed", () => {
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 0,
+		attemptCap: 3,
+		openTodos: [{ id: "aaaaaaaa", title: "t", status: "open" }],
+		policy: { kinds: ["todos"], alreadyBlocked: [] },
+		override: { reason: "deliberately settling", at: 7 },
+		liveRuns: ["run-1"],
+		waitForSubagents: true,
+		now: 1,
+	});
+	assert.equal(verdict.decision, "report");
+	assert.equal(verdict.parked, false, "an override is an action, not a park");
+	assert.deepEqual(verdict.override, { reason: "deliberately settling", at: 7 });
+	assert.equal(verdict.attempts, 0);
+});
+
+test("an exhausted budget does not park: there is nothing left to save", () => {
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 3,
+		attemptCap: 3,
+		openTodos: [{ id: "aaaaaaaa", title: "t", status: "open" }],
+		policy: { kinds: ["todos"], alreadyBlocked: ["todos"] },
+		liveRuns: ["run-1"],
+		waitForSubagents: true,
+		now: 1,
+	});
+	assert.equal(verdict.decision, "report");
+	assert.equal(verdict.parked, false);
+	assert.equal(verdict.attempts, 3);
+	assert.ok(verdict.reasons.some((reason) => reason.code === "attempt-cap-reached"));
+});
+
+test("a persisted verdict without the parking fields reconstructs as not parked", () => {
+	const state = reconstructGateState([gateStateEntry(1)]);
+	assert.equal(state.lastVerdict?.parked, false);
+	assert.deepEqual(state.lastVerdict?.liveRuns, []);
+
+	const parkedEntry = gateStateEntry(0, 3, {
+		parked: true,
+		liveRuns: ["run-1"],
+	});
+	const parkedState = reconstructGateState([parkedEntry]);
+	assert.equal(parkedState.lastVerdict?.parked, true);
+	assert.deepEqual(parkedState.lastVerdict?.liveRuns, ["run-1"]);
+});
+
+test("formatVerdict says a parked settlement parked rather than blocked", () => {
+	const verdict = evaluateGate({
+		outcome: "completed",
+		attempts: 0,
+		attemptCap: 3,
+		openTodos: [{ id: "deadbeef", title: "t", status: "open" }],
+		policy: { kinds: ["todos"], alreadyBlocked: [] },
+		liveRuns: ["run-1"],
+		waitForSubagents: true,
+		now: 1,
+	});
+	const text = formatVerdict(verdict);
+	assert.match(text, /Parked:/);
+	assert.match(text, /run-1/);
+});
+
+test("a settlement with a live run parks, and the last run settling wakes the parent exactly once", async () => {
+	await withParkingProject(async (cwd) => {
+		const host = await startHost({ cwd });
+		await host.fire("session_start", {});
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runStarted, { runId: "run-live-1", status: "queued", at: 1 });
+
+		const result = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+		const verdict = gateVerdictOf(result);
+		assert.equal(result.continue, undefined, "a park returns no continuation");
+		assert.equal(verdict.parked, true);
+		assert.deepEqual(verdict.liveRuns, ["run-live-1"]);
+		assert.equal(verdict.attempts, 0);
+		assert.equal(host.messages.length, 0, "parking sends nothing");
+
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runSettled, {
+			runId: "run-live-1",
+			status: "completed",
+			finishedAt: 2,
+		});
+		assert.equal(host.messages.length, 1, "the last settled run wakes the parked parent");
+		const sent = host.messages[0]!;
+		assert.equal(sent.message.customType, "orchestrator-resume");
+		assert.equal(sent.options?.triggerTurn, true);
+		assert.equal(sent.options?.deliverAs, "followUp");
+		assert.match(String(sent.message.content), /run-live-1/);
+
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runSettled, {
+			runId: "run-live-1",
+			status: "completed",
+			finishedAt: 3,
+		});
+		assert.equal(host.messages.length, 1, "a second settle in the same state does not wake again");
+	});
+});
+
+test("a parked parent stays parked while another run is live, then wakes on the last one", async () => {
+	await withParkingProject(async (cwd) => {
+		const host = await startHost({ cwd });
+		await host.fire("session_start", {});
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runStarted, { runId: "run-a", status: "running", at: 1 });
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runStarted, { runId: "run-b", status: "running", at: 1 });
+		const verdict = gateVerdictOf((await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal);
+		assert.deepEqual(verdict.liveRuns, ["run-a", "run-b"]);
+
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runSettled, { runId: "run-a", status: "failed", finishedAt: 2 });
+		assert.equal(host.messages.length, 0, "one sibling finishing does not wake the parent");
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runSettled, { runId: "run-b", status: "completed", finishedAt: 3 });
+		assert.equal(host.messages.length, 1);
+	});
+});
+
+test("a cancelled only-run releases the park", async () => {
+	await withParkingProject(async (cwd) => {
+		const host = await startHost({ cwd });
+		await host.fire("session_start", {});
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runStarted, { runId: "run-cancelled", status: "running", at: 1 });
+		const verdict = gateVerdictOf((await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal);
+		assert.equal(verdict.parked, true);
+
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runSettled, { runId: "run-cancelled", status: "cancelled", finishedAt: 2 });
+		assert.equal(host.messages.length, 1, "cancelled is terminal for parking");
+		assert.equal(host.messages[0]!.message.customType, "orchestrator-resume");
+	});
+});
+
+test("without a live run the settlement blocks normally: parking is not a blanket suppression", async () => {
+	await withParkingProject(async (cwd) => {
+		const host = await startHost({ cwd });
+		await host.fire("session_start", {});
+		const result = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+		const verdict = gateVerdictOf(result);
+		assert.equal(result.continue, true);
+		assert.equal(verdict.parked, false);
+		assert.equal(verdict.attempts, 1);
+		assert.equal(host.messages.length, 0, "no wake when nothing ever parked");
+	});
+});
+
+test("a runs snapshot rebuilds the live set before the first settlement after a reload", async () => {
+	await withParkingProject(async (cwd) => {
+		const host = await startHost({ cwd });
+		await host.fire("session_start", {});
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runsSnapshot, {
+			runs: [{ runId: "run-after-reload", status: "running" }],
+			at: 5,
+		});
+
+		const verdict = gateVerdictOf((await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal);
+		assert.equal(verdict.parked, true);
+		assert.deepEqual(verdict.liveRuns, ["run-after-reload"]);
+	});
+});
+
+test("a worker with the same config and a live run never parks", async () => {
+	await withParkingProject(async (cwd) => {
+		const host = await startHost({ cwd, role: "worker" });
+		await host.fire("session_start", {});
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runStarted, { runId: "run-live", status: "running", at: 1 });
+
+		const result = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+		const verdict = gateVerdictOf(result);
+		assert.equal(verdict.scope, "child");
+		assert.equal(verdict.parked, false);
+		assert.equal(result.continue, undefined);
+
+		emitOrchestration(host, ORCHESTRATION_EVENTS.runSettled, { runId: "run-live", status: "completed", finishedAt: 2 });
+		assert.equal(host.messages.length, 0, "a worker never wakes the parent");
 	});
 });

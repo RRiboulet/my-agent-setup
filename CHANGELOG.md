@@ -4,6 +4,24 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Added:
+
+- **A parent with live delegated runs parks its settlement instead of spending an
+  attempt on a turn with nothing to act on.** A block starts another turn, so a
+  parent that had just launched background subagents could burn its
+  `attemptCap` before the first child reported, and the completion notice does
+  not wake an idle session. The new `block.waitForSubagents` key (default
+  `false`) opts a project into parking: a settlement that would block while a
+  delegated run is live returns no continuation, spends no attempt, and records
+  `parked: true` with the live run ids. The orchestrator keeps that set from the
+  new `orchestrator:run-started`, `orchestrator:runs-snapshot` and
+  `orchestrator:run-settled` lifecycle events, rebuilds it from the snapshot on
+  reload, and sends exactly one `orchestrator-resume` message with
+  `triggerTurn: true` when the last run settles — normal completion notices stay
+  non-waking. `run-settled` now also reports `cancelled` and `interrupted`, so a
+  cancelled or interrupted only-run releases the park; a worker never parks.
+  Tests: `orchestrator-gate.test.ts`, `lifecycle-launch.test.ts`.
+
 Fixed:
 
 - **A delegated worker no longer passes its role to a `pi` its shell starts.**

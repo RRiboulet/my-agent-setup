@@ -711,6 +711,7 @@ never returns `continue`. Each opt-in key buys one check:
 | `block.openTodos` | An open todo stops the run settling. |
 | `block.repeatedFailure` | A repeated failure signature stops it. |
 | `block.loops` | The tool-call loop breaker, below. |
+| `block.waitForSubagents` | Opt-in parking: while a delegated run is live, a settlement that would block returns no continuation, spends no attempt, and the parent is woken once when the last run settles. |
 | `verification.command` | The project's verification command, run by the gate at the boundary, and the edits-without-verification check that goes with it. |
 | `advisor.provider` + `advisor.model` | The model a second opinion is asked of when the gate keeps failing the same way or a loop was broken. Off unless both are set. |
 | `advisor.cooldownMs` | Minimum gap between recorded advisor attempts (default 10 minutes). |
