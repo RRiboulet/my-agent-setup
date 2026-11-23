@@ -741,7 +741,13 @@ config. The model's own run of the same command also counts, so a run that
 already verified is not asked twice. A command that times out, exceeds its output
 cap, cannot be started, or returns a result that cannot be parsed is **fail-open**:
 the run settles, and the verdict names the timeout. Only a command that ran to
-completion with a non-zero exit is evidence against the change.
+completion with a non-zero exit is evidence against the change. A command that
+syntactically discards its own failure (`|| true`, `; exit 0`, `set +e`, a
+trailing `2>/dev/null`) is reported as `weak-command`, and a run whose bounded
+output reports zero tests (`0 passing`, `no tests found`, `0 tests`, `no test
+files`) as `inconclusive` — both fail open, because exit code 0 is not the same
+as verified — while the opt-in `verification.successPattern` is the regular
+expression the bounded output must match for `passed`.
 
 **Committing the config is the opt-in, and it runs code.** `verification.command`
 executes at settlement with your permissions, which is why the gate acts only in a

@@ -13,7 +13,7 @@
 // carries every earlier handler's entries forward.
 
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
@@ -75,7 +75,11 @@ function assistantCall(id: string, name: string, args: Record<string, unknown>):
 	};
 }
 
-function toolResult(id: string, toolName: string, options: { text?: string; isError?: boolean } = {}): Entry {
+function toolResult(
+	id: string,
+	toolName: string,
+	options: { text?: string; isError?: boolean; details?: Record<string, unknown> } = {},
+): Entry {
 	return {
 		type: "message",
 		id: `result-${id}`,
@@ -84,6 +88,7 @@ function toolResult(id: string, toolName: string, options: { text?: string; isEr
 			toolCallId: id,
 			toolName,
 			content: [{ type: "text", text: options.text ?? "ok" }],
+			...(options.details ? { details: options.details } : {}),
 			isError: options.isError ?? false,
 		},
 	};
@@ -198,6 +203,40 @@ async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 		await rm(dir, { recursive: true, force: true });
 	}
 }
+
+test("normalizeGateConfig validates verification.successPattern and leaves it off when absent", () => {
+	const base = { version: 1, verification: { command: "node --test" } };
+	assert.equal(normalizeGateConfig(base).config.verification?.successPattern, null, "absent means no pattern");
+	assert.deepEqual(normalizeGateConfig(base).warnings, []);
+
+	const valid = normalizeGateConfig({ version: 1, verification: { command: "node --test", successPattern: "fail 0" } });
+	assert.equal(valid.config.verification?.successPattern, "fail 0");
+	assert.deepEqual(valid.warnings, []);
+
+	const empty = normalizeGateConfig({ version: 1, verification: { command: "node --test", successPattern: "  " } });
+	assert.equal(empty.config.verification?.successPattern, null);
+
+	const invalid = normalizeGateConfig({ version: 1, verification: { command: "node --test", successPattern: "(" } });
+	assert.equal(invalid.config.verification?.successPattern, null, "an uncompilable pattern is not a pattern");
+	assert.match(invalid.warnings.join(" "), /verification\.successPattern/);
+
+	const nonString = normalizeGateConfig({ version: 1, verification: { command: "node --test", successPattern: 42 } });
+	assert.equal(nonString.config.verification?.successPattern, null);
+	assert.match(nonString.warnings.join(" "), /verification\.successPattern/);
+
+	const long = normalizeGateConfig({ version: 1, verification: { command: "node --test", successPattern: "a".repeat(600) } });
+	assert.equal(long.config.verification?.successPattern, null, "an over-long pattern is refused, not truncated");
+	assert.match(long.warnings.join(" "), /verification\.successPattern/);
+});
+
+test("the example config stays a valid, complete reference", async () => {
+	const examplePath = path.join(import.meta.dirname, "..", "..", "orchestrator", "orchestrator.example.json");
+	const example = JSON.parse(await readFile(examplePath, "utf8"));
+	const { config, warnings } = normalizeGateConfig(example);
+	assert.deepEqual(warnings, []);
+	assert.ok(config.verification);
+	assert.match(String(config.verification.successPattern), /fail\s+0/, "the example shows a realistic success pattern");
+});
 
 function verification(status: VerificationOutcome["status"], extra: Partial<VerificationOutcome> = {}): VerificationOutcome {
 	return {
@@ -616,6 +655,76 @@ test("the gate's own passing verification clears the edits it covered, and a fai
 	});
 });
 
+test("a matching shell result clears edits only when its evidence is a real pass", () => {
+	const options = { verificationCommand: "node --test" };
+	const shellRun = (result: { text?: string; isError?: boolean; details?: Record<string, unknown> }, extra: Entry[] = []) => [
+		assistantCall("e1", "edit", { path: "src/a.ts" }),
+		toolResult("e1", "edit"),
+		...extra,
+		assistantCall("b1", "bash", { command: "node --test" }),
+		toolResult("b1", "bash", result),
+	];
+
+	assert.deepEqual(scanEditVerification(shellRun({ text: "pass 3" }), options), {
+		editedFiles: [],
+		verificationRuns: 1,
+		editResults: 1,
+	});
+
+	const notPasses = [
+		["a failed shell result", shellRun({ text: "1 failing", isError: true })],
+		["an exit code in the details", shellRun({ text: "pass 3", details: { exitCode: 1 } })],
+		["zero-test output", shellRun({ text: "0 passing" })],
+		["a zero-test indicator for a runner that found no files", shellRun({ text: "No test files found" })],
+	] as const;
+	for (const [name, branch] of notPasses) {
+		const state = scanEditVerification(branch, options);
+		assert.deepEqual(state.editedFiles, ["src/a.ts"], `${name} does not clear the edits`);
+		assert.equal(state.verificationRuns, 0, `${name} is not a verification run`);
+		assert.equal(state.editResults, 1, "the edit is still evidence, so a later real pass re-arms");
+	}
+
+	// The configured command itself can be weak; running it proves nothing.
+	const weak = scanEditVerification(shellRun({ text: "pass 3" }), { verificationCommand: "node --test || true" });
+	assert.deepEqual(weak.editedFiles, ["src/a.ts"], "a weak command never clears edits");
+
+	// An opt-in pattern must match the output the model's run reported.
+	const pattern = { verificationCommand: "node --test", successPattern: "fail 0" };
+	assert.deepEqual(scanEditVerification(shellRun({ text: "pass 3" }), pattern).editedFiles, ["src/a.ts"]);
+	assert.deepEqual(scanEditVerification(shellRun({ text: "pass 3\nfail 0" }), pattern).editedFiles, []);
+});
+
+test("a persisted passed verdict clears edits only when it was a real pass", () => {
+	const edits = [assistantCall("e1", "edit", { path: "src/a.ts" }), toolResult("e1", "edit")];
+	const persisted = (verification: Record<string, unknown>, options: Parameters<typeof scanEditVerification>[1] = {}) =>
+		scanEditVerification([...edits, custom(GATE_ENTRY_TYPE, { verification, attempts: 1 })], {
+			verificationCommand: "node --test",
+			...options,
+		});
+
+	assert.deepEqual(persisted({ status: "passed", command: "node --test", output: "pass 3" }).editedFiles, []);
+	assert.deepEqual(
+		persisted({ status: "passed", command: "node --test", output: "0 passing" }).editedFiles,
+		["src/a.ts"],
+		"a verdict whose run reported zero tests predates the inconclusive status, so it is re-checked",
+	);
+	assert.deepEqual(
+		persisted({ status: "passed", command: "node --test || true", output: "pass 3" }).editedFiles,
+		["src/a.ts"],
+		"a weak persisted run is not a pass either",
+	);
+	assert.deepEqual(
+		persisted({ status: "passed", command: "node --test", output: "pass 3" }, { successPattern: "fail 0" }).editedFiles,
+		["src/a.ts"],
+		"a configured pattern applies to a persisted pass too",
+	);
+	assert.equal(
+		persisted({ status: "passed", command: "node --test || true", output: "pass 3" }).verificationRuns,
+		0,
+		"a re-checked false pass is not counted as a verification run",
+	);
+});
+
 test("scanFailures reports the same failing invocation repeated, not two different failures", () => {
 	const repeated = [
 		assistantCall("b1", "bash", { command: "npm test" }),
@@ -733,7 +842,12 @@ test("normalizeGateConfig validates the block keys, the verification command and
 				version: 1,
 				attemptCap: 5,
 				block: { openTodos: true, repeatedFailure: false, loops: true, waitForSubagents: true },
-				verification: { command: "node --test", timeoutMs: 300_000, maxOutputBytes: DEFAULT_VERIFICATION_MAX_OUTPUT_BYTES },
+				verification: {
+					command: "node --test",
+					timeoutMs: 300_000,
+					maxOutputBytes: DEFAULT_VERIFICATION_MAX_OUTPUT_BYTES,
+					successPattern: null,
+				},
 				advisor: null,
 			},
 			warnings: [],

@@ -26,6 +26,9 @@ import type { OrchestratorRole } from "../../orchestrator/role.ts";
 import {
 	boundVerificationOutput,
 	classifyVerification,
+	classifyVerificationEvidence,
+	detectWeakCommand,
+	detectZeroTests,
 	runVerification,
 	verificationFailedOpen,
 	verificationInvocation,
@@ -81,9 +84,136 @@ test("every status that says nothing about the change is fail-open", () => {
 	assert.equal(verificationFailedOpen(null), false);
 	assert.equal(verificationFailedOpen({ status: "passed" } as never), false);
 	assert.equal(verificationFailedOpen({ status: "failed" } as never), false);
-	for (const status of ["timed-out", "truncated", "unavailable"] as const) {
+	for (const status of ["timed-out", "truncated", "unavailable", "weak-command", "inconclusive"] as const) {
 		assert.equal(verificationFailedOpen({ status } as never), true, status);
 	}
+});
+
+// --- Evidence: a zero exit code is not enough --------------------------------
+
+test("a command that discards its own failure is named, and a pipeline redirection is not", () => {
+	for (const [command, construct] of [
+		["node --test || true", "|| true"],
+		["npm test || :", "|| :"],
+		["npm test; true", "; true"],
+		["npm test; exit 0", "; exit 0"],
+		["set +e; npm test", "set +e"],
+		["npm test 2>/dev/null", "2>/dev/null"],
+	] as const) {
+		assert.equal(detectWeakCommand(command), construct, command);
+	}
+	for (const command of [
+		"node --test",
+		// Mid-pipeline: the redirection applies to one stage, not to the exit code
+		// the whole command line reports.
+		"npm test 2>/dev/null | tail -20",
+		"node -e 'process.exit(0)'",
+	]) {
+		assert.equal(detectWeakCommand(command), null, command);
+	}
+});
+
+test("a run that reports zero tests is named, and a zero-failure summary is not", () => {
+	for (const [output, indicator] of [
+		["  0 passing (3ms)", "0 passing"],
+		["No tests found", "no tests found"],
+		["Ran 0 tests, 0 failures", "ran 0 tests"],
+		["0 tests completed", "0 tests"],
+		["No test files found, exiting with code 0", "no test files"],
+	] as const) {
+		assert.equal(detectZeroTests(output), indicator, output);
+	}
+	// The success line of the same runner: "0 tests failed" says everything passed.
+	assert.equal(detectZeroTests("pass 12\nfail 0\n0 tests failed"), null);
+	assert.equal(detectZeroTests("10 passing"), null, "a zero digit inside a larger count is not zero tests");
+	assert.equal(detectZeroTests("12 tests passed"), null);
+});
+
+test("classification qualifies the exit code with weak, zero-test and pattern evidence", () => {
+	const passed = classifyVerificationEvidence({ result: execResult(), command: "node --test", output: "pass 3" });
+	assert.deepEqual(passed, { status: "passed", exitCode: 0, evidence: null });
+
+	const weak = classifyVerificationEvidence({ result: execResult(), command: "node --test || true", output: "pass 3" });
+	assert.equal(weak.status, "weak-command");
+	assert.equal(weak.exitCode, 0, "the exit code is still reported, it is just not trusted");
+	assert.equal(weak.evidence, "|| true");
+	assert.equal(verificationFailedOpen(weak as never), true);
+	// A weak command is never `passed`, whatever the exit code says.
+	assert.equal(
+		classifyVerificationEvidence({ result: execResult({ code: 1 }), command: "npm test; exit 0", output: "" }).status,
+		"weak-command",
+	);
+
+	const zero = classifyVerificationEvidence({ result: execResult(), command: "node --test", output: "0 passing" });
+	assert.equal(zero.status, "inconclusive");
+	assert.equal(zero.evidence, "0 passing");
+	assert.equal(verificationFailedOpen(zero as never), true);
+
+	const mismatch = classifyVerificationEvidence({
+		result: execResult(),
+		command: "node --test",
+		output: "pass 3",
+		successPattern: "fail 0",
+	});
+	assert.equal(mismatch.status, "failed");
+	assert.equal(mismatch.evidence, "fail 0");
+	assert.equal(verificationFailedOpen(mismatch as never), false, "a mismatch is evidence against the change");
+
+	assert.equal(
+		classifyVerificationEvidence({ result: execResult(), command: "node --test", output: "pass 3", successPattern: "pass \\d+" }).status,
+		"passed",
+	);
+
+	// The fail-open statuses keep precedence: a timeout says nothing, even about a
+	// weak command.
+	assert.equal(
+		classifyVerificationEvidence({ result: execResult({ code: 143, killed: true }), command: "node --test || true", output: "" }).status,
+		"timed-out",
+	);
+	assert.equal(
+		classifyVerificationEvidence({ result: {}, command: "node --test || true", output: "" }).status,
+		"unavailable",
+	);
+
+	// A pattern that does not compile is ignored rather than thrown.
+	assert.equal(
+		classifyVerificationEvidence({ result: execResult(), command: "node --test", output: "pass 3", successPattern: "(" }).status,
+		"passed",
+	);
+});
+
+test("runVerification computes the bounded output before classifying and names the evidence", async () => {
+	const weak = await runVerification(
+		{ ...SPEC, command: "node --test || true" },
+		{ exec: async () => execResult({ stdout: "pass 3" }) },
+	);
+	assert.equal(weak.status, "weak-command");
+	assert.match(weak.summary, /\|\| true/);
+
+	const zero = await runVerification(SPEC, { exec: async () => execResult({ stdout: "0 passing" }) });
+	assert.equal(zero.status, "inconclusive");
+	assert.match(zero.summary, /0 passing/);
+
+	const mismatch = await runVerification(
+		{ ...SPEC, successPattern: "fail 0" },
+		{ exec: async () => execResult({ stdout: "pass 4" }) },
+	);
+	assert.equal(mismatch.status, "failed");
+	assert.match(mismatch.summary, /successPattern/);
+
+	const matched = await runVerification(
+		{ ...SPEC, successPattern: "pass \\d+" },
+		{ exec: async () => execResult({ stdout: "pass 4" }) },
+	);
+	assert.equal(matched.status, "passed");
+
+	// A bad regex must not throw; the summary says it was ignored.
+	const bad = await runVerification(
+		{ ...SPEC, successPattern: "(" },
+		{ exec: async () => execResult({ stdout: "pass 4" }) },
+	);
+	assert.equal(bad.status, "passed");
+	assert.match(bad.summary, /successPattern/);
 });
 
 test("runVerification maps passed, failed, killed, truncated, throwing and malformed results", async () => {
@@ -438,4 +568,72 @@ test("the command is not run when the run made no edits, and not in a child sess
 			assert.ok(verdict.reasons.some((reason) => reason.code === "blocking-suppressed"));
 		},
 	);
+});
+
+test("a configured command that swallows failures is reported weak-command and the run settles", async () => {
+	await withTempProject(
+		{ version: 1, verification: { command: "node --test || true", timeoutMs: 30_000 } },
+		async (cwd) => {
+			const host = newHost(cwd, editedBranch(), async () => execResult({ stdout: "pass 3" }));
+			const result = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+			const verdict = verdictOf(result);
+			assert.equal(verdict.verification?.status, "weak-command");
+			assert.match(verdict.verification?.summary ?? "", /\|\| true/, "the construct is named");
+			assert.equal(verdict.decision, "report", "a weak command fails open");
+			assert.equal(result.continue, undefined);
+			assert.equal(verdict.attempts, 0, "a fail-open settlement spends no attempt");
+			assert.ok(verdict.reasons.some((reason) => reason.code === "verification-fail-open"));
+			assert.ok(
+				verdict.conditions.some((condition) => condition.kind === "verification" && condition.status === "unknown"),
+				"the weak command is visible in the verdict",
+			);
+		},
+	);
+});
+
+test("a configured run whose output reports zero tests is inconclusive and the run settles", async () => {
+	await withTempProject(
+		{ version: 1, verification: { command: "node --test", timeoutMs: 30_000 } },
+		async (cwd) => {
+			const host = newHost(cwd, editedBranch(), async () => execResult({ stdout: "0 passing" }));
+			const result = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+			const verdict = verdictOf(result);
+			assert.equal(verdict.verification?.status, "inconclusive");
+			assert.match(verdict.verification?.summary ?? "", /0 passing/, "the indicator is named");
+			assert.equal(verdict.decision, "report", "a zero-test run fails open");
+			assert.equal(verdict.attempts, 0);
+			assert.ok(verdict.reasons.some((reason) => reason.code === "verification-fail-open"));
+		},
+	);
+});
+
+test("a model-run command clears edits only when its evidence is a real pass", async () => {
+	const config = { version: 1, verification: { command: "node --test", timeoutMs: 30_000 } };
+	await withTempProject(config, async (cwd) => {
+		// The model ran the configured command and its output says zero tests ran:
+		// nobody read it, so the edits stay open and the gate runs the command.
+		const zeroTests = [
+			...editedBranch(),
+			assistantCall("b1", "bash", { command: "node --test" }),
+			toolResult("b1", "bash", { text: "0 passing" }),
+		];
+		const host = newHost(cwd, zeroTests, async () => execResult({ stdout: "pass 3" }));
+		const result = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+		assert.equal(host.execCalls.length, 1, "an inconclusive model run does not clear the edits");
+		const verdict = verdictOf(result);
+		assert.equal(verdict.verification?.status, "passed", "the gate's own run is the evidence");
+		assert.equal(verdict.decision, "continue");
+
+		// A real pass is trusted: the gate does not run the command again.
+		const realPass = [
+			...editedBranch(),
+			assistantCall("b2", "bash", { command: "node --test" }),
+			toolResult("b2", "bash", { text: "pass 3" }),
+		];
+		const trusted = newHost(cwd, realPass, async () => execResult({ stdout: "pass 3" }));
+		const settled = (await trusted.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+		assert.equal(trusted.execCalls.length, 0, "a real model-run pass clears the edits");
+		assert.equal(verdictOf(settled).verification, null);
+		assert.equal(verdictOf(settled).decision, "report");
+	});
 });
