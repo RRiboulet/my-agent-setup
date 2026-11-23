@@ -720,14 +720,14 @@ never returns `continue`. Each opt-in key buys one check:
 
 A block is `continue: true` plus a `custom_message` carrying the reason and the
 verification output, so the model gets one more turn with the evidence. It never
-terminates the run, and it is bounded twice over: a condition blocks **once** per
-branch (the verdict carries the set, and every later settlement with the same
-condition reports and settles), and every block — settlement or loop — spends one
-of the branch's `attemptCap`. `attempts` counts blocks, not evaluations: an active
-goal that continues three times spends nothing.
+terminates the run: an unresolved condition keeps blocking while its evidence is
+unchanged, a new edit/todo/failure re-arms it, and every block — settlement or
+loop — spends one of the branch's `attemptCap`, which is the hard stop. `attempts`
+counts blocks, not evaluations: an active goal that continues three times spends
+nothing.
 
 Every block reason names `orchestrator_override`, a tool that grants a one-shot
-override: it lets the next settlement settle, or the next blocked call run, and
+override: it lets the next block settle, or the next blocked call run, and
 records the reason in the session. It is consumed by that block, spends no
 attempt, and is not inherited by a resumed session. The tool is registered only
 in a session whose config opts into a check, so a report-only project pays
