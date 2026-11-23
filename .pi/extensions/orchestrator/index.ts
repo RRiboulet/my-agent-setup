@@ -95,7 +95,8 @@ import {
 	type GateVerdict,
 	type LoopVerdict,
 } from "./gate.ts";
-import { ORCHESTRATION_EVENTS, publishOrchestrationEvent, subscribeOrchestrationEvent } from "./events.ts";
+import { ORCHESTRATION_EVENTS, ORCHESTRATOR_CUSTOM_TYPES, publishOrchestrationEvent, subscribeOrchestrationEvent, type LiveRunStatus } from "./events.ts";
+import { buildCompactSnapshot } from "./compact-snapshot.ts";
 import { isWorkerRole, ORCHESTRATOR_ROLE, type OrchestratorRole } from "./role.ts";
 import { registerWorkspace } from "./workspace-runtime.ts";
 import { readOpenTodos } from "./todo-state.ts";
@@ -177,13 +178,15 @@ export default function orchestratorExtension(
 	const loop = createLoopState();
 
 	/**
-	 * The delegated runs this parent believes are live. Rebuilt before the first
-	 * settlement after a reload by `orchestrator:runs-snapshot`, then maintained
-	 * from the run lifecycle events. A non-empty set is what makes an opted-in
-	 * settlement PARK instead of spending an attempt on a turn that has nothing
-	 * new to act on.
+	 * The delegated runs this parent believes are live, with the status each
+	 * reported. Rebuilt before the first settlement after a reload by
+	 * `orchestrator:runs-snapshot`, then maintained from the run lifecycle events.
+	 * A non-empty map is what makes an opted-in settlement PARK instead of
+	 * spending an attempt on a turn that has nothing new to act on. The status is
+	 * carried for the post-compaction snapshot, which names what is in flight;
+	 * parking only asks whether the map is empty.
 	 */
-	const liveRuns = new Set<string>();
+	const liveRuns = new Map<string, LiveRunStatus>();
 	/** True from a parked settlement until the wake it earns. In-memory only: a
 	 *  reload rebuilds the live set, not the fact that a particular turn parked, so
 	 *  a child that finished during the reload produces no wake. The next
@@ -216,7 +219,7 @@ export default function orchestratorExtension(
 	// evaluated before those handlers run. The initial set is therefore rebuilt
 	// before this parent's first settlement, whatever the discovery order.
 	subscribeOrchestrationEvent(pi, ORCHESTRATION_EVENTS.runStarted, (payload) => {
-		liveRuns.add(payload.runId);
+		liveRuns.set(payload.runId, payload.status);
 	});
 	subscribeOrchestrationEvent(pi, ORCHESTRATION_EVENTS.runSettled, (payload) => {
 		liveRuns.delete(payload.runId);
@@ -228,7 +231,7 @@ export default function orchestratorExtension(
 	});
 	subscribeOrchestrationEvent(pi, ORCHESTRATION_EVENTS.runsSnapshot, (payload) => {
 		liveRuns.clear();
-		for (const run of payload.runs) liveRuns.add(run.runId);
+		for (const run of payload.runs) liveRuns.set(run.runId, run.status);
 	});
 	// An aborted run never reaches `agent_before_settle`, so a park from an earlier
 	// settlement can outlive the turn it was protecting. Clearing it on abort means
@@ -321,6 +324,91 @@ export default function orchestratorExtension(
 	// call of the turn, and `agent_start` as a second, idempotent reset.
 	pi.on("turn_start", async () => resetLoopTurn(loop));
 	pi.on("agent_start", async () => resetLoopTurn(loop));
+
+	// --- The post-compaction snapshot --------------------------------------
+
+	/**
+	 * Re-surface the orchestrator's state to the model after a *successful*
+	 * compaction.
+	 *
+	 * Compaction itself stays pi's: this extension registers no
+	 * `session_before_compact` handler and returns no compaction result, so it can
+	 * neither cancel nor replace what pi wrote. The gate's and the advisor's state
+	 * is branch-derived, and `getBranch()` at `session_compact` still holds the
+	 * pre-compaction ancestors, so nothing has to be stashed: the readers below are
+	 * called exactly as `/gate` and the next settlement call them. Only the model's
+	 * context lost the state, and one `custom_message` repairs it.
+	 *
+	 * `display: false` is deliberate. A `custom_message` enters the model's context
+	 * either way; this is bookkeeping the human did not write, not a transcript
+	 * message. `triggerTurn: false` because a compaction must not start a turn of
+	 * its own. A failure is a different event (`session_compact_failed`), which
+	 * this extension does not handle at all: a failed or cancelled compaction sends
+	 * nothing.
+	 */
+	pi.on("session_compact", async (_event, ctx) => {
+		try {
+			const branch = ctx.sessionManager.getBranch();
+			const gate = reconstructGateState(branch);
+			const advisorState = readAdvisorState(branch);
+			const goal = activeGoalFromBranch(branch);
+			const todos = await readOpenTodos(ctx.cwd);
+
+			// The config supplies the advisor budget and, when the branch holds no
+			// verdict yet, the attempt cap. An unreadable config is not an error here:
+			// the snapshot is context repair, so the branch-derived sections are still
+			// worth sending without it.
+			let config: GateConfig | null = null;
+			try {
+				config = cachedConfigAt(ctx.cwd);
+			} catch {
+				config = null;
+			}
+			// An untrusted project's advisor key is ignored entirely (see `advise`), so
+			// reporting a budget the advisor would never spend would be misleading.
+			const advisorConfig = ctx.isProjectTrusted() ? config?.advisor ?? null : null;
+
+			const snapshot = buildCompactSnapshot({
+				goal: goal ? { objective: goal.objective } : null,
+				openTodos: todos.todos,
+				gate: {
+					attempts: gate.attempts,
+					attemptCap: gate.lastVerdict?.attemptCap ?? gate.lastLoopVerdict?.attemptCap ?? config?.attemptCap ?? 0,
+					blocked: gate.blockedConditions.map((kind) => ({
+						kind,
+						evidence: gate.blockedEvidence[kind] ?? null,
+					})),
+					lastReason: gate.lastVerdict?.reason ?? null,
+				},
+				liveRuns: [...liveRuns].map(([runId, status]) => ({ runId, status })),
+				advisor: advisorConfig
+					? {
+							budget: advisorConfig.budget,
+							attempts: advisorState.attempts,
+							consumedKeys: advisorState.consumedKeys,
+						}
+					: null,
+			});
+			// Nothing to report: no empty message, which would only spend context on a
+			// sentence saying there is nothing to say.
+			if (snapshot.empty) return;
+			pi.sendMessage(
+				{
+					customType: ORCHESTRATOR_CUSTOM_TYPES.compactSnapshot,
+					content: snapshot.text,
+					display: false,
+				},
+				{ triggerTurn: false },
+			);
+		} catch (error) {
+			// Compaction already succeeded; a snapshot that cannot be built must not
+			// turn that into a failure. The next settlement still reads the branch.
+			ctx.ui.notify(
+				`orchestrator snapshot: ${error instanceof Error ? error.message : String(error)}`,
+				"warning",
+			);
+		}
+	});
 
 	// --- The advisor -------------------------------------------------------
 
@@ -582,7 +670,7 @@ export default function orchestratorExtension(
 		// Read immediately BEFORE the evaluation, after the awaits above: a run
 		// that settled while verification was running is no longer live, and one
 		// admitted during it is.
-		const liveRunIds = [...liveRuns];
+		const liveRunIds = [...liveRuns.keys()];
 		const verdict = evaluateGate({
 			outcome,
 			attempts: state.attempts,

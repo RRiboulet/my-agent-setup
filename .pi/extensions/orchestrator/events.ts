@@ -40,11 +40,24 @@ export const ORCHESTRATION_EVENTS = {
 
 export type OrchestrationChannel = (typeof ORCHESTRATION_EVENTS)[keyof typeof ORCHESTRATION_EVENTS];
 
+/**
+ * The session entry types this extension writes besides its `custom` records.
+ * `compactSnapshot` is a `custom_message`, the only channel that enters the
+ * model's context without replacing the system prompt; see `compact-snapshot.ts`.
+ */
+export const ORCHESTRATOR_CUSTOM_TYPES = {
+	compactSnapshot: "orchestrator:compact-snapshot",
+} as const;
+
+/** The status of a run that is still live. `interrupted` is terminal for parking
+ *  and is never published as live, so it is not part of this union. */
+export type LiveRunStatus = "queued" | "running";
+
 /** A run was admitted, before its child is necessarily alive. Published once per
  *  run id: a plan retry creates a new id and therefore publishes its own. */
 export interface RunStartedPayload {
 	runId: string;
-	status: "queued" | "running";
+	status: LiveRunStatus;
 	planId?: string;
 	stepId?: string;
 	at: number;
@@ -55,7 +68,7 @@ export interface RunStartedPayload {
  *  is not live: it is terminal for parking in-process, and listing it after a
  *  reload would park a parent whose interrupt event can no longer fire. */
 export interface RunsSnapshotPayload {
-	runs: { runId: string; status: "queued" | "running" }[];
+	runs: { runId: string; status: LiveRunStatus }[];
 	at: number;
 }
 

@@ -85,6 +85,24 @@ Added:
   and an inherited usage entry is excluded by the existing fork patch. Tests:
   `orchestrator-advisor.test.ts`, `session-breakdown.test.ts`.
 
+- **After a successful compaction the model is told the orchestrator's state
+  again.** Gate and advisor state already survive compaction — both are rebuilt
+  from the active branch — but the model's own context does not, so after a
+  compaction it could be unaware of an open goal, open todos, a pending
+  verification, live delegated runs or a spent advisor budget. The new
+  `session_compact` observer appends exactly one `orchestrator:compact-snapshot`
+  `custom_message` naming the active goal, the open todo ids and titles, the gate
+  attempts and `attemptCap` with every blocked condition's evidence and the last
+  verdict's reason, the live delegated run ids with their `queued`/`running`
+  status, and the advisor's budget, recorded attempts and consumed trigger keys.
+  It is sent with `display: false` and `triggerTurn: false`, is bound to 4 KB
+  with a truncation note, and is not sent at all when there is nothing to report
+  or when the compaction failed. Compaction itself stays pi's: no
+  `session_before_compact` handler is registered, no `compaction` result is
+  returned, and nothing is read back from the snapshot — `/gate` and the next
+  settlement reconstruct the same attempts and blocked evidence as before.
+  Tests: `orchestrator-compact-snapshot.test.ts`.
+
 Fixed:
 
 - **A delegated worker no longer passes its role to a `pi` its shell starts.**

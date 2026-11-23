@@ -111,6 +111,7 @@ const MODULES: Record<string, string[]> = {
 		"seedLineageSession",
 		"usesSessionFile",
 	],
+	"../../orchestrator/compact-snapshot.ts": ["buildCompactSnapshot"],
 	"../../orchestrator/config.ts": ["gateConfigCanAct", "gateConfigPath", "normalizeGateConfig", "readGateConfig"],
 	"../../orchestrator/advisor.ts": [
 		"advisorSkipReason",
@@ -125,7 +126,7 @@ const MODULES: Record<string, string[]> = {
 		"redactSecrets",
 		"toPiUsage",
 	],
-	"../../orchestrator/events.ts": ["publishOrchestrationEvent", "subscribeOrchestrationEvent"],
+	"../../orchestrator/events.ts": ["ORCHESTRATOR_CUSTOM_TYPES", "publishOrchestrationEvent", "subscribeOrchestrationEvent"],
 	"../../orchestrator/gate.ts": [
 		"evaluateGate",
 		"formatLoopVerdict",
@@ -240,6 +241,11 @@ for (const relative of EXTENSIONS) {
 // named export stays pinned to a function.
 const CONSTANT_EXPORTS: Record<string, string[]> = {
 	"../../orchestrator/role.ts": ["ORCHESTRATOR_ROLE"],
+	// The entry-type constant is a table, not a function, and `events.ts` is the
+	// module both the index and `compact-snapshot.ts` import it from; pinning it
+	// here means a dropped export fails at load rather than at send time.
+	"../../orchestrator/events.ts": ["ORCHESTRATOR_CUSTOM_TYPES"],
+	"../../orchestrator/compact-snapshot.ts": ["MAX_COMPACT_SNAPSHOT_BYTES"],
 };
 
 for (const [relative, exports] of Object.entries(MODULES)) {
