@@ -391,7 +391,7 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 	// --- The settlement boundary -------------------------------------------
 
 	const settle = async (
-		event: { entries?: unknown[]; outcome?: unknown; context?: unknown },
+		event: { entries?: unknown[]; outcome?: unknown },
 		ctx: ExtensionContext,
 	): Promise<{ entries: unknown[]; continue?: boolean }> => {
 		// Fresh per boundary, not cached: a run may last minutes and a project may
@@ -433,9 +433,14 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 				"this project is not trusted, so the gate neither runs the command in its config nor blocks the run";
 		} else if (outcome !== "completed") {
 			suppressed = `the run ended as "${outcome}"; pi suppresses continuations after an error or abort, so the gate reports only`;
-		} else if (isRecord(event.context) && event.context.canContinue === false) {
-			suppressed = "pi reported that this boundary cannot continue the run, so the gate reports only";
 		}
+		// Do NOT consult `event.context.canContinue` here. pi builds that snapshot
+		// from the drafts proposed BEFORE this handler runs, and on a normal
+		// completed run it is false because the last message is the assistant's.
+		// The gate's own `custom_message` draft is what makes the next request
+		// continuable; treating the pre-draft snapshot as final suppressed every
+		// real block. pi validates the post-commit proposal itself and reports an
+		// invalid continuation instead of trapping the run.
 
 		const policy: GateBlockPolicy = {
 			kinds: [],

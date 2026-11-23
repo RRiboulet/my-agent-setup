@@ -286,6 +286,23 @@ Added:
   `lifecycle-plan-reload.test.ts`, `lifecycle-plan-cancel.test.ts` and
   `lifecycle-plan-status.test.ts` drive the real factory through each one.
 
+Fixed:
+
+- **The settlement gate now actually blocks in a real session.** It used to
+  treat pi's `context.canContinue` as the final capability, but pi builds that
+  snapshot from the drafts proposed before the gate runs: on a normal completed
+  run the last message is the assistant's, so `canContinue` is false even though
+  the gate's own continuation message would make the next request possible. The
+  gate therefore reported and settled instead of blocking in a live TUI, while
+  the fake-host tests (which did not set the field) passed. It no longer consults
+  the pre-draft snapshot; pi validates the post-commit proposal itself and
+  reports an invalid continuation rather than trapping the run. Tests:
+  `orchestrator-gate.test.ts` pins a real boundary shape with
+  `canContinue: false` and an open todo.
+  Because the old suppression also skipped the policy, a trusted project that
+  opted into blocking now actually runs its verification command at settlement,
+  and a block spends the branch's attempt budget (shared with the loop breaker).
+
 Maintenance:
 
 - **`/goal` now asks for its next turn at the settlement boundary instead of
