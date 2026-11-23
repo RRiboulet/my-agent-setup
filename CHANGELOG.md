@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.16.0 — 2026-11-23
+
 Added:
 
 - **Workspace coordination now expires the state a crashed session leaves
