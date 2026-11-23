@@ -38,8 +38,8 @@ import {
 	type LoopState,
 } from "../../orchestrator/loop.ts";
 import orchestratorExtension from "../../orchestrator/index.ts";
+import type { OrchestratorRole } from "../../orchestrator/role.ts";
 import { createFakeHost, type FakeHost } from "./fake-pi.ts";
-import { withEnv } from "./helpers.ts";
 
 type Entry = Record<string, unknown>;
 
@@ -195,9 +195,11 @@ async function withTempProject<T>(config: unknown, fn: (cwd: string) => Promise<
 	}
 }
 
-async function startHost(cwd: string): Promise<FakeHost> {
+async function startHost(cwd: string, role: OrchestratorRole = "parent"): Promise<FakeHost> {
 	const host = createFakeHost({ sessionId: "orchestrator-loop-test", cwd });
-	orchestratorExtension(host.pi);
+	// The role is resolved once at module load; the seam lets a test drive the
+	// worker path without mutating this process's environment after load.
+	orchestratorExtension(host.pi, { role });
 	return host;
 }
 
@@ -346,14 +348,12 @@ test("the branch budget bounds loop blocks as well as settlement blocks", async 
 });
 
 test("a delegated child session never blocks a tool call", async () => {
-	await withEnv({ PI_TMUX_SUBAGENT_CHILD: "1" }, async () => {
-		await withTempProject({ version: 1, block: { loops: true } }, async (cwd) => {
-			const host = await startHost(cwd);
-			for (let index = 0; index < 4; index += 1) {
-				assert.equal(await runCall(host, "edit", { path: "src/a.ts", oldText: "a", newText: "b" }), undefined);
-			}
-			assert.equal(loopEntries(host).length, 0);
-		});
+	await withTempProject({ version: 1, block: { loops: true } }, async (cwd) => {
+		const host = await startHost(cwd, "worker");
+		for (let index = 0; index < 4; index += 1) {
+			assert.equal(await runCall(host, "edit", { path: "src/a.ts", oldText: "a", newText: "b" }), undefined);
+		}
+		assert.equal(loopEntries(host).length, 0);
 	});
 });
 

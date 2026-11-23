@@ -22,6 +22,7 @@ import type { ExecResult } from "@earendil-works/pi-coding-agent";
 
 import { gateConfigPath } from "../../orchestrator/config.ts";
 import { GATE_ENTRY_TYPE, type GateVerdict } from "../../orchestrator/gate.ts";
+import type { OrchestratorRole } from "../../orchestrator/role.ts";
 import {
 	boundVerificationOutput,
 	classifyVerification,
@@ -31,7 +32,6 @@ import {
 } from "../../orchestrator/verify.ts";
 import orchestratorExtension from "../../orchestrator/index.ts";
 import { createFakeHost } from "./fake-pi.ts";
-import { withEnv } from "./helpers.ts";
 
 type Entry = Record<string, unknown>;
 
@@ -222,9 +222,14 @@ function continuationOf(result: unknown): string {
 	return String(entry?.content ?? "");
 }
 
-function newHost(cwd: string, branch: Entry[] = [], exec?: (command: string, args: string[], options: Record<string, unknown>) => Promise<ExecResult>) {
+function newHost(
+	cwd: string,
+	branch: Entry[] = [],
+	exec?: (command: string, args: string[], options: Record<string, unknown>) => Promise<ExecResult>,
+	role: OrchestratorRole = "parent",
+) {
 	const host = createFakeHost({ sessionId: "orchestrator-verify-test", cwd, branch, exec: exec as never });
-	orchestratorExtension(host.pi);
+	orchestratorExtension(host.pi, { role });
 	return host;
 }
 
@@ -419,15 +424,18 @@ test("the command is not run when the run made no edits, and not in a child sess
 			assert.equal(verdictOf(cleanResult).decision, "report");
 			assert.equal(clean.execCalls.length, 0, "no edits, nothing to verify");
 
-			await withEnv({ PI_TMUX_SUBAGENT_CHILD: "1" }, async () => {
-				const child = newHost(cwd, editedBranch());
-				const childResult = (await child.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
-				const verdict = verdictOf(childResult);
-				assert.equal(verdict.scope, "child");
-				assert.equal(verdict.decision, "report");
-				assert.equal(child.execCalls.length, 0, "a child runs no command and blocks nothing");
-				assert.ok(verdict.reasons.some((reason) => reason.code === "blocking-suppressed"));
-			});
+			// The worker role is a process-level fact resolved at module load; the
+			// factory seam is how a test drives it without mutating this process's
+			// environment after load (the bug the role module fixes).
+			const child = newHost(cwd, editedBranch(), async () => {
+				throw new Error("a child must run no verification command");
+			}, "worker");
+			const childResult = (await child.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+			const verdict = verdictOf(childResult);
+			assert.equal(verdict.scope, "child");
+			assert.equal(verdict.decision, "report");
+			assert.equal(child.execCalls.length, 0, "a child runs no command and blocks nothing");
+			assert.ok(verdict.reasons.some((reason) => reason.code === "blocking-suppressed"));
 		},
 	);
 });

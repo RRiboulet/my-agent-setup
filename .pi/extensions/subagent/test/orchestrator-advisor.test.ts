@@ -53,6 +53,7 @@ import {
 	type GateVerdict,
 } from "../../orchestrator/gate.ts";
 import orchestratorExtension from "../../orchestrator/index.ts";
+import type { OrchestratorRole } from "../../orchestrator/role.ts";
 import { createFakeHost } from "./fake-pi.ts";
 import { withEnv } from "./helpers.ts";
 
@@ -210,6 +211,8 @@ interface HostOptions {
 	registry?: Record<string, unknown>;
 	trusted?: boolean;
 	model?: { provider: string; id: string };
+	/** The process-level role; `worker` is a delegated child. */
+	role?: OrchestratorRole;
 }
 
 function startHost(options: HostOptions = {}) {
@@ -221,7 +224,9 @@ function startHost(options: HostOptions = {}) {
 		trusted: options.trusted,
 		model: options.model ?? { provider: PROVIDER, id: "current-model" },
 	});
-	orchestratorExtension(host.pi);
+	// The role is resolved once at module load; the seam drives the worker path
+	// without mutating this process's environment after load.
+	orchestratorExtension(host.pi, { role: options.role });
 	return host;
 }
 
@@ -737,16 +742,14 @@ test("an untrusted project ignores the advisor key: no call, no entry, no sectio
 });
 
 test("a delegated child consults nothing, exactly like the gate", async () => {
-	await withEnv({ PI_TMUX_SUBAGENT_CHILD: "1" }, async () => {
-		await withTempDir(async (cwd) => {
-			await writeConfig(cwd, { provider: PROVIDER, model: MODEL });
-			const { registry, calls } = fakeRegistry();
-			const host = startHost({ cwd, branch: [loopBlock(1)], registry });
-			await host.fire("session_start", {});
-			await host.fire("before_agent_start", promptEvent());
-			assert.equal(calls.length, 0);
-			assert.deepEqual(host.appended, []);
-		});
+	await withTempDir(async (cwd) => {
+		await writeConfig(cwd, { provider: PROVIDER, model: MODEL });
+		const { registry, calls } = fakeRegistry();
+		const host = startHost({ cwd, branch: [loopBlock(1)], registry, role: "worker" });
+		await host.fire("session_start", {});
+		await host.fire("before_agent_start", promptEvent());
+		assert.equal(calls.length, 0);
+		assert.deepEqual(host.appended, []);
 	});
 });
 

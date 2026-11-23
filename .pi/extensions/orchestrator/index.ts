@@ -45,13 +45,18 @@
  * budget, the digest and the credential rule. The advisor runs in the same
  * trusted project the gate acts in, and only there.
  *
- * **Delegated children report and never act.** `PI_TMUX_SUBAGENT_CHILD=1` marks a
- * child session, whose project config is the same file as the parent's. A child
- * that blocked itself would stall a delegation the parent is waiting on, and a
- * parent's policy applied to a child's own work is a decision made with less
- * context than the parent has. So the gate records a verdict with `scope: child`,
- * runs no command, blocks nothing; the same guard stops the loop breaker from
- * blocking a child's tool call, and the advisor from consulting.
+ * **Delegated workers report and never act.** The process role comes from
+ * `role.ts`, resolved once at module load: a process launched with
+ * `PI_ORCHESTRATOR_ROLE=worker` (or, from an older launcher, the legacy
+ * `PI_TMUX_SUBAGENT_CHILD=1`) is a worker whose project config is the same file
+ * as the parent's. A worker that blocked itself would stall the delegation its
+ * parent is waiting on, and a parent's policy applied to a worker's own work is
+ * a decision made with less context than the parent has. So the gate records a
+ * verdict with `scope: child`, runs no command, blocks nothing, registers no
+ * override tool; the same guard stops the loop breaker from blocking a worker's
+ * tool call, and the advisor from consulting. Resolving the role at load time is
+ * the fix for a real bug: the old guard re-read `PI_TMUX_SUBAGENT_CHILD` at every
+ * boundary, and the subagent factory had already deleted it.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -91,6 +96,7 @@ import {
 	type LoopVerdict,
 } from "./gate.ts";
 import { ORCHESTRATION_EVENTS, publishOrchestrationEvent } from "./events.ts";
+import { isWorkerRole, ORCHESTRATOR_ROLE, type OrchestratorRole } from "./role.ts";
 import { registerWorkspace } from "./workspace-runtime.ts";
 import { readOpenTodos } from "./todo-state.ts";
 import { runVerification, type VerificationExec, type VerificationOutcome } from "./verify.ts";
@@ -110,12 +116,6 @@ import {
 const GATE_REPORT_TYPE = "orchestrator-gate-report";
 const GATE_CONTINUATION_TYPE = "orchestrator-gate-continuation";
 const ADVISOR_NOTICE_TYPE = "orchestrator-advisor-notice";
-const CHILD_ENV = "PI_TMUX_SUBAGENT_CHILD";
-
-/** A delegated child reports and never acts; see the header. */
-function inChildSession(): boolean {
-	return process.env[CHILD_ENV] === "1";
-}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -144,7 +144,16 @@ function continuationText(verdict: GateVerdict): string {
 	return lines.join("\n");
 }
 
-export default function orchestratorExtension(pi: ExtensionAPI) {
+export default function orchestratorExtension(
+	pi: ExtensionAPI,
+	// A test seam, and nothing else: the role is a process-level fact, so the only
+	// caller that overrides it is a test that needs the worker path without
+	// mutating this process's environment after the module was loaded.
+	deps: { role?: OrchestratorRole } = {},
+) {
+	/** A delegated worker reports and never acts; see the header. */
+	const worker = isWorkerRole(deps.role ?? ORCHESTRATOR_ROLE);
+
 	// Registered first on purpose: pi stops at the first `tool_call` handler
 	// that blocks, so a reserved path must refuse the call before the loop
 	// breaker starts counting it.
@@ -179,6 +188,8 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 	 */
 	let overrideToolRegistered = false;
 	const registerOverrideTool = (trusted: boolean): void => {
+		// A worker never acts, so it must never get the escape hatch from a block.
+		if (worker) return;
 		if (!trusted) return; // never offer an escape hatch in a project the gate will not act in
 		if (overrideToolRegistered) return;
 		overrideToolRegistered = true;
@@ -290,9 +301,9 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 		event: { systemPromptOptions?: { sections?: Record<string, string> } },
 		ctx: ExtensionContext,
 	): Promise<void> => {
-		// A delegated child reports and never acts, exactly like the gate: the
+		// A delegated worker reports and never acts, exactly like the gate: the
 		// parent owns the run's decisions, and its spend.
-		if (inChildSession()) return;
+		if (worker) return;
 		// The advisor is a model call configured by a committed file. In a project
 		// pi has never trusted that file came from whoever wrote the repository, so
 		// its advisor key is ignored entirely: no call, no entry, no section.
@@ -406,7 +417,7 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 		lastVerdict = state.lastVerdict ?? lastVerdict;
 		lastLoopVerdict = state.lastLoopVerdict ?? lastLoopVerdict;
 
-		const child = inChildSession();
+		const child = worker;
 		const outcome = String(event.outcome ?? "unknown");
 		const unevaluated: string[] = [];
 		if (configRead.warning) unevaluated.push(`config: ${configRead.warning}`);
@@ -423,7 +434,7 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 		let suppressed: string | null = null;
 		if (child) {
 			suppressed =
-				"this is a delegated child session (PI_TMUX_SUBAGENT_CHILD=1): the gate reports and never blocks, because the parent owns the decision";
+				"this is a delegated worker session (PI_ORCHESTRATOR_ROLE=worker, or the legacy PI_TMUX_SUBAGENT_CHILD=1): the gate reports and never blocks, because the parent owns the decision";
 		} else if (!ctx.isProjectTrusted()) {
 			// The verification command comes from a committed project file. This
 			// extension ships as a user-level package, so it also loads in a checkout
@@ -541,7 +552,7 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 				outcome: String(event.outcome ?? "unknown"),
 				attempts,
 				attemptCap: 0,
-				scope: inChildSession() ? "child" : "parent",
+				scope: worker ? "child" : "parent",
 				suppressed: "the gate failed before it could act; this settlement is not blocked",
 				unevaluated: [`gate: ${error instanceof Error ? error.message : String(error)}`],
 			});
@@ -565,7 +576,7 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 	pi.on("tool_call", async (event, ctx) => {
 		const tool = typeof event.toolName === "string" ? event.toolName : "";
 		if (!tool || tool === GATE_OVERRIDE_TOOL) return;
-		if (inChildSession()) return;
+		if (worker) return;
 		// Same boundary as the settlement: a project pi does not trust supplies the
 		// config, so its policy is not honoured here either.
 		if (!ctx.isProjectTrusted()) return;
@@ -651,7 +662,7 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 		// Nothing to record unless the loop breaker is armed, and reading the
 		// cache (never the file) keeps that check free.
 		if (!cachedConfig?.read.config.block.loops) return;
-		if (inChildSession()) return;
+		if (worker) return;
 		const tool = typeof event.toolName === "string" ? event.toolName : "";
 		if (!tool) return;
 		const call = loopCallOf(tool, isRecord(event.input) ? event.input : {});

@@ -84,10 +84,14 @@ test("subagent launches a child in a detached tmux session and returns immediate
 		assert.ok(launched, "a tmux session is created");
 		const keys = h.execCalls.filter((call) => call.args.includes("send-keys"));
 		assert.ok(keys.length >= 2, "the child command is typed and submitted");
-		assert.ok(
-			keys.some((call) => call.args.some((arg) => arg.includes("--provider"))),
-			"the child invocation carries the provider",
-		);
+		const childCommand = keys
+			.flatMap((call) => call.args)
+			.find((arg) => typeof arg === "string" && arg.includes("--provider"));
+		assert.ok(childCommand, "the child invocation carries the provider");
+		// The role marker is written as a literal, beside the child-mode variables:
+		// the orchestrator resolves it once at module load, so a later scrub of
+		// PI_TMUX_SUBAGENT_CHILD cannot turn a delegated child back into a parent.
+		assert.match(childCommand, /PI_ORCHESTRATOR_ROLE=worker/);
 
 		const runs = await h.readRuns();
 		assert.equal(runs.length, 1);

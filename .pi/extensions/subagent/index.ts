@@ -3026,6 +3026,11 @@ const noteInterrupt = async (
 			const childCommand = [
 				"exec env",
 				`${CHILD_ENV}=1`,
+				// The orchestrator's process role, written as a literal like the others.
+				// It is a separate marker because the child-mode variable above is
+				// scrubbed from the child's environment at startup, and the orchestrator
+				// must still know it is a worker after that scrub.
+				"PI_ORCHESTRATOR_ROLE=worker",
 				`${RESULT_ENV}=${shellQuote(run.resultPath)}`,
 				`${INTERRUPT_ENV}=${shellQuote(getInterruptFilePath(run.runDir))}`,
 				// Local patch 23: the channel directory, which is also the child's
