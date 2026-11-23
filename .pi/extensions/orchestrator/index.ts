@@ -95,7 +95,7 @@ import {
 	type GateVerdict,
 	type LoopVerdict,
 } from "./gate.ts";
-import { ORCHESTRATION_EVENTS, publishOrchestrationEvent } from "./events.ts";
+import { ORCHESTRATION_EVENTS, publishOrchestrationEvent, subscribeOrchestrationEvent } from "./events.ts";
 import { isWorkerRole, ORCHESTRATOR_ROLE, type OrchestratorRole } from "./role.ts";
 import { registerWorkspace } from "./workspace-runtime.ts";
 import { readOpenTodos } from "./todo-state.ts";
@@ -175,6 +175,70 @@ export default function orchestratorExtension(
 	 */
 	let attempts = 0;
 	const loop = createLoopState();
+
+	/**
+	 * The delegated runs this parent believes are live. Rebuilt before the first
+	 * settlement after a reload by `orchestrator:runs-snapshot`, then maintained
+	 * from the run lifecycle events. A non-empty set is what makes an opted-in
+	 * settlement PARK instead of spending an attempt on a turn that has nothing
+	 * new to act on.
+	 */
+	const liveRuns = new Set<string>();
+	/** True from a parked settlement until the wake it earns. In-memory only: a
+	 *  reload rebuilds the live set, not the fact that a particular turn parked, so
+	 *  a child that finished during the reload produces no wake. The next
+	 *  settlement sees the empty set and blocks normally rather than waking late. */
+	let parked = false;
+	/** Runs that reached a terminal state after the park, named in the wake. */
+	const finishedWhileParked = new Set<string>();
+
+	/**
+	 * Wake a parked parent exactly once, after its last live run settles. This is
+	 * the only place `triggerTurn` is used by this extension: a normal completion
+	 * notice must stay non-waking, but a parent that parked has no turn of its own
+	 * left to receive it otherwise.
+	 */
+	const wakeParkedParent = (finished: string[]): void => {
+		parked = false;
+		const named = finished.length > 0 ? finished.join(", ") : "the delegated run";
+		pi.sendMessage(
+			{
+				customType: "orchestrator-resume",
+				content: `The last live delegated run finished (${named}); no delegated runs remain. You parked this settlement while it was still running, so collect the result with subagent_status and continue the work.`,
+				display: true,
+			},
+			{ triggerTurn: true, deliverAs: "followUp" },
+		);
+	};
+
+	// Registered at factory load, before any session event: the subagent factory's
+	// reload snapshot is published from its `session_start`, and every factory is
+	// evaluated before those handlers run. The initial set is therefore rebuilt
+	// before this parent's first settlement, whatever the discovery order.
+	subscribeOrchestrationEvent(pi, ORCHESTRATION_EVENTS.runStarted, (payload) => {
+		liveRuns.add(payload.runId);
+	});
+	subscribeOrchestrationEvent(pi, ORCHESTRATION_EVENTS.runSettled, (payload) => {
+		liveRuns.delete(payload.runId);
+		if (parked) finishedWhileParked.add(payload.runId);
+		if (!parked || liveRuns.size > 0) return;
+		const finished = [...finishedWhileParked];
+		finishedWhileParked.clear();
+		wakeParkedParent(finished);
+	});
+	subscribeOrchestrationEvent(pi, ORCHESTRATION_EVENTS.runsSnapshot, (payload) => {
+		liveRuns.clear();
+		for (const run of payload.runs) liveRuns.add(run.runId);
+	});
+	// An aborted run never reaches `agent_before_settle`, so a park from an earlier
+	// settlement can outlive the turn it was protecting. Clearing it on abort means
+	// a child that finishes later does not pull the user back into a run they chose
+	// to stop.
+	pi.on("agent_settled", (event) => {
+		if (!event.aborted) return;
+		parked = false;
+		finishedWhileParked.clear();
+	});
 
 	/**
 	 * Register the override tool on demand.
@@ -479,11 +543,17 @@ export default function orchestratorExtension(
 		// evidence, "edits without verification" is a weaker rewrite of the same
 		// state after the second block.
 		const carriedVerification = verificationAlreadyBlockedForEvidence ? state.lastVerdict?.verification ?? null : null;
+		// A live delegated run means the work is not finished, so a block would ask
+		// the model to act on information it does not have yet. Its outcome would be
+		// discarded by the park, so the command is not run: the next settlement,
+		// after the run settles, runs it once and acts on the result.
+		const parkingWhileLive = config.block.waitForSubagents === true && liveRuns.size > 0;
 		const shouldVerify =
 			spec !== null &&
 			policy.kinds.includes("verification") &&
 			edits.editedFiles.length > 0 &&
 			!verificationAlreadyBlockedForEvidence &&
+			!parkingWhileLive &&
 			pendingOverride === null;
 		let verification: VerificationOutcome | null = null;
 		if (spec && shouldVerify) {
@@ -496,6 +566,10 @@ export default function orchestratorExtension(
 			});
 		}
 
+		// Read immediately BEFORE the evaluation, after the awaits above: a run
+		// that settled while verification was running is no longer live, and one
+		// admitted during it is.
+		const liveRunIds = [...liveRuns];
 		const verdict = evaluateGate({
 			outcome,
 			attempts: state.attempts,
@@ -511,8 +585,14 @@ export default function orchestratorExtension(
 			policy,
 			suppressed,
 			unevaluated,
+			liveRuns: liveRunIds,
+			waitForSubagents: config.block.waitForSubagents,
 		});
 		if (verdict.override) pendingOverride = null;
+		// A parked settlement earns one wake, sent when the live set empties. A
+		// worker never reaches here with `parked` true: `suppressed` empties its
+		// candidate set, so parking needs no special case.
+		if (verdict.parked) parked = true;
 		attempts = verdict.attempts;
 		lastVerdict = verdict;
 

@@ -32,6 +32,9 @@ export interface CompletionMessage {
 export interface Harness {
 	pi: Record<string, unknown>;
 	ctx: Record<string, unknown>;
+	/** Dispatch an event to every handler registered for it, as pi does. Returns
+	 *  the last non-undefined result (the boundary proposal). */
+	fire: (event: string, payload?: Record<string, unknown>) => Promise<unknown>;
 	tools: Map<string, Record<string, unknown>>;
 	execCalls: { command: string; args: string[] }[];
 	messages: CompletionMessage[];
@@ -84,6 +87,9 @@ export interface Harness {
 
 export interface HarnessOptions {
 	maxConcurrent?: string;
+	/** The session working directory. Defaults to `process.cwd()`; a test that
+	 *  exercises project config or todos passes its own temp project. */
+	cwd?: string;
 	paneText?: string;
 	paneDead?: boolean;
 	/** Grace period subagent_interrupt waits for the child to confirm, in ms. */
@@ -140,10 +146,12 @@ export interface HarnessOptions {
 
 export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 	const tools = new Map<string, Record<string, unknown>>();
-	const handlers = new Map<string, (...args: unknown[]) => unknown>();
+	const commands = new Map<string, unknown>();
+	const handlers = new Map<string, ((...args: unknown[]) => unknown)[]>();
 	const execCalls: { command: string; args: string[] }[] = [];
 	const messages: CompletionMessage[] = [];
 	const orchestrationEvents: { channel: string; data: unknown }[] = [];
+	const eventHandlers = new Map<string, ((data: unknown) => void)[]>();
 	const notifications: { message: string; type: string | undefined }[] = [];
 	const confirmCalls: { title: string; message: string }[] = [];
 	// Flipped by removeTarget() to simulate the user killing the tmux session (or
@@ -174,6 +182,9 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 
 	const pi = {
 		registerFlag: () => undefined,
+		registerCommand: (name: string, definition: unknown) => {
+			commands.set(name, definition);
+		},
 		getFlag: () => undefined,
 		registerTool: (tool: Record<string, unknown>) => {
 			const name = tool.name as string;
@@ -194,8 +205,15 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		registerMessageRenderer: () => undefined,
 		registerEntryRenderer: () => undefined,
 		on: (event: string, handler: (...args: unknown[]) => unknown) => {
-			handlers.set(event, handler);
-			return () => handlers.delete(event);
+			const list = handlers.get(event) ?? [];
+			list.push(handler);
+			handlers.set(event, list);
+			return () => {
+				const current = handlers.get(event);
+				if (!current) return;
+				const index = current.indexOf(handler);
+				if (index >= 0) current.splice(index, 1);
+			};
 		},
 		getThinkingLevel: () => "medium",
 		// Local patch 15 asks pi what is active before it decides a tool's exposure.
@@ -206,14 +224,25 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		sendMessage: (message: Record<string, unknown>, opts?: Record<string, unknown>) => {
 			messages.push({ message, options: opts });
 		},
-		// The orchestration event bus (patch 22). A recording double, not an
-		// emitter: no test in this suite subscribes, and a subscriber is covered
-		// in orchestrator-events.test.ts.
+		// The orchestration event bus (patch 22). It records every emit AND
+		// dispatches to subscribers, so a test can load a second extension that
+		// consumes the subagent's lifecycle events in the same process.
 		events: {
 			emit: (channel: string, data: unknown) => {
 				orchestrationEvents.push({ channel, data });
+				for (const handler of [...(eventHandlers.get(channel) ?? [])]) handler(data);
 			},
-			on: () => () => {},
+			on: (channel: string, handler: (data: unknown) => void) => {
+				const list = eventHandlers.get(channel) ?? [];
+				list.push(handler);
+				eventHandlers.set(channel, list);
+				return () => {
+					const current = eventHandlers.get(channel);
+					if (!current) return;
+					const index = current.indexOf(handler);
+					if (index >= 0) current.splice(index, 1);
+				};
+			},
 		},
 		exec: async (command: string, args: string[]) => {
 			execCalls.push({ command, args });
@@ -272,7 +301,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	};
 
 	const ctx = {
-		cwd: process.cwd(),
+		cwd: options.cwd ?? process.cwd(),
 		mode: options.mode ?? "tui",
 		hasUI: options.hasUI ?? true,
 		isProjectTrusted: () => true,
@@ -306,6 +335,17 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		shutdown: () => undefined,
 	};
 
+	/** Dispatch like pi: every handler for the event, in registration order, and
+	 *  the last non-undefined result is the event's result. */
+	const fire = async (event: string, payload: Record<string, unknown> = {}): Promise<unknown> => {
+		let result: unknown;
+		for (const handler of [...(handlers.get(event) ?? [])]) {
+			const value = await handler({ type: event, ...payload }, ctx);
+			if (value !== undefined) result = value;
+		}
+		return result;
+	};
+
 	await withEnv(
 		{
 			// The factory branches on these to decide whether it is running as a
@@ -327,7 +367,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		},
 		async () => {
 			subagentExtension(pi as never);
-			await handlers.get("session_start")?.({}, ctx);
+			await fire("session_start");
 		},
 	);
 
@@ -338,6 +378,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	return {
 		pi,
 		ctx,
+		fire,
 		tools,
 		execCalls,
 		messages,
@@ -372,7 +413,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			activeToolNames.push(...names);
 		},
 		fireBeforeAgentStart: async () => {
-			await handlers.get("before_agent_start")?.({}, ctx);
+			await fire("before_agent_start");
 		},
 		renderWidget: (width = 200) => {
 			const component = [...widgetComponents.values()].at(-1);
@@ -397,7 +438,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			instance.handleMouse?.({ ...base, type: "click" });
 		},
 		shutdown: async () => {
-			await handlers.get("session_shutdown")?.({}, ctx);
+			await fire("session_shutdown");
 		},
 		call: async (tool, params) => {
 			const definition = tools.get(tool);

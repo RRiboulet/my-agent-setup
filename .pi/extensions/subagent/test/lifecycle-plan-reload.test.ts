@@ -20,6 +20,7 @@ import { test } from "node:test";
 
 import type { RunRecord } from "../index.ts";
 import type { PlanRecord, PlanStepState } from "../plan.ts";
+import { ORCHESTRATION_EVENTS, type RunsSnapshotPayload } from "../../orchestrator/events.ts";
 import { SESSION_ID, createHarness } from "./lifecycle-harness.ts";
 import { waitFor, withTempAgentDir } from "./helpers.ts";
 
@@ -404,6 +405,47 @@ test("a stop plan's queued step is abandoned before the reload drain can launch 
 				(call) => call.command === "tmux" && call.args.includes("send-keys") && call.args.join(" ").includes("run-b"),
 			);
 			assert.equal(submitted, false, "no child may be submitted for a step the stop policy abandoned");
+		} finally {
+			await h.shutdown();
+		}
+	});
+});
+
+test("a reload publishes the live runs a parent's parking set is rebuilt from", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		// The crash window a parked parent sees after a restart: a run index on disk
+		// with a child that outlived the previous process. The snapshot is the only
+		// way that parent learns it must park rather than spend its first attempt.
+		const live = runFixture(agentDir, { id: "run-live", status: "running" });
+		await seedSession(agentDir, [live], []);
+
+		const h = await createHarness({ maxConcurrent: "4" });
+		try {
+			const snapshots = h.events.filter(
+				(event) => event.channel === ORCHESTRATION_EVENTS.runsSnapshot,
+			);
+			assert.equal(snapshots.length, 1, "one snapshot per session start");
+			assert.deepEqual((snapshots[0]!.data as RunsSnapshotPayload).runs, [
+				{ runId: "run-live", status: "running" },
+			]);
+		} finally {
+			await h.shutdown();
+		}
+	});
+});
+
+test("a reload does not list an interrupted run as live", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		// Interrupted is terminal for parking: its in-process settlement event
+		// released the park. Listing it live after a reload would park a parent
+		// whose interrupt event can no longer fire.
+		await seedSession(agentDir, [runFixture(agentDir, { id: "run-int", status: "interrupted" })], []);
+
+		const h = await createHarness({ maxConcurrent: "4" });
+		try {
+			const snapshots = h.events.filter((event) => event.channel === ORCHESTRATION_EVENTS.runsSnapshot);
+			assert.equal(snapshots.length, 1, "one snapshot per session start");
+			assert.deepEqual((snapshots[0]!.data as RunsSnapshotPayload).runs, []);
 		} finally {
 			await h.shutdown();
 		}

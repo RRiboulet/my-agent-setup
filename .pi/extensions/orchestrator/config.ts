@@ -20,6 +20,10 @@
  *     spelling the same intent;
  *   * `block.loops` enables the tool-call loop breaker, which is off by default
  *     because it acts on every tool call rather than once per run;
+ *   * `block.waitForSubagents` parks a would-be block while a delegated run is
+ *     live, so the parent is not woken into a race it cannot win. Off by default,
+ *     and deliberately not a blocking check of its own: parking needs another
+ *     condition to be meaningful;
  *   * `advisor` configures one bounded second opinion from a stronger model when
  *     the gate keeps failing the same way or a loop was broken. It is off by
  *     default and separate from `block`, because it is not a blocking check: it
@@ -92,6 +96,10 @@ export interface GateBlockConfig {
 	repeatedFailure: boolean;
 	/** The tool-call loop breaker (no-progress evidence, not repetition). */
 	loops: boolean;
+	/** Park a would-be block while a delegated run is live, instead of spending
+	 *  an attempt on a turn with nothing new to act on. The parent is woken once
+	 *  when the last run settles. */
+	waitForSubagents: boolean;
 }
 
 /**
@@ -133,7 +141,7 @@ export interface GateConfigRead {
 export const DEFAULT_GATE_CONFIG: GateConfig = {
 	version: GATE_CONFIG_VERSION,
 	attemptCap: DEFAULT_ATTEMPT_CAP,
-	block: { openTodos: false, repeatedFailure: false, loops: false },
+	block: { openTodos: false, repeatedFailure: false, loops: false, waitForSubagents: false },
 	verification: null,
 	advisor: null,
 };

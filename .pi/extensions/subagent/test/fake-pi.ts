@@ -188,6 +188,10 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
 	const usageEntries: { kind: string; provider: string; model: string; usage: unknown; note: string | undefined }[] = [];
 	const modelChanges: { provider: string; id: string }[] = [];
 	const thinkingChanges: string[] = [];
+	// Subscribers to the orchestration event bus. Strictly additive: the bus used
+	// to be a no-op recorder, which was enough to see that a publisher emitted and
+	// not enough to drive an extension that keeps state from the events.
+	const eventHandlers = new Map<string, ((data: unknown) => void)[]>();
 
 	// Whether a low-level agent run is in progress, as pi's internal flag would be.
 	let runActive = false;
@@ -298,14 +302,26 @@ export function createFakeHost(options: FakeHostOptions = {}): FakeHost {
 	};
 
 	const pi = {
-		// The orchestration event bus, recorded. Tests that need subscriber
-		// behaviour drive a local EventBus instead; this double is enough to see
-		// that an emitter published.
+		// The orchestration event bus, recorded AND dispatched: `emit` records the
+		// call and calls every handler registered for that channel synchronously,
+		// like pi's in-process emitter. A handler added after the emit does not see
+		// it, and unsubscribing removes only that handler.
 		events: {
 			emit: (channel: string, data: unknown) => {
 				emitted.push({ channel, data });
+				for (const handler of [...(eventHandlers.get(channel) ?? [])]) handler(data);
 			},
-			on: (_channel: string, _handler: (data: unknown) => void) => () => {},
+			on: (channel: string, handler: (data: unknown) => void) => {
+				const list = eventHandlers.get(channel) ?? [];
+				list.push(handler);
+				eventHandlers.set(channel, list);
+				return () => {
+					const current = eventHandlers.get(channel);
+					if (!current) return;
+					const index = current.indexOf(handler);
+					if (index >= 0) current.splice(index, 1);
+				};
+			},
 		},
 		on: (event: string, handler: Handler) => {
 			const list = handlers.get(event) ?? [];

@@ -4,6 +4,24 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Added:
+
+- **A parent with live delegated runs parks its settlement instead of spending an
+  attempt on a turn with nothing to act on.** A block starts another turn, so a
+  parent that had just launched background subagents could burn its
+  `attemptCap` before the first child reported, and the completion notice does
+  not wake an idle session. The new `block.waitForSubagents` key (default
+  `false`) opts a project into parking: a settlement that would block while a
+  delegated run is live returns no continuation, spends no attempt, and records
+  `parked: true` with the live run ids. The orchestrator keeps that set from the
+  new `orchestrator:run-started`, `orchestrator:runs-snapshot` and
+  `orchestrator:run-settled` lifecycle events, rebuilds it from the snapshot on
+  reload, and sends exactly one `orchestrator-resume` message with
+  `triggerTurn: true` when the last run settles — normal completion notices stay
+  non-waking. `run-settled` now also reports `cancelled` and `interrupted`, so a
+  cancelled or interrupted only-run releases the park; a worker never parks.
+  Tests: `orchestrator-gate.test.ts`, `lifecycle-launch.test.ts`.
+
 Fixed:
 
 - **A delegated worker no longer passes its role to a `pi` its shell starts.**
@@ -14,6 +32,14 @@ Fixed:
   process — so it cannot outlive the run it was written for. The legacy
   `PI_TMUX_SUBAGENT_CHILD` fallback still assumes the orchestrator loads before
   the subagent factory, which the package manifest's order guarantees.
+- **A parked settlement is released by every terminal state, including after a
+  reload.** An interrupted run is terminal in-process, but the reload snapshot
+  listed it as live, so a parent that parked before a reload could wait forever
+  for an event the interrupt marker can no longer publish; `interrupted` is now
+  excluded from the snapshot. A park also no longer runs the verification command
+  whose result it would discard, and an aborted run clears the park so a late
+  child cannot wake a session the user stopped. The subagent→orchestrator path is
+  covered by a cross-factory test over one live event bus.
 - **A delegated child no longer runs the project's verification command or blocks
   its own settlement.** The orchestrator decided "am I a child?" by reading
   `PI_TMUX_SUBAGENT_CHILD` at every boundary, while the subagent extension reads
