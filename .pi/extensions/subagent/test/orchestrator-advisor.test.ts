@@ -937,6 +937,21 @@ test("a configured trigger makes exactly one consultation and injects the verdic
 	});
 });
 
+test("the consultation carries the parent session id, so a provider that routes by it can answer", async () => {
+	await withTempDir(async (cwd) => {
+		await writeConfig(cwd, { provider: PROVIDER, model: MODEL });
+		const { registry, calls } = fakeRegistry();
+		const host = startHost({ cwd, branch: [loopBlock(1)], registry });
+		await host.fire("session_start", {});
+		await host.fire("before_agent_start", promptEvent());
+
+		// OpenCode Go rejects a request without `x-opencode-session`; the
+		// registry turns this option into that header.
+		assert.equal(calls.length, 1);
+		assert.equal(calls[0]?.options.sessionId, "orchestrator-advisor-test");
+	});
+});
+
 test("the same trigger is not consulted twice: the answered key is reconstructed from the branch", async () => {
 	await withTempDir(async (cwd) => {
 		await writeConfig(cwd, { provider: PROVIDER, model: MODEL });
