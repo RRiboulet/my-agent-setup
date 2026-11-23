@@ -156,6 +156,10 @@ function fakeRegistry(options: {
 	fail?: Error | string;
 	/** Model ids whose completion throws, so the primary fails and a fallback answers. */
 	failModels?: string[];
+	/** Model ids whose completion returns an error message, which may still carry usage. */
+	errorModels?: string[];
+	/** Per-model usage, for a failed primary that reports what it spent. */
+	usageByModel?: Record<string, Record<string, unknown>>;
 	stopReason?: string;
 	usage?: Record<string, unknown> | null;
 } = {}) {
@@ -168,6 +172,21 @@ function fakeRegistry(options: {
 		complete: async (model: { provider: string; id: string }, context: Record<string, unknown>, callOptions: Record<string, unknown>) => {
 			calls.push({ model, context, options: callOptions });
 			if (options.failModels?.includes(model.id)) throw new Error(`provider ${model.provider} exploded`);
+			if (options.errorModels?.includes(model.id)) {
+				// A provider error reported as a message, not a throw: this is the shape
+				// that can still carry the usage of the failed call.
+				return {
+					role: "assistant",
+					content: [],
+					api: "openai-completions",
+					provider: model.provider,
+					model: model.id,
+					usage: options.usageByModel?.[model.id] ?? options.usage ?? undefined,
+					stopReason: "error",
+					errorMessage: `provider ${model.provider} refused`,
+					timestamp: Date.now(),
+				};
+			}
 			if (options.fail instanceof Error) throw options.fail;
 			if (typeof options.fail === "string") throw new Error(options.fail);
 			return {
@@ -183,7 +202,7 @@ function fakeRegistry(options: {
 				model: MODEL,
 				usage: options.usage === null
 					? undefined
-					: options.usage ?? {
+					: options.usageByModel?.[model.id] ?? options.usage ?? {
 							input: 120,
 							output: 40,
 							cacheRead: 0,
@@ -1146,6 +1165,39 @@ test("when the primary fails the fallback answers, the record names it, and one 
 		assert.equal(host.usageEntries[0]?.provider, "backup");
 		assert.equal(host.usageEntries[0]?.model, "backup-model");
 	});
+});
+
+test("a failed primary's reported usage is added to the fallback's, so both calls are billed", async () => {
+	const { registry, calls } = fakeRegistry({
+		errorModels: [MODEL],
+		usageByModel: {
+			[MODEL]: {
+				input: 100,
+				output: 20,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 120,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.001 },
+			},
+			"backup-model": {
+				input: 50,
+				output: 10,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 60,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0.002 },
+			},
+		},
+	});
+	const call = await consultAdvisor({ registry, config: fallbackConfig(), digest: FALLBACK_DIGEST, env: {} });
+	assert.equal(calls.length, 2, "the error primary, then the fallback");
+	assert.equal(call.status, "ok");
+	assert.equal(call.called, true);
+	assert.deepEqual(call.model, { provider: "backup", model: "backup-model" });
+	assert.equal(call.usage?.input, 150, "the failed primary's input is billed too");
+	assert.equal(call.usage?.output, 30);
+	assert.equal(call.usage?.totalTokens, 180);
+	assert.ok(Math.abs((call.usage?.cost ?? 0) - 0.003) < 1e-12, "both calls' costs are summed");
 });
 
 test("a refused primary is not retried on the fallback", async () => {

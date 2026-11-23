@@ -825,7 +825,8 @@ provider is down or rate-limits, `advisor.fallback` names one other provider/mod
 tried once, off unless both of its keys are set; a missing credential or an
 abort is not retried, because one is a configuration error and the other means
 nobody is waiting. The record names the model that *answered* and the primary it
-replaced, and the whole consultation is still one entry and one budget unit.
+replaced, and the whole consultation is still one entry and one budget unit; its
+usage and cost are the sum of both calls when the failed primary reported any.
 Every attempt is an `orchestrator-advisor` session entry, and `/gate` shows the
 last one; the section is attached to the run being prepared, so a reload does not
 re-inject a stale verdict. Like the rest of the gate it acts only in a trusted
