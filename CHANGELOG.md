@@ -4,6 +4,372 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.16.0 — 2026-11-23
+
+Added:
+
+- **Workspace coordination now expires the state a crashed session leaves
+  behind.** A presence record is refreshed with the session's current branch on
+  every heartbeat, so a checkout that changes branch mid-session does not keep
+  advertising the join-time branch. An unparsable presence file is left alone
+  while it is fresh (a newer build may own it) and swept once it is old, instead
+  of being re-reported on every `peers` call. A reservation whose holder process
+  is gone stops blocking immediately rather than waiting out its TTL, matching
+  how presence already treats a dead pid: a reservation is held by a live
+  process, not by the file. The delivered-id ledger is capped and
+  prunes its oldest entries, and the live-peer list says how many old peers its
+  cap omitted rather than dropping them silently. Tests:
+  `orchestrator-workspace.test.ts`, `orchestrator-reservations.test.ts`,
+  `orchestrator-steering.test.ts`.
+
+- **A session can send one targeted message to a peer, delivered at the peer's
+  next safe boundary.** The new `orchestrator_message` tool queues a bounded,
+  expiring message in the recipient's inbox; the recipient's own poller wakes an
+  idle session with a turn, steers a busy one without aborting it, and waits
+  while a human prompt or queued human input is pending. One peer message is
+  released per turn, delivery is idempotent per message id (a replayed id is
+  delivered once; an undelivered message that expires is reported rather than
+  silently dropped), and the message appears in the recipient's session with the
+  sender's id and directory. The poller starts when the session joins and is
+  cleared and unref'd on leave, shutdown and session replacement, so no timer
+  keeps the process alive. A peer that left or expired is reported as gone.
+  Tests: `orchestrator-steering.test.ts`.
+
+- **A reserved workspace path refuses another session's `write` or `edit`
+  before it runs, naming the holder and the reason.** The new
+  `orchestrator_reserve` tool reserves a file, a directory (trailing slash) or a
+  wildcard (`*` within a segment, `**` across) with a reason and a TTL. Paths are
+  canonicalised through their deepest existing ancestor, so relative, absolute
+  and symlinked spellings of one file cannot slip past as a second name. A
+  refusal names the holder, its reason and the one-shot override, which is
+  granted and then consumed as two recorded session entries. Reservations expire,
+  are released on leave or shutdown, and a directory lock refreshed by its holder
+  makes two reservers' overlap check and write one critical section across
+  processes, so two reservers cannot both believe they hold the same path.
+  Re-reserving supersedes this session's earlier overlapping record instead of
+  leaking a second one. Deliberately advisory:
+  the tool description and every refusal say that shell commands and nested tool
+  execution are not prevented, and the host's per-file mutation queue is
+  untouched. Tests: `orchestrator-reservations.test.ts`.
+
+- **Pi sessions working in one repository, including linked worktrees, can now
+  see each other.** Joining is explicit: the new `orchestrator_workspace` tool
+  publishes a presence entry with the session id, pid, working directory, branch,
+  heartbeat and TTL, and `peers` lists the other live sessions with their
+  directory, branch and last-seen time. The registry lives at
+  `<git-common-dir>/pi-agents/` — the one key that makes the main checkout and
+  every linked worktree share state without making unrelated projects share it —
+  and never in the working tree or the agent directory, so a checkout stays
+  clean and `.git` stays invisible to git. Each record is one atomically written
+  JSON file, so concurrent joins and heartbeats never expose a half-written
+  registry. `leave` removes the entry promptly; a killed session is swept as soon
+  as its pid is gone or, failing that, within its TTL. Outside a git repository
+  every action is a no-op that says why. Tests:
+  `orchestrator-workspace.test.ts`.
+
+- **The settlement gate can ask a stronger model for one bounded second opinion
+  when it keeps failing the same way.** A committed `advisor` block in
+  `.pi/orchestrator.json` names the provider and model; the consultation runs at
+  `before_agent_start` when the branch holds an unanswered trigger — a loop block,
+  or `minGateBlocks` settlement blocks (default 2) reporting the same conditions —
+  and its verdict is added to the prompt as an additive `sections.advisor` — on
+  the next prompt, not on the run that was stuck, because a boundary continuation
+  skips `before_agent_start`; a trigger disarmed only by a successful
+  consultation, so a problem fixed before the next prompt can still be described.
+  The
+  system prompt is never replaced, the session model and thinking level are never
+  switched, and nothing is called if the provider has no credentials: the refusal
+  names the provider and the fix instead of skipping silently. One completion
+  against the host's model registry resolves credentials and records usage like
+  any other call, including in the session totals. A trigger is answered once per
+  branch, and `cooldownMs` and `budget` bound the rest; the digest is capped at
+  4 KB and built from the gate's reasons, the verification summary, failure
+  signatures, edited files, todos and the goal, never tool output bodies. It
+  acts only in a trusted project and never in a delegated child. Tests:
+  `orchestrator-advisor.test.ts`.
+
+- **The settlement gate can now stop a run from settling, but only where a
+  project opts in.** A committed `.pi/orchestrator.json` turns each check on
+  separately: `block.openTodos` and `block.repeatedFailure` make an open todo or
+  a repeated failure signature commit one more turn, `verification.command`
+  names the project's own check — run by the gate through `pi.exec` with a
+  timeout and an output cap, and what the edits-without-verification condition
+  now means — and `block.loops` arms the tool-call loop breaker. With no config
+  nothing is run and nothing is blocked, which is exactly the previous
+  behaviour.
+
+  A block is a `continue` plus a message carrying the reason and the
+  verification output. It never terminates the run, and it is bounded twice: a
+  condition blocks once per piece of evidence — a new edit or todo re-arms it —
+  and every block spends one of the branch's `attemptCap`, which `retryCap` is
+  renamed to now that it counts blocks rather than settles. Every reason names the new `orchestrator_override` tool, whose
+  one-shot override lets the next block through and is recorded in the session.
+  A check that times out, exceeds its output cap or cannot be parsed fails open
+  and says so in the verdict, so the gate's own failure never becomes the run's
+  trap. The gate acts only in a project pi trusts: the config is a committed
+  file that names a command, and this extension also loads in clones that were
+  never trusted. The loop breaker reads no-progress evidence — the same
+  `edit`/`write` invocation with the same result three times and no other edit in
+  between, or any loop tool failing with the same signature three times — so a
+  status poll and a status command after each edit
+  are both untouched; it shares the branch budget and is capped at one block per
+  turn. Inside a delegated child the gate records `scope: child` and acts on
+  nothing, because the parent owns the decision and a blocked child would stall
+  the delegation, and every verdict states the limit a blocking check has: it
+  sees this session's own tool calls, not edits made by children. Tests:
+  `orchestrator-gate.test.ts` covers the decision, config, override and resume
+  paths; `orchestrator-loop.test.ts` the loop evidence and both bounds;
+  `orchestrator-verify.test.ts` the command, each fail-open outcome, and a real
+  process killed at its timeout.
+
+- **A settlement gate now reports what a project considers a finished run, and
+  publishes typed orchestration events.** A new `.pi/extensions/orchestrator/`
+  extension runs at `agent_before_settle` and records a verdict — an active
+  goal, open todos, files edited since the last successful verification
+  command, a repeated failure signature, and the remaining retry allowance —
+  as an append-only `custom` session entry. The entry is ignored by the model
+  context, so a verdict per settlement costs no tokens; `/gate` prints the last
+  one and `/gate --json` returns it verbatim. The attempt count is reconstructed
+  from the active branch on `session_start` and `session_tree`, so a resume or a
+  tree navigation cannot reset a cap. The gate composes with other boundary
+  handlers: it carries forward every entry proposed before it and leaves
+  `continue` alone, so an active goal keeps ownership of the next turn. A
+  condition it cannot evaluate is reported as unknown and the run still settles.
+
+  It landed report-only first: the gate recorded a verdict and never blocked,
+  ran a command or requested a continuation. Configuration is a committed
+  `<project>/.pi/orchestrator.json`, shipped as
+  `.pi/extensions/orchestrator/orchestrator.example.json`; the bullet above adds
+  the blocking checks, the verification command, the override and the loop
+  breaker, and renames `retryCap` to `attemptCap`.
+
+  The same extension owns the typed event bus: `orchestrator:run-settled`,
+  `orchestrator:plan-settled`, `orchestrator:todo-changed`,
+  `orchestrator:triage-planned` and `orchestrator:gate-decided`, with payload
+  types in `events.ts`. The subagent, todo and review-triage extensions now
+  publish their events after the state is persisted; publishing is total, so a
+  missing bus or a throwing subscriber cannot affect the operation observed.
+  The events are local to one parent session — no cross-process or cross-worktree
+  delivery is promised. Tests: `orchestrator-gate.test.ts` covers the decision
+  function, the readers, resume/tree reconstruction, entry composition and
+  fail-open; `orchestrator-events.test.ts` covers the bus contract and one
+  emitter per publishing extension.
+
+- **A finished subagent run now leaves a standalone report artifact, so its
+  complete answer is readable without opening the child's transcript.** Each
+  child is asked to end with a fenced `subagent-report` block carrying `status`
+  (`ok`/`blocked`/`failed`), a `summary`, and optional `files`, `commands` and
+  `unresolved` lists. When a run reports a final answer — completed, or failed
+  with an error — the parent writes the child's complete final text to
+  `<runDir>/report.md`, beside `result.json`, and puts a bounded copy in the run
+  record: the artifact path and full byte count, a head bounded with
+  pi's own `truncateHead` limits (a very long report is never loaded whole into
+  `runs.json`), and the parsed fields. The existing `output` field keeps its
+  meaning and cap, so a reader built before this change still works, and the
+  optional `report` field added to `result.json` is ignored by an older parent.
+  A cancelled or shutdown-killed run has no artifact, because its child never
+  reported an answer.
+  Validation is lenient because a child may run another branch's build: a
+  missing, malformed or incompatible report degrades to the plain final text
+  with the reason recorded rather than failing the run, while a compatible
+  older or newer version is accepted and its skew reported. `subagent_status`
+  prints the artifact path, size and any degradation. Tests: `report.test.ts`
+  covers the contract and `lifecycle-report.test.ts` proves the artifact is
+  written at settlement, the run index stays bounded, and every degradation and
+  skew path still completes.
+
+- **A blocked subagent can ask its parent a question, and only a human answers
+  it.** A child launched by this build can call `subagent_ask`: a question is
+  written atomically to `<runDir>/escalation/<id>.request.json`, and the tool
+  waits — honouring the call's abort signal and a deadline (300 s by default) —
+  for the reply, which arrives as its tool result so it continues in the same
+  turn. The parent's existing watcher tick reads the channel, so escalation adds
+  no timer of its own; it records the question on the run record, delivers it to
+  the parent session, and `subagent_answer({ id, answer })` asks
+  `ctx.ui.confirm` before writing the reply. The gate is that tool, not the
+  filesystem: the channel is same-uid, so a model able to write files could forge
+  a reply — the honest path is human-confirmed, and the docs say so rather than
+  pretending a file protocol authenticates its writer. A decision is therefore
+  confirmed by a human or refused: with no UI (print and JSON mode) the tool says why and
+  writes nothing, and the child reaches its deadline and is told to report the
+  blocker and its partial result and stop. Every other non-answer path says the
+  same thing, so a blocked child never hangs: a request past its deadline is
+  never delivered, and a parent that stopped ticking is detected from a stale
+  heartbeat in seconds rather than at the deadline. `kind: "progress"` is the
+  non-blocking half — the update reaches the session with no human gate and no
+  answer. A blocked child keeps its concurrency slot, and `subagent_status`
+  reports `? waiting on a question`, distinctly from a stalled or interrupted
+  run; the widget gets its own glyph. The channel is a file protocol across
+  builds, like `result.json`: the shape is the gate and the version advisory, a
+  partial write is never read as a request, a replayed request or reply is
+  handled once, and a child of an older parent registers no tool at all because
+  such a parent sets no channel. Tests: `escalation.test.ts` covers atomicity,
+  bounds, expiry, replay and every exit from the wait;
+  `lifecycle-escalation.test.ts` drives the round trip through the real child
+  tool and parent tick, both UI modes, the no-parent path, the no-timer
+  assertion and the status rendering.
+
+- **A launcher wrapper gives non-interactive invocations the agent dir a login
+  shell would have picked.** `bin/pi-wrapped` exists because the `--shell` hook
+  `bin/pi-agent-dir` installs lives in `~/.bashrc`, and a tmux child, a CI step
+  or an editor task gets the environment without the rc — so it started `pi` on
+  the shared, package-installed agent dir, and a run rooted in a linked worktree
+  hit the duplicate-tool load error with nobody watching. The wrapper forwards
+  every argument to `pi` unchanged and has no option of its own (a flag it saw is
+  a flag for `pi`; `--`, `@file` arguments and values with spaces are passed as
+  given); a `PI_CODING_AGENT_DIR` already in the environment wins over the derived
+  one, because an explicit choice outranks a derived one; and the project dir is
+  resolved by `bin/pi-agent-dir --print --project "$PWD"`, so the wrapper cannot
+  drift from the helper's own rule and a worktree maps to its main checkout. (The
+  `--shell` hook is an inline copy of that rule that assumes the default root and
+  overrides an explicit `PI_CODING_AGENT_DIR`; this wrapper honours it.) Outside a checkout — or when the project's dir was never created — it
+  runs `pi` with its defaults and says why on stderr, because a launcher that
+  dies over a path it could not derive is worse than one that runs with defaults.
+  It deliberately does not create the dir: running the helper without `--print`
+  would seed the user's agent root as a side effect of starting `pi`, needs `jq`
+  present, and a dir it half-created trusts nothing — a *silently empty* agent
+  rather than a working one. `pi-wrapped.test.ts` pins all of it against a stub
+  `pi` on PATH, including a real linked worktree.
+
+- **One `subagent` request can fan out N children and run a dependency plan.**
+  `subagent({ tasks: [...] })` is the one plan shape: each item may override
+  `task`, `cwd`, provider, model, thinking and handoff, and may declare
+  `dependsOn` step ids — a plain fan-out is just a plan with no edges. The tool
+  returns the runs in the requested order, and the children go through the same
+  `startRun`/`drainQueue` path as standalone runs, so they share one concurrency
+  budget rather than opening a second queue. A step starts only after every
+  dependency completed successfully; a cycle, self-dependency, unknown id or
+  duplicate id is rejected before the plan is recorded and before any run
+  exists. A permanently failed step follows `failurePolicy`: `continue` (the
+  default) cancels only its transitive dependents and keeps independent branches
+  running, while `stop` starts nothing further, abandons a step whose run was
+  still queued, and marks the plan failed (the failure policy does not kill live
+  children; `subagent_cancel` is what stops a run). A stop that lands while a
+  child is being
+  submitted kills that child instead of writing the abandoned run back as
+  running. `retries` per step, or a plan-level `retryLimit`,
+  is enforced as a new run per attempt with its own run id, report and usage, so
+  `attempts`, `retries` and every attempt's id stay visible. The plan is a
+  `plans.json` record beside `runs.json`, written through the same atomic writer
+  and persist chain and advanced only by the existing settle path
+  (`finalizeRun`/`markRunFailed`), with an idempotency guard so a replayed or
+  stale settlement launches nothing twice. `plan.test.ts` pins the pure
+  readiness/graph/policy/retry rules and `lifecycle-plan.test.ts` covers fan-out
+  ordering, budget sharing, dependency order, rejection, both policies and the
+  retry cap.
+
+- **A dependency plan now survives reload, cancels cleanly and is inspectable as
+  one row.** Loading a session reconciles each persisted plan against the run
+  index once: a step whose run is still queued, running or interrupted is left
+  alone — its child can outlive the parent reload and the watcher re-arms for it —
+  while a step whose run already completed, failed or was cancelled is folded in
+  rather than re-run. A run the plan index never recorded, which is exactly the
+  state a crash between the two `runs.json`/`plans.json` renames leaves, is
+  adopted instead of being launched a second time; only a step with no live run at
+  all is reported as interrupted and follows the plan's policy, and it is never
+  reported as complete. A resumed step that needs a fork snapshot hands off from
+  the session that is loading, not the one that created the plan.
+  `subagent_cancel` now settles a plan step. A cancel produces no `result.json`,
+  so the finaliser never saw it, and a `continue` plan whose only step was
+  cancelled used to sit `running` with a `running` step and nothing able to settle
+  it. Cancelling one step cancels its transitive dependents, which can never run
+  now and so must not be left `pending`, and keeps independent branches alive;
+  under `stop` it starts nothing further and ends the plan as `cancelled`, because
+  a deliberate cancel is not a failure. A plan id is a handle wherever it matters:
+  `subagent_cancel({ id })` cancels the whole plan and its live children and keeps
+  completed steps' records, `subagent_status({ id })` shows every step with its
+  latest run id and error, and `subagent_wait({ plan })` blocks until the plan is
+  over — added because a dependency plan's later waves have no run ids to name in
+  the reply, so the plan id is the only handle that covers them. The status list
+  shows a plan as one row with its step runs folded into it, so a ten-step plan
+  spends the list's detail budget once rather than once per step; the one-line
+  form carries progress while it runs and the stop reason once it ends. Tests:
+  `plan.test.ts` pins the cancellation and reconciliation rules, and
+  `lifecycle-plan-reload.test.ts`, `lifecycle-plan-cancel.test.ts` and
+  `lifecycle-plan-status.test.ts` drive the real factory through each one.
+
+Fixed:
+
+- **The settlement gate now actually blocks in a real session.** It used to
+  treat pi's `context.canContinue` as the final capability, but pi builds that
+  snapshot from the drafts proposed before the gate runs: on a normal completed
+  run the last message is the assistant's, so `canContinue` is false even though
+  the gate's own continuation message would make the next request possible. The
+  gate therefore reported and settled instead of blocking in a live TUI, while
+  the fake-host tests (which did not set the field) passed. It no longer consults
+  the pre-draft snapshot; pi validates the post-commit proposal itself and
+  reports an invalid continuation rather than trapping the run. Tests:
+  `orchestrator-gate.test.ts` pins a real boundary shape with
+  `canContinue: false` and an open todo.
+  Because the old suppression also skipped the policy, a trusted project that
+  opted into blocking now actually runs its verification command at settlement,
+  and a block spends the branch's attempt budget (shared with the loop breaker).
+
+Changed:
+
+- **A settlement block now has to be resolved or explicitly overridden.** The
+  gate no longer treats a condition as settled after one block for the same
+  evidence: an unresolved open todo, failed verification or repeated failure
+  blocks again on the next settlement, spends another attempt, and settles only
+  when the condition changes, `orchestrator_override` is used, or `attemptCap`
+  is reached. A passed verification remains informational once. The project's
+  verification command re-runs when the files under verification change — a
+  second edit of the same file counts as a new state — even after the block
+  budget is spent, and not for evidence it already checked. This makes the override necessary rather
+  than decorative, and `attemptCap` (default 3) still bounds repeated blocks so
+  a run cannot be trapped. Tests: `orchestrator-gate.test.ts` covers repeated
+  blocks, override consumption, the cap and the verification re-run rule.
+
+Maintenance:
+
+- **`/goal` now asks for its next turn at the settlement boundary instead of
+  mid-run, so a continuation is final and composes with other handlers.** The
+  vendored extension called `sendMessage(..., { triggerTurn: true })` from
+  `agent_end`, which fires before pi has finished with the run: pi may still
+  auto-retry, compact and retry, or drain a queued follow-up after it. A message
+  sent there is input to whatever run pi starts next, not a proposal the
+  settlement boundary composes with — so nothing else at that boundary can see it
+  or yield to it. The request is now a
+  `custom_message` draft returned from `agent_before_settle` alongside
+  `continue: true`, appended to `event.entries` so an earlier handler's proposal
+  survives. Behaviour is unchanged from the user's side — an active goal still
+  continues, and a paused, blocked, budget-limited, usage-limited or complete one
+  still does not — with two deliberate differences: an aborted run requests no
+  continuation at all (pi skips that boundary for an abort; the pause prompt
+  stays in `agent_end`, where the run is still active, and now says that
+  declining leaves the goal waiting for the user's next message), and a `/goal`
+  command that lands between pi's post-run check and the boundary stands it
+  down, because its follow-up is flushed only afterwards; without that guard the
+  goal would add a continuation on top of a turn already coming.
+  Usage and elapsed accounting, the budget limit, the error-stop decision and the
+  abort prompt all still run at `agent_end`, so recorded values are unchanged.
+  The draft keeps the same customType and `details.goalId`, which is what the
+  `context` hook keys on to drop a consumed continuation. Recorded as local
+  change 3 in `goal.ts`'s vendored-file header; `goal.test.ts` now asserts the
+  boundary's returned proposal rather than a sent message, across two consecutive
+  runs, with the `/goal` command's own continuation standing it down and a run's
+  usage still recorded against the goal.
+
+- **A fake extension host makes a factory's event wiring testable without tmux
+  or a model.** The suite could prove what an extension computes and, for the
+  subagent extension, what its run state machine does; it could not prove *when*
+  a factory acts, because pi's event wiring only runs under a real session. The
+  vendored `/goal` was the visible gap: its pure helpers were covered and the
+  claim that a completed run continues the goal was not. A new double records
+  registrations in order, dispatches an event to every handler over one mutable
+  event object (so a later handler sees an earlier mutation, and the last
+  non-undefined result is what the double returns), records messages with their
+  delivery options and
+  appended session entries, and runs a registered tool with the host context.
+  What it deliberately does not model — pi's chained-transform composition,
+  boundary-proposal merging, `tool_result` chaining, provider hooks, argument
+  validation, interactive UI answers — is stated in its header, so
+  a test that needs those extends it rather than trusting a plausible-looking
+  default. The goal suite now drives the factory through it: one continuation
+  per completed run, none for an inactive goal, and a pause rather than a
+  continuation after an abort with no UI. The harness itself changes no
+  production file.
+
 ## v1.15.2 — 2026-11-22
 
 Fixed:

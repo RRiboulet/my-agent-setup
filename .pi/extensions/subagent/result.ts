@@ -24,6 +24,14 @@
 //     this module reports, and never sleeps or retries on its own.
 //   - One writer, one reader, one file per run, exactly like activity.ts and
 //     interrupt.ts — hence the same `{ ok, reason }` result shape.
+//   - `report` is an OPTIONAL additive field (see report.ts): the child's
+//     structured final report, when its build produced one. It does not change
+//     the version or any existing field's meaning. An older parent built before
+//     the field validates the same shape, ignores unknown members, and keeps
+//     using `output`; an older child omits it, and the new parent degrades to
+//     the plain final text. The value is deliberately left unvalidated here:
+//     report.ts owns that contract, and an unusable report must degrade rather
+//     than fail the run, which is not what a result-protocol rejection does.
 
 import { readFile } from "node:fs/promises";
 
@@ -48,6 +56,12 @@ export interface ChildResult {
 	model?: string;
 	thinking?: string;
 	finishedAt: number;
+	/**
+	 * The child's structured final report (report.ts), when its build produced
+	 * one. Additive and optional; unvalidated here because report.ts handles a
+	 * bad value as a degradation rather than as an unusable result file.
+	 */
+	report?: unknown;
 }
 
 export type ChildResultReadResult =
@@ -129,6 +143,7 @@ export function validateChildResult(value: unknown): ChildResultReadResult {
 			...(typeof candidate.provider === "string" ? { provider: candidate.provider } : {}),
 			...(typeof candidate.model === "string" ? { model: candidate.model } : {}),
 			...(typeof candidate.thinking === "string" ? { thinking: candidate.thinking } : {}),
+			...(candidate.report === undefined ? {} : { report: candidate.report }),
 			finishedAt: candidate.finishedAt,
 		},
 	};

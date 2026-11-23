@@ -17,6 +17,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 
 import subagentExtension, { type RunRecord } from "../index.ts";
+import type { PlanRecord } from "../plan.ts";
 import { getActivityFilePath } from "../activity.ts";
 import { getInterruptFilePath } from "../interrupt.ts";
 import { waitFor, withEnv, withTempAgentDir } from "./helpers.ts";
@@ -34,8 +35,12 @@ export interface Harness {
 	tools: Map<string, Record<string, unknown>>;
 	execCalls: { command: string; args: string[] }[];
 	messages: CompletionMessage[];
+	/** Every `pi.events.emit` call, in order (patch 22's orchestration events). */
+	events: { channel: string; data: unknown }[];
 	/** Every ctx.ui.notify call, so guard messages can be asserted. */
 	notifications: { message: string; type: string | undefined }[];
+	/** Every ctx.ui.confirm call, so the human gate can be asserted. */
+	confirmCalls: { title: string; message: string }[];
 	/** Make every tmux call against the run's pane fail as if the session were gone. */
 	removeTarget: () => void;
 	/** Fail pane calls once with an unclassifiable error, then behave normally. */
@@ -70,6 +75,8 @@ export interface Harness {
 	shutdown: () => Promise<void>;
 	call: (tool: string, params: Record<string, unknown>) => Promise<{ text: string; details: Record<string, unknown> }>;
 	readRuns: () => Promise<RunRecord[]>;
+	/** The persisted plan records beside the runs (`plans.json`). */
+	readPlans: () => Promise<PlanRecord[]>;
 	writeResult: (run: RunRecord, result: Record<string, unknown>) => Promise<void>;
 	writeActivity: (run: RunRecord, activity: Record<string, unknown>) => Promise<void>;
 	writeInterrupt: (run: RunRecord, marker?: Record<string, unknown>) => Promise<void>;
@@ -97,6 +104,13 @@ export interface HarnessOptions {
 	/** Override ctx.mode, so the TUI-only widget guard can be exercised. */
 	mode?: string;
 	/**
+	 * ctx.hasUI. True by default (a TUI or RPC session has one); false models print
+	 * and JSON mode, where a decision cannot be confirmed by anyone.
+	 */
+	hasUI?: boolean;
+	/** What a `ctx.ui.confirm` dialog answers. Defaults to true: the human agrees. */
+	confirmAnswer?: boolean;
+	/**
 	 * Present a real live branch as the parent session (fork/lineage tests). The
 	 * manager is built from the temp agent dir `withHarness` has already set, so
 	 * callers do not thread `agentDir` through the options by hand.
@@ -111,6 +125,12 @@ export interface HarnessOptions {
 	 */
 	afterEscapeSent?: () => Promise<void>;
 	/**
+	 * Invoked while a child's submission (`send-keys … Enter`) is in flight. Lets a
+	 * test settle a sibling inside that window, which is the only way to reproduce
+	 * a stop policy abandoning a run mid-launch deterministically.
+	 */
+	duringEnterSent?: () => Promise<void>;
+	/**
 	 * Invoked when the pane probe reports the pane dead (`paneDead: true`), before
 	 * `finalizeMissingChild` runs. Lets a test write a result into the window
 	 * between the watcher's first result read and its post-probe re-read.
@@ -123,7 +143,9 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const handlers = new Map<string, (...args: unknown[]) => unknown>();
 	const execCalls: { command: string; args: string[] }[] = [];
 	const messages: CompletionMessage[] = [];
+	const orchestrationEvents: { channel: string; data: unknown }[] = [];
 	const notifications: { message: string; type: string | undefined }[] = [];
+	const confirmCalls: { title: string; message: string }[] = [];
 	// Flipped by removeTarget() to simulate the user killing the tmux session (or
 	// the server dying) out from under a run.
 	let targetMissing = options.missingTarget === true;
@@ -184,12 +206,24 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		sendMessage: (message: Record<string, unknown>, opts?: Record<string, unknown>) => {
 			messages.push({ message, options: opts });
 		},
+		// The orchestration event bus (patch 22). A recording double, not an
+		// emitter: no test in this suite subscribes, and a subscriber is covered
+		// in orchestrator-events.test.ts.
+		events: {
+			emit: (channel: string, data: unknown) => {
+				orchestrationEvents.push({ channel, data });
+			},
+			on: () => () => {},
+		},
 		exec: async (command: string, args: string[]) => {
 			execCalls.push({ command, args });
 			if (options.execDelayMs) await new Promise((resolve) => setTimeout(resolve, options.execDelayMs));
 			const joined = args.join(" ");
 			if (options.afterEscapeSent && joined.includes("send-keys") && args.includes("Escape")) {
 				await options.afterEscapeSent();
+			}
+			if (options.duringEnterSent && joined.includes("send-keys") && args.includes("Enter")) {
+				await options.duringEnterSent();
 			}
 			// The version probe is the only tmux call with no socket in its argv, and
 			// the socket path can itself contain "-V" (mkdtemp may name the agent dir
@@ -240,7 +274,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const ctx = {
 		cwd: process.cwd(),
 		mode: options.mode ?? "tui",
-		hasUI: true,
+		hasUI: options.hasUI ?? true,
 		isProjectTrusted: () => true,
 		sessionManager:
 			options.sessionManager === "liveBranch"
@@ -254,6 +288,13 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		ui: {
 			notify: (message: string, type?: string) => {
 				notifications.push({ message, type });
+			},
+			// The human gate (local patch 23). Recorded rather than rendered, and the
+			// answer is scripted, so both the confirmed and the declined path are
+			// deterministic; `hasUI: false` models a session where there is nobody to ask.
+			confirm: async (title: string, message: string, _opts?: unknown) => {
+				confirmCalls.push({ title, message });
+				return options.confirmAnswer ?? true;
 			},
 			custom: async () => undefined,
 			setWidget: (key: string, content: unknown, opts?: { placement?: string }) => {
@@ -290,7 +331,9 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		},
 	);
 
-	const runsIndex = path.join(process.env.PI_CODING_AGENT_DIR ?? "/tmp", "tmux-subagents", SESSION_ID, "runs.json");
+	const sessionDir = path.join(process.env.PI_CODING_AGENT_DIR ?? "/tmp", "tmux-subagents", SESSION_ID);
+	const runsIndex = path.join(sessionDir, "runs.json");
+	const plansIndex = path.join(sessionDir, "plans.json");
 
 	return {
 		pi,
@@ -299,6 +342,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		execCalls,
 		messages,
 		notifications,
+		confirmCalls,
 		removeTarget: () => {
 			targetMissing = true;
 		},
@@ -368,7 +412,15 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			const result = await execute(`call-${tool}`, params, undefined, undefined, ctx);
 			return { text: result.content[0]?.text ?? "", details: result.details ?? {} };
 		},
+		events: orchestrationEvents,
 		readRuns: async () => JSON.parse(await readFile(runsIndex, "utf8")) as RunRecord[],
+		readPlans: async () => {
+			try {
+				return JSON.parse(await readFile(plansIndex, "utf8")) as PlanRecord[];
+			} catch {
+				return [];
+			}
+		},
 		writeResult: async (run, result) => {
 			await writeFile(run.resultPath, `${JSON.stringify(result)}\n`, "utf8");
 		},

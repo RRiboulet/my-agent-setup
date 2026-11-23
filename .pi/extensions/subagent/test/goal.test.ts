@@ -14,13 +14,26 @@
 // accounting, budget limiting, the continuation prompt). These ship untested
 // upstream; the __test__ tail is the only reason they are testable at all.
 //
+// Part 3 drives the factory itself through the fake extension host
+// (./fake-pi.ts). The helpers above prove what a goal MEANS; those tests prove
+// WHEN the extension acts, which the pure-helper surface cannot: that a
+// completed run's settlement boundary proposes exactly one continuation, that
+// an inactive or already-queued goal proposes none, and that an aborted run
+// pauses rather than continues when no UI is available.
+//
+// The continuation is asserted on the boundary's RETURNED proposal, not on
+// `pi.sendMessage`: `agent_before_settle` has no message channel, so a factory
+// that still sent one from `agent_end` would pass a `messages` assertion while
+// requesting nothing at the boundary.
+//
 // Importing the module has no side effects: the factory is only called when
 // pi actually loads the extension.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { __test__ } from "../../goal.ts";
+import goalExtension, { __test__ } from "../../goal.ts";
+import { createFakeHost } from "./fake-pi.ts";
 
 const {
 	STATE_TYPE,
@@ -388,4 +401,227 @@ test("activeGoalSystemPrompt and budgetLimitMessage reflect state", () => {
 test("escapeXmlText escapes the three XML specials", () => {
 	assert.equal(escapeXmlText(`a & b < c > d`), `a &amp; b &lt; c &gt; d`);
 	assert.equal(escapeXmlText("plain"), "plain");
+});
+
+// --- Factory wiring (fake extension host) ------------------------------------
+
+const ASSISTANT_DONE = { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] };
+const ASSISTANT_ABORTED = { role: "assistant", stopReason: "aborted", content: [] };
+const ASSISTANT_ERROR = { role: "assistant", stopReason: "error", errorMessage: "rate limit exceeded", content: [] };
+
+/** A session branch that reconstructs into a goal in `status`. */
+function branchWithGoal(status: string): Record<string, unknown>[] {
+	return [
+		{
+			type: "custom",
+			customType: STATE_TYPE,
+			data: {
+				version: 2,
+				action: "set",
+				goal: {
+					id: "goal-under-test",
+					objective: "Ship the factory harness",
+					status,
+					tokensUsed: 0,
+					timeUsedSeconds: 0,
+					createdAt: 1,
+					updatedAt: 1,
+				},
+			},
+		},
+	];
+}
+
+async function startGoalHost(status: string, hasUI = false) {
+	const host = createFakeHost({ sessionId: "goal-session", branch: branchWithGoal(status), hasUI });
+	goalExtension(host.pi);
+	await host.fire("session_start", { reason: "startup" });
+	return host;
+}
+
+/** `get_goal` returns `{ goal, remainingTokens, completionBudgetReport }`. */
+function goalStatus(result: Awaited<ReturnType<Awaited<ReturnType<typeof startGoalHost>>["callTool"]>>): string | undefined {
+	return (result.details as { goal?: { status?: string } } | undefined)?.goal?.status;
+}
+
+/** Continuations that went out as a sent message. After the move to the
+ *  settlement boundary no run should use this channel; `/goal` still does. */
+function continuations(host: Awaited<ReturnType<typeof startGoalHost>>) {
+	return host.messages.filter((entry) => entry.message.customType === CONTINUATION_MESSAGE_TYPE);
+}
+
+/** The payload pi hands `agent_before_settle`: the drafts proposed so far, the
+ *  decision so far, and the context preview rebuilt from them. */
+function boundaryEvent(entries: Record<string, unknown>[] = [], pendingMessages: unknown[] = []) {
+	return { entries, continue: false, context: { pendingMessages }, outcome: "completed" };
+}
+
+interface BoundaryProposal {
+	entries?: { type?: string; customType?: string; content?: unknown; display?: unknown; details?: { goalId?: string } }[];
+	continue?: boolean;
+}
+
+/** The continuation drafts in a boundary result, whoever proposed them. */
+function boundaryContinuations(result: unknown): NonNullable<BoundaryProposal["entries"]> {
+	return ((result ?? {}) as BoundaryProposal).entries?.filter((entry) => entry.customType === CONTINUATION_MESSAGE_TYPE) ?? [];
+}
+
+test("a completed run's settlement boundary proposes exactly one continuation", async () => {
+	const host = await startGoalHost("active");
+
+	const before = await host.callTool("get_goal", {});
+	assert.equal(goalStatus(before), "active", "session_start must reconstruct the goal from the branch");
+
+	await host.fire("agent_start", {});
+	await host.fire("agent_end", { messages: [ASSISTANT_DONE] });
+
+	// An earlier handler's proposal, which this handler must not drop.
+	const sentinel = { type: "custom", customType: "another-extension", data: { note: "proposed first" } };
+	const boundary = (await host.fire("agent_before_settle", boundaryEvent([sentinel]))) as BoundaryProposal;
+
+	assert.equal(boundary.continue, true, "the boundary is where the next provider request is requested");
+	assert.ok(boundary.entries?.includes(sentinel), "an earlier handler's draft is carried forward, not replaced");
+
+	const drafted = boundaryContinuations(boundary);
+	assert.equal(drafted.length, 1);
+	const [continuation] = drafted;
+	assert.equal(continuation?.type, "custom_message");
+	assert.match(String(continuation?.content), /Continue working toward the active thread goal/);
+	assert.equal(continuation?.display, false, "the transcript shows the goal status, not the prompt");
+	// The `context` hook keys on this pair to drop a consumed continuation.
+	assert.equal(continuation?.details?.goalId, "goal-under-test");
+	assert.equal(continuations(host).length, 0, "a continuation is a boundary draft now, not a sent message");
+
+});
+
+test("a goal that is not active proposes no continuation at the boundary", async () => {
+	for (const status of ["paused", "blocked", "usageLimited", "budgetLimited", "complete"]) {
+		const host = await startGoalHost(status);
+		await host.fire("agent_start", {});
+		await host.fire("agent_end", { messages: [ASSISTANT_DONE] });
+
+		const sentinel = { type: "custom", customType: "another-extension", data: null };
+		const boundary = (await host.fire("agent_before_settle", boundaryEvent([sentinel]))) as BoundaryProposal | undefined;
+
+		assert.equal(boundaryContinuations(boundary).length, 0, `${status} must not continue`);
+		assert.notEqual(boundary?.continue, true, `${status} must not force a provider request`);
+		assert.equal(continuations(host).length, 0, `${status} must not fall back to a sent message`);
+	}
+});
+
+test("each low-level run gets its own continuation", async () => {
+	// The per-run flag is cleared by `agent_start`. Without that clear a goal would
+	// continue once and then stall for the rest of the session, which no other test
+	// here would catch: every other case fires a single run.
+	const host = await startGoalHost("active");
+
+	await host.fire("agent_start", {});
+	await host.fire("agent_end", { messages: [ASSISTANT_DONE] });
+	const first = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal | undefined;
+	assert.equal(boundaryContinuations(first).length, 1);
+
+	await host.fire("agent_start", {});
+	await host.fire("agent_end", { messages: [ASSISTANT_DONE] });
+	const second = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal | undefined;
+	assert.equal(boundaryContinuations(second).length, 1, "the next run must be able to continue too");
+});
+
+test("a boundary dispatch with a continuation already queued proposes nothing", async () => {
+	// This stands in for the flag's one real case: a `/goal` command landing after
+	// pi's post-run check has decided nothing is queued and before the boundary
+	// runs, so its follow-up is flushed only afterwards. The double does not model
+	// pi's run loop, so the state is constructed directly rather than timed: a
+	// command that lands mid-run is drained by a fresh run, whose `agent_start`
+	// clears the flag before any boundary.
+	const host = await startGoalHost("paused");
+	await host.fire("agent_start", {});
+	await host.runCommand("goal", "resume");
+	assert.equal(goalStatus(await host.callTool("get_goal", {})), "active");
+
+	const queued = continuations(host);
+	assert.equal(queued.length, 1, "the command queues its continuation as a message");
+
+	const boundary = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal | undefined;
+	assert.equal(boundaryContinuations(boundary).length, 0);
+	assert.notEqual(boundary?.continue, true);
+});
+
+test("a completed run records its usage against the goal", async () => {
+	const host = await startGoalHost("active");
+
+	await host.fire("agent_start", {});
+	await host.fire("agent_end", {
+		messages: [{ ...ASSISTANT_DONE, usage: { input: 400, output: 100 } }],
+	});
+
+	// 400 input minus 0 cache reads, plus 100 output.
+	const after = await host.callTool("get_goal", {});
+	assert.equal((after.details as { goal?: { tokensUsed?: number } }).goal?.tokensUsed, 500);
+	const actions = host.appended
+		.filter((entry) => entry.customType === STATE_TYPE)
+		.map((entry) => (entry.data as { action?: string } | undefined)?.action);
+	assert.ok(actions.includes("account"), "accounting is persisted");
+});
+
+test("declining the abort pause leaves the goal active and this run uncontinued", async () => {
+	// The prompt offers a pause; declining it is not a request to continue. pi
+	// skips the boundary for an aborted run, so the goal waits for the user.
+	const host = await startGoalHost("active", true);
+
+	await host.fire("agent_start", {});
+	await host.fire("agent_end", { messages: [ASSISTANT_ABORTED] });
+
+	assert.equal(goalStatus(await host.callTool("get_goal", {})), "active");
+	assert.equal(continuations(host).length, 0);
+});
+
+test("a run that ends in an error requests no continuation and keeps its status", async () => {
+	const stopped = await startGoalHost("active");
+	await stopped.fire("agent_start", {});
+	await stopped.fire("agent_end", { messages: [ASSISTANT_ERROR] });
+	assert.equal(goalStatus(await stopped.callTool("get_goal", {})), "usageLimited", "error-stop reporting is unchanged");
+	const afterEnd = (await stopped.fire("agent_before_settle", { ...boundaryEvent(), outcome: "error" })) as BoundaryProposal | undefined;
+	assert.equal(boundaryContinuations(afterEnd).length, 0);
+
+	// And on its own: the outcome is what stops continuation, so a failed run is
+	// not continued even when `agent_end` left the goal active.
+	const stillActive = await startGoalHost("active");
+	await stillActive.fire("agent_start", {});
+	const byOutcome = (await stillActive.fire("agent_before_settle", { ...boundaryEvent(), outcome: "error" })) as BoundaryProposal | undefined;
+	assert.equal(boundaryContinuations(byOutcome).length, 0);
+	assert.notEqual(byOutcome?.continue, true);
+});
+
+test("an aborted run pauses an active goal instead of continuing it when no UI is available", async () => {
+	const host = await startGoalHost("active", false);
+
+	// pi skips `agent_before_settle` for an aborted run, so this never fires the
+	// boundary: the abort path in `agent_end` is the only one that can act.
+	await host.fire("agent_start", {});
+	await host.fire("agent_end", { messages: [ASSISTANT_ABORTED] });
+
+	assert.equal(continuations(host).length, 0);
+	const goal = await host.callTool("get_goal", {});
+	assert.equal(goalStatus(goal), "paused");
+	const lastState = host.appended.filter((entry) => entry.customType === STATE_TYPE).at(-1);
+	assert.equal((lastState?.data as { action?: string } | undefined)?.action, "status");
+});
+
+test("a pending notice does not stop the boundary from continuing the goal", async () => {
+	// A message an extension sent without `triggerTurn` — a subagent completion
+	// notice is exactly that — is appended to the transcript but does not start a
+	// run. Guarding on the boundary's pending-message preview would therefore stall
+	// an active goal for something that was never going to speak, which is the
+	// regression this test exists to prevent.
+	const host = await startGoalHost("active");
+	await host.fire("agent_start", {});
+	await host.fire("agent_end", { messages: [ASSISTANT_DONE] });
+
+	const boundary = (await host.fire(
+		"agent_before_settle",
+		boundaryEvent([], [{ role: "user", customType: "subagent-result", content: "a child finished" }]),
+	)) as BoundaryProposal | undefined;
+
+	assert.equal(boundaryContinuations(boundary).length, 1, "the goal still continues");
+	assert.equal(boundary?.continue, true);
 });

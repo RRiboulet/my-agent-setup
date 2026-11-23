@@ -53,6 +53,9 @@ const ICONS: Record<SubagentStatusKind, { icon: string; color: ThemeColor }> = {
 	waiting: { icon: "◌", color: "muted" },
 	stalled: { icon: "⏳", color: "error" },
 	interrupted: { icon: "‖", color: "warning" },
+	// A blocked child is not stalled (its tool is alive and the parent holds the
+	// question), so it gets its own glyph rather than sharing the hourglass.
+	question: { icon: "?", color: "warning" },
 };
 
 function truncateTask(task: string): string {

@@ -192,6 +192,32 @@ Adding a new extension or skill means adding it to the `pi` manifest in
 discovery will not glob, so an unlisted extension installs nowhere.
 `test/package-manifest.test.ts` fails if the manifest and the tree disagree.
 
+Cross-extension imports have one home per extension. The settlement gate's
+typed event bus lives in `.pi/extensions/orchestrator/events.ts` and is imported
+by `todos.ts`, `review-triage/index.ts` and `subagent/index.ts`, because the
+publisher must not own the bus and a directory without an entry point fails the
+manifest test. The gate itself (`.pi/extensions/orchestrator/`) records a verdict
+as a session `custom` entry at `agent_before_settle`, publishes
+`orchestrator:gate-decided`, and **acts only where a project opted in** by
+committing `.pi/orchestrator.json`: an open todo, a repeated failure, a project
+verification command the gate runs, or the tool-call loop breaker can then commit
+one more turn instead of settling. An unresolved condition keeps blocking while
+its evidence is unchanged (a new edit, todo or failure re-arms it), every block
+spends one of the branch's `attemptCap`, and `orchestrator_override` is consumed
+by the next block it prevents without spending an attempt; `attemptCap` is the
+hard stop that keeps the gate from trapping a run. It yields `continue`
+when a goal owns it and never returns `continue: false`, so the goal extension
+keeps ownership of continuation. A check that cannot be evaluated fails open, and
+a delegated child records `scope: child` and blocks nothing. The same config's
+`advisor` key asks one configured stronger model for a second opinion when a
+branch holds an unanswered loop block or a repeated settlement failure, inside a
+cooldown and a per-branch budget, and injects the verdict as an extra prompt
+section at `before_agent_start` — never as a replacement system prompt and never
+by switching the model, so the cached prefix survives; it acts only in a trusted
+project, refuses loudly when the provider has no credentials, and its digest
+excludes tool output bodies. This repository deliberately has no config, so its
+own gate reports and nothing more.
+
 Install this repo where you run `pi` from it **as a local path**
 (`pi install /path/to/my-agent-setup`), never as
 `git:github.com/RRiboulet/my-agent-setup`: project discovery and an installed
@@ -320,6 +346,14 @@ which also means the child runs the branch's code and the branch's skills:
 cd .worktrees/<slug> && PI_CODING_AGENT_DIR="$(bin/pi-agent-dir --print)" pi -p "<task>"
 ```
 
+A launcher that bypasses a login shell gets no `~/.bashrc`, so the `--shell` hook
+cannot pick the dir for it: run `bin/pi-wrapped` instead of `pi` there. It
+resolves the same dir `bin/pi-agent-dir --print` names, forwards every argument
+to `pi` unchanged and has no flags of its own, keeps a `PI_CODING_AGENT_DIR`
+already set in the environment, and falls back to a plain `pi` with a note on
+stderr outside a checkout or when the dir was never created. It does not create
+the dir — `bin/pi-agent-dir` is the one-time step.
+
 The `subagent` tool has no env argument, so for a child that must live in a
 worktree, run it this way (or `pi --attach-subagent` into an existing session)
 rather than through `subagent({ cwd })`. Launching with `cwd` = the main checkout
@@ -327,8 +361,9 @@ and `cd`-ing inside each command is the fallback: it starts, but it runs the mai
 checkout's extensions and skills, not the branch's — which is enough for file
 edits and wrong for anything that tests the branch itself.
 
-The six management tools — `subagent_wait`, `subagent_status`,
-`subagent_cancel`, `subagent_interrupt`, `subagent_resume`, `subagent_clean` —
+The seven management tools — `subagent_wait`, `subagent_status`,
+`subagent_answer`, `subagent_cancel`, `subagent_interrupt`, `subagent_resume`,
+`subagent_clean` —
 are **not declared** in this repo's sessions: `defaultTools: ["+tool_search"]` in
 `~/.pi/agent/settings.json` puts them behind `tool_search` so their descriptions
 and schemas stop riding along on every request (measured: ~890 tokens a
@@ -346,6 +381,24 @@ timed-out wait returns the current state rather than an error. Keep
 (`subagent_status({ compact: true })` is the cheap one-line-per-run form, and
 the single-run path is the one that returns output), not for collecting a result
 you could have waited on.
+
+A delegated child that is blocked can ask, and one blocking wait is deliberate.
+It registers `subagent_ask` only when the parent gave it a channel, so a parent
+pays nothing for a tool it can never call and a child of an older parent simply
+cannot ask. The parent's existing watcher tick reads the request (no second
+timer), `subagent_status` shows the run as `? waiting on a question` rather than
+active, stalled or interrupted, and `subagent_answer({ id, answer })` writes the
+reply after `ctx.ui.confirm`. A decision is confirmed by a human or refused:
+with no UI the tool says why and the child times out and reports the blocker.
+The gate is the tool, not the filesystem: the channel is same-uid, so a model with
+`write` or `bash` on this host could forge a reply (or a child could forge its
+own). The honest path is human-confirmed and says so; it does not claim a file
+can authenticate its writer, and in RPC mode the client is what puts the confirm
+to a person. A
+child with no parent left — shut-down watcher, expired request, aborted turn —
+is told the same thing, so it never hangs. That is the only exception to "a
+child is non-blocking"; a progress update (`kind: "progress"`) is fire-and-forget
+and needs no answer.
 
 ## Reviews: one per change, and only when asked
 

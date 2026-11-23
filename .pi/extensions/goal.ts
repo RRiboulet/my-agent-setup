@@ -13,8 +13,9 @@
 //   https://github.com/mitsuhiko/agent-stuff (extensions/goal.ts)
 //   Licensed under the Apache License, Version 2.0.
 //
-// Vendored with one structural refactor and a __test__ tail — everything that
-// differs from upstream is listed below, so a refresh stays a readable diff.
+// Vendored with one structural refactor, one behavioural change, one read-only
+// export for the settlement gate and a __test__ tail — everything that differs
+// from upstream is listed below, so a refresh stays a readable diff.
 //
 // Upstream base: commit 0865c84 ("fix(session-breakdown): only count models
 // that produced messages"). Verified on 2026-10-07 by diffing against
@@ -32,6 +33,35 @@
 //   2. `__test__` export at the bottom exposes module-private helpers so
 //      test/*.test.ts can cover the reconstruction, the pure helpers, and the
 //      budget-limiting decision logic.
+//
+//   3. Goal continuation is requested at the settlement boundary, not at
+//      `agent_end`. Upstream calls `sendMessage(..., { triggerTurn: true })`
+//      from `agent_end`, which is the wrong moment for two reasons: pi may
+//      still auto-retry, compact and retry, or drain a queued follow-up after
+//      it, so a message sent there is input to whatever run pi starts next, not
+//      a proposal the settlement boundary composes with. The
+//      request now comes from `agent_before_settle` as a `custom_message` draft
+//      plus `continue: true` — the final actionable boundary, which pi honours
+//      exactly once per run and composes with other handlers' proposals (so the
+//      draft is appended to `event.entries` rather than replacing them). The
+//      draft carries the same customType and `details.goalId` as before, which
+//      is what the `context` hook keys on to suppress a consumed continuation.
+//      An aborted run skips that boundary, so an aborted run requests no
+//      continuation; the abort-pause prompt, the usage accounting and the
+//      error-stop decision stay in `agent_end`, unchanged in timing — the prompt's
+//      wording does change, to say that declining leaves the goal waiting for the
+//      user's next message, because this change makes that the truth. `/goal`
+//      keeps sending a continuation directly, because a command runs outside
+//      any run and therefore has no boundary to attach to. Composition is per
+//      field: `entries` compose, but `continue` is last-writer-wins, so a later
+//      handler returning `continue: false` cancels this request while the draft
+//      stays committed. The settlement gate must yield by leaving `continue`
+//      alone, not by overriding it.
+//
+//   4. `activeGoalFromBranch` is exported read-only for the settlement gate
+//      (`.pi/extensions/orchestrator/`). The gate reads goal state through this
+//      extension's own reconstruction instead of duplicating the persisted
+//      `goal` entry format; it cannot mutate the goal. No behaviour changes.
 // ---------------------------------------------------------------------------
 
 import { randomUUID } from "node:crypto";
@@ -414,6 +444,22 @@ function reconstructGoalFromBranch(branch: readonly { type?: string; customType?
 	return state;
 }
 
+/**
+ * Read-only view of the goal persisted on a branch, for the settlement gate.
+ *
+ * `null` unless the last goal entry describes an active goal: a paused, blocked,
+ * usage-limited, budget-limited or complete goal is not something a settlement
+ * should hold open. Deliberately returns a copy of the two fields the gate
+ * reports, so a caller cannot reach into the extension's live goal object.
+ */
+export function activeGoalFromBranch(
+	branch: readonly { type?: string; customType?: string; data?: unknown }[],
+): { id: string; objective: string } | null {
+	const goal = reconstructGoalFromBranch(branch);
+	if (!goal || goal.status !== "active") return null;
+	return { id: goal.id, objective: goal.objective };
+}
+
 function hasExhaustedTokenBudget(goal: Goal | null): boolean {
 	return goal !== null && goal.status === "active" && goal.tokenBudget !== undefined && goal.tokensUsed >= goal.tokenBudget;
 }
@@ -422,6 +468,14 @@ export default function goalExtension(pi: ExtensionAPI) {
 	let goal: Goal | null = null;
 	let activeSinceMs: number | null = null;
 	let activeGoalIdAtAgentStart: string | null = null;
+	// One continuation per low-level run: `agent_start` clears it, so the next run
+	// may ask again. A `/goal` command that queues a continuation mid-run does not
+	// leave it set at a boundary — pi drains the follow-up by starting another run,
+	// whose `agent_start` clears it. The flag is still load-bearing for the narrow
+	// case it actually covers: a command landing after pi's post-run handling has
+	// decided there is nothing queued and before the boundary runs. Its follow-up is
+	// flushed only afterwards, so without this guard the goal would add a
+	// continuation on top of a turn that is already coming.
 	let continuationQueued = false;
 
 	function currentGoalSnapshot(): Goal | null {
@@ -572,18 +626,32 @@ export default function goalExtension(pi: ExtensionAPI) {
 		return true;
 	}
 
-	function queueContinuation(ctx: ExtensionContext): void {
+	/** The continuation as `sendMessage` and the boundary draft both spell it;
+	 *  null when there is nothing to continue. */
+	function continuationMessage(): {
+		customType: string;
+		content: string;
+		display: boolean;
+		details: { goalId: string };
+	} | null {
 		const snapshot = currentGoalSnapshot();
-		if (!snapshot || snapshot.status !== "active") return;
-		if (continuationQueued || ctx.hasPendingMessages()) return;
-
-		continuationQueued = true;
-		const message = {
+		if (!snapshot || snapshot.status !== "active") return null;
+		return {
 			customType: CONTINUATION_MESSAGE_TYPE,
 			content: continuationPrompt(snapshot),
 			display: false,
 			details: { goalId: snapshot.id },
 		};
+	}
+
+	// Only a command uses this path: it runs outside any run, so there is no
+	// settlement boundary to attach the continuation to.
+	function queueContinuation(ctx: ExtensionContext): void {
+		const message = continuationMessage();
+		if (!message) return;
+		if (continuationQueued || ctx.hasPendingMessages()) return;
+
+		continuationQueued = true;
 		try {
 			if (ctx.isIdle()) {
 				pi.sendMessage(message, { triggerTurn: true });
@@ -668,7 +736,7 @@ export default function goalExtension(pi: ExtensionAPI) {
 			}
 			const pause = await ctx.ui.confirm(
 				"Pause active goal?",
-				"Operation aborted. Pause this goal instead of automatically continuing?",
+				"Operation aborted. Pause this goal? Declining leaves it active: it resumes with your next message, because an aborted run is not continued automatically.",
 			);
 			if (pause) {
 				setGoalStatus("paused");
@@ -678,8 +746,34 @@ export default function goalExtension(pi: ExtensionAPI) {
 				return;
 			}
 		}
+		// Declining the pause leaves the goal active, but pi skips
+		// `agent_before_settle` for an aborted run, so this run requests no
+		// continuation; the user's next message continues the goal.
+	});
 
-		queueContinuation(ctx);
+	// The continuation belongs here rather than in `agent_end`: this is the final
+	// boundary, so one `continue` is exactly one more provider request, and a
+	// goal whose status changed during the run (complete, blocked, budget hit)
+	// simply proposes nothing.
+	pi.on("agent_before_settle", async (event) => {
+		if (event.outcome !== "completed") return;
+		// Deliberately no queue guard. pi reaches this boundary only when no steer
+		// or follow-up is queued — a queued one continues the low-level loop first
+		// — and an extension message sent without `triggerTurn` is appended whether
+		// or not this handler continues. Guarding on `event.context.pendingMessages`
+		// therefore stops an active goal for something that would not have started
+		// a run, and a subagent completion notice is exactly that message.
+		if (continuationQueued) return;
+		const message = continuationMessage();
+		if (!message) return;
+
+		continuationQueued = true;
+		return {
+			// Returning `entries` replaces the proposal, so earlier handlers' drafts
+			// have to be carried forward for this one to compose with them.
+			entries: [...event.entries, { type: "custom_message" as const, ...message }],
+			continue: true,
+		};
 	});
 
 	pi.on("context", async (event) => {

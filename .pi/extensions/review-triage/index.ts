@@ -13,6 +13,11 @@
  *
  * Config: ~/.pi/agent/review-triage.json (all fields optional).
  * Judge:  a pi classifier model, `opencode` / `jev-1.13-free` by default.
+ *
+ * Besides the `review-triage` session entry, every successful plan publishes
+ * the bounded `orchestrator:triage-planned` event (see
+ * `../orchestrator/events.ts`). The full plan stays in the entry; a subscriber
+ * receives the identity and counts needed to react, not a second copy.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -51,6 +56,7 @@ import type { PolicyGates } from "./policy.ts";
 import { formatPlan } from "./format.ts";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { ORCHESTRATION_EVENTS, publishOrchestrationEvent } from "../orchestrator/events.ts";
 
 const TARGETS = ["uncommitted", "branch", "commit", "task", "none"] as const;
 type TargetParam = (typeof TARGETS)[number];
@@ -193,6 +199,26 @@ function availableModels(ctx: ExtensionContext): AvailableModel[] {
 }
 
 /**
+ * Publish a plan after it has been appended to the session. Bounded on purpose:
+ * the entry is the durable record, and a subscriber that needs the full plan can
+ * read it rather than receiving a copy of it. Publication is total, so a broken
+ * subscriber cannot fail the tool call.
+ */
+function publishTriagePlan(pi: ExtensionAPI, entry: TriageRun): void {
+	publishOrchestrationEvent(pi, ORCHESTRATION_EVENTS.triagePlanned, {
+		target: entry.evidence.target,
+		verdict: entry.plan.verdict,
+		status: entry.plan.status,
+		judge: entry.plan.judge,
+		files: entry.evidence.files.length,
+		added: entry.evidence.added,
+		removed: entry.evidence.removed,
+		signals: entry.evidence.signals.length,
+		...(entry.fingerprint ? { fingerprint: entry.fingerprint } : {}),
+	});
+}
+
+/**
  * The whole pipeline, shared by the tool and the `/triage` command. Config is
  * re-read on every call so an edit takes effect without reloading pi.
  */
@@ -219,6 +245,7 @@ async function runTriage(
 		} catch {
 			// Durable entries are a convenience; never let one break the tool call.
 		}
+		publishTriagePlan(pi, entry);
 		return entry;
 	}
 
@@ -421,6 +448,7 @@ async function runTriage(
 	} catch {
 		// Durable entries are a convenience; never let one break the tool call.
 	}
+	publishTriagePlan(pi, entry);
 	return entry;
 }
 
