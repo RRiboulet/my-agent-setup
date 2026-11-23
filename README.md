@@ -812,9 +812,12 @@ signatures, edited file names, open todos and the goal — never tool output
 bodies. Every field it does keep is passed through a documented redactor first
 (`advisor.redact`, on by default), which removes the common credential shapes: an
 `sk-…` key, a GitHub token, an `AKIA…` access key id, a Slack `xox…` token, a
-`Bearer` header's token, and the value of an `api_key`/`access_token`/`secret`/
-`password` assignment. It replaces characters, not fields, so the digest's shape
-and bound are unchanged; prose and file paths are not touched. If the primary
+`Bearer`/`Basic` header's token, URL userinfo (`user:password@`), and the value of
+an `api_key`/`access_token`/`secret`/`password` assignment. A quoted value may
+contain spaces; an unquoted one is redacted through the end of the assignment, so
+a sentence that uses one of those words as a key is over-redacted — the safe
+direction. It replaces characters, not fields, so the digest's shape and bound
+are unchanged; ordinary prose and file paths are not touched. If the primary
 provider is down or rate-limits, `advisor.fallback` names one other provider/model
 tried once, off unless both of its keys are set; a missing credential or an
 abort is not retried, because one is a configuration error and the other means

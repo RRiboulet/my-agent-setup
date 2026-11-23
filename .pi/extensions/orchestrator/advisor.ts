@@ -118,11 +118,15 @@ const MAX_ITEM_CHARS = 160;
  *      tokens.
  *   3. `AKIA…` — an AWS access key id (`AKIA` plus 16 upper-case characters).
  *   4. `xox[baprs]-…` — Slack tokens.
- *   5. `Bearer <token>` — an authorization header; the scheme is kept, the token
- *      is not.
- *   6. `api_key`/`access_token`/`secret`/`password` followed by `:` or `=`: the
+ *   5. `Bearer <token>` / `Basic <token>` — an authorization header; the scheme
+ *      is kept, the token is not. `Bearer` is matched case-insensitively.
+ *   6. URL userinfo — `scheme://user:password@host` keeps the scheme and host.
+ *   7. `api_key`/`access_token`/`secret`/`password` followed by `:` or `=`: the
  *      key name stays (it is evidence about which setting is involved), the
- *      value becomes `[redacted]`. Quoting is preserved.
+ *      value becomes `[redacted]`. A quoted value may contain spaces and doubled
+ *      quotes; an unquoted value is redacted to the end of the field, which
+ *      deliberately over-redacts a sentence that uses one of those words as a
+ *      key (`rotate the password: tomorrow`). The quoting style is preserved.
  *
  * Deliberately not matched: a word that merely looks secret-adjacent
  * (`src/auth/password.ts`, "rotate the secret"), a bare hash, and anything in a
@@ -134,12 +138,37 @@ const REDACTIONS: readonly { pattern: RegExp; replace: string }[] = [
 	{ pattern: /\bgithub_pat_[A-Za-z0-9_]{20,}/gu, replace: "[redacted]" },
 	{ pattern: /\bAKIA[0-9A-Z]{16}\b/gu, replace: "[redacted]" },
 	{ pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}/gu, replace: "[redacted]" },
-	{ pattern: /\bBearer\s+[A-Za-z0-9\-._~+/]{12,}=*/gu, replace: "Bearer [redacted]" },
-	{
-		pattern: /([A-Za-z0-9_]*(?:api[_-]?key|access[_-]?token|secret|password))(\s*[:=]\s*)(["']?)([^\s"',;)]+)\3/giu,
-		replace: "$1$2$3[redacted]$3",
-	},
+	// `i` so a lowercase scheme is caught too; the scheme is kept, the token is not.
+	{ pattern: /\bBearer\s+[A-Za-z0-9\-._~+/]{12,}=*/giu, replace: "Bearer [redacted]" },
+	{ pattern: /\bBasic\s+[A-Za-z0-9+/]{8,}={0,2}/giu, replace: "Basic [redacted]" },
+	// URL userinfo: keep the scheme and host, redact `user:password@`.
+	{ pattern: /\b([a-z][a-z0-9+.-]*:\/\/)[^/\s:@]+:[^/\s@]+@/giu, replace: "$1[redacted]@" },
 ];
+
+/**
+ * `key = value` / `key: value`, where the value is either quoted (spaces and
+ * doubled quotes allowed, so a passphrase is not cut at its first space) or
+ * unquoted and runs to the end of the field.
+ *
+ * The unquoted branch intentionally over-redacts: `rotate the password: tomorrow`
+ * loses `tomorrow`. A digest field is evidence, not prose, and the safe direction
+ * is to remove a sentence's tail rather than ship a passphrase. The key name and
+ * the separator stay, and so does the quoting style.
+ */
+const ASSIGNMENT_REDACTION =
+	/([A-Za-z0-9_]*(?:api[_-]?key|access[_-]?token|secret|password))(\s*[:=]\s*)(?:"((?:[^"]|"")*)"|'((?:[^']|'')*)'|([^\n]+))/giu;
+
+function redactAssignment(
+	_match: string,
+	key: string,
+	separator: string,
+	doubleQuoted: string | undefined,
+	singleQuoted: string | undefined,
+): string {
+	if (doubleQuoted !== undefined) return `${key}${separator}"[redacted]"`;
+	if (singleQuoted !== undefined) return `${key}${separator}'[redacted]'`;
+	return `${key}${separator}[redacted]`;
+}
 
 /**
  * Remove the {@link REDACTIONS} credential shapes from one field of the digest.
@@ -150,7 +179,7 @@ const REDACTIONS: readonly { pattern: RegExp; replace: string }[] = [
 export function redactSecrets(text: string): string {
 	let out = text;
 	for (const { pattern, replace } of REDACTIONS) out = out.replace(pattern, replace);
-	return out;
+	return out.replace(ASSIGNMENT_REDACTION, redactAssignment);
 }
 
 /** What the advisor is asked. Deliberately narrow: a verdict, not a plan. */
@@ -811,6 +840,9 @@ export async function consultAdvisor(args: ConsultAdvisorArgs): Promise<AdvisorC
 			: (primary.call.latencyMs ?? 0) + (second.call.latencyMs ?? 0);
 	return {
 		...second.call,
+		// The primary *was* called even when the fallback is only a refused
+		// credential check; the record must not claim no provider call was made.
+		called: primary.call.called || second.call.called,
 		fallbackFrom: { provider: args.config.provider, model: args.config.model },
 		// The primary's failure is not lost: a record whose reason only named the
 		// fallback would hide why the fallback was asked at all.
