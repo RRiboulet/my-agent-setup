@@ -268,6 +268,7 @@ test("every model-invoked description says when to use it", () => {
 // "devc ... tmux"). Every other name is checked as a token, one word or not;
 // `tdd` is the reason this list exists rather than a blanket exemption.
 const HOMOGRAPHS = new Set([
+	"architect",
 	"commit",
 	"devcontainer",
 	"github",
@@ -275,6 +276,7 @@ const HOMOGRAPHS = new Set([
 	"handoff",
 	"implement",
 	"librarian",
+	"recall",
 	"teach",
 	"tmux",
 	"worktree",
