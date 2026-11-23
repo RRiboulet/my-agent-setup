@@ -143,7 +143,18 @@ export interface GateBlockConfig {
  * itself. `budget` is the number of recorded attempts (calls and refusals alike)
  * allowed on one branch, and `minGateBlocks` is how many settlement blocks must
  * report the same conditions before they count as a repeated failure.
+ *
+ * `redact` filters the documented credential shapes out of every field the
+ * digest keeps; it is on unless a project turns it off. `fallback` names one
+ * other provider/model, used only when the primary call fails with a provider
+ * error — never for a credential refusal or an abort, which are configuration
+ * facts rather than outages.
  */
+export interface AdvisorFallback {
+	provider: string;
+	model: string;
+}
+
 export interface AdvisorConfig {
 	provider: string;
 	model: string;
@@ -151,6 +162,10 @@ export interface AdvisorConfig {
 	budget: number;
 	minGateBlocks: number;
 	timeoutMs: number;
+	/** Redact credential shapes from the digest's retained fields. Default true. */
+	redact: boolean;
+	/** `null` means no fallback: a failed call is reported and not retried. */
+	fallback: AdvisorFallback | null;
 }
 
 export interface GateConfig {
@@ -321,6 +336,28 @@ function normalizeVerification(raw: unknown): { verification: VerificationConfig
 }
 
 /**
+ * The fallback is validated exactly like the primary: two non-empty keys, or no
+ * fallback and a warning. A one-key object is a typo, not an intent, and a
+ * guessed model would be a second bill nobody asked for.
+ */
+function normalizeAdvisorFallback(raw: unknown): { fallback: AdvisorFallback | null; warning?: string } {
+	if (raw === undefined || raw === null) return { fallback: null };
+	if (typeof raw !== "object" || Array.isArray(raw)) {
+		return { fallback: null, warning: "advisor.fallback must be an object; no fallback model is configured" };
+	}
+	const record = raw as Record<string, unknown>;
+	const provider = typeof record.provider === "string" ? record.provider.trim() : "";
+	const model = typeof record.model === "string" ? record.model.trim() : "";
+	if (!provider || !model) {
+		return {
+			fallback: null,
+			warning: "advisor.fallback.provider and advisor.fallback.model must both be non-empty strings; no fallback model is configured",
+		};
+	}
+	return { fallback: { provider, model } };
+}
+
+/**
  * Validate the advisor block. A model is two keys rather than one
  * `provider/model` string because model ids contain slashes of their own; a
  * half-configured advisor is off, with a warning, rather than a guess.
@@ -352,6 +389,15 @@ function normalizeAdvisor(raw: unknown): { advisor: AdvisorConfig | null; warnin
 	for (const result of [cooldown, budget, minGateBlocks, timeout]) {
 		if (result.warning) warnings.push(result.warning);
 	}
+	// Redaction is on by default: a key that shipped off would leak the one thing
+	// it exists to catch. Only an explicit `false` turns it off.
+	let redact = true;
+	if (record.redact !== undefined) {
+		if (typeof record.redact === "boolean") redact = record.redact;
+		else warnings.push("advisor.redact must be a boolean; using true");
+	}
+	const fallback = normalizeAdvisorFallback(record.fallback);
+	if (fallback.warning) warnings.push(fallback.warning);
 	return {
 		advisor: {
 			provider,
@@ -360,6 +406,8 @@ function normalizeAdvisor(raw: unknown): { advisor: AdvisorConfig | null; warnin
 			budget: budget.value,
 			minGateBlocks: minGateBlocks.value,
 			timeoutMs: timeout.value,
+			redact,
+			fallback: fallback.fallback,
 		},
 		warnings,
 	};

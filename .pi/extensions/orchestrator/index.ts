@@ -400,13 +400,17 @@ export default function orchestratorExtension(
 				verificationCommand: config.verification?.command ?? null,
 				successPattern: config.verification?.successPattern ?? null,
 			}),
+			redact: advisor.redact,
 		});
 		const call = await consultAdvisor({ registry: ctx.modelRegistry, config: advisor, digest, signal: ctx.signal });
 		const record: AdvisorRecord = {
 			version: ADVISOR_VERSION,
 			at: Date.now(),
 			trigger: match.trigger,
-			model: { provider: advisor.provider, model: advisor.model },
+			// The model that answered, and the primary a fallback replaced: one record
+			// is one attempt, so the budget counts the consultation, not the calls.
+			model: call.model,
+			fallbackFrom: call.fallbackFrom,
 			called: call.called,
 			status: call.status,
 			reason: call.reason,

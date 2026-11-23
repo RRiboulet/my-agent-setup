@@ -718,6 +718,8 @@ never returns `continue`. Each opt-in key buys one check:
 | `advisor.budget` | Recorded attempts allowed on one branch, calls and refusals alike (default 2); `0` disables the advisor. |
 | `advisor.minGateBlocks` | Settlement blocks reporting the same conditions before that counts as a repeated failure (default 2). |
 | `advisor.timeoutMs` | Bound on the consultation call (default 60 s); it is awaited at run start. |
+| `advisor.redact` | Redact credential shapes from every field the digest keeps (default `true`). `false` sends the evidence verbatim. |
+| `advisor.fallback` | One `provider`/`model` used only when the primary call fails with a provider error or rate limit — never for a missing credential or an abort. One attempt either way, so the budget counts the consultation, not the calls. |
 | `workspace.lockScope` | `"worktree"` (default) or `"repo"`: which namespace a workspace reservation is compared in. Not a gate key — see below. |
 
 **Reservations are per-worktree unless a project says otherwise.** A reserved path
@@ -807,11 +809,24 @@ provider is checked first: no credentials means no call, and a notice names the
 provider and the fix. The digest is bounded to 4 KB and built only from
 structured evidence — the gate's reasons, the verification *summary*, failure
 signatures, edited file names, open todos and the goal — never tool output
-bodies. Every attempt is an `orchestrator-advisor` session entry, and `/gate`
-shows the last one; the section is attached to the run being prepared, so a
-reload does not re-inject a stale verdict. Like the rest of the gate it acts only
-in a trusted project (an untrusted clone's advisor key is ignored entirely), and
-a delegated child consults nothing.
+bodies. Every field it does keep is passed through a documented redactor first
+(`advisor.redact`, on by default), which removes the common credential shapes: an
+`sk-…` key, a GitHub token, an `AKIA…` access key id, a Slack `xox…` token, a
+`Bearer` header's token, and the value of an `api_key`/`access_token`/`secret`/
+`password` assignment. It replaces characters, not fields, so the digest's shape
+and bound are unchanged; prose and file paths are not touched. If the primary
+provider is down or rate-limits, `advisor.fallback` names one other provider/model
+tried once, off unless both of its keys are set; a missing credential or an
+abort is not retried, because one is a configuration error and the other means
+nobody is waiting. The record names the model that *answered* and the primary it
+replaced, and the whole consultation is still one entry and one budget unit.
+Every attempt is an `orchestrator-advisor` session entry, and `/gate` shows the
+last one; the section is attached to the run being prepared, so a reload does not
+re-inject a stale verdict. Like the rest of the gate it acts only in a trusted
+project (an untrusted clone's advisor key is ignored entirely), and a delegated
+child consults nothing. The attempt's usage is appended to the session's own
+accounting, so `/session-breakdown` bills it once alongside the messages it was
+asked about.
 
 **What a blocking check cannot see.** The gate reads this session's own tool
 calls. A run that delegated every edit to subagents reports no unverified edits

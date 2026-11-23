@@ -54,7 +54,16 @@
  *     the verification *summary* (status, command, exit code), failure
  *     signatures, the loop record, edited file names, open todos and the goal
  *     objective — and bounded to `MAX_ADVISOR_DIGEST_BYTES`. Tool output bodies
- *     are never read, so they cannot leak into it.
+ *     are never read, so they cannot leak into it. Every field it keeps is then
+ *     passed through {@link redactSecrets}, which removes the documented
+ *     credential shapes (an `sk-` key, a GitHub token, an `AKIA` id, a Slack
+ *     token, a `Bearer` header, and a `password: value`-style assignment) before
+ *     the bound is applied; `advisor.redact: false` turns that off.
+ *   * **One fallback.** `advisor.fallback` names a second provider/model, used
+ *     only when the primary call fails with a provider error or rate limit —
+ *     never for a credential refusal or an abort. The record names the model
+ *     that answered and the primary it replaced, and the whole consultation
+ *     spends one budget unit however many provider calls it made.
  *   * **Where the verdict lives.** One `orchestrator-advisor` session entry per
  *     attempt: the trigger, the model, the digest, the verdict and its usage.
  *     The same handler that records it attaches it to the run it is preparing,
@@ -90,6 +99,59 @@ const MAX_EDITED_FILES = 20;
 const MAX_GATE_REASONS = 8;
 const MAX_OPEN_TODOS = 5;
 const MAX_ITEM_CHARS = 160;
+
+// --- Redaction --------------------------------------------------------------
+
+/**
+ * The credential shapes the digest redactor removes, in order: the specific
+ * prefixes first, the generic `key: value` form last, so a named key is removed
+ * by shape before the generic rule has to guess where its value ends.
+ *
+ * Documented here because this is the whole of the filter — no entropy
+ * heuristic, no second pass, no model. Each pattern requires the shape a real
+ * credential has (a known prefix and enough random-looking characters), which is
+ * what keeps ordinary prose and file paths out of it:
+ *
+ *   1. `sk-…` — OpenAI-style keys, including `sk-proj-`/`sk-ant-` prefixed ones
+ *      (20+ key characters after the prefix).
+ *   2. `ghp_…`, `gho_…`, `ghu_…`, `ghs_…`, `ghr_…`, `github_pat_…` — GitHub
+ *      tokens.
+ *   3. `AKIA…` — an AWS access key id (`AKIA` plus 16 upper-case characters).
+ *   4. `xox[baprs]-…` — Slack tokens.
+ *   5. `Bearer <token>` — an authorization header; the scheme is kept, the token
+ *      is not.
+ *   6. `api_key`/`access_token`/`secret`/`password` followed by `:` or `=`: the
+ *      key name stays (it is evidence about which setting is involved), the
+ *      value becomes `[redacted]`. Quoting is preserved.
+ *
+ * Deliberately not matched: a word that merely looks secret-adjacent
+ * (`src/auth/password.ts`, "rotate the secret"), a bare hash, and anything in a
+ * tool-output body — those never reach the digest at all.
+ */
+const REDACTIONS: readonly { pattern: RegExp; replace: string }[] = [
+	{ pattern: /\bsk-(?:[A-Za-z0-9]{20,}|(?:proj|ant|live|test)-[A-Za-z0-9_-]{20,})/gu, replace: "[redacted]" },
+	{ pattern: /\bgh[pousr]_[A-Za-z0-9]{20,}/gu, replace: "[redacted]" },
+	{ pattern: /\bgithub_pat_[A-Za-z0-9_]{20,}/gu, replace: "[redacted]" },
+	{ pattern: /\bAKIA[0-9A-Z]{16}\b/gu, replace: "[redacted]" },
+	{ pattern: /\bxox[baprs]-[A-Za-z0-9-]{10,}/gu, replace: "[redacted]" },
+	{ pattern: /\bBearer\s+[A-Za-z0-9\-._~+/]{12,}=*/gu, replace: "Bearer [redacted]" },
+	{
+		pattern: /([A-Za-z0-9_]*(?:api[_-]?key|access[_-]?token|secret|password))(\s*[:=]\s*)(["']?)([^\s"',;)]+)\3/giu,
+		replace: "$1$2$3[redacted]$3",
+	},
+];
+
+/**
+ * Remove the {@link REDACTIONS} credential shapes from one field of the digest.
+ * A last-mile filter, not a digest rebuild: the field stays where it was and
+ * only the credential-shaped substring changes, so the evidence keeps its shape
+ * and its bound. Pure and idempotent — redacting `[redacted]` again is a no-op.
+ */
+export function redactSecrets(text: string): string {
+	let out = text;
+	for (const { pattern, replace } of REDACTIONS) out = out.replace(pattern, replace);
+	return out;
+}
 
 /** What the advisor is asked. Deliberately narrow: a verdict, not a plan. */
 export const ADVISOR_SYSTEM_PROMPT = [
@@ -136,7 +198,11 @@ export interface AdvisorRecord {
 	version: typeof ADVISOR_VERSION;
 	at: number;
 	trigger: AdvisorTrigger;
+	/** The model that answered, or the one that failed when none did. */
 	model: { provider: string; model: string };
+	/** Names the primary this fallback replaced; `null` when the primary answered
+	 *  (or nothing was called). One record is one attempt either way. */
+	fallbackFrom: { provider: string; model: string } | null;
 	status: AdvisorStatus;
 	/** False only for a refusal: no provider call was made. */
 	called: boolean;
@@ -145,6 +211,7 @@ export interface AdvisorRecord {
 	verdict: string | null;
 	usage: AdvisorUsage | null;
 	digest: AdvisorDigest;
+	/** Wall time of the whole attempt, both provider calls when a fallback ran. */
 	latencyMs: number | null;
 }
 
@@ -156,6 +223,10 @@ export interface AdvisorCall {
 	verdict: string | null;
 	usage: AdvisorUsage | null;
 	latencyMs: number | null;
+	/** The model that answered, or the one that was tried and failed. */
+	model: { provider: string; model: string };
+	/** The primary that failed when the fallback answered; `null` otherwise. */
+	fallbackFrom: { provider: string; model: string } | null;
 }
 
 /** The branch's advisor history, reconstructed on resume. */
@@ -309,6 +380,12 @@ function normalizeRecord(data: unknown): AdvisorRecord | null {
 			provider: typeof model.provider === "string" ? model.provider : "unknown",
 			model: typeof model.model === "string" ? model.model : "unknown",
 		},
+		fallbackFrom: isRecord(data.fallbackFrom)
+			? {
+					provider: typeof data.fallbackFrom.provider === "string" ? data.fallbackFrom.provider : "unknown",
+					model: typeof data.fallbackFrom.model === "string" ? data.fallbackFrom.model : "unknown",
+				}
+			: null,
 		status,
 		called: data.called === true,
 		reason: typeof data.reason === "string" ? data.reason : "",
@@ -375,6 +452,8 @@ export interface AdvisorDigestInput {
 	goal: { objective: string } | null;
 	openTodos: readonly { id: string; title: string }[];
 	edits: EditState | null;
+	/** Pass the config's `advisor.redact`; an absent value means redact. */
+	redact?: boolean;
 }
 
 function truncateBytes(text: string, max: number): AdvisorDigest {
@@ -405,6 +484,11 @@ function truncateBytes(text: string, max: number): AdvisorDigest {
  * any kind. Nothing here reads a `toolResult` message's content; the failure
  * detail comes from the loop record, which is the bounded signature the loop
  * breaker kept, not the body it came from.
+ *
+ * Every retained line is passed through {@link redactSecrets} before the byte
+ * bound (unless the config turns it off), because a file name, a todo title or a
+ * verification summary can carry a credential even though no tool body does. The
+ * redaction changes characters, never the digest's shape or its bound.
  */
 export function buildAdvisorDigest(input: AdvisorDigestInput): AdvisorDigest {
 	const lines: string[] = ["Second opinion requested because a coding session is stuck.", `Trigger: ${input.trigger.summary}.`];
@@ -461,7 +545,11 @@ export function buildAdvisorDigest(input: AdvisorDigestInput): AdvisorDigest {
 
 	if (input.goal) lines.push(`Active goal: ${collapse(input.goal.objective)}`);
 
-	return truncateBytes(lines.join("\n"), MAX_ADVISOR_DIGEST_BYTES);
+	// Per line, so every field is filtered and no pattern can match across the
+	// boundary between two fields. Redaction happens before the bound, so a
+	// credential cannot push an otherwise-fitting digest over it.
+	const text = (input.redact === false ? lines : lines.map(redactSecrets)).join("\n");
+	return truncateBytes(text, MAX_ADVISOR_DIGEST_BYTES);
 }
 
 // --- The consultation -------------------------------------------------------
@@ -513,19 +601,41 @@ export interface ConsultAdvisorArgs {
 	env?: NodeJS.ProcessEnv;
 }
 
+/** One provider call and the fact that decides whether a retry may follow it. */
+interface AdvisorAttempt {
+	call: AdvisorCall;
+	/** True when the caller's signal or the provider aborted the call. A retry
+	 *  would repeat the abort, so it is not a failure a fallback can fix. */
+	aborted: boolean;
+}
+
+function attemptResult(call: AdvisorCall, aborted = false): AdvisorAttempt {
+	return { call, aborted };
+}
+
 /**
- * Ask the configured model once. Never throws: credentials, a missing catalogue
- * entry, a provider error and an empty response are all returned as data, because
- * the caller is in the middle of starting a run.
+ * One provider call: find the model, check its credentials, call it, classify
+ * the answer. Never throws: credentials, a missing catalogue entry, a provider
+ * error and an empty response are all returned as data, because the caller is in
+ * the middle of starting a run.
  */
-export async function consultAdvisor(args: ConsultAdvisorArgs): Promise<AdvisorCall> {
-	const { provider, model: modelId } = args.config;
+async function callAdvisorModel(args: {
+	registry: AdvisorRegistry;
+	provider: string;
+	model: string;
+	timeoutMs: number;
+	digest: AdvisorDigest;
+	signal?: AbortSignal;
+	env?: NodeJS.ProcessEnv;
+}): Promise<AdvisorAttempt> {
+	const { provider, model: modelId } = args;
+	const identity = { provider, model: modelId };
 	const started = Date.now();
 	const elapsed = (): number => Date.now() - started;
 
 	const model = args.registry.find(provider, modelId);
 	if (!model) {
-		return {
+		return attemptResult({
 			called: false,
 			status: "refused",
 			reason:
@@ -534,7 +644,9 @@ export async function consultAdvisor(args: ConsultAdvisorArgs): Promise<AdvisorC
 			verdict: null,
 			usage: null,
 			latencyMs: null,
-		};
+			model: identity,
+			fallbackFrom: null,
+		});
 	}
 
 	const auth = authSourceFromRegistry(args.registry, args.env ?? process.env);
@@ -547,7 +659,7 @@ export async function consultAdvisor(args: ConsultAdvisorArgs): Promise<AdvisorC
 		status = undefined;
 	}
 	if (status?.configured === false) {
-		return {
+		return attemptResult({
 			called: false,
 			status: "refused",
 			reason:
@@ -556,7 +668,9 @@ export async function consultAdvisor(args: ConsultAdvisorArgs): Promise<AdvisorC
 			verdict: null,
 			usage: null,
 			latencyMs: null,
-		};
+			model: identity,
+			fallbackFrom: null,
+		});
 	}
 
 	const context: Context = {
@@ -572,69 +686,136 @@ export async function consultAdvisor(args: ConsultAdvisorArgs): Promise<AdvisorC
 
 	let message: AssistantMessage;
 	try {
-		message = await args.registry.complete(model, context, { signal: args.signal, timeoutMs: args.config.timeoutMs });
+		message = await args.registry.complete(model, context, { signal: args.signal, timeoutMs: args.timeoutMs });
 	} catch (error) {
-		return {
+		return attemptResult({
 			called: true,
 			status: "error",
 			reason: `the advisor call to ${provider}/${modelId} failed: ${error instanceof Error ? error.message : String(error)}`,
 			verdict: null,
 			usage: null,
 			latencyMs: elapsed(),
-		};
+			model: identity,
+			fallbackFrom: null,
+		});
 	}
 
 	if (!isRecord(message)) {
-		return {
+		return attemptResult({
 			called: true,
 			status: "error",
 			reason: `the advisor call to ${provider}/${modelId} returned no message`,
 			verdict: null,
 			usage: null,
 			latencyMs: elapsed(),
-		};
+			model: identity,
+			fallbackFrom: null,
+		});
 	}
 	const usage = usageOf(message.usage);
 	if (message.stopReason === "aborted" || args.signal?.aborted) {
-		return {
-			called: true,
-			status: "error",
-			reason: `the advisor call to ${provider}/${modelId} was aborted before it returned a verdict`,
-			verdict: null,
-			usage,
-			latencyMs: elapsed(),
-		};
+		return attemptResult(
+			{
+				called: true,
+				status: "error",
+				reason: `the advisor call to ${provider}/${modelId} was aborted before it returned a verdict`,
+				verdict: null,
+				usage,
+				latencyMs: elapsed(),
+				model: identity,
+				fallbackFrom: null,
+			},
+			true,
+		);
 	}
 	if (message.stopReason === "error") {
-		return {
+		return attemptResult({
 			called: true,
 			status: "error",
 			reason: `the advisor call to ${provider}/${modelId} failed: ${message.errorMessage ?? "the provider reported an error"}`,
 			verdict: null,
 			usage,
 			latencyMs: elapsed(),
-		};
+			model: identity,
+			fallbackFrom: null,
+		});
 	}
 
 	const text = Array.isArray(message.content) ? textOf(message) : "";
 	if (!text) {
-		return {
+		return attemptResult({
 			called: true,
 			status: "empty",
 			reason: `${provider}/${modelId} returned no verdict text`,
 			verdict: null,
 			usage,
 			latencyMs: elapsed(),
-		};
+			model: identity,
+			fallbackFrom: null,
+		});
 	}
 
-	return {
+	return attemptResult({
 		called: true,
 		status: "ok",
 		reason: `${provider}/${modelId} returned a verdict`,
 		verdict: text.slice(0, MAX_ADVISOR_VERDICT_CHARS),
 		usage,
 		latencyMs: elapsed(),
+		model: identity,
+		fallbackFrom: null,
+	});
+}
+
+/**
+ * Ask the configured model once, and `advisor.fallback` once if that call failed
+ * with a provider error.
+ *
+ * The fallback is for an outage: a provider that is down or rate-limits. It is
+ * deliberately not used for a credential refusal or a missing catalogue entry —
+ * those are configuration errors the second provider would only mask — nor for
+ * an abort, where the caller has already stopped waiting and a second call is the
+ * one thing that must not happen. An empty verdict is not an outage either: the
+ * model answered with nothing, which the record reports as `empty`.
+ *
+ * One consultation is one attempt: however many provider calls it made, it writes
+ * one record and spends one budget unit. The record names the model that
+ * answered, and `fallbackFrom` names the primary it replaced.
+ */
+export async function consultAdvisor(args: ConsultAdvisorArgs): Promise<AdvisorCall> {
+	const primary = await callAdvisorModel({
+		registry: args.registry,
+		provider: args.config.provider,
+		model: args.config.model,
+		timeoutMs: args.config.timeoutMs,
+		digest: args.digest,
+		signal: args.signal,
+		env: args.env,
+	});
+	const fallback = args.config.fallback;
+	if (primary.call.status !== "error" || primary.aborted || args.signal?.aborted || !fallback) return primary.call;
+
+	const second = await callAdvisorModel({
+		registry: args.registry,
+		provider: fallback.provider,
+		model: fallback.model,
+		timeoutMs: args.config.timeoutMs,
+		digest: args.digest,
+		signal: args.signal,
+		env: args.env,
+	});
+	const primaryLabel = `${args.config.provider}/${args.config.model}`;
+	const latency =
+		primary.call.latencyMs === null && second.call.latencyMs === null
+			? null
+			: (primary.call.latencyMs ?? 0) + (second.call.latencyMs ?? 0);
+	return {
+		...second.call,
+		fallbackFrom: { provider: args.config.provider, model: args.config.model },
+		// The primary's failure is not lost: a record whose reason only named the
+		// fallback would hide why the fallback was asked at all.
+		reason: `${second.call.reason} (fallback after ${primaryLabel}: ${primary.call.reason})`,
+		latencyMs: latency,
 	};
 }
 
@@ -657,7 +838,8 @@ export function formatAdvisorSection(record: AdvisorRecord): string {
 /** Human-readable form for `/gate`. */
 export function formatAdvisorRecord(record: AdvisorRecord): string {
 	const lines = [
-		`Advisor: ${record.status.toUpperCase()} · ${record.model.provider}/${record.model.model} · ${record.called ? "called" : "no call"}`,
+		`Advisor: ${record.status.toUpperCase()} · ${record.model.provider}/${record.model.model} · ${record.called ? "called" : "no call"}` +
+			(record.fallbackFrom ? ` · fallback after ${record.fallbackFrom.provider}/${record.fallbackFrom.model}` : ""),
 		`Trigger: ${record.trigger.summary}`,
 	];
 	if (record.verdict) lines.push(record.verdict);

@@ -62,6 +62,29 @@ Added:
   `orchestrator-workspace.test.ts`.
 
 
+- **The orchestration advisor redacts its digest, can fail over once, and its
+  cost is now visible in `/session-breakdown`.** The digest already excluded
+  tool-output bodies, but a file name, todo title, verification summary or loop
+  detail can carry a credential, so every field it keeps now passes through a
+  documented redactor (`advisor.redact`, on by default): an `sk-…` key, a GitHub
+  `ghp_`/`github_pat_` token, an `AKIA…` access key id, a Slack `xox…` token, a
+  `Bearer` header's token, and the value of an `api_key`/`access_token`/`secret`/
+  `password` assignment — the key name stays, the value becomes `[redacted]`.
+  Prose and paths are untouched, and the digest's shape and 4 KB bound are
+  unchanged because redaction replaces characters before the bound is applied.
+  `advisor.fallback` names one other provider/model tried once when the primary
+  call fails with a provider error or rate limit; it is not used for a credential
+  refusal or an abort, where a retry would hide a configuration error or keep
+  calling after nobody is waiting, and an empty answer is reported rather than
+  spent on a second provider. The record names the model that answered and the
+  primary it replaced, and two provider calls are still one record and one budget
+  unit. Separately, `/session-breakdown` counted only `type: "message"` entries,
+  so pi's `appendUsage` entries — one per advisor consultation — were billed to
+  nobody; the vendored file gains a fifth `LOCAL PATCH` that accounts those
+  entries' tokens and cost (and their model bucket) without counting a message,
+  and an inherited usage entry is excluded by the existing fork patch. Tests:
+  `orchestrator-advisor.test.ts`, `session-breakdown.test.ts`.
+
 Fixed:
 
 - **A delegated worker no longer passes its role to a `pi` its shell starts.**
