@@ -28,6 +28,7 @@ const SKILLS_ROOT = path.join(REPO_ROOT, ".pi/skills");
 // The stack adapted from RRiboulet/agent-coding-skills. Kept as a list so the
 // per-stack rules below do not silently apply to this repo's own skills.
 const ADAPTED = [
+	"architect",
 	"benchmark-checklist",
 	"blast-radius",
 	"diagnosing-bugs",
@@ -36,6 +37,7 @@ const ADAPTED = [
 	"implement",
 	"in-your-own-words",
 	"prove-it-works",
+	"recall",
 	"show-me-your-work",
 	"tdd",
 	"to-spec",
@@ -55,7 +57,7 @@ const ALL = [...ADAPTED, ...PORTED, ...OURS];
 
 // pi honors `disable-model-invocation`; these five are entry points only the
 // user starts, and AGENTS.md says so.
-const USER_INVOKED = ["handoff", "implement", "teach", "to-spec", "to-tickets"];
+const USER_INVOKED = ["handoff", "implement", "recall", "teach", "to-spec", "to-tickets"];
 
 function skillDirs(): string[] {
 	return readdirSync(SKILLS_ROOT)
@@ -266,6 +268,7 @@ test("every model-invoked description says when to use it", () => {
 // "devc ... tmux"). Every other name is checked as a token, one word or not;
 // `tdd` is the reason this list exists rather than a blanket exemption.
 const HOMOGRAPHS = new Set([
+	"architect",
 	"commit",
 	"devcontainer",
 	"github",
@@ -273,6 +276,7 @@ const HOMOGRAPHS = new Set([
 	"handoff",
 	"implement",
 	"librarian",
+	"recall",
 	"teach",
 	"tmux",
 	"worktree",

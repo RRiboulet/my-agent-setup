@@ -39,9 +39,9 @@ test("every skill on disk is listed exactly once", () => {
 	}
 });
 
-test("the two invocation classes match the frontmatter, and the five are pinned", () => {
+test("the two invocation classes match the frontmatter, and the six are pinned", () => {
 	const userInvoked = SKILLS.filter((skill) => skill.userInvoked).map((skill) => skill.name);
-	assert.deepEqual(userInvoked, ["handoff", "implement", "teach", "to-spec", "to-tickets"]);
+	assert.deepEqual(userInvoked, ["handoff", "implement", "recall", "teach", "to-spec", "to-tickets"]);
 	const block = renderBlock();
 	assert.ok(
 		block.includes(`### User-invoked — ${userInvoked.length}:`),
