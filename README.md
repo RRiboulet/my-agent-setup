@@ -794,10 +794,22 @@ a delegated child consults nothing.
 **What a blocking check cannot see.** The gate reads this session's own tool
 calls. A run that delegated every edit to subagents reports no unverified edits
 over a worktree full of them, because a child is another process with another
-session log; the gate says so in its scope line. A delegated child
-(`PI_TMUX_SUBAGENT_CHILD=1`) records a verdict with `scope: child`, runs no command
-and blocks nothing — parent and child share the project config, and a child that
-blocked itself would stall the delegation its parent is waiting on.
+session log; the gate says so in its scope line. A delegated worker
+(`PI_ORCHESTRATOR_ROLE=worker`, or the legacy `PI_TMUX_SUBAGENT_CHILD=1` that
+older launchers set) records a verdict with `scope: child`, runs no command, blocks
+nothing and registers no override tool — parent and child share the project
+config, and a child that blocked itself would stall the delegation its parent is
+waiting on. The role is resolved **once, at module load**, into a constant: the
+subagent extension deletes `PI_TMUX_SUBAGENT_CHILD` from the child's environment
+during startup so a `pi` spawned from the child's shell tool cannot re-enter child
+mode, and a guard that re-read the variable at the settlement boundary was gone by
+the time it mattered. The separate `PI_ORCHESTRATOR_ROLE` marker is written by the
+launcher as a literal in the child command, so scrubbing the child-mode variable
+does not erase the role, and a top-level run (`pi -p`, RPC, CI) carries no marker
+and settles normally. The child removes that marker at `session_start` — after
+every factory has read it, before any tool can spawn a process — so a `pi`
+launched from the worker's shell does not inherit the worker role and skip its own
+gate.
 
 **What the event means.** `gate-decided` is published from the boundary, before
 the entry is committed, because pi offers no post-commit hook there. Nothing acts

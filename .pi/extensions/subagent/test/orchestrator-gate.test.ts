@@ -36,7 +36,9 @@ import {
 	readGateConfig,
 	DEFAULT_VERIFICATION_MAX_OUTPUT_BYTES,
 } from "../../orchestrator/config.ts";
+import { ADVISOR_SECTION } from "../../orchestrator/advisor.ts";
 import { ORCHESTRATION_EVENTS } from "../../orchestrator/events.ts";
+import type { OrchestratorRole } from "../../orchestrator/role.ts";
 import { readOpenTodos, todoDirectory } from "../../orchestrator/todo-state.ts";
 import type { VerificationOutcome } from "../../orchestrator/verify.ts";
 import orchestratorExtension from "../../orchestrator/index.ts";
@@ -171,6 +173,7 @@ async function startHost(
 		hasUI?: boolean;
 		cwd?: string;
 		exec?: (command: string, args: string[], options: Record<string, unknown>) => Promise<Record<string, unknown>>;
+		role?: OrchestratorRole;
 	} = {},
 ) {
 	const host = createFakeHost({
@@ -180,7 +183,10 @@ async function startHost(
 		cwd: options.cwd,
 		exec: options.exec as never,
 	});
-	orchestratorExtension(host.pi);
+	// The role is a process-level fact resolved at module load; the seam exists so
+	// a test can drive the worker path without mutating this process's environment
+	// after the module was loaded (which is exactly the bug under test).
+	orchestratorExtension(host.pi, { role: options.role });
 	return host;
 }
 
@@ -945,7 +951,7 @@ test("an override lets a blocked settlement settle, and is recorded in the sessi
 
 function newHostFrom(cwd: string, branch: Entry[]) {
 	const host = createFakeHost({ sessionId: "orchestrator-gate-test", cwd, branch });
-	orchestratorExtension(host.pi);
+	orchestratorExtension(host.pi, { role: "parent" });
 	return host;
 }
 
@@ -1013,6 +1019,112 @@ test("an untrusted project's config is never executed and never blocks", async (
 			"a project the gate will not act in gets no escape hatch",
 		);
 	});
+});
+
+// --- Worker role ------------------------------------------------------------
+
+/**
+ * A delegated child that loads the orchestrator and then has its child markers
+ * scrubbed still reports, runs nothing and blocks nothing.
+ *
+ * This is the regression the role module exists for. The old guard read
+ * `PI_TMUX_SUBAGENT_CHILD` at every call site, and the subagent factory deletes
+ * it during startup, so by this boundary the guard was gone and the child ran
+ * the project's verification command and blocked its own settlement — while the
+ * parent was still waiting on it.
+ */
+test("a delegated worker reports, runs no command and blocks nothing after its child markers are scrubbed", async () => {
+	await withTempDir(async (cwd) => {
+		await mkdir(path.join(cwd, ".pi", "todos"), { recursive: true });
+		await writeFile(gateConfigPath(cwd), JSON.stringify({ version: 1, block: { openTodos: true } }));
+		await writeFile(
+			path.join(cwd, ".pi", "todos", "aaaaaaaa.md"),
+			`${JSON.stringify({ id: "aaaaaaaa", title: "finish", status: "open" })}\n`,
+		);
+
+		await withEnv({ PI_TODO_PATH: undefined }, async () => {
+			// The real order: the launcher sets the markers, the subagent factory
+			// reads them, and then it scrubs them from the process so a `pi` spawned
+			// from the child's shell tool cannot re-enter child mode.
+			await withEnv({ PI_TMUX_SUBAGENT_CHILD: "1", PI_ORCHESTRATOR_ROLE: "worker" }, async () => {
+				await withEnv({ PI_TMUX_SUBAGENT_CHILD: undefined, PI_ORCHESTRATOR_ROLE: undefined }, async () => {
+					const host = await startHost({ branch: [], cwd, role: "worker" });
+					await host.fire("session_start", {});
+
+					const result = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+					const verdict = gateVerdictOf(result);
+
+					assert.equal(verdict.decision, "report", "a child never blocks its own settlement");
+					assert.equal(verdict.scope, "child");
+					assert.equal(result.continue, undefined, "no continuation is requested from a child");
+					assert.equal(host.execCalls.length, 0, "the verification command must not run as a child");
+					const suppressed = verdict.reasons.find((reason) => reason.code === "blocking-suppressed");
+					assert.match(String(suppressed?.summary ?? ""), /PI_ORCHESTRATOR_ROLE=worker/);
+					assert.match(String(suppressed?.summary ?? ""), /PI_TMUX_SUBAGENT_CHILD/);
+					assert.equal(
+						host.tools.has(GATE_OVERRIDE_TOOL),
+						false,
+						"a child gets no escape hatch, at session start or at the boundary",
+					);
+				});
+			});
+		});
+	});
+});
+
+/**
+ * The control for the worker test: the same project, as a parent, blocks and
+ * runs the configured command. Without this, "report" above could be a
+ * misconfigured fixture rather than the role doing its job.
+ */
+test("the same project blocks a parent and runs its verification command", async () => {
+	await withTempDir(async (cwd) => {
+		await mkdir(path.join(cwd, ".pi"), { recursive: true });
+		await writeFile(
+			gateConfigPath(cwd),
+			JSON.stringify({ version: 1, verification: { command: "node --test", timeoutMs: 30_000 } }),
+		);
+		await withEnv({ PI_TODO_PATH: undefined }, async () => {
+			const exec = async () => ({ stdout: "ok", stderr: "", code: 0, killed: false, truncated: false });
+			const parent = await startHost({
+				cwd,
+				role: "parent",
+				exec,
+				branch: [assistantCall("e1", "edit", { path: "src/a.ts" }), toolResult("e1", "edit")],
+			});
+			const parentVerdict = gateVerdictOf((await parent.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal);
+			assert.equal(parentVerdict.scope, "parent");
+			assert.equal(parentVerdict.decision, "continue", "a parent is held to the project's policy");
+			assert.equal(parent.execCalls.length, 1, "a parent runs the configured command");
+
+			const worker = await startHost({
+				cwd,
+				role: "worker",
+				exec,
+				branch: [assistantCall("e1", "edit", { path: "src/a.ts" }), toolResult("e1", "edit")],
+			});
+			const workerVerdict = gateVerdictOf((await worker.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal);
+			assert.equal(workerVerdict.scope, "child");
+			assert.equal(workerVerdict.decision, "report");
+			assert.equal(worker.execCalls.length, 0);
+		});
+	});
+});
+
+// --- Prompt stability -------------------------------------------------------
+
+test("before_agent_start returns no systemPrompt and no handler writes to it", async () => {
+	const host = await startHost({ branch: [] });
+	const event = { systemPrompt: "base", systemPromptOptions: { sections: {} } };
+	const result = await host.fire("before_agent_start", event);
+	const proposal = (result ?? {}) as Record<string, unknown>;
+
+	// A returned `systemPrompt` would fold run-time state into the cached prefix.
+	assert.equal("systemPrompt" in proposal, false);
+	assert.equal(event.systemPrompt, "base", "no handler may rewrite the run's system prompt");
+	assert.deepEqual(Object.keys((event.systemPromptOptions as { sections: Record<string, string> }).sections), []);
+	// The only prompt mutation the orchestrator has is a namespaced section.
+	assert.equal(ADVISOR_SECTION, "advisor");
 });
 
 test("an override is not burned on a settlement that could not block", () => {

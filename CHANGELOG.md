@@ -4,6 +4,35 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Fixed:
+
+- **A delegated worker no longer passes its role to a `pi` its shell starts.**
+  `PI_ORCHESTRATOR_ROLE=worker` is inherited by every bash-tool subprocess, so a
+  nested `pi` launched from a worker's shell resolved as a worker and skipped its
+  own gate and advisor. The child now removes the marker at `session_start` —
+  after every extension factory has read it, and before any tool can spawn a
+  process — so it cannot outlive the run it was written for. The legacy
+  `PI_TMUX_SUBAGENT_CHILD` fallback still assumes the orchestrator loads before
+  the subagent factory, which the package manifest's order guarantees.
+- **A delegated child no longer runs the project's verification command or blocks
+  its own settlement.** The orchestrator decided "am I a child?" by reading
+  `PI_TMUX_SUBAGENT_CHILD` at every boundary, while the subagent extension reads
+  that variable in its factory and then deletes it so a `pi` spawned from the
+  child's shell tool cannot re-enter child mode — so by the first
+  `agent_before_settle` the guard was gone and the child was held to the parent's
+  policy, stalling the delegation its parent was waiting on. The role is now
+  resolved once at module load (`.pi/extensions/orchestrator/role.ts`) from the
+  launcher-set `PI_ORCHESTRATOR_ROLE=worker`, with the legacy
+  `PI_TMUX_SUBAGENT_CHILD=1` still honoured, so scrubbing the environment cannot
+  change it. A worker reports with `scope: child`, runs no command, blocks
+  nothing, consults no advisor and registers no override tool; a top-level run
+  (`pi -p`, RPC, CI) carries no marker and settles normally. The child command
+  now writes `PI_ORCHESTRATOR_ROLE=worker` as a literal, and a fresh-process test
+  drives the real factory with the launcher's environment instead of only the
+  test seam, which is what let the original bug through. A child-side test proves
+  the marker is removed at `session_start`. Tests: `orchestrator-role.test.ts`,
+  `orchestrator-gate.test.ts`, `lifecycle-launch.test.ts`.
+
 ## v1.16.0 — 2026-11-23
 
 Added:

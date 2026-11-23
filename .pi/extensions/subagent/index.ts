@@ -1711,6 +1711,19 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		delete process.env[RESULT_ENV];
 		delete process.env[INTERRUPT_ENV];
 		delete process.env[ESCALATION_ENV];
+		// The orchestrator's worker marker is scrubbed at session_start, not here.
+		// It is a literal this launcher writes into the child command, and the
+		// orchestrator resolves it once at module load to decide whether this
+		// process may act at a settlement boundary. Removing it in this factory
+		// would depend on the orchestrator having loaded first; session_start runs
+		// after every factory, so the marker is read wherever the orchestrator sits
+		// in the load order. Leaving it in place would be the same inheritance
+		// hazard as the child-mode variables above, with a different consequence: a
+		// `pi` launched from this worker's shell would resolve as a worker and skip
+		// its own gate and advisor.
+		pi.on("session_start", () => {
+			delete process.env.PI_ORCHESTRATOR_ROLE;
+		});
 		return;
 	}
 
@@ -3026,6 +3039,11 @@ const noteInterrupt = async (
 			const childCommand = [
 				"exec env",
 				`${CHILD_ENV}=1`,
+				// The orchestrator's process role, written as a literal like the others.
+				// It is a separate marker because the child-mode variable above is
+				// scrubbed from the child's environment at startup, and the orchestrator
+				// must still know it is a worker after that scrub.
+				"PI_ORCHESTRATOR_ROLE=worker",
 				`${RESULT_ENV}=${shellQuote(run.resultPath)}`,
 				`${INTERRUPT_ENV}=${shellQuote(getInterruptFilePath(run.runDir))}`,
 				// Local patch 23: the channel directory, which is also the child's

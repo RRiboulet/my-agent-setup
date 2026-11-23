@@ -134,6 +134,7 @@ const MODULES: Record<string, string[]> = {
 		"scanEditVerification",
 		"scanFailures",
 	],
+	"../../orchestrator/role.ts": ["ORCHESTRATOR_ROLE", "isWorkerRole", "resolveOrchestratorRole"],
 	"../../orchestrator/loop.ts": [
 		"createLoopState",
 		"evaluateLoop",
@@ -231,11 +232,24 @@ for (const relative of EXTENSIONS) {
 	});
 }
 
+// A module may also export a *value* the linker has to resolve, not a function.
+// `ORCHESTRATOR_ROLE` is the process role resolved once at module load; an
+// importer that got `undefined` instead would treat every process as a parent,
+// which is the bug the module exists to fix. Listed separately so every other
+// named export stays pinned to a function.
+const CONSTANT_EXPORTS: Record<string, string[]> = {
+	"../../orchestrator/role.ts": ["ORCHESTRATOR_ROLE"],
+};
+
 for (const [relative, exports] of Object.entries(MODULES)) {
 	test(`module ${relative} loads under strict ESM`, async () => {
 		const specifier = new URL(relative, import.meta.url).href;
 		const module = (await import(specifier)) as Record<string, unknown>;
 		for (const name of exports) {
+			if (CONSTANT_EXPORTS[relative]?.includes(name)) {
+				assert.ok(module[name] !== undefined, `${relative} must export the constant ${name}`);
+				continue;
+			}
 			assert.equal(typeof module[name], "function", `${relative} must export ${name}`);
 		}
 	});
