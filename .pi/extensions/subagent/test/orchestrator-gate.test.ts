@@ -764,6 +764,38 @@ test("with no configuration the gate reports clear and never blocks, continues o
 	});
 });
 
+test("a completed run's pre-draft canContinue=false does not suppress a real block", async () => {
+	// pi builds `context.canContinue` from the drafts proposed BEFORE the gate
+	// runs. On a normal completed run it is false (the last message is the
+	// assistant's); the gate's own custom_message is what makes the next request
+	// continuable. A real session with an open todo hit exactly this and settled
+	// without blocking until the suppression was removed.
+	await withTempDir(async (todosDir) => {
+		await writeFile(path.join(todosDir, "bbbbbbbb.md"), `${JSON.stringify({ id: "bbbbbbbb", title: "stay open", status: "open" })}\n`);
+		await withEnv({ PI_TODO_PATH: todosDir }, async () => {
+			await withTempDir(async (cwd) => {
+				await mkdir(path.join(cwd, ".pi"), { recursive: true });
+				await writeFile(gateConfigPath(cwd), JSON.stringify({ version: 1, block: { openTodos: true } }));
+				const host = await startHost({ branch: [], cwd });
+				const result = (await host.fire(
+					"agent_before_settle",
+					boundaryEvent([], { context: { pendingMessages: [], canContinue: false } }),
+				)) as BoundaryProposal;
+				const verdict = gateVerdictOf(result);
+				assert.equal(verdict.decision, "continue");
+				assert.equal(result.continue, true);
+				assert.deepEqual(verdict.blockedBy, ["todos"]);
+				// `continue: true` is only valid because the gate carries its own
+				// user-role draft; pin that, or deleting the message while keeping the
+				// flag would spend an attempt on a block the model never sees.
+				const message = result.entries?.find((entry) => entry.type === "custom_message");
+				assert.ok(message, "the block must carry a custom_message, not just continue: true");
+				assert.match(String(message?.content ?? ""), /did not settle/);
+			});
+		});
+	});
+});
+
 test("when a goal already owns the continuation the gate does not request another", async () => {
 	const host = await startHost({ branch: [goalEntry()] });
 	await host.fire("session_start", {});
