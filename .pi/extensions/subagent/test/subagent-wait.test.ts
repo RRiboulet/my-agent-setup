@@ -12,6 +12,10 @@
 // a timeout must return the current record plus the latest pane, never an error;
 // and the tool descriptions must teach "start, then wait once" rather than
 // polling, which is what the 681-status-calls measurement bought this change.
+// The two regressions ticket 03 recorded as gaps are pinned last: an aborted
+// caller signal must release a pending wait without killing the child, and a
+// settled wait must return the record (and, for one id, the text) the status
+// tool returns.
 
 import assert from "node:assert/strict";
 import { readFile, writeFile } from "node:fs/promises";
@@ -32,7 +36,12 @@ interface WaitHarness {
 	execCalls: { command: string; args: string[] }[];
 	messages: { message: Record<string, unknown> }[];
 	shutdown: () => Promise<void>;
-	call: (tool: string, params: Record<string, unknown>) => Promise<{ text: string; details: Record<string, unknown> }>;
+	/** `signal` is the abort signal pi hands a tool call; omitted means "not aborted". */
+	call: (
+		tool: string,
+		params: Record<string, unknown>,
+		options?: { signal?: AbortSignal },
+	) => Promise<{ text: string; details: Record<string, unknown> }>;
 	readRuns: () => Promise<RunRecord[]>;
 	writeResult: (run: RunRecord, result: Record<string, unknown>) => Promise<void>;
 	/** How many times each tool was called so far — the scripted-acceptance counter. */
@@ -146,18 +155,18 @@ async function createWaitHarness(options: WaitHarnessOptions = {}): Promise<Wait
 		shutdown: async () => {
 			await handlers.get("session_shutdown")?.({}, ctx);
 		},
-		call: async (tool, params) => {
+		call: async (tool, params, callOptions) => {
 			toolCalls.push({ tool, params });
 			const definition = tools.get(tool);
 			assert.ok(definition, `tool ${tool} must be registered`);
 			const execute = definition.execute as (
 				id: string,
 				params: unknown,
-				signal: undefined,
+				signal: AbortSignal | undefined,
 				onUpdate: undefined,
 				ctx: unknown,
 			) => Promise<{ content: { type: string; text: string }[]; details: Record<string, unknown> }>;
-			const result = await execute(`call-${tool}`, params, undefined, undefined, ctx);
+			const result = await execute(`call-${tool}`, params, callOptions?.signal, undefined, ctx);
 			return { text: result.content[0]?.text ?? "", details: result.details ?? {} };
 		},
 		readRuns: async () => JSON.parse(await readFile(runsIndex, "utf8")) as RunRecord[],
@@ -433,6 +442,100 @@ test("subagent_wait validates its arguments", async () => {
 		const waited = await h.call("subagent_wait", { id: run.id, timeoutMs: -5 });
 		assert.equal((waited.details as { timedOut: boolean }).timedOut, true);
 		assert.match(waited.text, /did not settle/);
+	});
+});
+
+test("an aborted signal releases the wait promptly and leaves the run running", async () => {
+	// R10: the abort path is the one wait path no test exercised. A tool call's
+	// signal must release the pending wait immediately — not at its timeout — and
+	// aborting the CALLER must not cancel the run it was watching.
+	await withWaitHarness({ paneText: "child still working" }, async (h) => {
+		const run = (await h.call("subagent", { task: "outlives the wait" })).details as unknown as RunRecord;
+		await waitForPanes(h, [run.id]);
+
+		const controller = new AbortController();
+		const started = Date.now();
+		const paneCallsBefore = h.execCalls.filter((call) => call.args.includes("capture-pane")).length;
+		const waiting = h.call("subagent_wait", { id: run.id, timeoutMs: 5_000 }, { signal: controller.signal });
+		// Two watcher ticks after the wait starts put the abort well past the
+		// registration loop (`ensureSessionPaths` and the synchronous waiter set).
+		// A fixed sleep is a proxy; a tick is an event the extension itself drove.
+		const paneCount = () => h.execCalls.filter((call) => call.args.includes("capture-pane")).length;
+		const deadline = Date.now() + 5_000;
+		while (paneCount() < paneCallsBefore + 2 && Date.now() < deadline) {
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
+		assert.ok(paneCount() >= paneCallsBefore + 2, "the watcher ticked after the wait registered");
+		controller.abort();
+		await assert.rejects(waiting, /Subagent wait aborted/);
+		const elapsed = Date.now() - started;
+		assert.ok(elapsed < 2_000, `abort must release the wait, not its timeout (${elapsed}ms)`);
+		assert.equal(
+			h.execCalls.filter((call) => call.args.includes("kill-session")).length,
+			0,
+			"aborting a wait must not kill the child",
+		);
+
+		// Aborting the wait is not a cancel: the run is still live, and a later
+		// wait on it still works.
+		const runs = await h.readRuns();
+		assert.equal(runs.find((candidate) => candidate.id === run.id)?.status, "running");
+		const later = await h.call("subagent_wait", { id: run.id, timeoutMs: 300 });
+		assert.equal((later.details as { timedOut: boolean }).timedOut, true);
+		assert.match(later.text, /status: running/);
+
+		// A signal already aborted when the call starts rejects at once too.
+		const preAborted = new AbortController();
+		preAborted.abort();
+		const preStarted = Date.now();
+		await assert.rejects(
+			h.call("subagent_wait", { id: run.id, timeoutMs: 5_000 }, { signal: preAborted.signal }),
+			/Subagent wait aborted/,
+		);
+		assert.ok(Date.now() - preStarted < 1_000, "a pre-aborted call does not register a waiter first");
+	});
+});
+
+test("a settled wait returns subagent_status({ id })'s record, and for one id its text verbatim", async () => {
+	// R7: the existing tests compare the wait's record with a fixture, not with
+	// the status tool's own output. This pins the contract at the surface the
+	// model actually reads: one run's summary (and its record) must be identical
+	// between `subagent_wait({ id })` and `subagent_status({ id })`.
+	await withWaitHarness(undefined, async (h) => {
+		const first = (await h.call("subagent", { task: "first settled child" })).details as unknown as RunRecord;
+		const second = (await h.call("subagent", { task: "second settled child" })).details as unknown as RunRecord;
+		await waitForPanes(h, [first.id, second.id]);
+		await h.writeResult(first, completedResult("first answer"));
+		await h.writeResult(second, completedResult("second answer"));
+
+		const waited = await h.call("subagent_wait", { ids: [first.id, second.id], timeoutMs: 30_000 });
+		// Snapshot at return, before the status call: both tools expose the same
+		// live RunRecord object, so a later status-side mutation would otherwise be
+		// invisible to the comparison.
+		const waitedRuns = JSON.parse(JSON.stringify((waited.details as { runs: RunRecord[] }).runs)) as RunRecord[];
+		assert.equal((waited.details as { timedOut: boolean }).timedOut, false);
+
+		for (const [index, run] of [first, second].entries()) {
+			const status = await h.call("subagent_status", { id: run.id });
+			const statusRun = (status.details as { runs: RunRecord[] }).runs[0];
+			assert.ok(statusRun, "the status tool returns the run record");
+			assert.deepEqual(
+				waitedRuns[index],
+				JSON.parse(JSON.stringify(statusRun)),
+				`the ids wait returns ${run.id}'s status record unchanged`,
+			);
+		}
+
+		// With a single id, the text is the status summary verbatim: no
+		// wait-specific preamble can drift from what the status tool shows.
+		const singleWait = await h.call("subagent_wait", { id: first.id, timeoutMs: 30_000 });
+		const singleWaitRun = JSON.parse(JSON.stringify((singleWait.details as { runs: RunRecord[] }).runs[0]));
+		const singleStatus = await h.call("subagent_status", { id: first.id });
+		assert.equal(singleWait.text, singleStatus.text, "one run: wait text equals status text verbatim");
+		assert.deepEqual(
+			singleWaitRun,
+			JSON.parse(JSON.stringify((singleStatus.details as { runs: RunRecord[] }).runs[0])),
+		);
 	});
 });
 
