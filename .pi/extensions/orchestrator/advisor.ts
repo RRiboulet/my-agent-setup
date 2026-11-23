@@ -600,6 +600,28 @@ function usageOf(raw: unknown): AdvisorUsage | null {
 	};
 }
 
+/**
+ * Add one provider call's usage to another's.
+ *
+ * A consultation that falls back made two calls, and both may have been billed.
+ * The record is still one attempt — the budget's unit — but its usage and cost
+ * are the sum: the failed primary's usage is present only when its provider
+ * reported it, and a provider that reports none contributes nothing rather than
+ * a guess.
+ */
+export function sumUsage(a: AdvisorUsage | null, b: AdvisorUsage | null): AdvisorUsage | null {
+	if (!a) return b;
+	if (!b) return a;
+	return {
+		input: a.input + b.input,
+		output: a.output + b.output,
+		cacheRead: a.cacheRead + b.cacheRead,
+		cacheWrite: a.cacheWrite + b.cacheWrite,
+		totalTokens: a.totalTokens + b.totalTokens,
+		cost: a.cost + b.cost,
+	};
+}
+
 /** Rebuild pi's `Usage` shape for the session's usage accounting. Only the
  *  fields `addUsageToTotals` reads are meaningful here. */
 export function toPiUsage(usage: AdvisorUsage): Usage {
@@ -843,6 +865,10 @@ export async function consultAdvisor(args: ConsultAdvisorArgs): Promise<AdvisorC
 		// The primary *was* called even when the fallback is only a refused
 		// credential check; the record must not claim no provider call was made.
 		called: primary.call.called || second.call.called,
+		// Both calls may have been billed. One record is still one budget unit, but
+		// its usage is the sum: a failed primary's usage is present only when its
+		// provider reported it, and a provider that reported none contributes nothing.
+		usage: sumUsage(primary.call.usage, second.call.usage),
 		fallbackFrom: { provider: args.config.provider, model: args.config.model },
 		// The primary's failure is not lost: a record whose reason only named the
 		// fallback would hide why the fallback was asked at all.

@@ -105,6 +105,10 @@ Added:
 
 Fixed:
 
+- **A failed advisor call's reported usage is no longer dropped when a fallback
+  answers.** The record is still one attempt, but its usage and cost are the sum
+  of both provider calls; a provider that reports none on a failed call
+  contributes nothing rather than a guess.
 - **Advisor redaction no longer misses a passphrase, a Basic-auth header or a URL's
   userinfo.** A quoted value containing spaces aborted the old assignment
   pattern, so `password: "correct horse battery staple"` reached the provider
