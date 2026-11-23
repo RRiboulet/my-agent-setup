@@ -303,6 +303,21 @@ Fixed:
   opted into blocking now actually runs its verification command at settlement,
   and a block spends the branch's attempt budget (shared with the loop breaker).
 
+Changed:
+
+- **A settlement block now has to be resolved or explicitly overridden.** The
+  gate no longer treats a condition as settled after one block for the same
+  evidence: an unresolved open todo, failed verification or repeated failure
+  blocks again on the next settlement, spends another attempt, and settles only
+  when the condition changes, `orchestrator_override` is used, or `attemptCap`
+  is reached. A passed verification remains informational once. The project's
+  verification command re-runs when the files under verification change — a
+  second edit of the same file counts as a new state — even after the block
+  budget is spent, and not for evidence it already checked. This makes the override necessary rather
+  than decorative, and `attemptCap` (default 3) still bounds repeated blocks so
+  a run cannot be trapped. Tests: `orchestrator-gate.test.ts` covers repeated
+  blocks, override consumption, the cap and the verification re-run rule.
+
 Maintenance:
 
 - **`/goal` now asks for its next turn at the settlement boundary instead of

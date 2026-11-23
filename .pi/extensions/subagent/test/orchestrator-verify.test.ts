@@ -277,7 +277,7 @@ test("a configured verification command that passes continues once with its resu
 	);
 });
 
-test("a configured verification command that fails continues once with the failure and then reports", async () => {
+test("a failed verification blocks again until overridden, and the override is consumed", async () => {
 	await withTempProject(
 		{ version: 1, verification: { command: "node -e \"process.stderr.write('boom'); process.exit(1)\"", timeoutMs: 30_000 } },
 		async (cwd) => {
@@ -289,11 +289,73 @@ test("a configured verification command that fails continues once with the failu
 			assert.equal(verdict.verification?.exitCode, 1);
 			assert.match(continuationOf(result), /boom/);
 
-			// The failed run does not clear the edits, but the condition blocked once
-			// already, so the second settlement reports and settles.
-			const settled = newHost(cwd, result.entries as Entry[]);
+			// Unchanged evidence blocks again and spends another attempt; the command
+			// is not re-run for evidence it already checked.
+			const same = [...editedBranch(), ...(result.entries as Entry[])];
+			const settled = newHost(cwd, same);
 			const next = (await settled.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
-			assert.equal(verdictOf(next).decision, "report");
+			const nextVerdict = verdictOf(next);
+			assert.equal(nextVerdict.decision, "continue");
+			assert.equal(nextVerdict.attempts, 2);
+			assert.equal(nextVerdict.verification?.status, "failed", "the last outcome is carried into the repeated block");
+			assert.equal(settled.execCalls.length, 0, "the same evidence is not re-verified");
+
+			// An override settles it without spending another attempt.
+			const overridden = newHost(cwd, [...same, ...(next.entries as Entry[])]);
+			await overridden.fire("session_start", {});
+			await overridden.callTool("orchestrator_override", { reason: "ship the failure" });
+			const done = (await overridden.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+			assert.equal(done.continue, undefined);
+			assert.equal(verdictOf(done).decision, "report");
+			assert.equal(verdictOf(done).attempts, 2);
+			assert.equal(verdictOf(done).override?.reason, "ship the failure");
+		},
+	);
+});
+
+test("fixing the same file re-runs verification instead of trusting the path set", async () => {
+	// A path set alone cannot distinguish "failed on src/a.ts" from "edited
+	// src/a.ts again after that failure"; the edit count in the evidence does.
+	let runs = 0;
+	const exec = async () => {
+		runs++;
+		return runs === 1
+			? { code: 1, killed: false, truncated: false, stdout: "", stderr: "fail" }
+			: { code: 0, killed: false, truncated: false, stdout: "ok", stderr: "" };
+	};
+	await withTempProject(
+		{ version: 1, verification: { command: "node --test", timeoutMs: 30_000 } },
+		async (cwd) => {
+			const host = newHost(cwd, editedBranch(), exec);
+			const first = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+			assert.equal(verdictOf(first).verification?.status, "failed");
+			assert.equal(runs, 1);
+
+			const fixedEdit = [assistantCall("e2", "edit", { path: "src/a.ts" }), toolResult("e2", "edit")];
+			const fixed = newHost(cwd, [...editedBranch(), ...(first.entries as Entry[]), ...fixedEdit], exec);
+			const second = (await fixed.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+			assert.equal(runs, 2, "the same file edited again is a new verification state");
+			assert.equal(verdictOf(second).verification?.status, "passed");
+			assert.equal(verdictOf(second).attempts, 2);
+		},
+	);
+});
+
+test("an exhausted block budget does not switch verification off", async () => {
+	const exec = async () => ({ code: 0, killed: false, truncated: false, stdout: "ok", stderr: "" });
+	await withTempProject(
+		{ version: 1, attemptCap: 1, verification: { command: "node --test", timeoutMs: 30_000 } },
+		async (cwd) => {
+			const host = newHost(cwd, editedBranch(), exec);
+			const first = (await host.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+			assert.equal(verdictOf(first).attempts, 1);
+			assert.equal(host.execCalls.length, 1);
+
+			const newEdit = [assistantCall("e2", "edit", { path: "src/b.ts" }), toolResult("e2", "edit")];
+			const afterCap = newHost(cwd, [...editedBranch(), ...(first.entries as Entry[]), ...newEdit], exec);
+			const report = (await afterCap.fire("agent_before_settle", boundaryEvent())) as BoundaryProposal;
+			assert.equal(verdictOf(report).decision, "report", "the cap settles the run");
+			assert.equal(afterCap.execCalls.length, 1, "but a new verification state is still checked");
 		},
 	);
 });

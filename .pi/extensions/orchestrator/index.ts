@@ -139,7 +139,7 @@ function continuationText(verdict: GateVerdict): string {
 		lines.push("```", "");
 	}
 	lines.push(
-		`Gate blocks used on this branch: ${verdict.attempts} of ${verdict.attemptCap}. The condition that blocked now reports only and will not block again on this branch; call \`${GATE_OVERRIDE_TOOL}\` with a reason if you need to settle without addressing it.`,
+		`Gate blocks used on this branch: ${verdict.attempts} of ${verdict.attemptCap}.`,
 	);
 	return lines.join("\n");
 }
@@ -457,12 +457,22 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 		const failure = scanFailures(branch);
 
 		const spec = config.verification;
+		// Re-run when the files under verification changed: the same evidence that
+		// already ran does not need a second command, but a new edit does, or the
+		// gate would keep blocking on an unverified state it never rechecked.
+		const verificationEvidence = `${[...edits.editedFiles].sort().join(",")}#${edits.editResults ?? 0}`;
+		const verificationAlreadyBlockedForEvidence =
+			state.blockedConditions.includes("verification") && state.blockedEvidence.verification === verificationEvidence;
+		// A repeated block on the same evidence did not re-run the command, but the
+		// reader still needs its last outcome: "verification failed (exit 1)" is
+		// evidence, "edits without verification" is a weaker rewrite of the same
+		// state after the second block.
+		const carriedVerification = verificationAlreadyBlockedForEvidence ? state.lastVerdict?.verification ?? null : null;
 		const shouldVerify =
 			spec !== null &&
 			policy.kinds.includes("verification") &&
 			edits.editedFiles.length > 0 &&
-			!state.blockedConditions.includes("verification") &&
-			state.attempts < config.attemptCap &&
+			!verificationAlreadyBlockedForEvidence &&
 			pendingOverride === null;
 		let verification: VerificationOutcome | null = null;
 		if (spec && shouldVerify) {
@@ -484,7 +494,7 @@ export default function orchestratorExtension(pi: ExtensionAPI) {
 			openTodos: todos.todos,
 			edits,
 			failure,
-			verification,
+			verification: verification ?? carriedVerification,
 			verificationCommand: spec?.command ?? null,
 			override: pendingOverride,
 			policy,

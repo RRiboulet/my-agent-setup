@@ -749,11 +749,13 @@ clones you have never trusted, where that file came from the repository's author
 In an untrusted project the gate reports a suppressed verdict, reads nothing from
 the config and offers no override.
 
-**A condition blocks once per piece of evidence, not once per branch.** The same
-open todo set, or the same unverified files, cannot block twice; a new todo or a
-new edit after the block re-arms the check, and `attemptCap` still bounds the
-total. Without that, one block would make the check decorative: edit once more and
-the next settlement passes unverified.
+**An unresolved condition keeps blocking, and an override or the cap ends it.**
+The same open todo set, failed verification or repeated failure blocks again on
+the next settlement while its evidence is unchanged; a new todo, a new edit or a
+new failure re-arms it. `orchestrator_override` is consumed by that repeated
+block and spends no attempt, and `attemptCap` (default 3) is the hard stop that
+keeps the gate from trapping a run. A passed verification is informational once,
+because there is nothing left to fix.
 
 **The loop breaker reads no-progress evidence, not repetition.** It considers
 `edit`, `write`, `bash` and `powershell` (an observation cannot make progress, so

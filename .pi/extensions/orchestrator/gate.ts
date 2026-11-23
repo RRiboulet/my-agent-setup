@@ -13,19 +13,23 @@
  *     boundary as `continue: true` plus a `custom_message` carrying the reason,
  *     so the model gets one more turn with the evidence. It never terminates the
  *     run, and it never drops entries an earlier handler proposed.
- *   * A condition can block **once** on a branch: `blockedConditions` is carried
- *     in every verdict and reconstructed by union from the active branch, so the
- *     second settlement with the same open condition reports and settles. That is
- *     what "blocks settlement once" means, and it is why a gate cannot be a trap.
+ *   * A condition that must be resolved keeps blocking while its evidence is
+ *     unchanged: `blockedConditions` and `blockedEvidence` are carried in every
+ *     verdict and reconstructed from the active branch. An open todo, a failed
+ *     verification or a repeated failure therefore blocks again on the next
+ *     settlement instead of becoming decorative. A passed verification is
+ *     informational once, because there is nothing to fix. New evidence (a new
+ *     edit, todo or failure) re-arms any condition.
  *   * `attemptCap` bounds every gate block on the branch, settlement and loop
- *     alike. `attempts` counts blocks, not evaluations: ticket 08's counter
- *     counted settles, so an active goal reached the cap on its third
- *     continuation with nothing having failed. The field is renamed for what it
- *     bounds and nothing else. `attemptCap: 0` therefore disables blocking
- *     without disabling reporting.
- *   * An override — the `orchestrator_override` tool — suppresses the next block
- *     and is named in every block reason, so a model that is legitimately
- *     iterating can continue without arguing with the gate.
+ *     alike; it is the hard stop that keeps repeated blocks from trapping a run.
+ *     `attempts` counts blocks, not evaluations: ticket 08's counter counted
+ *     settles, so an active goal reached the cap on its third continuation with
+ *     nothing having failed. The field is renamed for what it bounds and nothing
+ *     else. `attemptCap: 0` therefore disables blocking without disabling
+ *     reporting.
+ *   * An override — the `orchestrator_override` tool — is consumed by the next
+ *     block it prevents, including a repeated block on unchanged evidence. It
+ *     spends no attempt and is named in every block reason.
  *
  * Two limits are stated in the verdict rather than left to be discovered:
  *
@@ -98,12 +102,14 @@ export interface GateVerdict {
 	/** Condition kinds that stopped this settlement. Empty when reporting. */
 	blockedBy: GateConditionKind[];
 	/** Every condition kind that has ever blocked on this branch, including
-	 *  this verdict's: the reason the next settlement cannot be blocked by them
-	 *  while they report the same evidence. */
+	 *  this verdict's. A kind whose condition must be resolved stays blockable
+	 *  while its evidence is unchanged; the attempt cap and an override are the
+	 *  ways a run settles without resolving it. */
 	blockedConditions: GateConditionKind[];
 	/** The evidence each blocked kind reported when it blocked. A kind re-arms
 	 *  when its evidence changes — new unverified edits, a different set of open
-	 *  todos, a different failure — so one block cannot make a check decorative. */
+	 *  todos, a different failure — so the model can fix the condition rather
+	 *  than only overriding it. */
 	blockedEvidence: Partial<Record<GateConditionKind, string>>;
 	/** What the gate's own verification run did, when it ran one. */
 	verification: VerificationOutcome | null;
@@ -185,6 +191,10 @@ export interface EditState {
 	/** Successful verification runs seen on the branch, including the gate's own.
 	 *  Reported in the verdict, never used to decide. */
 	verificationRuns: number;
+	/** Successful edit/write results on the branch, never cleared. This is what
+	 *  makes evidence a *state* rather than a path set: editing the same file
+	 *  again must re-arm verification. Optional for callers that only report. */
+	editResults?: number;
 }
 
 export interface FailureSignature {
@@ -197,8 +207,9 @@ export interface FailureSignature {
 /** Which conditions the project allows to stop a settlement. */
 export interface GateBlockPolicy {
 	kinds: GateConditionKind[];
-	/** Kinds that already blocked on this branch; they report only while their
-	 *  evidence is unchanged. */
+	/** Kinds that already blocked on this branch. A kind whose condition must be
+	 *  resolved stays blockable until its evidence changes, it is overridden, or
+	 *  the attempt cap is reached. */
 	alreadyBlocked: GateConditionKind[];
 	/** Evidence each already-blocked kind reported, from `state.blockedEvidence`. */
 	alreadyBlockedEvidence?: Partial<Record<GateConditionKind, string>>;
@@ -414,6 +425,7 @@ export function scanEditVerification(branch: readonly unknown[], options: EditSc
 	const calls = new Map<string, ToolCallRecord>();
 	const edited = new Set<string>();
 	let verificationRuns = 0;
+	let editResults = 0;
 	const wanted = options.verificationCommand?.trim() ? collapse(options.verificationCommand) : null;
 
 	for (const item of branch) {
@@ -441,6 +453,7 @@ export function scanEditVerification(branch: readonly unknown[], options: EditSc
 		if (EDIT_TOOLS.has(tool)) {
 			const path = call?.arguments.path;
 			edited.add(typeof path === "string" && path.trim() ? path : "(unknown file)");
+			editResults += 1;
 			continue;
 		}
 		if (!SHELL_TOOLS.has(tool)) continue;
@@ -454,7 +467,7 @@ export function scanEditVerification(branch: readonly unknown[], options: EditSc
 		}
 	}
 
-	return { editedFiles: [...edited].sort(), verificationRuns };
+	return { editedFiles: [...edited].sort(), verificationRuns, editResults };
 }
 
 /**
@@ -562,6 +575,7 @@ export function evaluateGate(input: GateEvaluationInput): GateVerdict {
 
 	const editedFiles = input.edits?.editedFiles ?? [];
 	const verificationRuns = input.edits?.verificationRuns ?? 0;
+	const editResults = input.edits?.editResults ?? 0;
 	const verification = input.verification ?? null;
 	if (editedFiles.length === 0) {
 		conditions.push({
@@ -616,20 +630,30 @@ export function evaluateGate(input: GateEvaluationInput): GateVerdict {
 	/** What a kind reports right now; a change re-arms a kind that blocked before. */
 	const evidenceFor = (kind: GateConditionKind): string => {
 		if (kind === "todos") return openTodos.map((todo) => todo.id).sort().join(",");
-		if (kind === "verification") return [...editedFiles].sort().join(",");
+		// The edit count is part of the state: re-editing the same file is new
+		// evidence and must re-run the command, while an unchanged state must not.
+		if (kind === "verification") return `${[...editedFiles].sort().join(",")}#${editResults}`;
 		if (kind === "failure") return failure?.signature ?? "";
 		return "";
 	};
+	/**
+	 * A condition that represents a problem blocks until it is resolved or the
+	 * override settles it; a passed verification is informational and blocks at
+	 * most once for the same evidence. Without the second rule a passing
+	 * verification would keep blocking until the attempt cap, because its
+	 * condition never has anything to "fix".
+	 */
+	const informationalOnce = (kind: GateConditionKind): boolean => kind === "verification" && verification?.status === "passed";
 	const candidates = conditions.filter(
 		(condition) =>
 			condition.status === "attention" &&
 			policy.kinds.includes(condition.kind) &&
-			// Blocked once per branch *per evidence*: the same set of open todos or
-			// unverified edits cannot block twice, but a new edit or todo re-arms the
-			// check. Without this the first block would make the check decorative —
-			// edit once more and the next settlement passes unverified.
+			// Same evidence blocks again for a condition that must be resolved —
+			// that is what makes `orchestrator_override` necessary rather than
+			// decorative. A new edit, todo or failure also re-arms it via evidence.
 			(!alreadyBlocked.includes(condition.kind) ||
-				alreadyBlockedEvidence[condition.kind] !== evidenceFor(condition.kind)),
+				alreadyBlockedEvidence[condition.kind] !== evidenceFor(condition.kind) ||
+				!informationalOnce(condition.kind)),
 	);
 
 	const blockedBy: GateConditionKind[] = [];
@@ -700,7 +724,7 @@ export function evaluateGate(input: GateEvaluationInput): GateVerdict {
 		decision === "continue"
 			? `the gate did not settle this run: ${candidates
 					.map((condition) => condition.summary)
-					.join("; ")}. Address it, or call \`${GATE_OVERRIDE_TOOL}\` with a reason to settle anyway; it will not block again unless what it reports changes.`
+					.join("; ")}. Address it, or call \`${GATE_OVERRIDE_TOOL}\` with a reason to settle anyway; it will block again until the condition changes, is overridden, or the attempt budget runs out (${attempts} of ${attemptCap} gate blocks used).`
 			: summarizeReport(candidates, alreadyBlocked, previousAttempts, attemptCap);
 
 	return {
