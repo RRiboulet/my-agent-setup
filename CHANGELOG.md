@@ -150,6 +150,12 @@ Fixed:
   the marker is removed at `session_start`. Tests: `orchestrator-role.test.ts`,
   `orchestrator-gate.test.ts`, `lifecycle-launch.test.ts`.
 
+Maintenance:
+
+- Documented the lock-scope boundary: a repo-scoped claim binds edits inside the
+  writer's own worktree, a path outside it keeps its absolute form, and a v1
+  record's root is its recorded cwd.
+
 ## v1.16.0 — 2026-11-23
 
 Added:

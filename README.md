@@ -731,7 +731,10 @@ agents working on different branches collide only when they share a tree.
 one claim across all linked worktrees. A repository-scoped claim is enforced against a
 session that kept the default scope too — the write guard maps its path into the holder's
 namespace before matching — while a path outside the worktree stays absolute and gains no
-cross-tree meaning. The key is read from the same committed file as the gate settings and
+cross-tree meaning. The mapping is from the writer's own tree: a writer that names a
+sibling worktree's file by absolute path keeps that absolute path, so a repo claim binds
+edits inside the tree the writer is working in, not an arbitrary path it can name. The key
+is read from the same committed file as the gate settings and
 changes nothing else: presence, peer messaging, TTLs, pid liveness, globs and the advisory
 fail-open guard are unaffected. It is not part of `block`, so it neither blocks a
 settlement nor registers `orchestrator_override`.
