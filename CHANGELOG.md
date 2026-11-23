@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.17.0 — 2026-11-23
+
 Added:
 
 - **A parent with live delegated runs parks its settlement instead of spending an
