@@ -120,7 +120,9 @@ Fixed:
   drives the real factory with the launcher's environment instead of only the
   test seam, which is what let the original bug through. A child-side test proves
   the marker is removed at `session_start`. Tests: `orchestrator-role.test.ts`,
-  `orchestrator-gate.test.ts`, `lifecycle-launch.test.ts`.## v1.16.0 — 2026-11-23
+  `orchestrator-gate.test.ts`, `lifecycle-launch.test.ts`.
+
+## v1.16.0 — 2026-11-23
 
 Added:
 
