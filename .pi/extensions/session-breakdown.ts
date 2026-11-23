@@ -22,7 +22,7 @@
 //   https://github.com/mitsuhiko/agent-stuff (extensions/session-breakdown.ts)
 //   Licensed under the Apache License, Version 2.0.
 //
-// Vendored verbatim, with four LOCAL PATCH hunks below — each marked in place
+// Vendored verbatim, with five LOCAL PATCH hunks below — each marked in place
 // with a `LOCAL PATCH n` comment and listed here so a later `diff` against
 // upstream stays readable.
 //
@@ -46,6 +46,11 @@
 //   3. A one-line footer saying how much inherited context was excluded, so a
 //      surprising total explains itself next to the number.
 //   4. A __test__ export, so the aggregation can be tested over fixtures.
+//   5. Model-attributed `type: "usage"` entries are counted (tokens and cost,
+//      not messages). Upstream's parser keeps only `type: "message"` lines, so
+//      pi's `appendUsage` — the orchestrator's advisor writes one per
+//      consultation, the cache warmer writes them too — was billed to nobody in
+//      this view. Inherited usage is excluded by patch 2, as for any entry.
 //
 // Why patch 2 is not optional: summing whole files counted a fork run's
 // inherited prefix again — measured 2026-10-04 on a real `handoff: "fork"`
@@ -746,7 +751,17 @@ async function parseSessionFile(
 				continue;
 			}
 
-			if (obj?.type !== "message") continue;
+			if (obj?.type !== "message" && obj?.type !== "usage") continue;
+			// LOCAL PATCH 5 (ours): a `type: "usage"` entry is model-attributed usage
+			// that pi appends outside the message stream (`SessionManager.appendUsage`
+			// — the orchestrator's advisor writes one per consultation, the cache
+			// warmer writes them too). Upstream stops at `type !== "message"` above, so
+			// a real provider call's tokens and cost were invisible in every total.
+			// It is accounted exactly like a message's usage, and it counts zero
+			// messages: it is not a request this session's model made, only what one
+			// cost. The rest of this block is shared with messages on purpose, so the
+			// inherited-entry exclusion (LOCAL PATCH 2) applies to usage unchanged.
+			const usageEntry = obj?.type === "usage";
 
 			const { api, provider, model, modelId, usage } = extractProviderModelAndUsage(obj);
 			const explicitMk = modelKeyFromParts(provider, model) ?? modelKeyFromParts(provider, modelId);
@@ -770,15 +785,18 @@ async function parseSessionFile(
 				continue;
 			}
 
-			if (explicitMk) {
+			if (explicitMk && !usageEntry) {
 				currentModel = explicitMk;
 				currentModelIsFaux = false;
 			}
 			const role = obj?.message?.role ?? obj?.role;
 			if (explicitMk || role === "assistant") modelsUsed.add(mk);
 
-			messages += 1;
-			messagesByModel.set(mk, (messagesByModel.get(mk) ?? 0) + 1);
+			// LOCAL PATCH 5: billed, not counted as a message.
+			if (!usageEntry) {
+				messages += 1;
+				messagesByModel.set(mk, (messagesByModel.get(mk) ?? 0) + 1);
+			}
 
 			if (tok > 0) {
 				tokens += tok;

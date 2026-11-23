@@ -31,6 +31,7 @@ import {
 	gateTriggerKey,
 	loopTriggerKey,
 	readAdvisorState,
+	redactSecrets,
 	MAX_ADVISOR_DIGEST_BYTES,
 	MAX_ADVISOR_VERDICT_CHARS,
 	type AdvisorConfig,
@@ -70,6 +71,8 @@ function config(overrides: Partial<AdvisorConfig> = {}): AdvisorConfig {
 		budget: DEFAULT_ADVISOR_BUDGET,
 		minGateBlocks: DEFAULT_ADVISOR_MIN_GATE_BLOCKS,
 		timeoutMs: DEFAULT_ADVISOR_TIMEOUT_MS,
+		redact: true,
+		fallback: null,
 		...overrides,
 	};
 }
@@ -129,6 +132,7 @@ function advisorRecord(overrides: Partial<AdvisorRecord> = {}): AdvisorRecord {
 		at: Date.now(),
 		trigger: { kind: "loop-block", key: "loop:bash|npm test|repeated-failure", summary: "a loop" },
 		model: { provider: PROVIDER, model: MODEL },
+		fallbackFrom: null,
 		status: "ok",
 		called: true,
 		reason: `${PROVIDER}/${MODEL} returned a verdict`,
@@ -143,24 +147,37 @@ function advisorRecord(overrides: Partial<AdvisorRecord> = {}): AdvisorRecord {
 /** A fake registry that records every call and answers like the host would. */
 function fakeRegistry(options: {
 	answer?: string;
+	/** One answer per model id, for a fallback that answers differently. */
+	answerByModel?: Record<string, string>;
 	auth?: { configured: boolean } | undefined;
+	/** Per-provider credential status, for a matrix that refuses one of two. */
+	authByProvider?: Record<string, { configured: boolean }>;
 	hasModel?: boolean;
 	fail?: Error | string;
+	/** Model ids whose completion throws, so the primary fails and a fallback answers. */
+	failModels?: string[];
 	stopReason?: string;
 	usage?: Record<string, unknown> | null;
 } = {}) {
-	const calls: { model: unknown; context: Record<string, unknown>; options: Record<string, unknown> }[] = [];
+	const calls: { model: { provider: string; id: string }; context: Record<string, unknown>; options: Record<string, unknown> }[] = [];
 	const registry = {
 		find: (provider: string, modelId: string) =>
 			options.hasModel === false ? undefined : { provider, id: modelId, name: modelId, api: "openai-completions" },
-		getProviderAuthStatus: () => options.auth,
-		complete: async (model: unknown, context: Record<string, unknown>, callOptions: Record<string, unknown>) => {
+		getProviderAuthStatus: (provider: string) =>
+			options.authByProvider ? options.authByProvider[provider] : options.auth,
+		complete: async (model: { provider: string; id: string }, context: Record<string, unknown>, callOptions: Record<string, unknown>) => {
 			calls.push({ model, context, options: callOptions });
+			if (options.failModels?.includes(model.id)) throw new Error(`provider ${model.provider} exploded`);
 			if (options.fail instanceof Error) throw options.fail;
 			if (typeof options.fail === "string") throw new Error(options.fail);
 			return {
 				role: "assistant",
-				content: [{ type: "text", text: options.answer ?? "Root cause: it is retrying the wrong command." }],
+				content: [
+					{
+						type: "text",
+						text: options.answerByModel?.[model.id] ?? options.answer ?? "Root cause: it is retrying the wrong command.",
+					},
+				],
 				api: "openai-completions",
 				provider: PROVIDER,
 				model: MODEL,
@@ -245,6 +262,8 @@ test("normalizeGateConfig reads the advisor block, and a half-configured advisor
 		budget: 4,
 		minGateBlocks: 3,
 		timeoutMs: 5000,
+		redact: true,
+		fallback: null,
 	});
 
 	const defaults = normalizeGateConfig({ version: 1, advisor: { provider: PROVIDER, model: MODEL } });
@@ -273,6 +292,36 @@ test("normalizeGateConfig reads the advisor block, and a half-configured advisor
 
 	const disabled = normalizeGateConfig({ version: 1, advisor: { provider: PROVIDER, model: MODEL, budget: 0 } });
 	assert.equal(disabled.config.advisor?.budget, 0, "0 is a value: it disables the advisor, it is not invalid");
+});
+
+test("normalizeGateConfig turns redaction on by default, honours `redact: false`, and validates one fallback", () => {
+	const byDefault = normalizeGateConfig({ version: 1, advisor: { provider: PROVIDER, model: MODEL } });
+	assert.equal(byDefault.config.advisor?.redact, true, "redaction is on unless a config turns it off");
+	assert.equal(byDefault.config.advisor?.fallback, null, "and there is no fallback unless one is named");
+
+	const off = normalizeGateConfig({ version: 1, advisor: { provider: PROVIDER, model: MODEL, redact: false } });
+	assert.equal(off.config.advisor?.redact, false);
+	assert.deepEqual(off.warnings, []);
+
+	const notBoolean = normalizeGateConfig({ version: 1, advisor: { provider: PROVIDER, model: MODEL, redact: "yes" } });
+	assert.equal(notBoolean.config.advisor?.redact, true, "a non-boolean leaves redaction on");
+	assert.match(notBoolean.warnings.join(" "), /advisor\.redact must be a boolean/);
+
+	const named = normalizeGateConfig({
+		version: 1,
+		advisor: { provider: PROVIDER, model: MODEL, fallback: { provider: "backup", model: "backup-model" } },
+	});
+	assert.deepEqual(named.config.advisor?.fallback, { provider: "backup", model: "backup-model" });
+	assert.deepEqual(named.warnings, []);
+
+	// Validated like the primary: both keys, or no fallback and a warning.
+	const half = normalizeGateConfig({ version: 1, advisor: { provider: PROVIDER, model: MODEL, fallback: { provider: "backup" } } });
+	assert.equal(half.config.advisor?.fallback, null);
+	assert.match(half.warnings.join(" "), /advisor\.fallback\.provider and advisor\.fallback\.model/);
+
+	const badShape = normalizeGateConfig({ version: 1, advisor: { provider: PROVIDER, model: MODEL, fallback: "backup/backup-model" } });
+	assert.equal(badShape.config.advisor?.fallback, null);
+	assert.match(badShape.warnings.join(" "), /advisor\.fallback must be an object/);
 });
 
 // --- The trigger ------------------------------------------------------------
@@ -475,13 +524,118 @@ test("a digest that would exceed the bound is truncated and says so", () => {
 		goal: { objective: "y".repeat(400) },
 		openTodos: Array.from({ length: 5 }, (_, index) => ({ id: `todo-${index}`, title: "z".repeat(400) })),
 		edits: {
-			editedFiles: Array.from({ length: 200 }, (_, index) => `a/very/long/path/number-${index}/${"x".repeat(120)}.ts`),
+			editedFiles: Array.from({ length: 200 }, (_, index) => `a/very/long/path/number-${index}/${"x".repeat(150)}.ts`),
 			verificationRuns: 0,
 		},
 	});
 	assert.equal(digest.truncated, true);
 	assert.ok(digest.bytes <= MAX_ADVISOR_DIGEST_BYTES, `${digest.bytes} must fit ${MAX_ADVISOR_DIGEST_BYTES}`);
 	assert.match(digest.text, /\[digest truncated\]$/);
+});
+
+// --- Redaction --------------------------------------------------------------
+
+test("redactSecrets removes the documented credential shapes and keeps the key name", () => {
+	const cases: { label: string; text: string; secret: string; keeps?: string }[] = [
+		{ label: "an OpenAI-style key", text: "using sk-proj-AbCdEf0123456789GhIjKlMnOpQrSt", secret: "sk-proj-AbCdEf0123456789GhIjKlMnOpQrSt" },
+		{ label: "a GitHub classic token", text: "export GITHUB_TOKEN=ghp_0123456789abcdefghijABCDEFGHIJ012345", secret: "ghp_0123456789abcdefghijABCDEFGHIJ012345", keeps: "GITHUB_TOKEN" },
+		{ label: "a GitHub fine-grained token", text: "clone https://github_pat_11ABCDEFG0123456789_abcdefghijklmnop@github.com/x/y", secret: "github_pat_11ABCDEFG0123456789_abcdefghijklmnop" },
+		{ label: "an AWS access key id", text: "aws configure set aws_access_key_id AKIAIOSFODNN7EXAMPLE", secret: "AKIAIOSFODNN7EXAMPLE" },
+		{ label: "a Slack token", text: "curl -H xoxb-123456789012-abcdefghijkl https://slack.example", secret: "xoxb-123456789012-abcdefghijkl" },
+		{ label: "a Bearer header", text: "Authorization: Bearer abcdef0123456789abcdef", secret: "abcdef0123456789abcdef", keeps: "Bearer" },
+		{ label: "an api key assignment", text: "OPENAI_API_KEY: sk-test-value", secret: "sk-test-value", keeps: "OPENAI_API_KEY" },
+		{ label: "a password assignment", text: "password = \"hunter2\"", secret: "hunter2", keeps: "password" },
+		{ label: "an access token assignment", text: "access_token=abc123def456", secret: "abc123def456", keeps: "access_token" },
+	];
+	for (const entry of cases) {
+		const redacted = redactSecrets(entry.text);
+		assert.doesNotMatch(redacted, new RegExp(entry.secret.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")), `${entry.label} must be redacted`);
+		assert.match(redacted, /\[redacted\]/, `${entry.label} leaves a marker`);
+		if (entry.keeps) assert.match(redacted, new RegExp(entry.keeps), `${entry.label} keeps the key name`);
+	}
+});
+
+test("redactSecrets leaves ordinary prose and file paths alone", () => {
+	const clean = [
+		"src/auth/password.test.ts was edited",
+		"rotate the secret only after the migration lands",
+		"docs/api-key-rotation.md explains the setting",
+		"the loop stopped after `npm test` failed 3 times",
+	];
+	for (const text of clean) assert.equal(redactSecrets(text), text);
+});
+
+test("a credential in any kept digest field is redacted before the size bound, and `redact: false` keeps it", () => {
+	const token = "ghp_0123456789abcdefghijABCDEFGHIJ012345";
+	const slack = "xoxb-123456789012-abcdefghijkl";
+	const openai = "sk-proj-AbCdEf0123456789GhIjKlMnOpQrSt";
+	const input = {
+		trigger: { kind: "loop-block" as const, key: "loop:bash|deploy", summary: "the loop breaker stopped `bash deploy`" },
+		gate: {
+			kind: "attention" as const,
+			decision: "continue" as const,
+			attempts: 2,
+			attemptCap: 3,
+			scope: "parent" as const,
+			blockedBy: ["verification"],
+			reason: "blocked: verification",
+			reasons: [{ code: "verification-failed", summary: `verification failed with ${token}` }],
+			verification: { status: "failed" as const, command: "deploy", exitCode: 1, summary: `deploy --token ${slack} exited 1` },
+		},
+		loop: {
+			version: 2 as const,
+			action: "block" as const,
+			at: 3,
+			tool: "bash",
+			invocation: "deploy",
+			kind: "repeated-failure" as const,
+			count: 3,
+			detail: `fatal: remote rejected ${openai}`,
+			reason: "a loop",
+			attempts: 3,
+			attemptCap: 3,
+			remainingAttempts: 0,
+			blocksTheTurn: 1,
+		},
+		goal: { objective: `ship it with ${token} rotated` },
+		openTodos: [{ id: "aaaaaaaa", title: `rotate password = ${slack}` }],
+		edits: { editedFiles: [`certs/${token}.pem`, "src/a.ts"], verificationRuns: 0 },
+	};
+
+	const digest = buildAdvisorDigest(input);
+	for (const secret of [token, slack, openai]) {
+		assert.doesNotMatch(digest.text, new RegExp(secret), "no retained field may carry a credential");
+	}
+	assert.match(digest.text, /\[redacted\]/);
+	assert.match(digest.text, /certs\/\[redacted\]\.pem/, "the field, not the line, is replaced");
+	assert.match(digest.text, /Verification: failed \(exit 1\)/, "the digest's structure survives redaction");
+	assert.match(digest.text, /Edited since the last verification \(2\)/);
+	assert.match(digest.text, /Open todos \(1\)/);
+	assert.ok(digest.bytes <= MAX_ADVISOR_DIGEST_BYTES, "the bound is applied after redaction");
+
+	const verbatim = buildAdvisorDigest({ ...input, redact: false });
+	assert.match(verbatim.text, new RegExp(token), "a config can turn redaction off");
+
+	// A redacted digest that is still over the bound is truncated, not enlarged.
+	const huge = buildAdvisorDigest({
+		...input,
+		edits: {
+			editedFiles: Array.from({ length: 200 }, (_, index) =>
+				index === 0 ? `certs/${token}.pem` : `a/very/long/path/number-${index}/${"x".repeat(150)}.ts`,
+			),
+			verificationRuns: 0,
+		},
+		openTodos: Array.from({ length: 5 }, (_, index) => ({
+			id: `todo-${index}`,
+			title: index === 0 ? `rotate secret = ${token}` : `z${index}`.repeat(80),
+		})),
+		goal: { objective: "y".repeat(160) },
+	});
+	assert.equal(huge.truncated, true);
+	assert.ok(huge.bytes <= MAX_ADVISOR_DIGEST_BYTES);
+	assert.doesNotMatch(huge.text, new RegExp(token));
+	assert.match(huge.text, /certs\/\[redacted\]\.pem/, "the redaction happens before the cut, not after it");
+	assert.match(huge.text, /rotate secret = \[redacted\]/, "and it happens in the fields inside the bound too");
 });
 
 // --- The consultation -------------------------------------------------------
@@ -596,6 +750,93 @@ test("an unknown credential status is usable, and a provider failure is reported
 	assert.equal(blank.called, true);
 	assert.equal(blank.status, "empty");
 	assert.match(blank.reason, /no verdict text/);
+});
+
+// --- The fallback -----------------------------------------------------------
+
+/** The digest every fallback test sends; the content is irrelevant there. */
+const FALLBACK_DIGEST = { text: "d", bytes: 1, truncated: false };
+
+function fallbackConfig(): AdvisorConfig {
+	return config({ fallback: { provider: "backup", model: "backup-model" } });
+}
+
+test("the fallback answers only on a provider error: not on a refusal, an abort or an empty verdict", async () => {
+	const answered = fakeRegistry();
+	const primaryOk = await consultAdvisor({ registry: answered.registry, config: fallbackConfig(), digest: FALLBACK_DIGEST, env: {} });
+	assert.equal(answered.calls.length, 1, "the primary answered, so the fallback is not called");
+	assert.equal(primaryOk.status, "ok");
+	assert.deepEqual(primaryOk.model, { provider: PROVIDER, model: MODEL }, "the record names the answering model");
+	assert.equal(primaryOk.fallbackFrom, null);
+
+	const failing = fakeRegistry({ failModels: [MODEL] });
+	const fellBack = await consultAdvisor({ registry: failing.registry, config: fallbackConfig(), digest: FALLBACK_DIGEST, env: {} });
+	assert.equal(failing.calls.length, 2, "one attempt on the primary, one on the fallback");
+	assert.deepEqual(failing.calls.map((call) => call.model.id), [MODEL, "backup-model"]);
+	assert.equal(fellBack.status, "ok");
+	assert.deepEqual(fellBack.model, { provider: "backup", model: "backup-model" }, "the record names the model that answered");
+	assert.deepEqual(fellBack.fallbackFrom, { provider: PROVIDER, model: MODEL }, "and the primary it replaced");
+	assert.match(fellBack.reason, /fallback/, "the reason says a fallback answered");
+
+	// A credential refusal is a configuration error, not an outage: no fallback.
+	const refused = fakeRegistry({ authByProvider: { [PROVIDER]: { configured: false } } });
+	const refusedCall = await consultAdvisor({ registry: refused.registry, config: fallbackConfig(), digest: FALLBACK_DIGEST, env: {} });
+	assert.equal(refused.calls.length, 0, "a refusal falls back to nothing");
+	assert.equal(refusedCall.status, "refused");
+	assert.deepEqual(refusedCall.model, { provider: PROVIDER, model: MODEL }, "a refusal names the model it refused");
+	assert.equal(refusedCall.fallbackFrom, null);
+
+	const aborted = fakeRegistry();
+	const abortedCall = await consultAdvisor({
+		registry: aborted.registry,
+		config: fallbackConfig(),
+		digest: FALLBACK_DIGEST,
+		env: {},
+		signal: AbortSignal.abort(),
+	});
+	assert.equal(aborted.calls.length, 1, "an aborted attempt is not retried on another provider");
+	assert.equal(abortedCall.status, "error");
+	assert.equal(abortedCall.fallbackFrom, null);
+
+	const stopped = fakeRegistry({ stopReason: "aborted" });
+	const stoppedCall = await consultAdvisor({ registry: stopped.registry, config: fallbackConfig(), digest: FALLBACK_DIGEST, env: {} });
+	assert.equal(stopped.calls.length, 1, "a provider that reports an abort is not a provider outage");
+	assert.equal(stoppedCall.status, "error");
+	assert.equal(stoppedCall.fallbackFrom, null);
+
+	// Empty is not an error either: documented, so a later change is deliberate.
+	const empty = fakeRegistry({ answer: "" });
+	const emptyCall = await consultAdvisor({ registry: empty.registry, config: fallbackConfig(), digest: FALLBACK_DIGEST, env: {} });
+	assert.equal(empty.calls.length, 1, "an empty verdict is reported, not spent on a second provider");
+	assert.equal(emptyCall.status, "empty");
+	assert.equal(emptyCall.fallbackFrom, null);
+});
+
+test("a fallback that also fails is one record, naming the fallback and keeping the primary's reason", async () => {
+	const both = fakeRegistry({ failModels: [MODEL, "backup-model"] });
+	const failed = await consultAdvisor({ registry: both.registry, config: fallbackConfig(), digest: FALLBACK_DIGEST, env: {} });
+	assert.equal(both.calls.length, 2);
+	assert.equal(failed.status, "error");
+	assert.deepEqual(failed.model, { provider: "backup", model: "backup-model" }, "the failure names the model that failed");
+	assert.deepEqual(failed.fallbackFrom, { provider: PROVIDER, model: MODEL });
+	assert.match(failed.reason, /backup\/backup-model/);
+	assert.match(failed.reason, /provider backup exploded/);
+	assert.match(failed.reason, new RegExp(`${PROVIDER}/${MODEL}`), "the primary's failure is not lost");
+	assert.equal(failed.called, true);
+
+	// A fallback whose own credentials are missing is a refusal, still named.
+	const noBackupCredential = fakeRegistry({ failModels: [MODEL], authByProvider: { backup: { configured: false } } });
+	const refusedFallback = await consultAdvisor({
+		registry: noBackupCredential.registry,
+		config: fallbackConfig(),
+		digest: FALLBACK_DIGEST,
+		env: {},
+	});
+	assert.equal(noBackupCredential.calls.length, 1, "the fallback's credential check happens before its call");
+	assert.equal(refusedFallback.status, "refused");
+	assert.deepEqual(refusedFallback.model, { provider: "backup", model: "backup-model" });
+	assert.deepEqual(refusedFallback.fallbackFrom, { provider: PROVIDER, model: MODEL });
+	assert.match(refusedFallback.reason, /no credentials for provider "backup"/);
 });
 
 // --- The factory ------------------------------------------------------------
@@ -809,6 +1050,98 @@ test("the digest sent to the model excludes tool output bodies, end to end", asy
 	});
 });
 
+test("a credential in a kept digest field is redacted in the request and in the record, and a config can turn it off", async () => {
+	await withTempDir(async (cwd) => {
+		const token = "ghp_0123456789abcdefghijABCDEFGHIJ012345";
+		await writeConfig(cwd, { provider: PROVIDER, model: MODEL });
+		const branch = [loopBlock(1, { invocation: `deploy --token ${token}` })];
+		const { registry, calls } = fakeRegistry();
+		const host = startHost({ cwd, branch, registry });
+		await host.fire("session_start", {});
+		await host.fire("before_agent_start", promptEvent());
+
+		assert.equal(calls.length, 1);
+		const sent = calls[0]!.context as { messages: { content: { text: string }[] }[] };
+		const text = sent.messages[0]!.content[0]!.text;
+		assert.doesNotMatch(text, new RegExp(token), "a credential-shaped invocation reaches the model only redacted");
+		assert.match(text, /\[redacted\]/);
+		assert.match(text, /the loop breaker stopped/, "the digest's structure is unchanged");
+
+		const record = host.appended.find((candidate) => candidate.customType === ADVISOR_ENTRY_TYPE)?.data as AdvisorRecord;
+		assert.doesNotMatch(record.digest.text, new RegExp(token), "the recorded digest is redacted too");
+		assert.ok(record.digest.bytes <= MAX_ADVISOR_DIGEST_BYTES);
+
+		// The same project can opt out; then the digest is sent verbatim.
+		const verbatimDir = path.join(cwd, "verbatim");
+		await writeConfig(verbatimDir, { provider: PROVIDER, model: MODEL, redact: false });
+		const verbatim = fakeRegistry();
+		const verbatimHost = startHost({ cwd: verbatimDir, branch, registry: verbatim.registry });
+		await verbatimHost.fire("session_start", {});
+		await verbatimHost.fire("before_agent_start", promptEvent());
+		const verbatimSent = verbatim.calls[0]!.context as { messages: { content: { text: string }[] }[] };
+		assert.match(verbatimSent.messages[0]!.content[0]!.text, new RegExp(token), "redact: false is honoured end to end");
+	});
+});
+
+test("when the primary fails the fallback answers, the record names it, and one attempt spends one budget unit", async () => {
+	await withTempDir(async (cwd) => {
+		await writeConfig(cwd, {
+			provider: PROVIDER,
+			model: MODEL,
+			budget: 1,
+			fallback: { provider: "backup", model: "backup-model" },
+		});
+		const { registry, calls } = fakeRegistry({
+			failModels: [MODEL],
+			answerByModel: { "backup-model": "Root cause: the fallback saw the wrong command." },
+		});
+		const host = startHost({ cwd, branch: [loopBlock(1)], registry });
+		await host.fire("session_start", {});
+		const event = promptEvent();
+		await host.fire("before_agent_start", event);
+
+		assert.equal(calls.length, 2, "the primary, then the fallback once");
+		assert.deepEqual(calls.map((call) => call.model.id), [MODEL, "backup-model"]);
+
+		const entries = host.appended.filter((candidate) => candidate.customType === ADVISOR_ENTRY_TYPE);
+		assert.equal(entries.length, 1, "two provider calls are still one recorded attempt");
+		const record = entries[0]!.data as AdvisorRecord;
+		assert.equal(record.status, "ok");
+		assert.deepEqual(record.model, { provider: "backup", model: "backup-model" }, "the record names the model that answered");
+		assert.deepEqual(record.fallbackFrom, { provider: PROVIDER, model: MODEL });
+		assert.match(record.verdict ?? "", /the fallback saw the wrong command/);
+		assert.match(event.systemPromptOptions.sections[ADVISOR_SECTION] ?? "", /backup\/backup-model/);
+
+		// One attempt: the branch that holds the record is out of a budget of one.
+		const state = readAdvisorState([custom(ADVISOR_ENTRY_TYPE, record)]);
+		assert.equal(state.attempts, 1);
+		assert.equal(advisorSkipReason({ state, config: config({ budget: 1 }), now: Date.now() }), "budget");
+
+		// And the answering model is the one billed.
+		assert.equal(host.usageEntries.length, 1);
+		assert.equal(host.usageEntries[0]?.provider, "backup");
+		assert.equal(host.usageEntries[0]?.model, "backup-model");
+	});
+});
+
+test("a refused primary is not retried on the fallback", async () => {
+	await withEnv({ NOWHERE_API_KEY: undefined }, async () => {
+		await withTempDir(async (cwd) => {
+			await writeConfig(cwd, { provider: "nowhere", model: "some-model", fallback: { provider: "backup", model: "backup-model" } });
+			const { registry, calls } = fakeRegistry({ authByProvider: { nowhere: { configured: false } } });
+			const host = startHost({ cwd, branch: [loopBlock(1)], registry });
+			await host.fire("session_start", {});
+			await host.fire("before_agent_start", promptEvent());
+
+			assert.equal(calls.length, 0, "a credential refusal is a configuration error, not an outage");
+			const record = host.appended.find((candidate) => candidate.customType === ADVISOR_ENTRY_TYPE)?.data as AdvisorRecord;
+			assert.equal(record.status, "refused");
+			assert.equal(record.fallbackFrom, null);
+			assert.deepEqual(record.model, { provider: "nowhere", model: "some-model" });
+		});
+	});
+});
+
 test("the section and the /gate record render the trigger, the verdict and the usage", () => {
 	const record = advisorRecord();
 	const section = formatAdvisorSection(record);
@@ -826,4 +1159,10 @@ test("the section and the /gate record render the trigger, the verdict and the u
 	assert.match(shown, /OK/);
 	assert.match(shown, /Usage: 10 in \/ 5 out/);
 	assert.match(shown, /cost 0\.001/);
+
+	const fellBack = formatAdvisorRecord(
+		advisorRecord({ model: { provider: "backup", model: "backup-model" }, fallbackFrom: { provider: PROVIDER, model: MODEL } }),
+	);
+	assert.match(fellBack, /backup\/backup-model/);
+	assert.match(fellBack, /fallback after/);
 });

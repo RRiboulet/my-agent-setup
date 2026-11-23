@@ -122,6 +122,7 @@ const MODULES: Record<string, string[]> = {
 		"gateTriggerKey",
 		"loopTriggerKey",
 		"readAdvisorState",
+		"redactSecrets",
 		"toPiUsage",
 	],
 	"../../orchestrator/events.ts": ["publishOrchestrationEvent", "subscribeOrchestrationEvent"],
