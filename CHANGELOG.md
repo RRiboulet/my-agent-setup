@@ -105,6 +105,16 @@ Added:
 
 Fixed:
 
+- **Advisor redaction no longer misses a passphrase, a Basic-auth header or a URL's
+  userinfo.** A quoted value containing spaces aborted the old assignment
+  pattern, so `password: "correct horse battery staple"` reached the provider
+  verbatim, and an unquoted value left its tail behind. Quoted values (doubled
+  quotes included) and unquoted values through the end of the assignment are now
+  replaced, and `Basic <token>`, `scheme://user:password@host` and a lowercase
+  `bearer` are covered. A fallback whose own credential check refuses now records
+  that the primary was called, instead of claiming no call was made. A sentence
+  that uses one of the key words as a label is over-redacted; that is the safe
+  direction for evidence about to be sent to another provider.
 - **A delegated worker no longer passes its role to a `pi` its shell starts.**
   `PI_ORCHESTRATOR_ROLE=worker` is inherited by every bash-tool subprocess, so a
   nested `pi` launched from a worker's shell resolved as a worker and skipped its

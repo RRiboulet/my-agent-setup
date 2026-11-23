@@ -545,6 +545,14 @@ test("redactSecrets removes the documented credential shapes and keeps the key n
 		{ label: "a Bearer header", text: "Authorization: Bearer abcdef0123456789abcdef", secret: "abcdef0123456789abcdef", keeps: "Bearer" },
 		{ label: "an api key assignment", text: "OPENAI_API_KEY: sk-test-value", secret: "sk-test-value", keeps: "OPENAI_API_KEY" },
 		{ label: "a password assignment", text: "password = \"hunter2\"", secret: "hunter2", keeps: "password" },
+		{ label: "a quoted multi-word password", text: 'password: "correct horse battery staple"', secret: "correct horse battery staple", keeps: "password" },
+		{ label: "a single-quoted multi-word secret", text: "secret = 'two words here'", secret: "two words here", keeps: "secret" },
+		{ label: "an unquoted multi-word password", text: "password: correct horse battery staple", secret: "correct horse battery staple", keeps: "password" },
+		{ label: "a doubled-quote password", text: "password: 'it''s a secret'", secret: "it''s a secret", keeps: "password" },
+		{ label: "an unquoted value with a residual tail", text: "api_key:   spaced  out  value", secret: "out", keeps: "api_key" },
+		{ label: "a Basic header", text: "Authorization: Basic dXNlcjpwYXNzd29yZA==", secret: "dXNlcjpwYXNzd29yZA==", keeps: "Basic" },
+		{ label: "URL userinfo", text: "https://user:hunter2@api.example.com/v1", secret: "hunter2", keeps: "api.example.com" },
+		{ label: "a lowercase bearer", text: "authorization: bearer abcdef0123456789abcdef", secret: "abcdef0123456789abcdef", keeps: "Bearer" },
 		{ label: "an access token assignment", text: "access_token=abc123def456", secret: "abc123def456", keeps: "access_token" },
 	];
 	for (const entry of cases) {
@@ -563,6 +571,14 @@ test("redactSecrets leaves ordinary prose and file paths alone", () => {
 		"the loop stopped after `npm test` failed 3 times",
 	];
 	for (const text of clean) assert.equal(redactSecrets(text), text);
+});
+
+test("a credential-shaped assignment is over-redacted rather than leak a passphrase", () => {
+	// The unquoted branch runs to the end of the field. A sentence that uses one of
+	// the key words loses its tail; that is the safe direction for evidence that is
+	// about to be sent to another provider.
+	assert.equal(redactSecrets("rotate the password: tomorrow"), "rotate the password: [redacted]");
+	assert.equal(redactSecrets("password: correct horse battery staple"), "password: [redacted]");
 });
 
 test("a credential in any kept digest field is redacted before the size bound, and `redact: false` keeps it", () => {
@@ -608,6 +624,7 @@ test("a credential in any kept digest field is redacted before the size bound, a
 	}
 	assert.match(digest.text, /\[redacted\]/);
 	assert.match(digest.text, /certs\/\[redacted\]\.pem/, "the field, not the line, is replaced");
+	assert.match(digest.text, /rotate password = \[redacted\]/, "a todo title is redacted too");
 	assert.match(digest.text, /Verification: failed \(exit 1\)/, "the digest's structure survives redaction");
 	assert.match(digest.text, /Edited since the last verification \(2\)/);
 	assert.match(digest.text, /Open todos \(1\)/);
@@ -619,6 +636,13 @@ test("a credential in any kept digest field is redacted before the size bound, a
 	// A redacted digest that is still over the bound is truncated, not enlarged.
 	const huge = buildAdvisorDigest({
 		...input,
+		gate: {
+			...input.gate,
+			reasons: Array.from({ length: 8 }, (_, index) => ({
+				code: `reason-${index}`,
+				summary: `reason ${index} ${"w".repeat(150)}`,
+			})),
+		},
 		edits: {
 			editedFiles: Array.from({ length: 200 }, (_, index) =>
 				index === 0 ? `certs/${token}.pem` : `a/very/long/path/number-${index}/${"x".repeat(150)}.ts`,
@@ -635,7 +659,6 @@ test("a credential in any kept digest field is redacted before the size bound, a
 	assert.ok(huge.bytes <= MAX_ADVISOR_DIGEST_BYTES);
 	assert.doesNotMatch(huge.text, new RegExp(token));
 	assert.match(huge.text, /certs\/\[redacted\]\.pem/, "the redaction happens before the cut, not after it");
-	assert.match(huge.text, /rotate secret = \[redacted\]/, "and it happens in the fields inside the bound too");
 });
 
 // --- The consultation -------------------------------------------------------
@@ -834,6 +857,7 @@ test("a fallback that also fails is one record, naming the fallback and keeping 
 	});
 	assert.equal(noBackupCredential.calls.length, 1, "the fallback's credential check happens before its call");
 	assert.equal(refusedFallback.status, "refused");
+	assert.equal(refusedFallback.called, true, "the primary was called even though the fallback's credential check refused");
 	assert.deepEqual(refusedFallback.model, { provider: "backup", model: "backup-model" });
 	assert.deepEqual(refusedFallback.fallbackFrom, { provider: PROVIDER, model: MODEL });
 	assert.match(refusedFallback.reason, /no credentials for provider "backup"/);
