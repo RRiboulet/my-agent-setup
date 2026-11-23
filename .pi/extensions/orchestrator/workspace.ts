@@ -883,6 +883,10 @@ function reservationComparisonPair(
 	record: ReservationRecord,
 	requestPaths: ReservationPath[],
 ): { requestPaths: ReservationPath[]; holderPaths: ReservationPath[] } {
+	// Without a shared root the two namespaces cannot be reconciled. Comparing them
+	// as they are is the fail-open choice: a mixed-scope collision is missed rather
+	// than invented. Every runtime caller supplies it; only a direct store caller
+	// can omit it.
 	if (request.scope === record.scope || !request.sharedRoot) {
 		return { requestPaths, holderPaths: record.paths };
 	}
@@ -938,7 +942,9 @@ export function validateReservation(value: unknown): ReservationRecord | null {
 	if (!Array.isArray(value.paths) || value.paths.length === 0) return null;
 	// A v1 record predates the scope field, and its paths are canonical absolute
 	// paths: reading it as worktree-scoped with its own cwd as the root is the
-	// only honest interpretation, and no migration write is needed.
+	// only honest interpretation, and no migration write is needed. A record
+	// written from a subdirectory therefore maps from that subdirectory, not the
+	// worktree top level; nothing better can be recovered without inventing data.
 	let scope: ReservationScope = "worktree";
 	let root = value.cwd;
 	if (value.version === RESERVATION_VERSION) {
