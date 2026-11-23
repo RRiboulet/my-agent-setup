@@ -806,7 +806,10 @@ mode, and a guard that re-read the variable at the settlement boundary was gone 
 the time it mattered. The separate `PI_ORCHESTRATOR_ROLE` marker is written by the
 launcher as a literal in the child command, so scrubbing the child-mode variable
 does not erase the role, and a top-level run (`pi -p`, RPC, CI) carries no marker
-and settles normally.
+and settles normally. The child removes that marker at `session_start` — after
+every factory has read it, before any tool can spawn a process — so a `pi`
+launched from the worker's shell does not inherit the worker role and skip its own
+gate.
 
 **What the event means.** `gate-decided` is published from the boundary, before
 the entry is committed, because pi offers no post-commit hook there. Nothing acts

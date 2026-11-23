@@ -13,8 +13,14 @@
 
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
 import { test } from "node:test";
 
+import subagentExtension from "../index.ts";
+import { createFakeHost } from "./fake-pi.ts";
+import { withEnv } from "./helpers.ts";
 import { ORCHESTRATOR_ROLE, isWorkerRole, resolveOrchestratorRole } from "../../orchestrator/role.ts";
 
 test("a process with no role marker is the parent", () => {
@@ -137,4 +143,79 @@ test("scrubbing the marker after import does not change the role a process loade
 
 test("a fresh process with no markers evaluates as the parent", () => {
 	assert.equal(roleInFreshProcess(withoutRoleMarkers()), "parent");
+});
+
+/**
+ * Drive the real factory in a fresh process, so the role under test is the one
+ * its module-load default resolved from the launcher's environment.
+ *
+ * The factory tests inject `{ role }` to reach the worker path; that seam is
+ * useful but it cannot fail if the default wiring regresses to "parent". This
+ * spawns a process with the marker set and reads the verdict the factory
+ * actually produced, which is the path a delegated child takes.
+ */
+function factoryVerdictInFreshProcess(env: NodeJS.ProcessEnv): Record<string, unknown> | null {
+	const fakeHref = new URL("./fake-pi.ts", import.meta.url).href;
+	const indexHref = new URL("../../orchestrator/index.ts", import.meta.url).href;
+	const script = [
+		`const { createFakeHost } = await import(${JSON.stringify(fakeHref)});`,
+		`const { default: orchestratorExtension } = await import(${JSON.stringify(indexHref)});`,
+		'const host = createFakeHost({ sessionId: "role-default", cwd: process.cwd(), trusted: true });',
+		"orchestratorExtension(host.pi);",
+		'const result = await host.fire("agent_before_settle", { entries: [], continue: false, outcome: "completed", context: {} });',
+		'const entry = (result?.entries ?? []).find((item) => item.customType === "orchestrator-gate");',
+		'process.stdout.write(JSON.stringify(entry?.data ?? null));',
+	].join("\n");
+	const out = execFileSync(process.execPath, ["--input-type=module", "-e", script], {
+		env,
+		encoding: "utf8",
+	});
+	return JSON.parse(out) as Record<string, unknown> | null;
+}
+
+test("the factory's default role comes from the launcher's environment", () => {
+	const worker = factoryVerdictInFreshProcess({
+		...withoutRoleMarkers(),
+		PI_ORCHESTRATOR_ROLE: "worker",
+	});
+	assert.equal(worker?.scope, "child", "the env marker must reach the factory, not only role.ts");
+	assert.equal(worker?.decision, "report");
+
+	const parent = factoryVerdictInFreshProcess(withoutRoleMarkers());
+	assert.equal(parent?.scope, "parent");
+});
+
+test("a child scrubs the worker marker at session_start, after every factory has read it", async () => {
+	// The marker must survive the child factory (the orchestrator may load after
+	// it) and be gone before any tool could spawn a nested pi. Scrubbing at
+	// session_start is the point that satisfies both.
+	const dir = await mkdtemp(path.join(tmpdir(), "orchestrator-role-scrub-"));
+	const resultPath = path.join(dir, "run", "result.json");
+	await mkdir(path.dirname(resultPath), { recursive: true });
+	try {
+		await withEnv(
+		{
+			PI_TMUX_SUBAGENT_CHILD: "1",
+			PI_TMUX_SUBAGENT_RESULT: resultPath,
+			PI_ORCHESTRATOR_ROLE: "worker",
+		},
+		async () => {
+			const host = createFakeHost({ sessionId: "child-role-scrub" });
+			subagentExtension(host.pi);
+			assert.equal(
+				process.env.PI_ORCHESTRATOR_ROLE,
+				"worker",
+				"the factory must not scrub a marker the orchestrator may not have read yet",
+			);
+			await host.fire("session_start", {});
+			assert.equal(
+				process.env.PI_ORCHESTRATOR_ROLE,
+				undefined,
+				"a nested pi launched from this worker's shell must not inherit the worker role",
+			);
+		},
+	);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
 });

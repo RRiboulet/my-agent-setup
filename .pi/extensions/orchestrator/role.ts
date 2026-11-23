@@ -23,7 +23,10 @@
  * with the child's environment and nothing needs to read it twice.
  *
  * The legacy `PI_TMUX_SUBAGENT_CHILD=1` marker is still honoured, so a child
- * launched by a build that predates the role marker stays guarded.
+ * launched by a build that predates the role marker stays guarded. That
+ * fallback is read at module load too, so it depends on this extension loading
+ * before the subagent factory scrubs the legacy variable; the documented marker
+ * above has no such ordering requirement and is what current launchers write.
  */
 
 /** Who owns this run's decisions. */
