@@ -244,7 +244,7 @@ source of truth for the API this code targets — but do not modify pi itself.
 
 ## Coding skills
 
-Twelve skills adapted from
+Fourteen skills adapted from
 [RRiboulet/agent-coding-skills](https://github.com/RRiboulet/agent-coding-skills)
 cover the coding loop and now live here as ours: they carry this repo's rules in
 their bodies, and `licenses/NOTICE.md` records the MIT provenance. They are
@@ -256,6 +256,10 @@ than waiting to be told:
   ceremony. Where that boundary falls is a judgement, not a rule: no check can
   decide it, so it is prose and not a row in the table below.
 - Non-trivial or ambiguous request: `in-your-own-words` before building.
+- The shape of a change is still open — a new module or feature, a boundary
+  being reshaped, a workaround that keeps coming back, or two abstractions
+  competing: `architect` before any code, because a wrong shape is cheap to redo
+  on paper and expensive to redo once it is built.
 - The user asks to be grilled, stress-tested or interviewed, or a request's
   shape is undecided and a ten-line playback cannot carry its assumptions:
   `grilling`. It is the full design-tree interview in rounds; the cheap playback
@@ -283,15 +287,16 @@ than waiting to be told:
 - Writing or editing a skill, or changing a rule or pointer in `AGENTS.md`:
   `writing-for-agents`.
 
-Only the user starts the five user-invoked entry points, which pi spells
+Only the user starts the six user-invoked entry points, which pi spells
 `/skill:<name>`: `/skill:to-spec`, `/skill:to-tickets`, `/skill:implement`,
-`/skill:handoff`, `/skill:teach`. Suggest them when they fit; never start them
-yourself.
+`/skill:handoff`, `/skill:recall` (rebuild where the work actually stands from
+recent sessions and live repository state), `/skill:teach`. Suggest them when
+they fit; never start them yourself.
 
 `grilling`, `teach` and `writing-for-agents` are ported straight from
 [mattpocock/skills](https://github.com/mattpocock/skills) rather than through that
 stack, and `licenses/NOTICE.md` records them separately. `grilling` therefore
-sits in the trigger list above although it is not one of the twelve adapted
+sits in the trigger list above although it is not one of the fourteen adapted
 skills. It is model-invoked (so it is advertised by its description, and
 `/skill:grilling` still works). `teach` is user-invoked and stateful: it builds a
 teaching workspace outside any project checkout — never in this one — and the
