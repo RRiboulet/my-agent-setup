@@ -20,5 +20,8 @@
     "budget": 2,
     "minGateBlocks": 2,
     "timeoutMs": 60000
+  },
+  "workspace": {
+    "lockScope": "worktree"
   }
 }

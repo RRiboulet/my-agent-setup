@@ -816,6 +816,7 @@ test("readGateConfig defaults when absent, and reports a malformed file rather t
 		assert.equal(missing.config.attemptCap, 3);
 		assert.equal(missing.config.verification, null);
 		assert.deepEqual(missing.config.block, { openTodos: false, repeatedFailure: false, loops: false, waitForSubagents: false });
+		assert.deepEqual(missing.config.workspace, { lockScope: "worktree" }, "reservations stay worktree-scoped unless a project opts in");
 		assert.equal(missing.warning, undefined);
 
 		await withTempDir(async (configDir) => {
@@ -849,6 +850,7 @@ test("normalizeGateConfig validates the block keys, the verification command and
 					successPattern: null,
 				},
 				advisor: null,
+				workspace: { lockScope: "worktree" },
 			},
 			warnings: [],
 		},

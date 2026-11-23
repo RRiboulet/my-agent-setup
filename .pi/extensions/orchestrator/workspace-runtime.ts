@@ -32,6 +32,8 @@ import { Type } from "typebox";
 import { unlink } from "node:fs/promises";
 import { join as joinPath } from "node:path";
 
+import { readGateConfig } from "./config.ts";
+
 import {
 	DEFAULT_PRESENCE_TTL_MS,
 	MAX_MESSAGE_BODY_BYTES,
@@ -56,6 +58,7 @@ import {
 	readWorkspaceBranch,
 	releaseReservations,
 	removePeerMessage,
+	reservationCandidateFor,
 	reservationMatches,
 	reservationsDir,
 	reservePaths,
@@ -68,6 +71,7 @@ import {
 	type PeerMessage,
 	type PresenceRecord,
 	type ReservationRecord,
+	type ReservationScope,
 	type ScopeResult,
 	type WorkspaceScope,
 } from "./workspace.ts";
@@ -237,6 +241,26 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 	let releasedThisTurn = false;
 	let overrideArmed: { reason: string; at: number } | null = null;
 	const deliveredIds = new Set<string>();
+
+	/**
+	 * The project's reservation namespace, read lazily and cached per cwd like the
+	 * gate's own config: a session that never reserves reads no file. The default
+	 * is `"worktree"` and a config that cannot be read stays there — a broken file
+	 * must not silently widen a lock to the whole repository.
+	 */
+	let cachedLockScope: { cwd: string; scope: ReservationScope } | null = null;
+	const lockScopeAt = (cwd: string): ReservationScope => {
+		if (cachedLockScope?.cwd !== cwd) {
+			let scope: ReservationScope = "worktree";
+			try {
+				scope = readGateConfig(cwd).config.workspace.lockScope === "repo" ? "repo" : "worktree";
+			} catch {
+				scope = "worktree";
+			}
+			cachedLockScope = { cwd, scope };
+		}
+		return cachedLockScope.scope;
+	};
 
 	const clearJoinedTimers = (state: Joined): void => {
 		if (state.heartbeat) {
@@ -430,9 +454,11 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 
 	const reserve = async (ctx: ExtensionContext, input: ReserveInput): Promise<string> => {
 		if (!joined) return `Reserve requires a joined workspace: call \`${WORKSPACE_TOOL}\` with action "join" first.`;
+		const scope = lockScopeAt(ctx.cwd);
+		const reservationOptions = { scope, root: joined.scope.root, sharedRoot: joined.scope.sharedRoot };
 		let paths;
 		try {
-			paths = buildReservationPaths(ctx.cwd, input.paths);
+			paths = buildReservationPaths(ctx.cwd, input.paths, reservationOptions);
 		} catch (error) {
 			return `Reservation failed: ${(error as Error).message}`;
 		}
@@ -447,6 +473,9 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 				reason: input.reason,
 				now: now(),
 				ttlMs: input.ttlMs,
+				scope,
+				root: joined.scope.root,
+				sharedRoot: joined.scope.sharedRoot,
 			});
 		} catch (error) {
 			return `Reservation failed: ${(error as Error).message}`;
@@ -676,10 +705,17 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 		}
 		if (live.length === 0) return undefined;
 		const candidate = canonicalPath(ctx.cwd, event.input.path);
+		// The candidate is mapped per holder, because the namespace belongs to the
+		// holder's record: a repo-scoped claim is compared in the shared root, a
+		// worktree-scoped one by canonical absolute path. This session's own config
+		// is not consulted here — a default-scope writer still has to see a
+		// repo-scoped peer's claim on the same relative path.
+		const writer = { root: scope.scope.root, sharedRoot: scope.scope.sharedRoot };
 		const conflicts: { reservation: ReservationRecord; path: { pattern: string; kind: string } }[] = [];
 		for (const reservation of live) {
 			if (sessionId && reservation.sessionId === sessionId) continue;
-			const path = reservation.paths.find((held) => reservationPathMatches(held, candidate));
+			const holderCandidate = reservationCandidateFor(reservation, candidate, writer);
+			const path = reservation.paths.find((held) => reservationPathMatches(held, holderCandidate));
 			if (path) conflicts.push({ reservation, path });
 		}
 		if (conflicts.length === 0) return undefined;
@@ -807,6 +843,7 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 		humanPromptOpen = false;
 		releasedThisTurn = false;
 		overrideArmed = null;
+		cachedLockScope = null;
 	});
 
 	pi.on("session_shutdown", async () => {

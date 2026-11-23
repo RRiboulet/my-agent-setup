@@ -41,6 +41,27 @@ Added:
   trusted. Tests:
   `orchestrator-verify.test.ts`, `orchestrator-gate.test.ts`.
 
+- **A project can ask for reservations that hold across linked worktrees, not
+  just inside one.** `workspace.lockScope` in the committed
+  `.pi/orchestrator.json` is `"worktree"` (the default, which reproduces the
+  previous behaviour exactly: two linked worktrees may each reserve the same
+  repository-relative file, and one worktree still refuses it twice) or
+  `"repo"`, which maps every reservation into the shared repository root — the
+  main checkout, resolved from the git common directory — so the same relative
+  path is one claim across all of them. A repo-scoped claim is enforced against
+  a session that kept the default scope, because the write guard maps its
+  candidate into the holder's namespace before matching; a path outside the
+  worktree keeps its absolute pattern and gains no cross-tree meaning. Records
+  are version 2 and carry the scope and the reserving worktree's root; a version
+  1 record is still read and enforced as worktree-scoped with no migration
+  write, an unknown scope is unusable rather than guessed (it blocks nothing),
+  and presence and peer messages keep version 1 so an older build in the next
+  worktree neither loses its peers nor drops its inbox. The key is not a gate
+  block: it neither blocks a settlement nor changes when `orchestrator_override`
+  is registered. Tests: `orchestrator-reservations.test.ts`,
+  `orchestrator-workspace.test.ts`.
+
+
 Fixed:
 
 - **A delegated worker no longer passes its role to a `pi` its shell starts.**
@@ -76,8 +97,7 @@ Fixed:
   drives the real factory with the launcher's environment instead of only the
   test seam, which is what let the original bug through. A child-side test proves
   the marker is removed at `session_start`. Tests: `orchestrator-role.test.ts`,
-  `orchestrator-gate.test.ts`, `lifecycle-launch.test.ts`.
-## v1.16.0 — 2026-11-23
+  `orchestrator-gate.test.ts`, `lifecycle-launch.test.ts`.## v1.16.0 — 2026-11-23
 
 Added:
 

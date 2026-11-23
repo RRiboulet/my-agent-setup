@@ -718,6 +718,21 @@ never returns `continue`. Each opt-in key buys one check:
 | `advisor.budget` | Recorded attempts allowed on one branch, calls and refusals alike (default 2); `0` disables the advisor. |
 | `advisor.minGateBlocks` | Settlement blocks reporting the same conditions before that counts as a repeated failure (default 2). |
 | `advisor.timeoutMs` | Bound on the consultation call (default 60 s); it is awaited at run start. |
+| `workspace.lockScope` | `"worktree"` (default) or `"repo"`: which namespace a workspace reservation is compared in. Not a gate key — see below. |
+
+**Reservations are per-worktree unless a project says otherwise.** A reserved path
+(`orchestrator_reserve`) is keyed by its canonical absolute path, so the main checkout
+and a linked worktree can each claim the same repository-relative file: branch-isolated
+agents working on different branches collide only when they share a tree.
+`workspace.lockScope: "repo"` re-anchors every reservation at the shared repository root
+(the main checkout, resolved from the git common directory), so the same relative path is
+one claim across all linked worktrees. A repository-scoped claim is enforced against a
+session that kept the default scope too — the write guard maps its path into the holder's
+namespace before matching — while a path outside the worktree stays absolute and gains no
+cross-tree meaning. The key is read from the same committed file as the gate settings and
+changes nothing else: presence, peer messaging, TTLs, pid liveness, globs and the advisory
+fail-open guard are unaffected. It is not part of `block`, so it neither blocks a
+settlement nor registers `orchestrator_override`.
 
 A block is `continue: true` plus a `custom_message` carrying the reason and the
 verification output, so the model gets one more turn with the evidence. It never
