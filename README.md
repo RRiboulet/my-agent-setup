@@ -1101,7 +1101,7 @@ record says so by carrying no `report`.
 |---|---|
 | [`handoff`](.pi/skills/handoff/SKILL.md) | User-invoked /skill:handoff: write a handoff document a fresh agent in any harness can continue from. |
 | [`implement`](.pi/skills/implement/SKILL.md) | User-invoked /skill:implement: take a spec, ticket, ticket set or plan end to end in small verified units. |
-| [`orchestrate`](.pi/skills/orchestrate/SKILL.md) | User-invoked /skill:orchestrate: run a to-tickets folder in tiered subagent waves — triaged dispatch from the ladder, a reviewer gate on Tier-1 output, verified-only serial commits. |
+| [`orchestrate`](.pi/skills/orchestrate/SKILL.md) | User-invoked /skill:orchestrate: run a numbered ticket folder in tiered subagent waves — triaged dispatch from the ladder, a reviewer gate on Tier-1 output, verified-only serial commits. |
 | [`recall`](.pi/skills/recall/SKILL.md) | User-invoked /skill:recall: rebuild recent working context from session records and live repository state into a status brief. |
 | [`teach`](.pi/skills/teach/SKILL.md) | User-invoked /skill:teach: teach a topic across sessions in a workspace of lessons and records, when the learning is the project, not one explanation. |
 | [`to-spec`](.pi/skills/to-spec/SKILL.md) | User-invoked /skill:to-spec: write a spec with test seams and acceptance criteria from the current conversation. |
