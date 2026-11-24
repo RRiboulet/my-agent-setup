@@ -1,12 +1,12 @@
 ---
-status: ready
+status: done
 blocked-by: ["01", "02", "03", "04"]
 ---
 
 # 05: Author the orchestrate skill
 
 **Blocked by:** 01, 02, 03, 04
-**Status:** ready
+**Status:** done
 
 ## What to build
 `.pi/skills/orchestrate/SKILL.md` + the `ladder.json` instantiation: the
