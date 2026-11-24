@@ -27,6 +27,7 @@
     ],
     "skills": [
       ".pi/skills/add-model",
+      ".pi/skills/architect",
       ".pi/skills/benchmark-checklist",
       ".pi/skills/blast-radius",
       ".pi/skills/commit",
@@ -42,6 +43,7 @@
       ".pi/skills/native-web-search",
       ".pi/skills/prevent-recurrence",
       ".pi/skills/prove-it-works",
+      ".pi/skills/recall",
       ".pi/skills/show-me-your-work",
       ".pi/skills/tdd",
       ".pi/skills/teach",

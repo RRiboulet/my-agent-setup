@@ -1,10 +1,12 @@
 # Coding and teaching skill provenance
 
-The twelve coding skills under `.pi/skills/` (`in-your-own-words`,
-`blast-radius`, `tdd`, `diagnosing-bugs`, `prove-it-works`,
+The fourteen coding skills under `.pi/skills/` (`in-your-own-words`,
+`blast-radius`, `architect`, `tdd`, `diagnosing-bugs`, `prove-it-works`,
 `idempotent-operations`, `benchmark-checklist`, `show-me-your-work`,
-`to-spec`, `to-tickets`, `implement`, `handoff`) were adapted from
-<https://github.com/RRiboulet/agent-coding-skills> at commit `25deecd`. Three more
+`recall`, `to-spec`, `to-tickets`, `implement`, `handoff`) were adapted from
+<https://github.com/RRiboulet/agent-coding-skills> at commit `25deecd`, except
+`architect` and `recall`, which come from its `dfdff89` — the later snapshot
+that added them. Three more
 skills, `grilling`, `teach` and `writing-for-agents`, were adapted straight from
 mattpocock/skills rather than through that stack; they are listed below with the
 rest.
@@ -29,6 +31,7 @@ Paths are relative to each upstream repository at the pinned commit.
 | --- | --- |
 | `in-your-own-words` | pstack `skills/in-your-own-words`; Matt `skills/productivity/grilling` |
 | `blast-radius` | pstack `skills/blast-radius` |
+| `architect` | pstack `skills/architect`; Matt `skills/engineering/codebase-design` |
 | `tdd` | Matt `skills/engineering/tdd` (with `tests.md`, `mocking.md`); pstack `skills/tdd` |
 | `diagnosing-bugs` | Matt `skills/engineering/diagnosing-bugs` (with `scripts/hitl-loop.template.sh`); pstack `skills/principle-fix-root-causes` |
 | `prevent-recurrence` | pstack `skills/correct`, `skills/principle-encode-lessons-in-structure` |
@@ -40,6 +43,7 @@ Paths are relative to each upstream repository at the pinned commit.
 | `to-tickets` | Matt `skills/engineering/to-tickets` |
 | `implement` | Matt `skills/engineering/implement`, `skills/engineering/implement-spec`; pstack `skills/principle-sequence-verifiable-units`, `skills/principle-subtract-before-you-add` |
 | `handoff` | Matt `skills/productivity/handoff` |
+| `recall` | pstack `skills/recall` |
 | `grilling` | Matt `skills/productivity/grilling` (with `skills/productivity/grill-me`, the user-invoked wrapper, folded into its "Where this sits" section rather than shipped as a second skill) |
 | `teach` | Matt `skills/productivity/teach` (with `MISSION-FORMAT.md`, `LEARNING-RECORD-FORMAT.md`, `RESOURCES-FORMAT.md`, `GLOSSARY-FORMAT.md`) |
 | `writing-for-agents` | Matt `skills/productivity/writing-for-agents` (with `references/skill-mechanics.md`) |
@@ -48,6 +52,32 @@ Paths are relative to each upstream repository at the pinned commit.
 
 The skills were edited to fit this repository rather than kept as copies:
 
+- **`architect` is the shape step, not a multi-model design run.** pstack's
+  version is a five-phase pipeline whose Phase B dispatches several models
+  through `arena`; there is no arena, no `pstack-models` rule and no `how` or
+  `why` skill here, so those mechanics are gone and the durable discipline stays:
+  map what the change touches, sketch two structurally distinct shapes, apply the
+  deletion and single-owner tests, then pick or escalate. Upstream's opt-in human
+  checkpoint became the default, because the escalation is where the decision
+  belongs: `grilling` settles it with the user when both shapes carry real
+  tradeoffs. Matt's deep-module vocabulary — depth as leverage at the interface,
+  the seam, one adapter is hypothetical and two make it real,
+  replace-don't-layer — is folded into the boundary tests rather than shipped as
+  a skill of its own. Building against the sketch is `tdd`'s job, so Phase D is
+  dropped along with the rationale template, the `references/` files and
+  `agents/openai.yaml`.
+- **`recall` reads pi's own session store instead of a harness transcript path.**
+  Mining is `<agent dir>/sessions/<safePath>/*.jsonl` ordered by modification
+  time, with the current session and subagent noise excluded, fanned out through
+  `subagent` and collected with `subagent_wait` so the transcripts stay in the
+  children. It adds a live-presence source upstream did not have —
+  `orchestrator_workspace` `peers`, the other sessions open on this repository —
+  with the heartbeat caveat that a stale claim is verified against git, and it
+  settles tracker questions through `gh` instead of an assumed integration.
+  pstack's routing into skills that are not installed here (`why`,
+  `session-pickup`, `automate-me`, `unslop`, `poteto-mode`) is dropped; the
+  boundary with `handoff`, which does exist, is kept. It stays user-invoked,
+  like every other entry point here.
 - **One review pipeline.** The adapted `review-change` skill was folded into
   `REVIEW_GUIDELINES.md`, which is what `/review` appends and what a
   triage-launched reviewer follows. `prove-it-works` now says plainly that it is

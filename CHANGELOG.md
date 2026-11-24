@@ -4,6 +4,44 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.17.1 — 2026-11-24
+
+Added:
+
+- **The shape of a change is now argued on paper instead of discovered through
+  the diff.** `.pi/skills/architect/` is model-invoked and fires when a module or
+  feature is being designed, a boundary is being reshaped, a workaround keeps
+  coming back, or two abstractions compete. It maps every caller and boundary
+  the change crosses, sketches two genuinely distinct shapes — different
+  ownership, seams and types, not one idea renamed — and tests both on the
+  deletion test, single ownership, minimal caller knowledge and
+  replace-don't-layer. Then it picks the simpler shape and says why the other
+  lost, or hands the decision to the user when both carry real product or
+  irreversible tradeoffs. Upstream's scrap signal survives: friction that is a
+  pattern rather than an instance means the boundary is wrong, so the sketch is
+  thrown out instead of guarded.
+
+- **A sixth user-invoked entry point, `/skill:recall`, rebuilds where the work
+  stands before it is resumed.** It mines the session records under the agent
+  dir through a `subagent` fan-out, then verifies every state claim against
+  `git` and `gh` instead of trusting the transcript that made it. It adds a
+  source upstream did not have: `orchestrator_workspace` `peers`, the other pi
+  sessions live on this repository right now — read as a heartbeat, so a stale
+  presence claim is verified against git rather than repeated. Tests:
+  `coding-skills.test.ts`.
+
+- **The stealth reasoning model `hungerg-free` is available in the OpenCode Go
+  provider, including offline.** The curated entry registers `HungerG Free` on
+  the canonical OpenAI-compatible Go endpoint with text and image input, a
+  1,000,000-token context window, 65,536 output tokens and zero pricing. The
+  live API advertises reasoning support without an effort list, so the entry
+  enables reasoning but leaves pi's default thinking levels in charge rather
+  than inventing a level map. Its minimal compatibility flags disable stored
+  messages and the developer role while retaining strict mode and
+  `max_tokens`; live probes confirmed ordinary assistant history works without
+  requiring `reasoning_content`, and both text and image input remain exposed
+  through pi's model type.
+
 ## v1.17.0 — 2026-11-23
 
 Added:

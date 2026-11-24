@@ -15,6 +15,7 @@ import path from "node:path";
 import { test } from "node:test";
 import type { JsonModel } from "../index.ts";
 import livePayload from "./fixtures/live-models-2026-11-10.json" with { type: "json" };
+import curatedModels from "../models.json" with { type: "json" };
 
 // index.ts resolves the cache path once, at import time, from pi's agent dir.
 // Point it at a temp dir before importing so loadStaleModels never reads the
@@ -35,6 +36,30 @@ const CACHE_DIR = path.join(agentDir, "cache");
 const CACHE_PATH = path.join(CACHE_DIR, "opencode-go-models.json");
 
 const liveModels = livePayload.data;
+
+test("curates HungerG Free for offline use with its advertised limits and compatibility", () => {
+	const hungerg = curatedModels.find((entry) => entry.id === "hungerg-free");
+	assert.ok(hungerg, "the stealth model must be available without a live API response");
+	assert.deepEqual(hungerg, {
+		id: "hungerg-free",
+		name: "HungerG Free",
+		api: "openai-completions",
+		baseUrl: "https://opencode.ai/zen/go/v1",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1000000,
+		maxTokens: 65536,
+		compat: {
+			supportsStore: false,
+			supportsDeveloperRole: false,
+			supportsStrictMode: true,
+			maxTokensField: "max_tokens",
+		},
+	});
+	assert.equal("thinkingLevelMap" in hungerg, false, "the API advertises no effort levels to map");
+});
+
 function live(id: string) {
   const found = liveModels.find((m) => m.id === id);
   assert.ok(found, `fixture is missing ${id}`);
