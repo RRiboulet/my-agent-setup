@@ -1,6 +1,6 @@
 ---
 name: orchestrate
-description: "User-invoked /skill:orchestrate: run a numbered ticket folder in tiered subagent waves — triaged dispatch from the ladder, a reviewer gate on Tier-1 output, verified-only serial commits."
+description: "User-invoked /skill:orchestrate: run a numbered ticket folder in tiered subagent waves — triaged dispatch, gated verified-only commits."
 disable-model-invocation: true
 ---
 
