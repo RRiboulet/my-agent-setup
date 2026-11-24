@@ -4,6 +4,8 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.17.1 — 2026-11-24
+
 Added:
 
 - **The shape of a change is now argued on paper instead of discovered through
@@ -27,6 +29,19 @@ Added:
   sessions live on this repository right now — read as a heartbeat, so a stale
   presence claim is verified against git rather than repeated. Tests:
   `coding-skills.test.ts`.
+
+- **The stealth reasoning model `hungerg-free` is available in the OpenCode Go
+  provider, including offline.** The curated entry registers `HungerG Free` on
+  the canonical OpenAI-compatible Go endpoint with text and image input, a
+  1,000,000-token context window, 65,536 output tokens and zero pricing. The
+  live API advertises reasoning support without an effort list, so the entry
+  enables reasoning but leaves pi's default thinking levels in charge rather
+  than inventing a level map. Its minimal compatibility flags disable stored
+  messages and the developer role while retaining strict mode and
+  `max_tokens`; live probes confirmed ordinary assistant history works without
+  requiring `reasoning_content`, and both text and image input remain exposed
+  through pi's model type.
+
 ## v1.17.0 — 2026-11-23
 
 Added:
