@@ -355,7 +355,10 @@ function normalizePins(raw, roster, tiers, warnings) {
  * Gate policy. Kept here, next to the models it gates, because a rule written in
  * skill prose and a model written here drift apart the moment one is edited.
  * `throughTier` is the highest tier whose output still passes the reviewer: Tier
- * 1 gets an independent grader, Tier 2 and above are ungated.
+ * 1 gets an independent grader, Tier 2 and above are ungated. The gate cannot be
+ * disabled from config: `throughTier: 0` is refused with a warning and the
+ * built-in gate is kept, because dropping the Tier-1 grader is exactly the
+ * silent quality-floor loss this ladder exists to prevent.
  */
 function normalizeGates(raw, warnings) {
 	const gates = { reviewer: { throughTier: 1 } };
@@ -372,10 +375,16 @@ function normalizeGates(raw, warnings) {
 	}
 	const { throughTier } = reviewer;
 	if (throughTier === undefined) return gates;
-	if (typeof throughTier !== "number" || !Number.isInteger(throughTier) || throughTier < 0) {
-		warnings.push(
-			"gates.reviewer.throughTier must be a non-negative integer; the reviewer gate stays at its built-in setting",
-		);
+	if (typeof throughTier !== "number" || !Number.isInteger(throughTier) || throughTier < 1) {
+		if (throughTier === 0) {
+			warnings.push(
+				"gates.reviewer.throughTier 0 would disable the reviewer gate; the gate cannot be disabled, so the built-in setting is used — widen the gate with a higher throughTier instead",
+			);
+		} else {
+			warnings.push(
+				"gates.reviewer.throughTier must be a positive integer; the reviewer gate stays at its built-in setting",
+			);
+		}
 		return { reviewer: { throughTier: 1 } };
 	}
 	return { reviewer: { throughTier } };

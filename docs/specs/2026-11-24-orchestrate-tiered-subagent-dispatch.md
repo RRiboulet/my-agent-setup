@@ -188,24 +188,24 @@ verdicts, escalations, blockers.
 
 ## Acceptance criteria
 
-- [ ] `/skill:orchestrate <folder>` parses a `to-tickets` folder, reports the
+- [x] `/skill:orchestrate <folder>` parses a `to-tickets` folder, reports the
       graph (cycles/dangling blockers detected before dispatching), and only
       then dispatches. (Behaviors 1, 2)
-- [ ] Every dispatched subagent's run record shows a *(model, thinking)* pair
+- [x] Every dispatched subagent's run record shows a *(model, thinking)* pair
       from `ladder.json`, and each ticket maps to a recorded triage decision
       (tier + justification) or an explicit `tier-override`. (Behavior 3)
-- [ ] A Tier-1 implementer's output is followed by a Tier-2 reviewer gate whose
+- [x] A Tier-1 implementer's output is followed by a Tier-2 reviewer gate whose
       verdict is recorded; Tier-2+ output has no gate. (Behavior 4)
-- [ ] A crashed run retried at the same tier, then escalated one tier, is
+- [x] A crashed run retried at the same tier, then escalated one tier, is
       observable in the run records; a ticket that exhausts Tier 3 ends
       `blocked` with a reason and nothing landed for it. (Behavior 4)
-- [ ] Every commit on the feature branch lands after that ticket's Validation
+- [x] Every commit on the feature branch lands after that ticket's Validation
       passed and cites the ticket number; no implementer run produced a commit.
       (Behavior 5)
-- [ ] Ticket files' `Status` transitions are observable mid-run by reading the
+- [x] Ticket files' `Status` transitions are observable mid-run by reading the
       files; the closing report exists and covers per-ticket tier, gate
       verdicts, escalations, and blockers. (Behavior 6, 7)
-- [ ] `ladder.json` is the only place roster types, tier models, thinking pins,
+- [x] `ladder.json` is the only place roster types, tier models, thinking pins,
       and gate rules are written; the orchestrate skill contains no second copy
       of the table. (Design decision: single source of truth)
 

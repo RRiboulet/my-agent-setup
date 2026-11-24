@@ -27,15 +27,15 @@ The skill file and its ladder instantiation. The reader and parser modules come
 from tickets 02–03 and are consumed, not reimplemented.
 
 ## Acceptance criteria
-- [ ] Every dispatched run's record shows a *(model, thinking)* pair from
+- [x] Every dispatched run's record shows a *(model, thinking)* pair from
       `ladder.json`; `ladder.json` is the only copy of that table.
-- [ ] A crashed run retries at the same tier once, then escalates one tier,
+- [x] A crashed run retries at the same tier once, then escalates one tier,
       observable in run records.
-- [ ] Tier-1 output is gated by a Tier-2 reviewer whose verdict is recorded;
+- [x] Tier-1 output is gated by a Tier-2 reviewer whose verdict is recorded;
       Tier-2+ output has no gate.
-- [ ] Each commit lands after that ticket's validation passed and cites the
+- [x] Each commit lands after that ticket's validation passed and cites the
       ticket number; no implementer run commits.
-- [ ] Entry warns and requires confirmation when the session model is not
+- [x] Entry warns and requires confirmation when the session model is not
       Tier 3.
 
 ## Validation

@@ -22,9 +22,9 @@ Proof that both special models in the ladder can actually be dispatched today:
 `enabledModels` in the user's settings, plus a recorded probe result. No code.
 
 ## Acceptance criteria
-- [ ] A subagent run pinned to `mistral/zai-glm-5-3` @ `high` completes and its
+- [x] A subagent run pinned to `mistral/zai-glm-5-3` @ `high` completes and its
       run record shows the model.
-- [ ] A dispatch pinned to the chosen decision model completes, or the ticket
+- [x] A dispatch pinned to the chosen decision model completes, or the ticket
       documents the exact failure and the alternative pin chosen instead.
 
 ## Validation

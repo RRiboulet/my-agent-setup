@@ -284,10 +284,23 @@ test("a malformed gates block falls back to the built-in reviewer gate", (t) => 
 	ladder.gates = { reviewer: { throughTier: "one" } };
 	const file = writeLadder(t, ladder);
 	const result = readLadder(file);
-	assert.match(warningsOf(result), /gates\.reviewer\.throughTier must be a non-negative integer/);
+	assert.match(warningsOf(result), /gates\.reviewer\.throughTier must be a positive integer/);
 	assert.equal(
 		result.ladder.gates.reviewer.throughTier, 1,
 		"a malformed gate must fall back to the built-in gate, not to a disabled one: 0 would drop the Tier-1 quality floor silently",
+	);
+});
+
+test("an explicit zero reviewer gate is refused, not accepted as gate-off", (t) => {
+	const ladder = shipped();
+	ladder.gates = { reviewer: { throughTier: 0 } };
+	const file = writeLadder(t, ladder);
+	const result = readLadder(file);
+	assert.equal(result.source, "file");
+	assert.match(warningsOf(result), /the gate cannot be disabled/);
+	assert.equal(
+		result.ladder.gates.reviewer.throughTier, 1,
+		"a zero throughTier would drop the Tier-1 quality floor — the spec's headline value — so the ladder refuses it and keeps the built-in gate",
 	);
 });
 

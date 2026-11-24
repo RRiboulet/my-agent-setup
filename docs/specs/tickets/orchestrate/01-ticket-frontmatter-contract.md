@@ -21,9 +21,9 @@ demonstrating the contract. Leaves the `orchestrate` skill and its parser for
 later tickets.
 
 ## Acceptance criteria
-- [ ] The published template shows frontmatter with `status`, `blocked-by`,
+- [x] The published template shows frontmatter with `status`, `blocked-by`,
       optional `tier-override`, and prose sections unchanged.
-- [ ] A ticket generated from the template has frontmatter that a YAML parser
+- [x] A ticket generated from the template has frontmatter that a YAML parser
       reads into `{status, blocked-by[], tier-override?}` with defaults when
       fields are absent (`blocked-by: []`, `status: ready`).
 

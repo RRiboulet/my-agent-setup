@@ -132,7 +132,12 @@ tier assigned, and a one-line justification naming the ticket signal that fits
 the winning criterion. **A triage decision is never invisible** — every
 dispatched ticket maps to a recorded classification, an explicit
 `tier-override`, or the recorded floor. Resolve the dispatch tier with
-`resolveTier`: the override wins, the classification stands, the ladder's
+`resolveTier` — two details that are easy to get wrong: the classifier's
+`choice` is a **string**, so coerce it (`Number.parseInt(choice, 10)`) before
+passing it, or every classification fails the number check and silently falls
+to the Tier-1 floor; and pass `{ maxTier: ladder.tiers.length }` from the
+ladder you read, so a ladder that grows accepts valid tiers instead of
+rejecting them. The override wins, the classification stands, the ladder's
 lowest tier is the floor. Do not reimplement the precedence.
 
 **c. Dispatch each implementer** with `subagent`, at the tier's exact

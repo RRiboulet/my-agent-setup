@@ -27,8 +27,11 @@ surfaces. No new features.
 - [ ] Every commit on the branch cites a ticket number and follows a passed
       validation; the forced-failure ticket's escalation is visible in run
       records.
-- [ ] Mid-run status transitions were observed by reading ticket files while a
-      wave was live.
+- [ ] ~Mid-run status transitions were observed by reading ticket files while a
+      wave was live~ — **waived rather than ticked**: the wave sequence's
+      transitions (in-progress written before each dispatch, done/blocked after
+      each wave) are in the run transcript, but a literal mid-wave file read was
+      not captured as evidence; recorded openly instead of silently green.
 
 ## Validation
 The dry-run transcript reference plus a green `node tools/branch-base.mjs`
@@ -70,7 +73,7 @@ the classifier result wrong — answers are keyed by question id
 
 **Findings left open (not fixed in a dry run):** run-settled records echo
 `thinking high` for pairs requested as `max`/`medium` (the launch line shows
-the requested level, the settled record the session's) — a think- ing-level
+the requested level, the settled record the session's) — a thinking-level
 bookkeeping variance that makes the settled audit line less trustworthy than
 the launch line; one disposable SKIP: the serial-commit step (§2h) was not
 exercised — the dry-run folder is outside the repository, so there was nothing

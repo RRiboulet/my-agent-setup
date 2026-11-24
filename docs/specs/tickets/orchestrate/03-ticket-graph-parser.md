@@ -20,10 +20,10 @@ The parser module and `node --test` tests only. Who calls it (the orchestrate
 skill) is ticket 05.
 
 ## Acceptance criteria
-- [ ] Cycles and dangling blockers are reported as named, checkable errors
+- [x] Cycles and dangling blockers are reported as named, checkable errors
       before any dispatch could happen.
-- [ ] `tier-override` in a ticket's frontmatter wins over everything else.
-- [ ] Status transitions (`ready → in-progress → done/blocked`) write back to
+- [x] `tier-override` in a ticket's frontmatter wins over everything else.
+- [x] Status transitions (`ready → in-progress → done/blocked`) write back to
       frontmatter and are visible to a plain file read.
 
 ## Validation

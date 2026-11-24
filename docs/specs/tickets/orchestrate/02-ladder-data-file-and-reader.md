@@ -24,9 +24,9 @@ The data file and the reader with `node --test` tests. The skill that reads it
 is ticket 05.
 
 ## Acceptance criteria
-- [ ] `readLadder` returns the parsed ladder for a valid file and a warnings
+- [x] `readLadder` returns the parsed ladder for a valid file and a warnings
       list alongside defaults for a malformed one — never throws.
-- [ ] Tests cover: missing/thinking-out-of-range tiers, a roster type with no
+- [x] Tests cover: missing/thinking-out-of-range tiers, a roster type with no
       tier coverage, an exempt type (triage) without its pin, and unknown
       roster entries.
 
