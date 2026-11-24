@@ -111,7 +111,7 @@ unavailable. Sketch, in a codemode script:
 ```js
 const pin = pins.triage; // read from the ladder first
 const jev = await models.getModelOfType("classifier", pin.provider, pin.model);
-const answer = await models.classify(jev, {
+const result = await models.classify(jev, {
 	state: { id, title, whatToBuild, acceptanceCriteria, validation },
 	questions: { tier: { type: "choice",
 		instructions: "Which complexity tier does ticket work need?",
@@ -123,8 +123,10 @@ const answer = await models.classify(jev, {
 });
 ```
 
-Check `answer.stopReason` — a provider error is a failed triage, not a
-low-answer. At most four classifier calls run at once per script, so a wide
+Check `result.stopReason` — a provider error is a failed triage, not a
+low-answer — then read the verdict from `result.answers.tier.choice` (answers
+are keyed by question id; each answer also carries `confidence`). At most four
+classifier calls run at once per script, so a wide
 frontier batches inside one script. Record every decision before dispatch: the
 tier assigned, and a one-line justification naming the ticket signal that fits
 the winning criterion. **A triage decision is never invisible** — every
