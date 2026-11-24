@@ -45,11 +45,18 @@ Present the breakdown as a numbered list: title, blocked by, and the end-to-end 
 ### 4. Publish
 
 - **Default:** one file per ticket, numbered from `01` in dependency order (blockers first). Put them next to the spec in a `tickets/` folder if a spec file exists, else in `docs/tickets/<feature-slug>/`, or wherever the user or repository convention says. Never combine tickets into one file. Do not commit unless asked.
+- **Frontmatter is the machine contract.** Open every ticket file with the template's YAML frontmatter — `status: ready`, `blocked-by: []`, and `tier-override` only where a ticket should be pinned to a fixed complexity tier instead of classified. A consumer (an orchestrator, a graph parser) reads those fields, never the prose. The `**Blocked by:**` and `**Status:**` lines stay beside them for human readers, and a status change updates both.
 - **Issue tracker:** only if the user names one. Create issues in dependency order so edges can cite real identifiers, use the tracker's native blocking links where they exist, and link each to the parent issue if there is one. Never close or edit the parent.
 
 ## Ticket template
 
 ```markdown
+---
+status: ready
+blocked-by: []
+# tier-override: 2
+---
+
 # <NN>: <Title: the outcome, not the activity>
 
 **Blocked by:** <ticket numbers or titles, or "None (can start immediately)">
@@ -68,6 +75,8 @@ The components or behaviors it touches, and what it leaves for later tickets.
 ## Validation
 The test or check that proves it, and which spec behaviors it covers.
 ```
+
+The frontmatter between the `---` lines is what a parser reads: `status`, `blocked-by` (the blocker tickets' ids), and optional `tier-override` (the complexity tier an orchestrator should dispatch the ticket at). Quote the ids — `blocked-by: ["01"]`, not `[01]` — so a zero-padded id stays the string that matches the ticket's filename. Write `blocked-by: []` when nothing gates the ticket, leave `tier-override` out unless the ticket is pinned, and a missing `status` reads as `ready`; the defaults are the machine reading of "None (can start immediately)".
 
 Keep file paths and code snippets out; they go stale. The exception is a snippet from a prototype that pins a decision more precisely than prose: include only the decision-rich part and say where it came from.
 
