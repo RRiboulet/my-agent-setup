@@ -1,0 +1,879 @@
+import { constants, existsSync } from "node:fs";
+import { mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import * as path from "node:path";
+
+import { getAgentDir, getPackageDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { Usage } from "@earendil-works/pi-ai";
+
+import { buildAttachCommand, buildEscapeBindArgs, buildPanelLaunch } from "../subagent/panel.ts";
+import { currentTmuxPointer, defaultPanelLauncher, resolvePaneClient, type PanelLauncher } from "../subagent/popup.ts";
+
+// Kept exported: `BtwDeps.launch` and `__test__.setPanelLauncher` name this type,
+// so a typed consumer of this entry point should not have to reach into the
+// subagent tree to spell it.
+export type { PanelLauncher };
+import {
+	buildBtwKillServerArgs,
+	buildBtwPaths,
+	buildBtwRemainOnExitArgs,
+	buildBtwSendKeysArgs,
+	buildBtwSessionCreateArgs,
+	buildBtwSubmitArgs,
+	buildBtwViewerCommand,
+	btwRootDir,
+	requireBtwQuestion,
+	type BtwPaths,
+} from "./launch.ts";
+import { fenceCloser, runBtwRequest, sanitizeAnswerText, type BtwOutcome } from "./request.ts";
+import { resolvePiEntryPoints } from "./entry-points.mjs";
+import { buildThemeSpec } from "./theme.mjs";
+
+const DESCRIPTION = "Open a side-question panel that asks for the question and answers without adding anything to the transcript.";
+/** Every tmux call is bounded: a wedged server must not hang the command handler. */
+const TMUX_TIMEOUT_MS = 5_000;
+const FOOTER = "\n\n---\n";
+
+/**
+ * The answer file's header: the question as a blockquote paragraph, one `> `
+ * line per question line. The popup title reads it back, so writer and parser
+ * share these literals rather than agreeing by coincidence.
+ */
+const ANSWER_HEADING = "# /btw";
+const ANSWER_QUOTE_PREFIX = "> ";
+/** The header is read from the start; the answer after it can be large. */
+const ANSWER_HEADER_BYTES = 4_096;
+
+// A module-level binding rather than a direct call so factory-driven tests can
+// substitute it (`__test__.setPanelLauncher`). The extension reads it at popup
+// time, so a test can change it without reloading the factory. The launcher
+// itself is shared with the subagent extension (see popup.ts).
+let panelLauncher: PanelLauncher = defaultPanelLauncher;
+
+/** What the launch core needs from its caller; tests inject their own. */
+export interface BtwDeps {
+	exec: ExtensionAPI["exec"];
+	notify: (message: string, type: "info" | "warning" | "error") => void;
+	launch: PanelLauncher;
+	/** The pi agent dir, absolute; tests point it at a temp directory. */
+	agentDir: string;
+	/** Process liveness for the owner-pid reap; injected so tests can fake it. */
+	isPidAlive: (pid: number) => boolean;
+	/** Mirror the main loop's image-blocking wrapper when the setting is on. */
+	blockImages: boolean;
+	/**
+	 * The theme pi is rendering with right now.
+	 *
+	 * The panel renders in its own process, and pi's theme lives in pi's
+	 * process: the panel is handed the resolved colors (see `theme.mjs`), so
+	 * it draws the answer in the transcript's colors rather than in a theme of
+	 * its own.
+	 */
+	theme?: ExtensionContext["ui"]["theme"];
+	/**
+	 * The indent the transcript gives a code block.
+	 *
+	 * pi-tui's own default is two spaces, which is also pi's default, so this
+	 * is only set when the session moved it.
+	 */
+	codeBlockIndent?: string;
+}
+
+/** The slice of pi's command context the launch core reads. */
+export type BtwContext = Pick<ExtensionContext, "mode" | "cwd" | "model" | "modelRegistry"> & {
+	sessionManager: Pick<ExtensionContext["sessionManager"], "getSessionId" | "getEntries" | "getLeafId">;
+};
+
+/** A running panel: abort it on replace/shutdown, await it before reusing paths. */
+export interface BtwLaunch {
+	controller: AbortController;
+	completion: Promise<void>;
+}
+
+function messageOf(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The theme pi is rendering with, or undefined when there is none.
+ *
+ * pi's theme is a proxy that throws when it has not been initialised, which
+ * is a session handler's problem and not the panel's: a panel without a
+ * theme opens in the terminal's palette, and a session handler that throws
+ * takes the session down with it.
+ */
+function liveTheme(ctx: ExtensionContext): ExtensionContext["ui"]["theme"] | undefined {
+	try {
+		return ctx.ui.theme;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Whether a pid belongs to a live process. EPERM means the process exists but
+ * is not ours, which still counts as alive.
+ */
+function defaultIsPidAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as { code?: string }).code === "EPERM";
+	}
+}
+
+function throwIfAborted(signal: AbortSignal | undefined): void {
+	if (signal?.aborted) {
+		throw new DOMException("Aborted", "AbortError");
+	}
+}
+
+/**
+ * Append to an existing answer file without recreating it.
+ *
+ * `appendFile` opens with `O_CREAT`, so a late delta or footer racing with
+ * panel teardown recreates `answer.md` inside `runDir` (causing `rmdir` to
+ * fail with `ENOTEMPTY` or leaving a headerless fragment behind). Opening with
+ * `O_WRONLY | O_APPEND` fails atomically with `ENOENT` once the file is gone.
+ */
+async function appendExistingAnswer(answerPath: string, text: string): Promise<boolean> {
+	let handle: Awaited<ReturnType<typeof open>>;
+	try {
+		handle = await open(answerPath, constants.O_WRONLY | constants.O_APPEND);
+	} catch (error) {
+		if ((error as { code?: string }).code === "ENOENT") return false;
+		throw error;
+	}
+	try {
+		await handle.writeFile(text, "utf8");
+		return true;
+	} finally {
+		await handle.close();
+	}
+}
+
+async function runTmux(deps: BtwDeps, args: string[], what: string, signal?: AbortSignal): Promise<void> {
+	throwIfAborted(signal);
+	const result = await deps.exec("tmux", args, { timeout: TMUX_TIMEOUT_MS, ...(signal ? { signal } : {}) });
+	throwIfAborted(signal);
+	if (result.code !== 0) {
+		// pi.exec resolves rather than rejects on a non-zero exit, and leaves
+		// stderr empty when the binary itself could not be spawned.
+		const reason = result.stderr.trim() || `tmux exited ${result.code} without output (tmux may be unavailable)`;
+		throw new Error(`${what}: ${reason}`);
+	}
+}
+
+/**
+ * Kill the panel's tmux server, reporting whether the command exited 0.
+ *
+ * A missing server exits non-zero, which is the normal first-run case; the
+ * boolean lets `destroyPanel` skip its confirmation probe on a clean kill
+ * without ever reading a failure as success.
+ */
+async function killPanel(deps: BtwDeps, paths: BtwPaths): Promise<boolean> {
+	try {
+		const result = await deps.exec("tmux", buildBtwKillServerArgs({ socket: paths.socket }), {
+			timeout: TMUX_TIMEOUT_MS,
+		});
+		return result.code === 0;
+	} catch {
+		// Nothing to kill, or the abort already tore the command down.
+		return false;
+	}
+}
+
+/**
+ * Kill the panel's server and report whether it is gone.
+ *
+ * A clean kill (exit 0) means gone. On an ambiguous result the has-session
+ * probe decides: a live session, a thrown probe or a timed-out one all count
+ * as alive, so every caller keeps the answer and the socket for a later retry.
+ */
+async function closePanelServer(deps: BtwDeps, paths: BtwPaths): Promise<boolean> {
+	if (await killPanel(deps, paths)) return true;
+	try {
+		const still = await deps.exec("tmux", ["-S", paths.socket, "has-session", "-t", paths.session], {
+			timeout: TMUX_TIMEOUT_MS,
+		});
+		return still.code !== 0 && still.killed !== true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Kill this panel's server and recreate its scratch directory.
+ *
+ * The remove sits between a confirmed close and the mkdir, so a replace cannot
+ * inherit the previous answer and a server that would not die cannot take that
+ * answer down with it. The owner is the main pi process: a later start or sweep
+ * reaps this panel only when this pid is gone, which is what makes a second
+ * live pi on the same session id safe.
+ */
+async function resetPanel(deps: BtwDeps, paths: BtwPaths): Promise<void> {
+	if (!(await closePanelServer(deps, paths))) {
+		throw new Error("the previous BTW panel is still running; close it and try again");
+	}
+	await rm(paths.runDir, { recursive: true, force: true });
+	await mkdir(paths.runDir, { recursive: true, mode: 0o700 });
+	await writeFile(paths.ownerPid, `${process.pid}\n`, { encoding: "utf8", mode: 0o600 });
+}
+
+
+/**
+ * Read the owner pid of a panel directory. A missing or malformed file counts
+ * as dead: the only writer creates the directory first.
+ */
+async function readOwnerPid(paths: BtwPaths): Promise<number | undefined> {
+	try {
+		const raw = (await readFile(paths.ownerPid, "utf8")).trim();
+		const pid = Number.parseInt(raw, 10);
+		return Number.isFinite(pid) && pid > 0 ? pid : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Kill the server, then remove the scratch dir and the socket file.
+ *
+ * Kill must come before the deletes. The socket is removed here because tmux
+ * leaves it behind when a server exits, and one socket per session would
+ * otherwise accumulate. If the kill fails or times out, nothing is deleted: the
+ * socket is the only handle to a possibly live viewer, and the answer should
+ * not be unlinked under it.
+ */
+async function destroyPanel(deps: BtwDeps, paths: BtwPaths): Promise<void> {
+	if (!(await closePanelServer(deps, paths))) return;
+	await rm(paths.runDir, { recursive: true, force: true }).catch(() => undefined);
+	await rm(paths.socket, { force: true }).catch(() => undefined);
+}
+
+/** Reap one panel directory when its owning pi process is gone. */
+async function reapPanel(deps: BtwDeps, sessionId: string): Promise<void> {
+	let paths: BtwPaths;
+	try {
+		paths = buildBtwPaths(deps.agentDir, sessionId);
+	} catch {
+		return;
+	}
+	try {
+		await stat(paths.runDir);
+	} catch {
+		return; // no panel was ever created for this session
+	}
+	const owner = await readOwnerPid(paths);
+	if (owner !== undefined && deps.isPidAlive(owner)) return;
+	await destroyPanel(deps, paths);
+}
+
+/**
+ * Sweep every panel directory whose owner is dead. This catches a crash whose
+ * next pi start uses a different session id, which the per-session reap cannot
+ * see; a live sibling process keeps its panel.
+ */
+async function sweepPanels(deps: BtwDeps): Promise<void> {
+	let entries: Awaited<ReturnType<typeof readdir>>;
+	try {
+		entries = await readdir(btwRootDir(deps.agentDir), { withFileTypes: true });
+	} catch {
+		return;
+	}
+	for (const entry of entries) {
+		if (!entry.isDirectory()) continue;
+		await reapPanel(deps, entry.name).catch(() => undefined);
+	}
+}
+
+/**
+ * `session_start`: a reload keeps the panel (the runtime is rebuilt, the panel
+ * is still ours); every other start reaps this session's dead panel and sweeps
+ * orphans. The owner-pid check is what keeps a live sibling alive.
+ */
+export async function reapBtwPanels(deps: BtwDeps, reason: string, sessionId: string): Promise<void> {
+	if (reason === "reload") return;
+	await reapPanel(deps, sessionId);
+	await sweepPanels(deps);
+}
+
+/**
+ * `session_shutdown`: quit and session replacement tear the panel down; reload
+ * keeps it. Only the process that launched the panel, or a dead owner's
+ * leftovers, may destroy it.
+ */
+export async function destroyBtwPanel(deps: BtwDeps, reason: string, sessionId: string): Promise<void> {
+	if (reason === "reload") return;
+	let paths: BtwPaths;
+	try {
+		paths = buildBtwPaths(deps.agentDir, sessionId);
+	} catch {
+		return;
+	}
+	if (!existsSync(paths.runDir) && !existsSync(paths.socket)) return;
+	const owner = await readOwnerPid(paths);
+	if (owner !== undefined && owner !== process.pid && deps.isPidAlive(owner)) return;
+	await destroyPanel(deps, paths);
+}
+
+/** What the tmux server says about the viewer session. */
+type PanelState = "missing" | "dead" | "live" | "unknown";
+
+/**
+ * Probe the panel's tmux session and its viewer.
+ *
+ * `unknown` exists for a thrown exec (an aborted turn): the caller must not
+ * replace a panel it could not inspect, and must not pretend it is live either.
+ */
+async function panelState(deps: BtwDeps, paths: BtwPaths): Promise<PanelState> {
+	try {
+		const alive = await deps.exec("tmux", ["-S", paths.socket, "has-session", "-t", paths.session], {
+			timeout: TMUX_TIMEOUT_MS,
+		});
+		if (alive.code !== 0) return "missing";
+		const dead = await deps.exec(
+			"tmux",
+			["-S", paths.socket, "display-message", "-p", "-t", paths.session, "#{pane_dead}"],
+			{ timeout: TMUX_TIMEOUT_MS },
+		);
+		// A query that cannot answer is treated as live: replacing a panel that
+		// may still be running is worse than attaching to one that is not.
+		return dead.code === 0 && dead.stdout.trim() === "1" ? "dead" : "live";
+	} catch (error) {
+		deps.notify(`Could not check the BTW panel: ${messageOf(error)}`, "error");
+		return "unknown";
+	}
+}
+
+/**
+ * Open the popup over pi's client for an existing panel session.
+ *
+ * Returns true when the popup was launched. Every false path notifies with the
+ * reason and the manual attach command, because the popup is the only way the
+ * panel is shown. The binding is re-applied on every open: the popup's exit
+ * command unbinds Escape, so a reattach without a fresh bind would leave
+ * Escape falling through to the viewer.
+ *
+ * Two limits are deliberate. A popup tmux itself rejects after the detached
+ * spawn (the client detached in between, tmux too old) exits unobserved; only a
+ * spawn error is reportable. And the unbind runs in the old popup's shell when
+ * it exits, so kill-then-reopen can in principle land `unbind` after the new
+ * `bind`; the bind is re-applied on every open, and the panel's own socket
+ * bounds any stale binding to this one session's server.
+ *
+ * The popup title carries the question read from the answer file's header, so
+ * a reattach shows the same title the launch did; the panel builder sanitizes
+ * and truncates it.
+ */
+async function openBtwPopup(deps: BtwDeps, paths: BtwPaths, sessionId: string, signal?: AbortSignal): Promise<boolean> {
+	const attach = buildAttachCommand(paths.socket, paths.session);
+	const fallback = (message: string, type: "info" | "warning"): false => {
+		deps.notify(`${message} Attach with: ${attach}`, type);
+		return false;
+	};
+
+	try {
+		const outer = currentTmuxPointer();
+		if (!outer) return fallback("Not running inside tmux.", "info");
+
+		// The client has to be one actually looking at pi's window; popup.ts
+		// explains why the window filter, not `-t <pane>`, is what finds it.
+		const resolved = await resolvePaneClient(deps.exec, outer.socket, outer.pane, { timeoutMs: TMUX_TIMEOUT_MS });
+		if (resolved.kind === "pane-gone") return fallback("That tmux pane is gone.", "warning");
+		if (resolved.kind === "no-client") return fallback("No attached tmux client is viewing this pane.", "warning");
+		const client = resolved.client;
+
+		const alive = await deps.exec("tmux", ["-S", paths.socket, "has-session", "-t", paths.session], {
+			timeout: TMUX_TIMEOUT_MS,
+		});
+		if (alive.code !== 0) {
+			deps.notify("The BTW panel session is gone. Run /btw again to start a fresh one.", "warning");
+			return false;
+		}
+
+		const bound = await deps.exec("tmux", buildEscapeBindArgs(paths.socket), { timeout: TMUX_TIMEOUT_MS });
+		if (bound.code !== 0) {
+			return fallback(
+				`Could not set up the panel's Escape binding: ${bound.stderr.trim() || `tmux exited ${bound.code}`}.`,
+				"warning",
+			);
+		}
+
+		const launch = buildPanelLaunch({
+			outerSocket: outer.socket,
+			pane: outer.pane,
+			client,
+			socket: paths.socket,
+			session: paths.session,
+			runId: sessionId,
+			titlePrefix: "btw",
+			titleSuffix: await questionFromAnswer(paths.answer),
+		});
+		if (signal?.aborted) return false;
+		deps.launch(launch.command, launch.args, { detached: true, stdio: "ignore" }, (message) => {
+			deps.notify(`Could not open the panel: ${message}. Attach with: ${attach}`, "error");
+		});
+		return true;
+	} catch (error) {
+		deps.notify(`Could not open the panel: ${messageOf(error)}. Attach with: ${attach}`, "error");
+		return false;
+	}
+}
+
+/**
+ * Write the panel's setup: the theme it draws with, and where to find pi.
+ *
+ * The viewer is a separate process, so two things do not reach it: pi's theme
+ * instance, and pi's packages. The parent resolves both - the theme into a
+ * small spec the viewer rebuilds a theme from, and the packages into paths
+ * the viewer can import - and writes them down for it.
+ *
+ * This runs on every start of the viewer, not only on the first: the panel
+ * outlives a reload, and a theme changed in between should reach it.
+ *
+ * A missing theme is not fatal - the viewer falls back to the terminal's own
+ * palette, so a panel still opens - but it is said out loud, because a panel
+ * in the wrong colors is a panel nobody can read the difference between and
+ * trusts.
+ */
+async function writePanelSpec(deps: BtwDeps, paths: BtwPaths): Promise<void> {
+	// The entry points come first and on their own: they are what lets the
+	// panel start at all, and a theme that cannot be read must not cost it
+	// that.
+	let entryPoints: { tui?: string; theme?: string } = {};
+	try {
+		entryPoints = resolvePiEntryPoints(getPackageDir());
+	} catch (error) {
+		deps.notify(`The BTW panel could not find pi's packages: ${messageOf(error)}`, "warning");
+	}
+	const theme = deps.theme;
+	if (!theme) {
+		await writePanelSpecFile(paths, { entryPoints });
+		return;
+	}
+	try {
+		const spec = buildThemeSpec(theme, { codeBlockIndent: deps.codeBlockIndent });
+		await writePanelSpecFile(paths, { theme: spec, entryPoints });
+	} catch (error) {
+		deps.notify(`The BTW panel could not use your theme: ${messageOf(error)}`, "warning");
+		await writePanelSpecFile(paths, { entryPoints });
+	}
+}
+
+/** Write the panel's setup down for the viewer. */
+async function writePanelSpecFile(paths: BtwPaths, spec: unknown): Promise<void> {
+	await writeFile(paths.panel, JSON.stringify(spec), { encoding: "utf8", mode: 0o600 }).catch(() => undefined);
+}
+
+/**
+ * The question as the answer file's header recorded it, for the popup title.
+ *
+ * Only the header is read, and only from the start: the answer after it can
+ * be large, and reattach happens while it may still be streaming. The block is
+ * anchored to the heading, so a blockquote in the answer body is never
+ * mistaken for the question; a panel whose file predates the header simply
+ * opens without a suffix. Its lines are joined because the title is one line,
+ * which makes a reattach produce the same title the launch did.
+ *
+ * A failed read costs the suffix, not the panel, so it is not reported: the
+ * title is decoration, and the viewer reports an answer file it cannot read.
+ */
+async function questionFromAnswer(answerPath: string): Promise<string | undefined> {
+	let header: string;
+	try {
+		const handle = await open(answerPath, "r");
+		try {
+			const buffer = Buffer.alloc(ANSWER_HEADER_BYTES);
+			const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+			header = buffer.toString("utf8", 0, bytesRead);
+		} finally {
+			await handle.close();
+		}
+	} catch {
+		return undefined;
+	}
+	const lines = header.split("\n");
+	if (lines[0] !== ANSWER_HEADING) return undefined;
+	let index = 1;
+	while (index < lines.length && lines[index] === "") index++;
+	if (index >= lines.length || !lines[index]!.startsWith(ANSWER_QUOTE_PREFIX)) return undefined;
+	const quoted: string[] = [];
+	for (; index < lines.length && lines[index]!.startsWith(ANSWER_QUOTE_PREFIX); index++) {
+		quoted.push(lines[index]!.slice(ANSWER_QUOTE_PREFIX.length).trim());
+	}
+	return quoted.join(" ").trim() || undefined;
+}
+
+/** Start (or restart) the view-only tmux session for an existing answer file. */
+async function startViewer(deps: BtwDeps, paths: BtwPaths, cwd: string, signal?: AbortSignal): Promise<void> {
+	throwIfAborted(signal);
+	await writePanelSpec(deps, paths);
+	await runTmux(
+		deps,
+		buildBtwSessionCreateArgs({ socket: paths.socket, session: paths.session, cwd }),
+		"Could not create the BTW tmux session",
+		signal,
+	);
+	await runTmux(
+		deps,
+		buildBtwRemainOnExitArgs({ socket: paths.socket, session: paths.session }),
+		"Could not keep the BTW pane after exit",
+		signal,
+	);
+	await runTmux(
+		deps,
+		buildBtwSendKeysArgs({ socket: paths.socket, target: paths.target, command: buildBtwViewerCommand(paths.answer, paths.panel) }),
+		"Could not start the BTW viewer",
+		signal,
+	);
+	await runTmux(
+		deps,
+		buildBtwSubmitArgs({ socket: paths.socket, target: paths.target }),
+		"Could not submit the BTW viewer",
+		signal,
+	);
+}
+
+/**
+ * Open the popup for a panel that is already running, without asking again.
+ *
+ * Returns false when there is nothing to reuse: no session, no answer file, and
+ * no dead viewer to restart. A live panel that merely cannot be shown here
+ * returns true, so the caller does not replace it by launching a new question.
+ */
+export async function reattachBtwPanel(deps: BtwDeps, ctx: BtwContext, signal?: AbortSignal): Promise<boolean> {
+	let sessionId: string;
+	let paths: BtwPaths;
+	try {
+		sessionId = ctx.sessionManager.getSessionId();
+		paths = buildBtwPaths(deps.agentDir, sessionId);
+	} catch {
+		return false;
+	}
+	const state = await panelState(deps, paths);
+	if (signal?.aborted) return true;
+	if (state === "unknown") return true;
+	if (state === "missing" || state === "dead") {
+		if (!existsSync(paths.answer)) {
+			if (state === "dead") {
+				deps.notify("The previous BTW panel is no longer running; ask a new question to start one.", "warning");
+			}
+			return false;
+		}
+		try {
+			// The session may still exist (a viewer that exited leaves a dead
+			// pane), and new-session refuses a duplicate name; the socket is
+			// per-session, so closing it first is scoped and cheap.
+			if (!(await closePanelServer(deps, paths))) {
+				throw new Error("the previous BTW panel is still running; close it and try again");
+			}
+			await startViewer(deps, paths, ctx.cwd, signal);
+		} catch (error) {
+			if (!signal?.aborted) {
+				deps.notify(`Could not reopen the BTW panel: ${messageOf(error)}`, "warning");
+			}
+			return true;
+		}
+		await openBtwPopup(deps, paths, sessionId, signal);
+		return true;
+	}
+	const shown = await openBtwPopup(deps, paths, sessionId, signal);
+	if (!shown && !signal?.aborted) {
+		deps.notify("The running BTW panel was left in place; run /btw and submit a question to replace it.", "info");
+	}
+	return true;
+}
+
+/** The answer file's footer. */
+export function formatBtwUsage(usage: Usage | undefined): string {
+	if (usage === undefined) return "";
+	const number = (value: number): string => value.toLocaleString("en-US");
+	const parts = [`input ${number(usage.input)}`];
+	if (usage.cacheRead > 0) parts.push(`cache read ${number(usage.cacheRead)}`);
+	if (usage.cacheWrite > 0) parts.push(`cache write ${number(usage.cacheWrite)}`);
+	parts.push(`output ${number(usage.output)}`);
+	return parts.join(" · ");
+}
+
+/** Append the outcome to the answer file, where the viewer sees it. */
+async function appendFooter(deps: BtwDeps, paths: BtwPaths, outcome: BtwOutcome): Promise<void> {
+	// A sibling pi that reset this run dir under us owns the answer file now;
+	// writing the footer into it would interleave two answers.
+	if ((await readOwnerPid(paths)) !== process.pid) return;
+	const toolNote =
+		outcome.ignoredToolCalls === undefined
+			? undefined
+			: `${outcome.ignoredToolCalls} tool call${outcome.ignoredToolCalls === 1 ? "" : "s"} ignored`;
+	const withToolNote = (text: string): string => (toolNote === undefined ? text : `${text} · ${toolNote}`);
+	const summary =
+		outcome.status === "ok"
+			? withToolNote(formatBtwUsage(outcome.usage))
+			: outcome.status === "cancelled"
+				? withToolNote(`cancelled${outcome.usage ? ` · ${formatBtwUsage(outcome.usage)}` : ""}`)
+				: withToolNote(`error: ${outcome.message}${outcome.usage ? ` · ${formatBtwUsage(outcome.usage)}` : ""}`);
+	// A code fence the answer left open would swallow the footer into the
+	// code block, so the fence is closed before the footer is appended. The
+	// answer is read back because the outcome does not carry the text of a
+	// cancelled or failed request.
+	let answer = "";
+	try {
+		answer = await readFile(paths.answer, "utf8");
+	} catch (error) {
+		if ((error as { code?: string }).code === "ENOENT") return;
+		deps.notify(`The BTW panel could not read the answer: ${messageOf(error)}`, "warning");
+	}
+	const closer = fenceCloser(answer);
+	if (closer) {
+		try {
+			if (!(await appendExistingAnswer(paths.answer, closer))) return;
+		} catch (error) {
+			deps.notify(`The BTW panel could not close an open code fence: ${messageOf(error)}`, "warning");
+		}
+	}
+	try {
+		if (!(await appendExistingAnswer(paths.answer, `${FOOTER}${sanitizeAnswerText(summary)}\n`))) return;
+	} catch (error) {
+		deps.notify(`The BTW panel could not write its footer: ${messageOf(error)}`, "warning");
+	}
+	if (outcome.status === "error") deps.notify(`BTW: ${outcome.message}`, "error");
+	// A zero cache read is the one failure the footer cannot show (it omits
+	// the `cache read` segment when the value is 0), so it is notified too — but
+	// only when the context was large enough that a cache read was clearly
+	// expected. A short session, or the first question after an idle gap,
+	// cold-starts with a small `input` that the footer already shows; warning
+	// those trains the user to distrust the warning.
+	const ZERO_CACHE_WARN_INPUT_TOKENS = 20_000;
+	if (
+		outcome.status === "ok" &&
+		outcome.usage !== undefined &&
+		outcome.usage.cacheRead === 0 &&
+		outcome.usage.input >= ZERO_CACHE_WARN_INPUT_TOKENS
+	) {
+		deps.notify("BTW: the answer reported 0 cached tokens read — the cache invariants in CACHE.md are broken", "warning");
+	}
+}
+
+/**
+ * Start a /btw panel: reset the scratch dir, write the answer header, start the
+ * viewer, open the popup, and begin the in-process request.
+ *
+ * The request runs in the background and is returned as `completion`, so the
+ * command handler returns while the answer streams into the viewer. A new
+ * question aborts the controller and awaits the completion before resetting the
+ * paths, which keeps the old request from writing into the new answer file.
+ */
+export async function launchBtwPanel(
+	deps: BtwDeps,
+	ctx: BtwContext,
+	rawQuestion: string,
+	options?: { signal?: AbortSignal },
+): Promise<BtwLaunch | null> {
+	const signal = options?.signal;
+	if (signal?.aborted) return null;
+	if (ctx.mode !== "tui") {
+		deps.notify("BTW needs the TUI.", "warning");
+		return null;
+	}
+	let question: string;
+	try {
+		question = requireBtwQuestion(rawQuestion);
+	} catch (error) {
+		deps.notify(messageOf(error), "warning");
+		return null;
+	}
+	const model = ctx.model;
+	if (!model) {
+		deps.notify("BTW needs a selected model.", "warning");
+		return null;
+	}
+	const sessionId = ctx.sessionManager.getSessionId();
+	let paths: BtwPaths;
+	try {
+		paths = buildBtwPaths(deps.agentDir, sessionId);
+	} catch (error) {
+		deps.notify(`Could not start the BTW panel: ${messageOf(error)}`, "error");
+		return null;
+	}
+
+	try {
+		throwIfAborted(signal);
+		await resetPanel(deps, paths);
+		throwIfAborted(signal);
+		const quoted = sanitizeAnswerText(question).split("\n").join(`\n${ANSWER_QUOTE_PREFIX}`);
+		await writeFile(paths.answer, `${ANSWER_HEADING}\n\n${ANSWER_QUOTE_PREFIX}${quoted}\n\n`, {
+			encoding: "utf8",
+			mode: 0o600,
+		});
+		throwIfAborted(signal);
+		await startViewer(deps, paths, ctx.cwd, signal);
+		throwIfAborted(signal);
+		await openBtwPopup(deps, paths, sessionId, signal);
+		throwIfAborted(signal);
+	} catch (error) {
+		await destroyPanel(deps, paths);
+		if (!signal?.aborted) {
+			deps.notify(`Could not start the BTW panel: ${messageOf(error)}`, "error");
+		}
+		return null;
+	}
+
+	const controller = new AbortController();
+	const completion = (async (): Promise<void> => {
+		let outcome: BtwOutcome;
+		try {
+			outcome = await runBtwRequest({
+				modelRegistry: ctx.modelRegistry,
+				model,
+				sessionId,
+				blockImages: deps.blockImages,
+				entries: ctx.sessionManager.getEntries(),
+				leafId: ctx.sessionManager.getLeafId(),
+				question,
+				signal: controller.signal,
+				abort: () => controller.abort(),
+				onText: async (text) => {
+					// A second pi on the same session id resets this run dir under us
+					// and writes its own owner pid; appending then interleaves two
+					// answers into one file. Stop the request instead of writing into
+					// a panel this process no longer owns, or if the answer file was
+					// already removed during teardown.
+					if ((await readOwnerPid(paths)) !== process.pid) {
+						controller.abort();
+						return;
+					}
+					if (!(await appendExistingAnswer(paths.answer, text))) {
+						controller.abort();
+					}
+				},
+			});
+		} catch (error) {
+			outcome = { status: "error", message: messageOf(error) };
+		}
+		await appendFooter(deps, paths, outcome);
+	})();
+	return { controller, completion };
+}
+
+export default function btwExtension(pi: ExtensionAPI): void {
+	let active: BtwLaunch | undefined;
+	let starting = false;
+	let inFlightAbort: AbortController | undefined;
+	let inFlightOp: Promise<void> | undefined;
+	const depsFor = (ctx: ExtensionContext): BtwDeps => {
+		const settings = pi.getSettings();
+		return {
+			exec: (command, argv, options) => pi.exec(command, argv, options),
+			launch: (command, argv, options, onError) => panelLauncher(command, argv, options, onError),
+			notify: (message, type = "info") => ctx.ui.notify(message, type),
+			agentDir: getAgentDir(),
+			isPidAlive: defaultIsPidAlive,
+			blockImages: settings.images?.blockImages === true,
+			// The theme pi renders with right now; the panel is handed its
+			// resolved colors (see `theme.mjs`). pi's theme is a proxy that
+			// throws when it has not been initialised, and a session handler
+			// that throws takes the session down with it.
+			theme: liveTheme(ctx),
+			// The indent the transcript gives a code block, when the session
+			// moved it away from pi-tui's default.
+			codeBlockIndent: settings.markdown?.codeBlockIndent,
+			// The main loop forwards these so the provider maps thinking and
+			// attributes the request identically; see request.ts.
+			thinkingBudgets: settings.thinkingBudgets,
+			thinkingLevel: pi.getThinkingLevel(),
+			enableInstallTelemetry: settings.enableInstallTelemetry === true,
+		};
+	};
+	const stopActive = async (): Promise<void> => {
+		const current = active;
+		active = undefined;
+		if (!current) return;
+		current.controller.abort();
+		await current.completion.catch(() => undefined);
+	};
+
+	pi.registerCommand("btw", {
+		description: DESCRIPTION,
+		handler: async (args, ctx) => {
+			if (ctx.mode !== "tui") {
+				// Checked before the prompt: in JSON/print the input is a silent
+				// no-op, so this is the guard that keeps a pointless prompt away.
+				ctx.ui.notify("BTW needs the TUI.", "warning");
+				return;
+			}
+			if (args.trim().length > 0) {
+				// The command takes no arguments: the question comes from the input
+				// prompt, so spaces and punctuation in it cannot be parsed as
+				// command arguments or lost on the way in.
+				ctx.ui.notify("BTW takes no arguments: run /btw and the panel will ask for the question.", "warning");
+				return;
+			}
+			if (starting) {
+				// The setup owns the run dir and socket until it hands back a
+				// launch; a second command in that window would interleave rm,
+				// mkdir and new-session on the same paths.
+				ctx.ui.notify("BTW is still starting the previous panel.", "warning");
+				return;
+			}
+			starting = true;
+			const startController = new AbortController();
+			inFlightAbort = startController;
+			try {
+				const deps = depsFor(ctx);
+				// The command is deliberately argument-free. An empty submission
+				// reopens the existing panel; a question starts (or replaces) one.
+				// The hint rides in the title: pi's input component ignores the
+				// placeholder argument, so a hint passed there is never rendered.
+				const question = await ctx.ui.input(
+					"BTW question (submit empty to reopen the panel):",
+					"ask about this conversation",
+				);
+				if (question === undefined || startController.signal.aborted) return; // cancelled or shut down
+				const op = (async () => {
+					if (!question.trim()) {
+						if (!(await reattachBtwPanel(deps, ctx, startController.signal)) && !startController.signal.aborted) {
+							deps.notify("No BTW panel is running; type a question to start one.", "info");
+						}
+						return;
+					}
+					await stopActive();
+					if (startController.signal.aborted) return;
+					const launch = await launchBtwPanel(deps, ctx, question, { signal: startController.signal });
+					if (launch) {
+						active = launch;
+						// The completion holds the launch's closure; drop the slot once
+						// it finishes so the entries snapshot is not retained.
+						void launch.completion.catch(() => undefined).finally(() => {
+							if (active === launch) active = undefined;
+						});
+					}
+				})();
+				inFlightOp = op;
+				await op;
+			} finally {
+				if (inFlightAbort === startController) inFlightAbort = undefined;
+				inFlightOp = undefined;
+				starting = false;
+			}
+		},
+	});
+
+	// The panel outlives a reload (the runtime is rebuilt, the tmux session and
+	// its answer are still ours); quit and session replacement clean it up.
+	pi.on("session_start", async (event, ctx) => {
+		await reapBtwPanels(depsFor(ctx), event.reason, ctx.sessionManager.getSessionId());
+	});
+	pi.on("session_shutdown", async (event, ctx) => {
+		inFlightAbort?.abort();
+		if (inFlightOp) await inFlightOp.catch(() => undefined);
+		await stopActive();
+		await destroyBtwPanel(depsFor(ctx), event.reason, ctx.sessionManager.getSessionId());
+	});
+}
+
+/** Internals exposed for unit tests; nothing here is used at runtime. */
+export const __test__ = {
+	setPanelLauncher: (launcher?: PanelLauncher): void => {
+		panelLauncher = launcher ?? defaultPanelLauncher;
+	},
+	defaultPanelLauncher,
+};

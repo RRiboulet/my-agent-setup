@@ -1,0 +1,1120 @@
+# pi coding-agent extensions
+
+Personal pi extensions, skills and the devcontainer that runs them.
+
+Nothing here depends on npm publishing. The repository doubles as a pi
+package, so these extensions can be installed into any other project:
+
+```bash
+pi install git:github.com/RRiboulet/my-agent-setup          # for me, every project
+pi install --local git:github.com/RRiboulet/my-agent-setup  # pin for one project only
+```
+
+Verified on a clean agent dir and an empty project: both install every
+extension and skill the `pi` manifest below lists. That check predates
+`review.ts`, `continue.ts`, `opencode-go-provider/`, `repo-explorer/`,
+`review-triage/`, `btw/` and `voice/`; the manifest is kept honest by
+`.pi/extensions/subagent/test/package-manifest.test.ts`, and every entry point by the strict-ESM load
+test under Tests.
+
+The one non-obvious part is that this needs the `pi` manifest in
+`package.json`. A git-sourced package is discovered either from that manifest or
+from conventional `extensions/`, `skills/`, `prompts/` and `themes/` directories
+at the package root — and this repo keeps its resources in `.pi/extensions/`,
+which is dot-prefixed, so a glob will not find it. The manifest therefore lists
+each entry point explicitly:
+
+```jsonc
+// package.json
+"pi": {
+  "extensions": [
+    ".pi/extensions/answer.ts",
+    ".pi/extensions/btw/index.ts",
+    ".pi/extensions/continue.ts",
+    ".pi/extensions/goal.ts",
+    ".pi/extensions/mcp-catalogue.ts",
+    ".pi/extensions/native-web-search.ts",
+    ".pi/extensions/opencode-go-provider/index.ts",
+    ".pi/extensions/orchestrator/index.ts",
+    ".pi/extensions/repo-explorer/index.ts",
+    ".pi/extensions/review-triage/index.ts",
+    ".pi/extensions/review.ts",
+    ".pi/extensions/session-breakdown.ts",
+    ".pi/extensions/todos.ts",
+    ".pi/extensions/subagent/index.ts",  // the rest of that dir is its internals
+    ".pi/extensions/voice/index.ts"
+  ],
+  "skills": [
+    ".pi/skills/add-model",
+    ".pi/skills/architect",
+    ".pi/skills/benchmark-checklist",
+    ".pi/skills/blast-radius",
+    ".pi/skills/commit",
+    ".pi/skills/devcontainer",
+    ".pi/skills/diagnosing-bugs",
+    ".pi/skills/github",
+    ".pi/skills/grilling",
+    ".pi/skills/handoff",
+    ".pi/skills/idempotent-operations",
+    ".pi/skills/implement",
+    ".pi/skills/in-your-own-words",
+    ".pi/skills/librarian",
+    ".pi/skills/native-web-search",
+    ".pi/skills/prevent-recurrence",
+    ".pi/skills/prove-it-works",
+    ".pi/skills/recall",
+    ".pi/skills/show-me-your-work",
+    ".pi/skills/tdd",
+    ".pi/skills/teach",
+    ".pi/skills/tmux",
+    ".pi/skills/to-spec",
+    ".pi/skills/to-tickets",
+    ".pi/skills/update-changelog",
+    ".pi/skills/worktree",
+    ".pi/skills/writing-for-agents"
+  ]
+}
+```
+
+Without that file `pi install` succeeds, clones the repo, and quietly loads
+nothing.
+
+Pinning works the usual way — append a tag or a commit:
+`git:github.com/RRiboulet/my-agent-setup@<ref>`. One caveat worth knowing:
+`v1.0.0` is not empty, but it is the old layout — the resources sit in
+conventional root `extensions/` and `skills/`, which pi discovers without any
+manifest, so pinning to it installs four extensions and one skill (no
+`/session-breakdown`, no `commit` or `update-changelog`). What installs
+*nothing* is the stretch between the move to `.pi/` and the manifest commit
+`e4e072f`: dot-prefixed directories are not found by a glob, so the install
+succeeds, clones, and quietly loads zero resources. Pin a ref at or after
+`e4e072f`, or track `main`.
+
+Project-local extensions only load **after you grant project trust**, so on a
+fresh machine pi asks on first start; until then the extensions are silently
+inactive. Installed packages are loaded regardless of project trust.
+
+### One copy of the extensions, never two
+
+Pi discovers extensions from the project (`.pi/extensions`, `.pi/skills`) *and*
+from every installed package — and this package's resources are exactly those two
+directories. So a checkout of this repo that *also* has the package installed
+loads each extension twice, and pi treats a duplicate tool registration as a load
+error, not a warning:
+
+```
+Error: Failed to load extension "…/agent/git/github.com/RRiboulet/my-agent-setup/.pi/extensions/goal.ts":
+  Tool "get_goal" conflicts with /workspace/.pi/extensions/goal.ts
+… one line per duplicated tool and flag …
+Hint: Start without extensions using "pi -ne".
+```
+
+The TUI then exits 1 instead of starting. `pi --version` and `pi --list-models`
+print the same lines and carry on, so a quick check looks healthy; and the
+extensions that register no tool or flag (`/answer`, `/btw`, `/continue`,
+`/review`, `/session-breakdown`, repo-explorer, `/voice`) load twice in silence.
+Skills collide the same way, but as a first-one-wins collision diagnostic, so
+they never raise the error by themselves.
+
+Both environments therefore keep the working tree as the single source:
+
+| Where | Setup |
+|---|---|
+| a host that works in this checkout | `pi remove git:github.com/RRiboulet/my-agent-setup`, then `pi install /path/to/my-agent-setup` — the **local path**, not the git source. It resolves to the same files project discovery already found, so pi dedupes instead of conflicting, and there is no clone that can fall behind the checkout |
+| this repo's devcontainer | installs no package at all: `PI_CODING_AGENT_DIR` (`.devcontainer/devcontainer.json`) gives the container its own agent dir on a **private** volume, `my-agent-setup-pi-config`. There is no shared agent volume any more, and `postCreate.sh` starts a missing `settings.json` from the committed template `.devcontainer/pi/settings.json` (which deliberately has no `.packages`). Credentials come from the host environment, not from a copied `auth.json` |
+| every other project's devcontainer | the image bakes this repo at the tag in that project's `.devcontainer/pi-agent-setup.version`, then `postCreate` declares the baked `/opt/pi-packages/my-agent-setup` path in the container's own agent settings. No volume is shared between containers. The pin is visible as `PI_AGENT_SETUP_TAG`, the image label `org.rriboulet.pi-package`, and `/opt/pi-packages/my-agent-setup/.pi-agent-setup-tag`; each project's CI fails if its Dockerfile and version file disagree, and `postCreate` fails if the running image is older than the checkout's pin |
+| a host that works in this checkout **and in its worktrees** | `bin/pi-agent-dir` does the devcontainer's split on a host: it creates `~/.pi/agent-<main checkout directory name>`, a sibling of the shared agent dir, seeded from the shared settings with `.packages` removed, plus credentials and a `trust.json` entry for the checkout. The *shape* is the one `devcontainer.json` declares; the *name* is the checkout directory's, not the project's, so the two differ wherever the directory is not named after the repo — this container mounts the repo at `/workspace`, where the script would compute `agent-workspace` while the container's own dir carries the project's name. That is intended: the script is for hosts, and a host whose directory has another name needs no configuring, because the hook derives the same name at call time. `bin/pi-agent-dir --shell` adds one marker-delimited block to `~/.bashrc` with a `pi` function that selects that dir for any cwd inside the checkout or a worktree of it, and leaves every other project on the shared, package-installed dir |
+
+Removing the git entry matters: installing the local path *next to* it leaves two
+entries pointing at different paths (the checkout and the clone), which is the
+conflict again. Note what the local entry actually stores: `pi` rewrites it to a
+path relative to the agent dir (`normalizePackageSourceForSettings`), e.g.
+`../../my-agent-setup` for `~/my-agent-setup`. It therefore encodes *both*
+locations, and moving either the checkout or `~/.pi/agent` makes it resolve to
+nothing — silently, because a missing local source is skipped, not reported. Re-run
+`pi install <path>` after either moves.
+
+**A linked worktree is the same trap one level down, and the local-path entry
+does not cover it.** The entry dedupes against project discovery only because
+both name files in the same checkout. A child process rooted in
+`.worktrees/<slug>` discovers *that tree's* `.pi/extensions` as its project
+extension, while the package still resolves to the main checkout's copy — two
+different files registering the same tools and the same `--attach-subagent`
+flag, so pi exits 1 with one `Tool "…" conflicts with
+…/.worktrees/<slug>/.pi/extensions/…` line per extension. This is not the bug the
+subagent launcher fixed: it reproduces with no `--extension` at all, and there
+is no *selective* way to suppress the package copy for one run. `PI_PACKAGE_DIR`
+overrides pi's own install path, not the installed extensions;
+`--no-extensions` (`-ne`) does drop package discovery, but it also disables the
+built-in extensions and every extension not named with `-e`, so it is a lossy
+workaround rather than a dedupe. The launcher therefore cannot fix it. The
+devcontainer is immune for the same reason
+as above — its agent dir installs no package. On a host that installs this repo
+as a package, the remedy is `bin/pi-agent-dir` (below): the worktree's own copy
+is then the only one loaded, which is also the only variant that runs the
+*branch's* extension code. The two fallbacks are worse — uninstall the package
+there and every other project loses its extensions, or launch with `cwd` = the
+main checkout and `cd` into the tree inside each command, which starts but runs
+the main checkout's extensions, not the branch's.
+
+`bin/pi-agent-dir` writes only what is missing, so re-running it is safe: an
+existing `settings.json` is kept (it belongs to that project from then on, like
+the container's), credentials are copied once and never overwritten,
+`trust.json` is merged rather than replaced so a second project does not evict
+the first, and `mcp.json` is seeded from the catalogue only when it is absent, so
+an entry deleted there stays deleted — see
+[MCP servers](#mcp-servers-installed-once-enabled-per-project). Trust matters
+more here than it looks: it is what makes pi read
+`<checkout>/.pi/` at all, and a saved decision applies to a directory or any of
+its parents, so the one entry covers `.worktrees/<slug>`. Without it the
+package-free dir is a *silently empty* agent — no extensions, no skills — rather
+than a broken one. `--check` reports those four things — the catalogue as a
+warning, because a dir works without it — and exits non-zero if a package would
+still conflict; `--print` resolves the path without writing anything.
+
+**A launcher that bypasses a login shell gets none of that.** The hook lives in
+`~/.bashrc`, so a tmux child, a CI step, a scheduled job or an editor task starts
+`pi` without it and lands back on the shared, package-installed agent dir — the
+worktree conflict above, from a process nobody is watching. `bin/pi-wrapped` is
+the command for those: it selects the same per-project dir and forwards every
+argument to `pi` unchanged, with no option of its own (a flag it saw is a flag
+for `pi`, and `--`, `@file` arguments and values with spaces are passed as
+given). An agent dir already in the environment wins, because an explicit choice
+outranks a derived one; outside a git checkout, or when the project's dir has
+never been created, it runs `pi` with its defaults and says why on stderr rather
+than failing. It never creates the dir: one without trust is a *silently empty*
+agent, and seeding the user's agent root as a side effect of starting `pi` is not
+a launcher's job — `bin/pi-agent-dir` is the one-time step, and the wrapper names
+it in the note.
+
+In the devcontainer, that dir is the container's own and the volume is private:
+the model and tool defaults start from `.devcontainer/pi/settings.json`, and
+everything else is created in the container. Rotate a key or change a default *in
+the container*; no other container sees it. Sessions stay on the private volume,
+so history from before the split (on the old shared volume) does not appear in
+`--continue` here. `gh`'s non-secret config lives at `GH_CONFIG_DIR` on the private
+volume, while its token arrives as `GH_TOKEN` from the host environment.
+
+Credentials for every container come from one host-side file,
+`~/.config/devc/env` (mode 600, never committed): `devc` sources it before
+`devcontainer up`, and each `devcontainer.json` passes the variables in with
+`${localEnv:...}`. `OPENCODE_API_KEY`, `OPENROUTER_API_KEY`, `BRAVE_API_KEY`,
+`TYPESAFE_API_KEY` and `GH_TOKEN` are the current set; `PI_VOICE_API_KEY` reuses
+the OpenRouter key. Values therefore appear in `docker inspect` and in child
+process environments. That is the accepted trade-off: it keeps credentials
+shared without any cross-container mount or coupling.
+
+### MCP servers: installed once, enabled per project
+
+`pi install` ships this package's extensions and skills and **none of its MCP
+servers**: the `pi` manifest has no MCP key, and pi reads MCP configuration only
+from `<agent dir>/mcp.json` and a trusted project's `.pi/mcp.json`. The servers
+are therefore a catalogue in [`mcp/catalogue.json`](mcp/catalogue.json) — Figma
+over streamable HTTP, Playwright through `npx -y @playwright/mcp@latest
+--browser chromium --headless` — and one command that ships with the clone
+installs it:
+
+```bash
+bash bin/mcp-catalogue      # from the clone; in a session: /mcp-catalogue
+```
+
+`pi install` (the top of this file) is the first half of that setup; this is the
+second, and it runs once per agent dir that should have the servers — from the
+clone, by path, with no PATH entry, no `jq` and no build step.
+
+That merges the catalogue into `<agent dir>/mcp.json`, where the agent dir is
+`$PI_CODING_AGENT_DIR` when it is set and non-empty, else `~/.pi/agent`. It
+**adds only the names you have not got**: an existing `figma` or `playwright`
+entry — one you edited or pinned — is left byte-identical and reported as
+skipped, and every other byte of the file survives, unrelated keys and its
+indentation included. Re-running it reports nothing added and changes nothing.
+`--if-missing` is the other mode, create the file only when it is absent and
+never merge into it: that is what the two automatic paths below use, and a
+person rarely needs it. Exit `1` means it refused to write and changed nothing
+(invalid catalogue, or an `mcp.json` it cannot merge into); exit `2` means it
+could not run. `bash bin/mcp-catalogue --help` prints the whole contract.
+
+**Nothing connects until a project opts in.** Every catalogue entry ships
+`"enabled": false` with an explicit `"exposure": "codemode"`, so installing it
+starts nothing — no process, no sign-in prompt, no tool in any request. `pi mcp
+list` only lists them:
+
+```console
+$ pi mcp list
+figma: disabled (codemode, global)
+  https://mcp.figma.com/mcp
+playwright: disabled (codemode, global)
+  npx -y @playwright/mcp@latest --browser chromium --headless
+```
+
+**Opt a project in with one key** in its committed `.pi/mcp.json`:
+
+```json
+{ "mcpServers": { "figma": { "enabled": true } } }
+```
+
+That is the whole override: a project entry carrying only `enabled`, `exposure`
+or `toolExposure` layers onto the global server of the same name and keeps its
+`url`, `args` and `oauth`. The same thing without typing: `/mcp`, select the
+server, *Enable in this project* — in a trusted project, that writes exactly
+this override. `/reload` picks up a change made outside the session.
+
+Two facts about that file have bitten before. A **committed** `.pi/mcp.json`
+reaches every checkout of the branch, linked worktrees included, because it is
+part of the tree; an **uncommitted** one exists only in the working tree you
+wrote it in, so a worktree started from the same branch sees nothing. And an
+override needs the global entry to exist: without the catalogue installed,
+`{"figma": {"enabled": true}}` is a hard configuration error (`server "figma"
+needs "command" or "url", or a global server to override`), while in an
+**untrusted** project the file is ignored in silence — project trust is what
+makes pi read `.pi/` at all.
+
+**Which agent dirs get it without the command.** Two, both through
+`--if-missing`, so neither ever merges into a file that already exists:
+
+- this repo's devcontainer, from `postCreate.sh`, when the private volume is
+  fresh;
+- a per-checkout agent dir, when `bin/pi-agent-dir` creates it — `--check`
+  reports the catalogue file and warns rather than fails when it is missing.
+
+Everything else needs the command once per agent dir: `~/.pi/agent` on a host,
+another project's container, a machine where the package was installed by git
+source. Because seeding never merges, an entry you delete from one of those dirs
+stays deleted across a rebuild or a re-run; only the explicit command adds a
+newly catalogued server.
+
+**Signing in is once per agent dir, not per project.** Figma's server uses
+OAuth: `/mcp login figma` (or `pi mcp login figma`) opens the authorization page
+and stores the token in the agent dir's `mcp-auth.json`, so every project on
+that dir shares it.
+
+**Figma's `clientName` is a compatibility value, and it is the first thing to
+look at if sign-in fails.** The catalogue sends `"oauth": { "clientName":
+"Claude Code" }`, which tells Figma's authorization server that the client
+registering is one it recognises — pi's own documentation pairs this URL with
+it. If the sign-in is rejected, change or drop that field in your own `mcp.json`
+before looking anywhere else; the installer skips an entry that already exists,
+so your edit survives every re-run.
+
+**Playwright needs its browser installed once per machine.** The catalogue asks
+for Playwright's own Chromium on purpose: the `chrome` channel the server
+defaults to cannot be installed on arm64 hosts, and the headed default cannot
+open a window where pi runs headless. One install per machine, using the same
+Playwright version the server ships so the browser build numbers agree:
+
+```bash
+npx --package @playwright/mcp@latest -- playwright install chromium   # ~130 MB
+sudo npx --package @playwright/mcp@latest -- playwright install-deps chromium
+```
+
+Without them the server still connects and lists its tools, and every action
+fails with an `Executable doesn't exist` or `Missing system dependencies` error
+that names the command to run. Neither is a project concern, so nothing about
+them belongs in a project's `.pi/mcp.json`.
+
+**Playwright tracks the newest release, so a broken one is a pin away.** The
+catalogue launches `npx -y @playwright/mcp@latest`. If a release breaks, edit
+your own entry to `"args": ["-y", "@playwright/mcp@<version>", "--browser",
+"chromium", "--headless"]` and re-run the installer freely: `playwright` is
+already present, so it is reported as skipped and your pin is not undone. The
+same rule cuts the other way, and it is worth knowing before you look for a bug
+in the catalogue: a change to the catalogue's own arguments does not reach an
+entry you already have. Delete that entry from your `mcp.json` and re-run the
+installer to take the new one.
+
+**Adding a server to the catalogue** is one object in
+[`mcp/catalogue.json`](mcp/catalogue.json) under `mcpServers`, then the
+installer in each agent dir that should have it:
+
+```json
+"my-server": {
+  "command": "npx",
+  "args": ["-y", "my-mcp-server"],
+  "enabled": false,
+  "exposure": "codemode"
+}
+```
+
+Name it with letters, digits, `_` and `-` only; give it `command` or `url`, not
+both; keep `enabled: false` and state `exposure` explicitly, because the
+catalogue's promise that nothing connects must not depend on pi's defaults; and
+never put `auth` in it — a credential belongs to the agent dir that signs in.
+The installer validates the catalogue before writing and exits `1` with the
+reason, rather than writing an entry pi would skip with one line in a log.
+
+## Contents
+
+| Path | What it is |
+|---|---|
+| `package.json` | the `pi` manifest that makes this repo installable as a package (see above) |
+| `.pi/extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent` (one run, or a `tasks` fan-out with per-step overrides and optional `dependsOn` dependency edges), `subagent_status`, `subagent_wait`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel`, `subagent_clean`, `subagent_answer` (a child's blocking question, answered only after `ctx.ui.confirm`; `subagent_ask` inside the child is the one deliberate blocking wait, and a progress update needs no answer), a live child-activity phase and a status widget above the editor; fan-out steps share the one concurrency queue and their plan is persisted in `plans.json` beside the runs; a plan survives reload (it resumes at the first unfinished step, adopts a run the plan index missed, and reconciles a step whose child is gone rather than re-running it), cancels with its live steps (`subagent_cancel` takes a plan id), and is inspectable as one row — `subagent_status` folds a plan's step runs into it so a ten-step plan costs one detail slot, and `subagent_wait({ plan })` waits for every wave; every run that reports a final answer (completed or failed) leaves a `report.md` artifact with it, plus a bounded copy and a pointer in its run record |
+| `.pi/extensions/todos.ts` | `/todos` TUI and the `todo` tool |
+| `.pi/extensions/orchestrator/` | The settlement gate, the loop breaker, the advisor, workspace coordination, tiered wave orchestration (`/orchestrate` + `orchestrator_wave`), and the typed orchestration event bus: `/gate` shows the last verdict, loop block and consultation, `/orchestrate <folder>` starts a tiered ticket wave gated on review/verify/commit order, and at `agent_before_settle` the gate reports an active goal, open todos, edits without a verification run, a repeated failure signature, any active wave and the remaining gate-block budget as a session `custom` entry. A committed `.pi/orchestrator.json` (example beside the extension) opts a **trusted** project into blocking checks — an open todo, a repeated failure, a project verification command run by the gate, and the tool-call loop breaker — plus the `orchestrator_override` tool every block reason names; its `advisor` key adds one bounded second opinion from a stronger model, injected as a prompt section rather than replacing the prompt. Its absence means report-only (aside from active-wave gates). **Ours** |
+| `.pi/extensions/answer.ts` | `/answer`: extract questions from the last response and answer them in a focused TUI |
+| `.pi/extensions/continue.ts` | `shift+alt+enter` sends the literal prompt `continue`, but only when the agent is idle, so it never steers or queues a message mid-run. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), unmodified |
+| `.pi/extensions/review.ts` | `/review` and `/end-review`: PR, branch, commit, folder and uncommitted review modes, loop-fixing, custom instructions, project-level `REVIEW_GUIDELINES.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with two local changes — see below |
+| `.pi/extensions/mcp-catalogue.ts` | `/mcp-catalogue`: install this package's MCP server catalogue into the agent dir, every server disabled — see [MCP servers](#mcp-servers-installed-once-enabled-per-project). **Ours** |
+| `.pi/extensions/goal.ts` | `/goal` and the `get_goal`/`create_goal`/`update_goal` tools: a long-running objective that auto-continues across turns with an optional token budget, its state appended to the session log and reconstructed on reload/tree navigation. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with four local changes — see below |
+| `.pi/extensions/session-breakdown.ts` | `/session-breakdown`: sessions, messages, tokens and cost per day over 7/30/90, model breakdown, contributions-style calendar. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with four local patches — see below |
+| `.pi/extensions/native-web-search.ts` | Native web search tool — **ours**, not upstream: it registers the `web_search` tool. Ships with `.pi/skills/native-web-search/`, which *is* vendored |
+| `.pi/extensions/repo-explorer/` | `/explore`: browse a branch's file tree with a directory-by-directory fuzzy filter and print a file into the transcript, or quick-open `/explore <path> [branch]` / `<branch>:<path>` to skip the menus. Read-only git resolved against the session cwd; the process runner, branch menu, browser, transcript renderer, display sanitizer and argument grammar are separate internals. **Ours** |
+| `.pi/extensions/review-triage/` | `triage_change` tool and `/triage`: measure a finished change from its git diff, ask a calibrated decision model (Jev, via `ctx.modelRegistry.classify()`) whether it needs an adversarial and/or complexity review, how hard each should push and which allowed model should run it, and return a depth-runged, fallback-chained plan for the `subagent` tool. Policy (judge model, candidates, thresholds, chains) lives in `~/.pi/agent/review-triage.json` — this repo ships it as `review-triage.example.json` beside the extension, with every candidate on `opencode-go` and only the judge on another provider; the verdict is appended to the session for audit. **Ours** |
+| `.pi/extensions/voice/` | `/voice`: dictation with the phone as microphone — start `termux-microphone-record` over ssh, fetch the m4a, transcribe it through an OpenAI-compatible `/audio/transcriptions` endpoint, and paste the transcript at the cursor (or submit it with `autoSubmit`). `/voice cancel` aborts; `alt+r` (and `ctrl+shift+r` on a Kitty terminal) toggle the same cycle. **Ours** |
+| `.pi/extensions/btw/` | `/btw`: opens a panel and asks for the question (submit it empty to reopen a running panel), then answers in-process from the exact conversation prefix, so the provider prompt cache is reused; the streaming answer is shown in its own tmux popup, rendered by pi-tui's own `Markdown` component in pi's own theme — the panel draws the answer with the renderer and the colours the transcript draws an assistant message with. Neither the question nor the answer enters the transcript. Escape returns to pi while the answer keeps running; a new question replaces the panel. **Ours** |
+| `.pi/extensions/opencode-go-provider/` | An `opencode-go` provider for `/model`: fast GLM, Kimi, MiniMax, Qwen, DeepSeek and Grok models via opencode.ai's Go API, with the correct wire protocol per model (Anthropic, OpenAI Completions, Responses) and a per-account usage-budget widget below the editor. **Vendored** from [monotykamary/pi-opencode-go-provider](https://github.com/monotykamary/pi-opencode-go-provider) (MIT), byte-identical to upstream — see below |
+| `.pi/skills/native-web-search/` | Script + docs for the above. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/native-web-search/`, with local provider patches: OpenRouter support, unknown-provider rejection, and a test seam (`__test__` + direct-invocation guard). The two must travel together |
+| `.pi/skills/commit/` | Conventional Commits subjects, and the branch-per-change rule from `AGENTS.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/commit/SKILL.md`, with two local adaptations |
+| `.pi/skills/in-your-own-words/` | Plays the goal, done-when, scope and risky assumptions back before non-trivial work; asks only about decisions, never facts. Part of the coding skill stack below |
+| `.pi/skills/grilling/` | Interviews the user in rounds about a plan, decision or idea until every branch of the design tree is settled: ask the whole frontier, recommend an answer per question, find facts yourself with a `subagent`, leave the decisions to them. **Ported** from mattpocock/skills `skills/productivity/grilling`, with its user-invoked `grill-me` wrapper folded in rather than shipped as a second skill |
+| `.pi/skills/blast-radius/` | Finds what a change can break beyond its diff, names the one fact it is safe because of, and proves it by running real code |
+| `.pi/skills/tdd/` | Red-green-refactor at public seams, one vertical slice at a time, with the two-imagined-edits test and mocking rules |
+| `.pi/skills/diagnosing-bugs/` | Feedback loop first, then reproduce, minimise, rank hypotheses, instrument, and fix the root cause with a regression test |
+| `.pi/skills/idempotent-operations/` | Retries, consumers, jobs, locks and migrations that converge however many times they run or however far a previous run got |
+| `.pi/skills/add-model/` | Add or fix a model in the opencode-go provider: thinking levels, reasoning flags, cost tiers. **Ours** |
+| `.pi/skills/benchmark-checklist/` | Seven questions that vet a performance number before it is reported or acted on |
+| `.pi/skills/show-me-your-work/` | Append-only TSV decision log for a big task left unsupervised for a long time, self-audited before handing back; `scripts/log.sh` writes a sanitised row |
+| `.pi/skills/prove-it-works/` | Verifies the real artifact, runs the repository's quality gate, checks the final diff for scope and hygiene, and reports statuses with honest meaning. The one finishing step — it never starts a reviewer |
+| `.pi/skills/prevent-recurrence/` | Turns the second correction of one mistake class into a check at the highest level that works — architecture, type, lint, test, then prose — proves it at the bad and good revision, ratchets existing findings, and records the rule with its enforcer in `AGENTS.md`'s "Rules and enforcement" table. **Ours**, adapted from pstack's `/correct` and `principle-encode-lessons-in-structure`; `scripts/rule-table.mjs` is the checker |
+| `.pi/skills/to-spec/` | User-invoked `/skill:to-spec`: writes the conversation up as a spec with test seams and acceptance criteria |
+| `.pi/skills/to-tickets/` | User-invoked `/skill:to-tickets`: splits a spec into tracer-bullet tickets with blocked-by edges |
+| `.pi/skills/implement/` | User-invoked `/skill:implement`: builds a spec or ticket end to end through the skills above |
+| `.pi/skills/handoff/` | User-invoked `/skill:handoff`: writes a handoff document a fresh session can continue from |
+| `.pi/skills/teach/` | User-invoked `/skill:teach`: teaches a topic across sessions in a stateful workspace of short cited HTML lessons, reference sheets, vetted resources, a glossary and ADR-style learning records. **Ported** from mattpocock/skills `skills/productivity/teach`, with the workspace kept out of any project checkout and the glossary format linked instead of orphaned |
+| `.pi/skills/writing-for-agents/` | How to write any document an agent consumes — context pointers, the two loads, the information hierarchy, steps and completion criteria, splitting, leading words and pruning — plus `references/skill-mechanics.md` for the skill-specific branch. **Ported** from mattpocock/skills `skills/productivity/writing-for-agents`, with upstream's `agents/openai.yaml` not carried over |
+| `.pi/skills/devcontainer/` | Drive a project's devcontainer from a headless host: `devc` (`devcontainer up` + `exec`), the rule that an agent must never run the attaching form, long-build and long-server recipes, the volume/uid/port rules that prevent damage, and a symptom→fix table. **Ours** |
+| `.pi/skills/github/` | gh CLI usage: PRs, CI runs, `gh api`, structured JSON. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/github/SKILL.md`, with four local adaptations — this repo's `GH_CONFIG_DIR` auth setup, the AGENTS.md squash workflow, the token rule, and the credential-helper note |
+| `.pi/skills/librarian/` | Caches and refreshes remote git repos under the pi agent dir (`<agent dir>/cache/checkouts/<host>/<org>/<repo>`) with partial clones, so repeated references reuse a stable local checkout. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/librarian/`, with the cache root moved from `~/.cache/checkouts` to the persistent agent dir and the script invoked by skill-relative path |
+| `.pi/skills/tmux/` | Drive interactive CLIs (python, gdb, lldb, psql, …) over a private tmux socket: literal `send-keys`, `capture-pane -J`, prompt polling, and `find-sessions.sh`/`wait-for-text.sh`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/tmux/`, with local adaptations — `PI_TMUX_SOCKET_DIR`/`pi-*` naming, an explicit split from the subagent extension's socket and reserved `pi-agent-*` sessions, `-S` support in `wait-for-text.sh`, and fixes in `find-sessions.sh` for the format strings, `-q` name matching and the attached-client count |
+| `.pi/skills/update-changelog/` | Writes `CHANGELOG.md`'s `Unreleased` section from the commits since the last tag. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/update-changelog/SKILL.md`, with one local adaptation |
+| `.pi/skills/worktree/` | Creates, lists, opens, reviews and removes git worktrees (linked working trees) for independent tasks, under a gitignored `.worktrees/` directory. **Ours** |
+| `REVIEW_GUIDELINES.md` | Project-level review guidelines read by `/review` — branch hygiene, token rules, changelog shape, PR workflow, line endings |
+| `licenses/` | MIT notices for the two projects the coding skill stack adapts, plus `NOTICE.md` with per-skill provenance and what changed here |
+| `mcp/catalogue.json` | The one list of MCP servers this package ships — Figma and Playwright, each disabled with `exposure: "codemode"`; installed by `bin/mcp-catalogue` and `/mcp-catalogue` |
+| `pi-session.sh` | Launch pi under tmux with an OpenRouter model |
+| `bin/mcp-catalogue` | Shell surface of that installer, for a setup script or a container; the merge itself is `tools/mcp-catalogue.mjs` |
+| `bin/devc` | Open a project's devcontainer from a terminal — headless, no GUI, tmux-backed. See [`devc`](#devc) |
+| `bin/pi-wrapped` | Start `pi` with the per-project agent dir a login shell would have selected, for launchers that bypass the shell — see [One copy of the extensions, never two](#one-copy-of-the-extensions-never-two) |
+
+Rows prefixed `User-invoked /skill:<name>:` are the six entry points only you can
+start; every other skill is model-invoked, which means you can type it and the
+agent also loads it on its own when the task matches. The full list, with each
+skill's trigger text, is [below](#skills-and-how-they-are-invoked).
+
+### The coding skill stack
+
+The fourteen skills adapted from
+[RRiboulet/agent-coding-skills](https://github.com/RRiboulet/agent-coding-skills)
+(`architect` through `to-tickets` in the generated index below) are now
+maintained here as ours: pi invocation syntax (`/skill:<name>` for the six
+user-invoked entry points), this repo's commit and worktree rules, `dev` as the
+review base, the gate read from `AGENTS.md`, and the handoff written
+under the persistent agent dir instead of `/tmp`. The stack adapts MIT material
+from mattpocock/skills and cursor/plugins `pstack`; their notices and the
+per-skill provenance are in [`licenses/NOTICE.md`](licenses/NOTICE.md).
+
+`grilling`, `teach` and `writing-for-agents` are ported from mattpocock/skills
+directly, and the notice records them separately. `grilling` joins the trigger
+list in `AGENTS.md` as the full design-tree interview — `in-your-own-words`
+remains the cheap default — and `teach` is one of the user-invoked entry points,
+which builds a teaching workspace outside any project checkout.
+`writing-for-agents` joins that trigger list too: it is the reference for writing
+a skill, an `AGENTS.md` line or any other document an agent reads.
+
+`prevent-recurrence` is the model-invoked answer to a correction that came back.
+It classifies the mistake from the fix commits and review comments, then walks
+architecture → type → lint → test → prose and has to say why every higher rung
+did not work. A lint is allowed only when the offending lines alone prove the
+violation, and an existing stock rule is tried first: the Python adapter in
+`references/python.md` covers Ruff `TID251` and the stock rules worth selecting,
+ast-grep, `import-linter`, and a project test, and the JS/TS adapter in
+`references/js-ts.md` covers ESLint's `no-restricted-imports` and
+`no-restricted-syntax`, a local flat-config rule with suggestions,
+dependency-cruiser boundaries, typed linting through typescript-eslint, oxlint
+for the inner loop, and the suppression audit. The check must fail at the
+recorded bad revision and pass at the fixed one, with both commands and exit
+codes recorded in a proof file; existing violations may land behind a ratchet
+that only shrinks. The rule then gets a row in the target's `AGENTS.md`
+`Rules and enforcement` table, which `scripts/rule-table.mjs` validates. It never
+adds a suppression, commits, pushes, opens a PR, or starts a review — it hands
+back the rule, level, proof, row, and open work.
+
+The review workflow is deliberately narrow:
+
+- `prove-it-works` closes every change. It is the author's own proof and diff
+  check, and it never starts a reviewer.
+- A change gets **one** independent review, only when asked, through exactly one
+  door: `/review` for an interactive review, or `triage_change`/`/triage` and one
+  approved sub-agent. Never both, never a second reviewer.
+- The rubric either one follows is `REVIEW_GUIDELINES.md`, which now carries the
+  Spec / Correctness / Standards method that used to be a separate skill.
+- `show-me-your-work` is only for a big task left unsupervised for a long time;
+  its trail is handed to that one reviewer rather than reviewed separately.
+
+`/btw` notes: the command takes no arguments — it always asks for the question
+(submit it empty to reopen a running panel), so spaces and punctuation in it
+cannot be lost. The request reuses the main
+conversation's prompt prefix — no system-prompt or tool-list override — but the
+provider's cache only stays warm for a few minutes of idle time, so the first
+question after a gap pays full price once (and warms the cache for the next
+main turn). Escape closes the
+popup and never reaches the viewer; the answer keeps streaming into its file.
+Copying text out needs nested tmux copy-mode (`C-b C-b`, because the outer
+client keeps the prefix). The panel renders the answer with pi-tui's own
+`Markdown` component — the one the TUI renders an assistant message with — so
+tables, nested lists and syntax-highlighted code blocks come out as the
+transcript draws them, and the panel's colours are the transcript's colours
+(the parent hands the viewer its resolved theme and the paths of pi's own
+packages; `.pi/extensions/btw/theme.mjs` and
+`.pi/extensions/btw/entry-points.mjs`). Two things the transcript does are
+*not* done in the panel: its Markdown transforms (a mermaid diagram is shown
+as its source) and its scrollback behaviour (the panel's history is the
+answer's history, except after a resize, which redraws the panel and clears
+it, as the transcript does). The pane still scrolls natively — copy mode
+(`C-b [`), and the mouse wheel where the tmux config sets `set -g mouse on`
+(the devcontainer's does) — like the subagent attach views, because the
+viewer only draws and never takes the keyboard. The popup's title bar names the
+panel and its question (`btw 01a14e96 why does the cache matter?`); the id alone
+is a UUIDv7 timestamp and could not tell two panels apart. The question is
+collapsed to one line and truncated to fit; it is read from the answer file's
+header, so a launch and a reattach show the same title and a reopened panel
+still says what it is answering, and a blockquote in the answer itself is
+never mistaken for it. The next `/btw` restarts the viewer on the same answer. On a session with an active `/goal` the
+main request's forced system prompt differs, so the panel may re-bill the
+context and show goal notes; `.pi/extensions/btw/request.ts` documents that
+limitation.
+
+## Skills and how they are invoked
+
+The skills split on one axis: **who can invoke them**.
+
+- **User-invoked** are reachable only when you type them — pi spells that
+  `/skill:<name>`. Their job is to orchestrate: `to-spec` writes the contract,
+  `to-tickets` cuts it up, `implement` builds it, `recall` rebuilds live state,
+  `handoff` passes it on, and `teach` explains it later (while `/orchestrate`
+  dispatches ticket waves through the orchestrator extension). They set
+  `disable-model-invocation: true`, so their descriptions are not in the
+  model's context and they cost nothing until asked for.
+- **Model-invoked** can be typed the same way, and the agent also loads one
+  itself when the task matches the description in its frontmatter. They hold the
+  reusable discipline — `tdd`, `blast-radius`, `diagnosing-bugs`,
+  `prevent-recurrence` — and their descriptions sit in context every turn, which
+  is the price of that reach.
+
+Two rules follow, and both hold here today. A user-invoked skill may load
+model-invoked skills (`implement` does, at the seam the spec agreed); it never
+*starts* another user-invoked one — it suggests `/skill:to-spec` and stops. And
+nothing model-invoked needs the user to remember it exists: its description is
+the pointer.
+
+The frontmatter is the source of truth. `disable-model-invocation: true` makes a
+skill user-invoked and keeps its description out of the model's context, and
+`coding-skills.test.ts` pins the classification and the
+`User-invoked /skill:<name>: …` description shape of the six. The tables below
+are generated from that same frontmatter by `tools/skills-index.mjs --write`;
+`skills-index.test.ts` fails when the README and the skills disagree, so this
+list cannot drift the way a hand-written one does.
+
+## Requirements
+
+- `@earendil-works/pi-coding-agent` **`@latest`**
+- **Node 24+** — the tests execute TypeScript directly, with no build step
+- **tmux** — the subagent extension creates one tmux session per run, and the `tmux` skill drives interactive CLIs on a separate private socket
+- **A phone with Termux + Termux:API** for `/voice` — setup is in `.pi/extensions/voice/README.md`
+- An OpenRouter key for web search — in `~/.pi/agent/auth.json` under `openrouter`. The `web_search` tool and the native-web-search skill default to it (Brave when a Brave key is configured). The same key is used by `pi-session.sh`, which launches a model through OpenRouter. An `opencode-go` key is for the `/model` provider only; the Go plan's Anthropic models do not carry native web search (an explicit `--provider opencode-go` or `PI_WEB_SEARCH_PROVIDER=opencode-go` errors rather than falling back).
+
+The `.devcontainer/` provides all of these.
+
+## devc
+
+`bin/devc` opens a project's devcontainer from a terminal, which is what "open"
+has to mean on a headless host: there is no `code`, and the Dev Containers CLI
+has no `open` subcommand. It makes sure the container is built and running, then
+attaches a login shell inside it under tmux, so a dropped SSH connection does not
+kill the session.
+
+```bash
+devc                     # pick a project (lists when stdin is not a TTY)
+devc ls                  # names, paths, state, published ports
+devc up <name>           # ensure built/running; no shell
+devc <name>              # ensure, then attach a login shell in tmux
+devc <name> -- <cmd>     # run one command in the container
+devc rebuild <name> [--no-cache]
+devc stop <name>         # stop; named volumes are kept
+devc doctor [name]       # preflight: docker, CLI, disk, iptables, per-project blockers
+```
+
+Install it once with `ln -s "$PWD/bin/devc" ~/bin/devc`. Projects come from
+`~/.config/devc/roots` (seeded on first run with `$HOME`), one directory per
+line; a directory either contains `.devcontainer/devcontainer.json` itself or
+holds projects one level down. There is deliberately no registry: the config
+file in the repo is the source of truth, and an allowlist is what keeps the
+cached copies under `~/.pi/agent/git` out of the list.
+
+Three behaviours are worth knowing because they exist to stop silent breakage:
+
+- **It recreates a container whose config changed.** `devcontainer up` on 0.90
+  reports success and leaves an existing container alone even when
+  `devcontainer.json` or the compose file has changed, so an edited environment
+  silently keeps running the old one. `devc` hashes those files (plus the
+  Dockerfile, lifecycle scripts and `.dockerignore`), records the hash next to
+  the container, and recreates when it moves. `devc doctor` reports the drift.
+- **It refuses a uid mismatch.** If the container's user does not match the
+  host uid, the bind-mounted repo is unwritable and the project's `postCreate`
+  "fixes" it by chowning the host checkout to a uid the host user does not own.
+  `devc` stops before that and says why. The Dev Containers CLI's default
+  `updateRemoteUserUID` is the mechanism; do not disable it.
+- **It never removes volumes.** `rebuild` recreates the container and leaves
+  named volumes (pi sessions, provider auth, gh token, databases) in place.
+  Nothing here runs `docker compose down -v` or `docker system prune --volumes`.
+
+Requires `docker` (the user in the `docker` group) and
+`@devcontainers/cli@0.90.0`. `DEVC_DRY_RUN=1` prints the commands instead of
+running them.
+
+## Tests
+
+See [`AGENTS.md`](AGENTS.md#tests) for the full CI gate list (single source of
+truth). Quick run for the subagent and extension suite:
+
+```bash
+bash .pi/extensions/subagent/test/setup-deps.sh      # once: symlinks pi's packages into node_modules
+node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts
+```
+
+## `/review`
+
+Interactive code review with five modes — PR (`/review pr 123` or a full URL),
+base branch (`/review branch main`), uncommitted changes (`/review uncommitted`),
+a specific commit (`/review commit <sha>`), and folder/file snapshot
+(`/review folder src docs`). Toggles for loop-fixing (review/fix cycle, max 10
+iterations) and shared custom instructions. Reads a project-level
+`REVIEW_GUIDELINES.md` (looked up next to `.pi/`), so house rules — check the
+base before committing, never put a token in `.git/config`, changelog shape —
+are where the reviewer actually reads them.
+
+It is **vendored, not ours**: `review.ts` comes from
+[mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
+(`extensions/review.ts`, Apache-2.0 — Copyright (c) mitsuhiko and contributors).
+Upstream ships it with no tests; the file is kept close to upstream on purpose,
+so a later refresh is a readable diff. Our changes are listed in the file
+header:
+
+1. **Testability refactor.** `parseReviewPaths`, `parseArgs`, `tokenizeArgs`
+   and the end-review prompt templates were moved from inside the export
+   factory to module scope, `export`ed and re-indented, so the parsing and
+   rubric logic is unit-testable without pi's jiti loader.
+
+2. **`__test__` export** at the bottom exposes the module-private helpers
+   (arg parsers, PR-ref parsing, verdict and findings logic) so
+   `review.test.ts` can cover them without loading the extension through
+   jiti.
+
+## `/goal`
+
+Long-running objective mode: `/goal <objective>` starts a task that keeps
+pursuing that objective across turns instead of ending when the turn does.
+`/goal` alone shows the current goal; `/goal edit|pause|resume|clear` manage it.
+Three tools expose the same state to the model — `get_goal` (current status,
+usage and remaining budget), `create_goal` (only on explicit request; replaces a
+completed goal, refuses while one is unfinished) and `update_goal` (marks the
+goal `complete` or, after the strict three-turn blocked audit, `blocked`). An
+optional token budget (`/goal <objective>` with a `create_goal` budget, or the
+`token_budget` tool parameter) stops automatic continuation once spent, landing
+the goal in `budgetLimited`; assistant errors with usage/rate/quota wording land
+it in `usageLimited` instead of `blocked`. Objectives are capped at 4,000
+characters — beyond that the extension tells you to put the instructions in a
+file and refer to it. All state is appended to the session log as custom entries
+and reconstructed from the active branch on reload and tree navigation; there
+is no external database, so `/fork`ed and subagent sessions each carry the goal
+of their own branch.
+
+It is **vendored, not ours**: `goal.ts` comes from
+[mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
+(`extensions/goal.ts`, Apache-2.0 — Copyright (c) mitsuhiko and contributors).
+Upstream ships it with no tests; the file is kept close to upstream on purpose,
+so a later refresh is a readable diff. Our changes are listed in the file
+header:
+
+1. **Testability refactor.** `reconstructGoalFromBranch` — the reconstruction
+   loop that runs over the branch on session start and tree navigation, which
+   is where a reload can silently lose or double-count goal state — and
+   `hasExhaustedTokenBudget`, the budget-exhaustion condition, were moved from
+   inside the export factory to module scope and `export`ed, so the
+   session-reconstruction and budget-limiting logic is unit-testable without
+   pi's jiti loader.
+
+2. **`__test__` export** at the bottom exposes the module-private helpers
+   (reconstruction, status normalization, the objective limit, usage
+   accounting, continuation/budget prompts) so `goal.test.ts` can cover them
+   without loading the extension through jiti.
+
+3. **Continuation at the settlement boundary.** Upstream asks for the next goal
+   turn from `agent_end`, where pi may still retry, compact and retry, or drain
+   a queued follow-up. The request is now a `custom_message` draft plus
+   `continue: true` returned from `agent_before_settle`, the final actionable
+   boundary: pi honours it exactly once per run and composes it with other
+   handlers' proposals. An aborted run skips that boundary, so it requests no
+   continuation — the abort-pause prompt stays in `agent_end`, as do the usage
+   accounting and the error-stop decision.
+
+4. **Read-only goal view for the settlement gate.**
+   `activeGoalFromBranch` is exported so `.pi/extensions/orchestrator/` reads
+   the active objective through this extension's own reconstruction instead of
+   duplicating the persisted format. It cannot mutate the goal.
+
+Behaviourally it is the most invasive vendor in this repo: a run's next turn is
+requested at its settlement boundary, and `/goal` — which runs outside any run —
+still queues a follow-up message directly (`deliverAs: "followUp"`); on the next
+turn the extension filters its own bookkeeping messages out of the model context.
+That is orthogonal to the subagent extension's queueing — `subagent` messages of
+the same delivery kind are unaffected, and the custom message types the two
+extensions use never collide — but a real end-to-end continuation run still
+needs credentials and is not part of the suite; `goal.test.ts` pins the
+reconstruction, the budget-limiting decision and the boundary's returned
+proposal instead.
+
+## Settlement gate
+
+`.pi/extensions/orchestrator/` runs at `agent_before_settle`, the final
+actionable boundary, and records what this project considers a finished run:
+an active goal, open todos, edits with no verification run, a repeated failure
+signature (same tool, same invocation, same first error line), and the remaining
+gate-block budget. Each evaluation is a `custom` session entry — append-only,
+ignored by the model context, and reconstructed from the active branch on resume
+and tree navigation — so a budget cannot be reset by reloading. `/gate` prints
+the last verdict, the last loop block and the last advisor consultation;
+`/gate --json` prints all three verbatim.
+
+**Report-only unless a project opts in.** With no configuration the gate records
+and publishes a verdict and nothing else: it runs no command, blocks nothing and
+never returns `continue`. Each opt-in key buys one check:
+
+| Key | What it turns on |
+|---|---|
+| `attemptCap` | Gate blocks allowed on one branch (default 3). `0` makes a configured gate report-only. |
+| `block.openTodos` | An open todo stops the run settling. |
+| `block.repeatedFailure` | A repeated failure signature stops it. |
+| `block.loops` | The tool-call loop breaker, below. |
+| `block.waitForSubagents` | Opt-in parking: while a delegated run is live, a settlement that would block returns no continuation, spends no attempt, and the parent is woken once when the last run settles. |
+| `verification.command` | The project's verification command, run by the gate at the boundary, and the edits-without-verification check that goes with it. |
+| `advisor.provider` + `advisor.model` | The model a second opinion is asked of when the gate keeps failing the same way or a loop was broken. Off unless both are set. |
+| `advisor.cooldownMs` | Minimum gap between recorded advisor attempts (default 10 minutes). |
+| `advisor.budget` | Recorded attempts allowed on one branch, calls and refusals alike (default 2); `0` disables the advisor. |
+| `advisor.minGateBlocks` | Settlement blocks reporting the same conditions before that counts as a repeated failure (default 2). |
+| `advisor.timeoutMs` | Bound on the consultation call (default 60 s); it is awaited at run start. |
+| `advisor.redact` | Redact credential shapes from every field the digest keeps (default `true`). `false` sends the evidence verbatim. |
+| `advisor.fallback` | One `provider`/`model` used only when the primary call fails with a provider error or rate limit — never for a missing credential or an abort. One attempt either way, so the budget counts the consultation, not the calls. |
+| `workspace.lockScope` | `"worktree"` (default) or `"repo"`: which namespace a workspace reservation is compared in. Not a gate key — see below. |
+
+**Reservations are per-worktree unless a project says otherwise.** A reserved path
+(`orchestrator_reserve`) is keyed by its canonical absolute path, so the main checkout
+and a linked worktree can each claim the same repository-relative file: branch-isolated
+agents working on different branches collide only when they share a tree.
+`workspace.lockScope: "repo"` re-anchors every reservation at the shared repository root
+(the main checkout, resolved from the git common directory), so the same relative path is
+one claim across all linked worktrees. A repository-scoped claim is enforced against a
+session that kept the default scope too — the write guard maps its path into the holder's
+namespace before matching — while a path outside the worktree stays absolute and gains no
+cross-tree meaning. The mapping is from the writer's own tree: a writer that names a
+sibling worktree's file by absolute path keeps that absolute path, so a repo claim binds
+edits inside the tree the writer is working in, not an arbitrary path it can name. The key
+is read from the same committed file as the gate settings and
+changes nothing else: presence, peer messaging, TTLs, pid liveness, globs and the advisory
+fail-open guard are unaffected. It is not part of `block`, so it neither blocks a
+settlement nor registers `orchestrator_override`.
+
+A block is `continue: true` plus a `custom_message` carrying the reason and the
+verification output, so the model gets one more turn with the evidence. It never
+terminates the run: an unresolved condition keeps blocking while its evidence is
+unchanged, a new edit/todo/failure re-arms it, and every block — settlement or
+loop — spends one of the branch's `attemptCap`, which is the hard stop. `attempts`
+counts blocks, not evaluations: an active goal that continues three times spends
+nothing.
+
+Every block reason names `orchestrator_override`, a tool that grants a one-shot
+override: it lets the next block settle, or the next blocked call run, and
+records the reason in the session. It is consumed by that block, spends no
+attempt, and is not inherited by a resumed session. The tool is registered only
+in a session whose config opts into a check, so a report-only project pays
+nothing for an escape hatch it cannot need.
+
+**The verification command is the gate's own run.** A run that edited files
+without running the configured command gets it run by the gate, non-interactively
+through the host's `pi.exec`, with `timeoutMs` and `maxOutputBytes` from the
+config. The model's own run of the same command also counts, so a run that
+already verified is not asked twice. A command that times out, exceeds its output
+cap, cannot be started, or returns a result that cannot be parsed is **fail-open**:
+the run settles, and the verdict names the timeout. Only a command that ran to
+completion with a non-zero exit is evidence against the change. A command that
+syntactically discards its own failure (`|| true`, `; exit 0`, `set +e`, a
+trailing `2>/dev/null`) is reported as `weak-command`, and a run whose bounded
+output reports zero tests (`0 passing`, `no tests found`, `0 tests`, `no test
+files`) as `inconclusive` — both fail open, because exit code 0 is not the same
+as verified — while the opt-in `verification.successPattern` is the regular
+expression the bounded output must match for `passed`.
+
+**Committing the config is the opt-in, and it runs code.** `verification.command`
+executes at settlement with your permissions, which is why the gate acts only in a
+project pi trusts: the extension is installed as a user-level package and loads in
+clones you have never trusted, where that file came from the repository's author.
+In an untrusted project the gate reports a suppressed verdict, reads nothing from
+the config and offers no override.
+
+**An unresolved condition keeps blocking, and an override or the cap ends it.**
+The same open todo set, failed verification or repeated failure blocks again on
+the next settlement while its evidence is unchanged; a new todo, a new edit or a
+new failure re-arms it. `orchestrator_override` is consumed by that repeated
+block and spends no attempt, and `attemptCap` (default 3) is the hard stop that
+keeps the gate from trapping a run. A passed verification is informational once,
+because there is nothing left to fix.
+
+**The loop breaker reads no-progress evidence, not repetition.** It considers
+`edit`, `write`, `bash` and `powershell` (an observation cannot make progress, so
+blocking one removes information and breaks no loop), and it needs the results to
+repeat as well as the calls: the same invocation producing the same result three
+times with no successful edit in between, or the same first error line three
+times, edits notwithstanding. Two documented workflows stay clear of it — polling
+a status tool repeats a call but is never considered, and a status command after
+each edit is separated by the edit. A block is one per turn and shares the branch
+budget, and the reason names the override.
+
+**A second opinion, off the main loop's cache.** `advisor` configures one
+bounded consultation with a stronger model when the branch already shows a stuck
+session: a loop block, or at least `minGateBlocks` settlement blocks reporting
+the same conditions (default 2 — the gate's first nudge has not failed yet, it
+has not been tried). The consultation happens at `before_agent_start`, the only
+seam at which a prompt section can still change the request: pi applies prompt
+options once per prompt, and a settlement-boundary continuation reuses them. The
+verdict is added as `sections.advisor` — the system prompt is not replaced and
+the session model is not switched, so the main loop's cached prefix survives.
+One completion against the host's model registry means credentials resolve like
+any other model call and the usage lands in `/session` totals. Each trigger is
+answered once per branch (its key is the evidence: the same loop, or the same set
+of blocked conditions), and `cooldownMs` and `budget` bound the rest, refusals
+included so a misconfiguration cannot write an entry on every prompt. The
+provider is checked first: no credentials means no call, and a notice names the
+provider and the fix. The digest is bounded to 4 KB and built only from
+structured evidence — the gate's reasons, the verification *summary*, failure
+signatures, edited file names, open todos and the goal — never tool output
+bodies. Every field it does keep is passed through a documented redactor first
+(`advisor.redact`, on by default), which removes the common credential shapes: an
+`sk-…` key, a GitHub token, an `AKIA…` access key id, a Slack `xox…` token, a
+`Bearer`/`Basic` header's token, URL userinfo (`user:password@`), and the value of
+an `api_key`/`access_token`/`secret`/`password` assignment. A quoted value may
+contain spaces; an unquoted one is redacted through the end of the assignment, so
+a sentence that uses one of those words as a key is over-redacted — the safe
+direction. It replaces characters, not fields, so the digest's shape and bound
+are unchanged; ordinary prose and file paths are not touched. If the primary
+provider is down or rate-limits, `advisor.fallback` names one other provider/model
+tried once, off unless both of its keys are set; a missing credential or an
+abort is not retried, because one is a configuration error and the other means
+nobody is waiting. The record names the model that *answered* and the primary it
+replaced, and the whole consultation is still one entry and one budget unit; its
+usage and cost are the sum of both calls when the failed primary reported any.
+Every attempt is an `orchestrator-advisor` session entry, and `/gate` shows the
+last one; the section is attached to the run being prepared, so a reload does not
+re-inject a stale verdict. Like the rest of the gate it acts only in a trusted
+project (an untrusted clone's advisor key is ignored entirely), and a delegated
+child consults nothing. The attempt's usage is appended to the session's own
+accounting, so `/session-breakdown` bills it once alongside the messages it was
+asked about.
+
+**Compaction is pi's; the model is what forgets.** Gate and advisor state are
+rebuilt from the session branch, so a compaction cannot lose them — but the
+model's own context is replaced by pi's summary, and with it its awareness of an
+open goal, open todos, a pending verification, live delegated runs or a spent
+advisor budget. After a *successful* compaction the extension appends one
+`orchestrator:compact-snapshot` `custom_message` (with `display: false` and no
+turn triggered) naming the active goal, the open todo ids and titles, the gate
+attempts and `attemptCap` with the evidence of every blocked condition and the
+last verdict's reason, the live delegated run ids with their status, and the
+advisor's budget, recorded attempts and consumed trigger keys, bounded to 4 KB
+with a truncation note. A session with nothing to report gets no message, and a
+failed or cancelled compaction gets none either. It is context repair, not a
+record: no `session_before_compact` handler is registered and no compaction
+result is returned, so pi's compaction is neither cancelled nor replaced, and
+nothing is ever read back from the snapshot — `/gate` and the next settlement
+still reconstruct exactly what they did before.
+
+**What a blocking check cannot see.** The gate reads this session's own tool
+calls. A run that delegated every edit to subagents reports no unverified edits
+over a worktree full of them, because a child is another process with another
+session log; the gate says so in its scope line. A delegated worker
+(`PI_ORCHESTRATOR_ROLE=worker`, or the legacy `PI_TMUX_SUBAGENT_CHILD=1` that
+older launchers set) records a verdict with `scope: child`, runs no command, blocks
+nothing and registers no override tool — parent and child share the project
+config, and a child that blocked itself would stall the delegation its parent is
+waiting on. The role is resolved **once, at module load**, into a constant: the
+subagent extension deletes `PI_TMUX_SUBAGENT_CHILD` from the child's environment
+during startup so a `pi` spawned from the child's shell tool cannot re-enter child
+mode, and a guard that re-read the variable at the settlement boundary was gone by
+the time it mattered. The separate `PI_ORCHESTRATOR_ROLE` marker is written by the
+launcher as a literal in the child command, so scrubbing the child-mode variable
+does not erase the role, and a top-level run (`pi -p`, RPC, CI) carries no marker
+and settles normally. The child removes that marker at `session_start` — after
+every factory has read it, before any tool can spawn a process — so a `pi`
+launched from the worker's shell does not inherit the worker role and skip its own
+gate.
+
+**What the event means.** `gate-decided` is published from the boundary, before
+the entry is committed, because pi offers no post-commit hook there. Nothing acts
+on the event: the action is the boundary's return value, and the attempt count is
+re-read from the branch at every settlement rather than advanced when the event
+fires. A subscriber may therefore see a proposal a later handler dropped.
+
+Configuration is a committed `<project>/.pi/orchestrator.json`; the shape ships
+beside the extension as `orchestrator.example.json`. This repository deliberately
+commits none, so its own gate reports and does nothing else.
+
+Related extensions publish typed events to the same in-process bus:
+`orchestrator:run-settled`, `orchestrator:plan-settled`,
+`orchestrator:todo-changed`, `orchestrator:triage-planned` and
+`orchestrator:gate-decided` (payload types in
+`.pi/extensions/orchestrator/events.ts`; `gate-decided` is a discriminated union
+of a settlement verdict and a loop block). They are local to one parent session:
+no cross-process or cross-worktree delivery is promised, and a subscriber that
+throws is reported and ignored.
+
+## `/session-breakdown`
+
+Read-only analytics over the session transcripts in pi's agent dir
+(`PI_CODING_AGENT_DIR` when set, else `~/.pi/agent`):
+sessions, messages, tokens and cost per day over the last 7/30/90 days, a model
+/ directory / weekday / time-of-day breakdown, and a GitHub-contributions-style
+calendar. Nothing is written and no network call is made.
+
+It is **vendored, not ours**: `session-breakdown.ts` comes from
+[mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
+(`extensions/session-breakdown.ts`, Apache-2.0 — Copyright (c) mitsuhiko and
+contributors). Upstream ships it with no tests; the file is kept close to
+upstream on purpose, so a later refresh is a readable diff. Our changes are four
+`LOCAL PATCH` hunks, marked in place and listed in the file header:
+
+1. **Roots.** Upstream hardcodes `<homedir>/.pi/agent/sessions`. We read the
+   agent dir from pi (`getAgentDir()`, so `PI_CODING_AGENT_DIR` works — upstream
+   PR #24 asked for this and was closed unmerged) and sweep three trees:
+   `sessions/`, plus `tmux-subagents/` and the legacy `subagents/`, which is
+   where the subagent extension writes child transcripts. Those are siblings of
+   `sessions/`, so the stock scanner never saw them.
+2. **Inherited entries are not this session's spend.** A forked session file
+   starts with a verbatim copy of its parent's tail, entry ids included. pi's own
+   `/fork`, `/clone` and `--fork` do this, and so does a subagent run launched
+   with `handoff: "fork"`. Those copies are records of requests some other
+   process made, so they are excluded from messages, tokens and cost — resolved
+   through the `parentSession` path in the v3 header, which every producer writes
+   and nothing read before. The file still counts as one session, and a file
+   whose parent can no longer be read is counted in full rather than guessed at.
+3. **A footer line** saying how many inherited entries were excluded and how
+   many files had an unreadable parent, because a total that silently drops
+   context is indistinguishable from one that is simply wrong.
+4. **A `__test__` export**, so the aggregation is testable over fixtures instead
+   of a developer's real transcripts.
+
+Measured on this machine on 2026-10-04, with
+`node tools/measure-session-usage.mjs` (read-only, independent of the extension
+so a bug in it cannot hide on both sides of the comparison): child transcripts
+that were invisible — **$0.067741 of $1.708118, 4.0% of the cost** — are now
+counted, and **3,003,013 duplicated tokens across 6 forked files** are no longer
+counted twice (that figure comes from the extension's own lineage walk, which the
+harness does not reproduce; the harness reports the dollar gap and, per fork run,
+the prefix measured against the extension's recorded `usageFromLine`).
+
+Those counts are of a machine that was being used while they were taken, so they
+move; the dollar figures are stable only because every duplicated entry on this
+box reports `cost.total = 0`. One file carries a `parentSession` that cannot be
+resolved — its source transcript is gone — so its lineage is incomplete and the
+footer says that instead of leaving it to be discovered.
+
+A forked child's *own* turns still cost real money: its re-send of the parent's
+prefix is billed, mostly as cache reads. This is about counting each request
+once, not about pretending delegation is free. The footer line is the honest
+version of that, and it only appears when there is something to report.
+
+## opencode-go provider
+
+`/model` gains an `opencode-go` provider serving fast GLM, Kimi, MiniMax, Qwen,
+DeepSeek and Grok models through [opencode.ai](https://opencode.ai)'s Go API —
+Go-optimized endpoints at lower latency, the correct wire protocol per model
+(Anthropic, OpenAI Completions, Responses) and prompt-cache session affinity.
+Pick it with `/model`; the provider's default model is `kimi-k2.6`. A usage
+widget below the editor shows how much of the 5h / 7d / 30d Go-plan budgets
+remain (`/opencode-go-usage` prints the full breakdown; `off`/`on` hide and show
+the widget). Credentials resolve as `--api-key` flag → `~/.pi/agent/auth.json`
+under `opencode-go` → the `OPENCODE_API_KEY` environment variable, in that order
+(see [pi's providers doc](https://github.com/earendil-works/pi-coding-agent/blob/main/docs/providers.md)).
+
+It is **vendored, not ours**: the whole directory comes from
+[monotykamary/pi-opencode-go-provider](https://github.com/monotykamary/pi-opencode-go-provider)
+(MIT — Copyright (c) monotykamary), multi-file package kept intact.
+The manifest here imports `.pi/extensions/opencode-go-provider/index.ts`
+directly, so a refresh is a plain `cp` of the upstream tree; there are **zero
+local changes** — the files above are byte-identical to upstream commit
+`286c467` (main, 2026-10-07, package.json v1.1.18). The extension is
+side-effect-free at load (the strict-ESM guard covers it) and only depends on
+pi's host packages.
+
+## Voice
+
+`/voice` turns a phone into the microphone: it starts
+`termux-microphone-record` over ssh, stops it on the second `/voice`, fetches
+the recording, and POSTs it to an OpenAI-compatible `/audio/transcriptions`
+endpoint. The transcript is pasted at the cursor by default (a long paste
+collapses to pi's `[paste #n]` marker and expands on submit), or submitted as a
+prompt with `autoSubmit` — queued as a follow-up while the agent streams.
+`/voice cancel` aborts any phase; `alt+r` toggles the same cycle on every
+terminal, `ctrl+shift+r` on a Kitty one, so the recording can be finished
+without retyping the command.
+
+Setup, the configuration table, the key routing (the ambient OpenAI key is
+never sent to a custom endpoint), the single `response_format` retry and the
+phone prerequisites are in `.pi/extensions/voice/README.md`.
+
+## Configuration
+
+The subagent extension reads `PI_SUBAGENT_*` environment variables —
+`PI_SUBAGENT_MAX_CONCURRENT` (default 4), `PI_SUBAGENT_NOTIFY`,
+`PI_SUBAGENT_AUTO_REAP`, `PI_SUBAGENT_REAP_DELAY_MS`, `PI_SUBAGENT_GC_DAYS`,
+`PI_SUBAGENT_KILL_ON_SHUTDOWN`, `PI_SUBAGENT_PROVIDER`, `PI_SUBAGENT_MODEL`,
+`PI_SUBAGENT_INTERRUPT_CONFIRM_MS`, `PI_SUBAGENT_STALL_SECONDS`,
+`PI_SUBAGENT_TOOL_STALL_SECONDS`, and — in a child only —
+`PI_SUBAGENT_QUESTION_TIMEOUT_SECONDS` / `PI_SUBAGENT_QUESTION_GRACE_SECONDS`.
+The test README documents what each one does; the header comment in
+`.pi/extensions/subagent/index.ts` lists the local patches.
+
+The subagent management tools (`subagent_status`, `subagent_wait`,
+`subagent_answer`, `subagent_cancel`, `subagent_interrupt`, `subagent_resume`,
+`subagent_clean`) are hidden from the
+model's tool declarations when pi can reach them another way — that is, when
+`codemode` or `tool_search` is in your tool set. This repo enables both in
+[`.pi/settings.json`](.pi/settings.json) and [`.devcontainer/pi/settings.json`](.devcontainer/pi/settings.json):
+
+```jsonc
+// .pi/settings.json (and defaultTools / codemode in .devcontainer/pi/settings.json)
+{ "defaultTools": ["+tool_search", "+codemode"], "codemode": { "mode": "on" } }
+```
+
+Use the modifier-only form for `defaultTools`. `resolveDefaultTools`
+(`settings-manager.js:55`) *replaces* the inherited selection as soon as a list
+contains any plain name, and only treats an all-modifier list as an addition —
+so this composes with whatever another layer's `defaultTools` says, where
+restating pi's four defaults would silently couple this repo to them.
+
+`tool_search` then loads a hidden management tool on demand, and a codemode
+script can call it as `tools.subagent_status({ id })`. Without either tool they
+stay declared directly, so nothing depends on this being switched on.
+
+### Historical baseline (pi 1.0.2)
+
+Request payloads measured on pi 1.0.2 with this extension, headless `--print`
+with a one-word prompt (before `subagent_wait` and before enabling `+codemode` in
+`.pi/settings.json`); bytes are the whole provider payload, averaged over the
+(single) request of each run:
+
+| `defaultTools` | payload | declared tools |
+|---|---|---|
+| *(unset)* | 19,578 B | 12 |
+| `["+tool_search"]` | **16,000 B** | 8 |
+| `["+codemode"]` | 21,069 B | 8 |
+| `["+codemode", "+tool_search"]` | 21,809 B | 9 |
+| `["+codemode", "+tool_search"]` + `codemode.mode: "only"` | 19,985 B | 2 |
+
+On raw single-request payload, `+tool_search` alone saved **3,578 B (~890
+tokens)** with 0 of the 6 management tools declared (pre-`subagent_wait`);
+`subagent` stays declared throughout.
+
+`+codemode` adds its own tool description (4,933 B in 1.0.2) plus a short
+`Codemode: tools.<name>(args) ...` line per declared tool in `codemode.mode:
+"on"`, which is the upfront prompt cost traded for batching independent tool
+calls and filtering large outputs inside a single script turn. This repo
+enables both `+tool_search` and `+codemode` (`codemode.mode: "on"`) in
+`.pi/settings.json` and `.devcontainer/pi/settings.json` for that script
+workflow; remove `"+codemode"` from a project's `settings.json` if you prefer
+the minimal `+tool_search`-only payload.
+
+Subagent delegation is non-blocking: start independent tasks together, then
+call `subagent_wait` once per run (or once with `ids`) instead of polling.
+`subagent_status` remains the live "what is it doing right now" view.
+
+The one exception runs the other way: a child can block on a question to its
+parent. `subagent_ask` (registered only inside a delegated child, and only when
+its parent gave it a channel) writes a request file and waits; the parent's
+existing watcher tick surfaces it as a `subagent_status` question and a session
+message, and `subagent_answer({ id, answer })` sends the reply — after
+`ctx.ui.confirm`, because a decision comes from a human or from nobody. With no
+UI the answer is refused and says why, and a child with no parent, an expired
+request or a shut-down watcher is told to report the blocker and its partial
+result and stop rather than hang. A blocked child still holds its concurrency
+slot, and its status row says `? waiting on a question`, distinct from stalled
+and interrupted. `subagent_ask` with `kind: "progress"` is the non-blocking
+half: the update reaches the parent's session with no human gate and no answer.
+The channel is `<runDir>/escalation/`, a request/reply file pair per request id,
+written atomically and bounded in size like `result.json` and `interrupt.json`.
+
+One `subagent({ tasks: [...] })` call can launch the whole fan-out, with
+per-step `cwd`/provider/model/thinking/handoff overrides, and returns the runs in
+the requested order. Adding `dependsOn` step ids makes a dependency plan: a step
+starts only after every dependency completed successfully, a cycle or
+self-dependency is rejected before anything launches, and a failed step follows
+the plan's `failurePolicy` (`continue`, the default, cancels only its dependents
+and lets independent branches finish; `stop` starts nothing further). Each step
+may set `retries` (or the plan-level `retryLimit`); a retry is a new run, and the
+plan records every attempt. Plans and their steps are written to `plans.json` in
+the session's `tmux-subagents` directory, advanced by the ordinary settle path
+rather than a scheduler. If the
+session ends while a wait is pending, it returns `details.ended` with the run's
+current state — never a claim that the run settled. A finishing run never takes the turn — its notification is appended to the
+transcript and the model reads it next time it acts, while the widget shows the
+same thing live.
+
+A run that reports a final answer — completed, or failed with an error — leaves its complete report in `<runDir>/report.md`, beside
+`result.json` rather than inside the child's session transcript. The run record
+carries a pointer (`artifactPath`, `artifactBytes`) and a bounded head, plus the
+child's parsed `status`, `summary`, `files`, `commands` and `unresolved` when it
+ended with the requested `subagent-report` block; `output` keeps its previous
+meaning and cap. A child from an older build, or one that simply forgot the
+block, still completes: the plain final text is preserved and the record says
+why the report degraded. The artifact is written at settlement, so it exists for
+failed runs too, where the failure text is the complete report. A cancelled or
+shutdown-killed run has none: its child never reported an answer, and the run
+record says so by carrying no `report`.
+
+<!-- skills-index:begin — generated by tools/skills-index.mjs --write; do not edit by hand -->
+
+### User-invoked — 6: only you can start these, by typing `/skill:<name>`
+
+| Skill | What it does, and when to reach for it |
+|---|---|
+| [`handoff`](.pi/skills/handoff/SKILL.md) | User-invoked /skill:handoff: write a handoff document a fresh agent in any harness can continue from. |
+| [`implement`](.pi/skills/implement/SKILL.md) | User-invoked /skill:implement: take a spec, ticket, ticket set or plan end to end in small verified units. |
+| [`recall`](.pi/skills/recall/SKILL.md) | User-invoked /skill:recall: rebuild recent working context from session records and live repository state into a status brief. |
+| [`teach`](.pi/skills/teach/SKILL.md) | User-invoked /skill:teach: teach a topic across sessions in a workspace of lessons and records, when the learning is the project, not one explanation. |
+| [`to-spec`](.pi/skills/to-spec/SKILL.md) | User-invoked /skill:to-spec: write a spec with test seams and acceptance criteria from the current conversation. |
+| [`to-tickets`](.pi/skills/to-tickets/SKILL.md) | User-invoked /skill:to-tickets: break a spec or plan into tracer-bullet tickets with explicit blocked-by edges. |
+
+### Model-invoked — 21: you can type `/skill:<name>`, and the agent loads one itself when its description matches
+
+| Skill | What it does, and when to reach for it |
+|---|---|
+| [`add-model`](.pi/skills/add-model/SKILL.md) | Add or fix a model in the opencode-go provider. Use when: a model is missing or stale; shows as non-reasoning; or has wrong or missing thinking levels. |
+| [`architect`](.pi/skills/architect/SKILL.md) | Settle a change's shape before code: sketch two distinct designs, test them on deletion and single-owner, then pick or escalate. Use when: designing a module or feature; reshaping a boundary; workarounds keep returning; or two abstractions compete. |
+| [`benchmark-checklist`](.pi/skills/benchmark-checklist/SKILL.md) | Vet a performance measurement before reporting or acting on it. Use when: running a benchmark; reporting a speedup or regression; comparing libraries or configurations on speed; or building a performance test harness. |
+| [`blast-radius`](.pi/skills/blast-radius/SKILL.md) | Find what a change could break beyond its diff. Use when: it crosses a module boundary; alters a public API, schema, wire format, config or env var; touches persistence, caching, retries or concurrency; spans many files; or the user asks what breaks. |
+| [`commit`](.pi/skills/commit/SKILL.md) | Make a git commit following this repo's format and branch rules. Use when: committing current changes. |
+| [`devcontainer`](.pi/skills/devcontainer/SKILL.md) | Work inside a project's devcontainer from a headless host with `devc`. Use when: running commands inside a project container; a container build, dev server or database misbehaves; or the user asks to open, rebuild, stop or diagnose a devcontainer. |
+| [`diagnosing-bugs`](.pi/skills/diagnosing-bugs/SKILL.md) | Diagnose to a confirmed root cause and a regression test, via a tight feedback loop and ranked hypotheses. Use when: something is broken, failing, flaky or slow; the user says diagnose or debug; or an earlier fix attempt did not work. |
+| [`github`](.pi/skills/github/SKILL.md) | Work with GitHub through the `gh` CLI. Use when: issues, pull requests, CI runs or releases; or any `gh` command in this repository. |
+| [`grilling`](.pi/skills/grilling/SKILL.md) | Interview the user relentlessly, in rounds, until every branch of the design tree is settled. Use when: the user asks to be grilled or stress-tested; a plan needs poking at; or a request's shape outruns a ten-line playback. |
+| [`idempotent-operations`](.pi/skills/idempotent-operations/SKILL.md) | Design state-changing operations so they converge however many times they run. Use when: writing retries, queues, webhooks, jobs, commands, scripts or migrations, or anything that must survive crashes and restarts. |
+| [`in-your-own-words`](.pi/skills/in-your-own-words/SKILL.md) | Play the goal, done-when, scope and risky assumptions back before non-trivial work; ask about decisions, never facts. Use when: a request is ambiguous, spans several files or messages, or involves state transitions, retries or migrations. |
+| [`librarian`](.pi/skills/librarian/SKILL.md) | Cache and refresh remote git repositories under the pi agent dir so later references reuse a local checkout. Use when: the user points you to a remote git repository as reference; or you encounter one through other means. |
+| [`native-web-search`](.pi/skills/native-web-search/SKILL.md) | Trigger native web search. Use when: you need quick internet research with concise summaries and full source URLs. |
+| [`prevent-recurrence`](.pi/skills/prevent-recurrence/SKILL.md) | Turn a repeated correction into an enforced check that fails without it. Use when: the same mistake class is corrected twice; a review, revert or fix shows a known pattern coming back; or a correction needs to stop a class, not one instance. |
+| [`prove-it-works`](.pi/skills/prove-it-works/SKILL.md) | Prove a code change works by verifying the real artifact and reporting evidence. Use when: finishing any coding task; before committing or opening a pull request; after addressing review feedback; or when asked to verify changes. |
+| [`show-me-your-work`](.pi/skills/show-me-your-work/SKILL.md) | Keep an append-only decision trail for a task the user left running unattended, audit it, and report what still needs their eyes. Use when: the user asks for a decision log; or a run is long and unsupervised enough to be judged from the trail. |
+| [`tdd`](.pi/skills/tdd/SKILL.md) | Default style for new or changed behavior: failing test at a public seam, then the smallest code that passes. Use when: any behavior change, a bug with a test path, or the user asks for TDD or a regression test. Not for a rename, comment or typo. |
+| [`tmux`](.pi/skills/tmux/SKILL.md) | Drive interactive CLIs (python, gdb, lldb, psql) over a private tmux socket. Use when: a process needs a persistent TTY that a one-shot bash call cannot provide. |
+| [`update-changelog`](.pi/skills/update-changelog/SKILL.md) | Update the repository's changelog correctly. Use when: updating CHANGELOG.md or CHANGELOG; preparing a release. |
+| [`worktree`](.pi/skills/worktree/SKILL.md) | Create, list, open, review, and remove git worktrees (linked working trees) for independent tasks. Use when: a task needs an isolated working tree or branch without disturbing the current checkout; or parallel tasks need separate checkouts. |
+| [`writing-for-agents`](.pi/skills/writing-for-agents/SKILL.md) | Writing the documents an agent consumes — skills, AGENTS.md and CLAUDE.md, and docs reached by a pointer. Use when: writing or editing a skill; or changing a rule or pointer in AGENTS.md or CLAUDE.md. |
+
+<!-- skills-index:end -->
