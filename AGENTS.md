@@ -31,7 +31,7 @@ Feature workflow:
 
 Release workflow (`dev` → `main`; tags cut from `main` only):
 
-1. On `dev`, update `CHANGELOG.md` (`## Unreleased` → `## vX.Y.Z — <today>`, fresh `## Unreleased` above; per `.pi/skills/update-changelog/`, checked by `.pi/extensions/subagent/test/changelog-structure.test.ts`).
+1. On `dev`, update `CHANGELOG.md` (`## Unreleased` → `## vX.Y.Z — <today>`, fresh `## Unreleased` above; per `.pi/skills/update-changelog/`, checked by `.pi/extensions/subagent/test/changelog-structure.test.ts`). A release that starts a new major also deletes the older major's sections in that same commit: the file holds `## Unreleased` and the newest major only, and every older release stays reachable through its tag (`git show vX.Y.Z:CHANGELOG.md`).
 2. Commit, push `dev`, and open PR `dev` → `main`. Never squash a release.
 3. `gh pr merge <n> --merge` — do not pass `--delete-branch` because `dev` is the head branch and must survive.
 4. Tag the merge commit on `main` and push: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
@@ -98,6 +98,8 @@ Always ask the user before launching a review subagent (propose lens and model, 
 | Every extension loads under strict ESM without side effects | test | `node --test .pi/extensions/subagent/test/extension-load.test.ts` | `.pi/extensions/subagent/test/extension-load.test.ts` |
 | Per-container agent dir is declared in devcontainer.json only | test | `node --test .pi/extensions/subagent/test/devcontainer-agent-dir.test.ts` | `.pi/extensions/subagent/test/devcontainer-agent-dir.test.ts` |
 | CHANGELOG.md keeps ## Unreleased at H2 above descending versions | test | `node --test .pi/extensions/subagent/test/changelog-structure.test.ts` | `.pi/extensions/subagent/test/changelog-structure.test.ts` |
+| CHANGELOG.md holds ## Unreleased plus the newest major's releases only, older ones via git show | test | `node --test .pi/extensions/subagent/test/changelog-structure.test.ts` | `.pi/extensions/subagent/test/changelog-structure.test.ts` |
+| CHANGELOG.md merges with the union driver so concurrent Unreleased appends merge | test | `node --test .pi/extensions/subagent/test/changelog-union-attribute.test.ts` | `.pi/extensions/subagent/test/changelog-union-attribute.test.ts` |
 | Skills follow naming, invocation, byte-cap, and reference-link contracts | test | `node --test .pi/extensions/subagent/test/coding-skills.test.ts` | `.pi/extensions/subagent/test/coding-skills.test.ts` |
 | README skill index matches .pi/skills frontmatter | test | `node tools/skills-index.mjs --check` | `.pi/extensions/subagent/test/skills-index.test.ts` |
 
