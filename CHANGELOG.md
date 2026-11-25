@@ -39,6 +39,28 @@ Removed:
   status note where they still asked for session-breakdown work, so no open
   ticket points at an extension that no longer exists.
 
+Maintenance:
+
+- **CHANGELOG.md keeps only `## Unreleased` and the newest major's
+  releases; the tags are the archive.** The file reached 4,400 lines holding
+  all 22 releases since v1.0.0, so every changelog edit made every subagent
+  load the whole file, and parallel worktrees appending at the same
+  `## Unreleased` anchor conflicted at merge time. It is now 241 lines:
+  Unreleased plus v1.17.0 and v1.17.1, with a title note pointing at
+  `git show vX.Y.Z:CHANGELOG.md` for everything older — nothing is lost,
+  every removed section is still readable at its tag. The retention is a
+  rule now, not a one-off: the structure test fails if a release of an
+  older major appears, `AGENTS.md` orders releases that start a new major
+  to delete the older sections in the same commit, and the
+  `update-changelog` skill records the whole policy. Concurrent appends
+  auto-merge: `CHANGELOG.md merge=union` in `.gitattributes` keeps both
+  sides of two worktree branches appending to Unreleased (a local-only
+  guarantee — GitHub's server-side squash merge does not run the driver,
+  so a PR conflict is resolved with a local `git merge dev`), guarded by a
+  test that asserts both the file text and the effective attribute. Built
+  as a three-ticket wave with pinned implementer/reviewer/verifier gates;
+  the tickets live in `docs/tickets/changelog-trim/`.
+
 ## v1.17.1 — 2026-11-24
 
 Added:
