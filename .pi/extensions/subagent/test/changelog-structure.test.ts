@@ -77,6 +77,24 @@ test("released versions are in strictly descending order", async () => {
 	}
 });
 
+test("only the newest major keeps its releases in the file", async () => {
+	// Retention policy (AGENTS.md's rule table): the file carries `## Unreleased`
+	// plus the newest major's releases; every older major lives in its tags,
+	// read back with `git show vX.Y.Z:CHANGELOG.md`. Nothing in the release
+	// workflow forces a prune, so a file that kept appending reached 4,400
+	// lines with releases no reader scrolls to. Starting a new major is the one
+	// moment the older sections are redundant: git already has them.
+	const versions = (await headings(2)).map(versionOf).filter((v): v is [number, number, number] => v !== undefined);
+	assert.ok(versions.length > 0, "expected at least one released version to check");
+	const newestMajor = Math.max(...versions.map(([major]) => major));
+	const older = versions.filter(([major]) => major !== newestMajor).map((v) => `v${v.join(".")}`);
+	assert.deepEqual(
+		older,
+		[],
+		`only v${newestMajor}.x releases belong in CHANGELOG.md; drop these and read them from their tags with \`git show vX.Y.Z:CHANGELOG.md\``,
+	);
+});
+
 test("each release section has exactly one label per kind", async () => {
 	// Two `Fixed:` blocks in one section is how the file ended up with fixes
 	// above features after a section was inserted at the top.
