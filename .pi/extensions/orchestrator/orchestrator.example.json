@@ -1,6 +1,7 @@
 {
   "version": 1,
   "attemptCap": 3,
+  "loopAttemptCap": 3,
   "block": {
     "openTodos": false,
     "repeatedFailure": false,

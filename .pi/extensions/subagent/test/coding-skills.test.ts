@@ -55,9 +55,9 @@ const OURS = ["prevent-recurrence"];
 
 const ALL = [...ADAPTED, ...PORTED, ...OURS];
 
-// pi honors `disable-model-invocation`; these five are entry points only the
+// pi honors `disable-model-invocation`; these six are entry points only the
 // user starts, and AGENTS.md says so.
-const USER_INVOKED = ["handoff", "implement", "orchestrate", "recall", "teach", "to-spec", "to-tickets"];
+const USER_INVOKED = ["handoff", "implement", "recall", "teach", "to-spec", "to-tickets"];
 
 function skillDirs(): string[] {
 	return readdirSync(SKILLS_ROOT)
@@ -82,7 +82,7 @@ function frontmatter(dir: string): Record<string, string> {
 test("every skill is classified in this test", () => {
 	// A new skill added to the tree without updating this test would otherwise
 	// escape the frontmatter assertions below.
-	const known = new Set([...ALL, "add-model", "commit", "devcontainer", "github", "librarian", "native-web-search", "orchestrate", "prevent-recurrence", "tmux", "update-changelog", "worktree"]);
+	const known = new Set([...ALL, "add-model", "commit", "devcontainer", "github", "librarian", "native-web-search", "prevent-recurrence", "tmux", "update-changelog", "worktree"]);
 	for (const dir of skillDirs()) {
 		assert.ok(known.has(dir), `unclassified skill .pi/skills/${dir}: add it to this test`);
 	}

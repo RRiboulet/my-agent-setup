@@ -1,9 +1,8 @@
 node_modules/
 *.log
 .DS_Store
+# local pi session state (`.pi/settings.json` is intentionally tracked)
 .pi/todos/
-# local pi session state (may hold project-level declarations; un-ignore deliberately with git add -f if needed)
-.pi/settings.json
 .pi/npm/
 lab/
 # Android build leftovers from the pi-termux-mobile app build. That app has its

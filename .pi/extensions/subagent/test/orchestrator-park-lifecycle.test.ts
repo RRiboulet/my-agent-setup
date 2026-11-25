@@ -81,3 +81,72 @@ test("a real subagent run parks the orchestrator, and cancelling it wakes the pa
 		});
 	});
 });
+
+test("parking then settling cleanly without parking does not wake when the live subagent later finishes", async () => {
+	await withParkingProject(async (cwd) => {
+		await withHarness({ cwd, maxConcurrent: "4" }, async (h) => {
+			orchestratorExtension(h.pi as never);
+			await h.fire("session_start", {});
+
+			const { details } = await h.call("subagent", { task: "work" });
+			const run = details as unknown as RunRecord;
+
+			const parked = verdictOf(
+				await h.fire("agent_before_settle", {
+					entries: [],
+					continue: false,
+					outcome: "completed",
+					context: {},
+				}),
+			);
+			assert.equal(parked.parked, true);
+
+			// Close the open todo so the next settlement settles cleanly without parking.
+			await writeFile(
+				path.join(cwd, ".pi", "todos", "aaaaaaaa.md"),
+				`${JSON.stringify({ id: "aaaaaaaa", title: "finish", status: "closed" })}\n`,
+			);
+			const clean = verdictOf(
+				await h.fire("agent_before_settle", {
+					entries: [],
+					continue: false,
+					outcome: "completed",
+					context: {},
+				}),
+			);
+			assert.equal(clean.parked, false);
+			assert.equal(clean.decision, "report");
+
+			await h.call("subagent_cancel", { id: run.id });
+			const wake = h.messages.find((message) => message.message.customType === "orchestrator-resume");
+			assert.equal(wake, undefined, "finishing a live subagent after a non-parked settlement must not send a wake turn");
+		});
+	});
+});
+
+test("parking then switching branch via session_tree does not wake when the live subagent later finishes", async () => {
+	await withParkingProject(async (cwd) => {
+		await withHarness({ cwd, maxConcurrent: "4" }, async (h) => {
+			orchestratorExtension(h.pi as never);
+			await h.fire("session_start", {});
+
+			const { details } = await h.call("subagent", { task: "work" });
+			const run = details as unknown as RunRecord;
+
+			const parked = verdictOf(
+				await h.fire("agent_before_settle", {
+					entries: [],
+					continue: false,
+					outcome: "completed",
+					context: {},
+				}),
+			);
+			assert.equal(parked.parked, true);
+
+			await h.fire("session_tree", {});
+			await h.call("subagent_cancel", { id: run.id });
+			const wake = h.messages.find((message) => message.message.customType === "orchestrator-resume");
+			assert.equal(wake, undefined, "switching branch via session_tree must clear stale parked state");
+		});
+	});
+});

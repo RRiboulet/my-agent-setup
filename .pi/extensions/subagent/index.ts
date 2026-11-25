@@ -391,6 +391,7 @@ const QUESTION_MESSAGE_TYPE = "subagent-question";
 const PROGRESS_MESSAGE_TYPE = "subagent-progress";
 const RUNS_DIR = "tmux-subagents";
 const POLL_INTERVAL_MS = 500;
+const TMUX_EXEC_TIMEOUT_MS = 5_000;
 const PANE_PREVIEW_LINES = 18;
 const DEFAULT_PROVIDER = "openrouter";
 const DEFAULT_MAX_CONCURRENT = 4;
@@ -735,9 +736,10 @@ async function prepareHandoffSession(run: RunRecord, ctx: ExtensionContext): Pro
  * transcript, so the file outliving its own directory is normal, and deleting
  * that directory is destructive to whoever still holds it.
  */
-function runDirOwnsLiveTranscript(run: RunRecord, runs: Map<string, RunRecord>): boolean {
+function runDirOwnsLiveTranscript(run: RunRecord, runs: ReadonlyMap<string, RunRecord> | Iterable<RunRecord>): boolean {
 	if (!run.runDir) return false;
-	for (const other of runs.values()) {
+	const candidates = runs instanceof Map ? runs.values() : runs;
+	for (const other of candidates) {
 		if (other.id === run.id) continue;
 		// holdsChild, not !isTerminal: an interrupted run's child is still alive
 		// and still holds its transcript open, so its run dir is just as load
@@ -1324,7 +1326,7 @@ async function openSubagentPanel(deps: OpenPanelDeps, runId: string): Promise<vo
 
 	// The client has to be one actually looking at the pane; popup.ts explains
 	// why the window filter, not `-t <session>`, is what finds it.
-	const resolved = await resolvePaneClient(deps.exec, outer.socket, outer.pane);
+	const resolved = await resolvePaneClient(deps.exec, outer.socket, outer.pane, { timeoutMs: TMUX_EXEC_TIMEOUT_MS });
 	if (resolved.kind === "pane-gone") {
 		notify("That tmux pane is gone.");
 		return;
@@ -1337,13 +1339,13 @@ async function openSubagentPanel(deps: OpenPanelDeps, runId: string): Promise<vo
 
 	// Bind only while the server is known to hold the session: the binding is
 	// global to the subagent server, and an empty server would exit and drop it.
-	const alive = await deps.exec("tmux", tmuxArgs("has-session", "-t", run.tmuxSession));
+	const alive = await deps.exec("tmux", tmuxArgs("has-session", "-t", run.tmuxSession), { timeout: TMUX_EXEC_TIMEOUT_MS });
 	if (alive.code !== 0) {
 		notify(`Subagent ${short} has no live tmux session.`);
 		return;
 	}
 
-	const bound = await deps.exec("tmux", buildEscapeBindArgs(socket));
+	const bound = await deps.exec("tmux", buildEscapeBindArgs(socket), { timeout: TMUX_EXEC_TIMEOUT_MS });
 	if (bound.code !== 0) {
 		notify(`Could not set up the panel's Escape binding: ${bound.stderr.trim() || `tmux exited ${bound.code}`}`, "warning");
 		return;
@@ -1452,6 +1454,88 @@ function resolveModel(
 	if (!provider) provider = DEFAULT_PROVIDER;
 	if (!model) throw new Error("No model is active. Pass both provider and model to the subagent tool.");
 	return { provider, model };
+}
+
+interface ModelRegistryLike {
+	find?: (provider: string, modelId: string) => unknown;
+	getApiKeyAndHeaders?: (model: unknown) => Promise<{ ok: boolean; error?: string }>;
+	getApiKeyForProvider?: (provider: string) => Promise<string | undefined>;
+	hasConfiguredAuth?: (model: unknown) => boolean;
+	getProviderAuthStatus?: (provider: string) => { configured?: boolean } | undefined;
+}
+
+function hasExplicitModelOverride(
+	providerOverride: string | undefined,
+	modelOverride: string | undefined,
+): boolean {
+	return Boolean(
+		providerOverride?.trim() ||
+			modelOverride?.trim() ||
+			process.env.PI_SUBAGENT_PROVIDER?.trim() ||
+			process.env.PI_SUBAGENT_MODEL?.trim(),
+	);
+}
+
+async function validateModelSelection(
+	ctx: ExtensionContext,
+	selected: { provider: string; model: string },
+	explicitOverride: boolean,
+): Promise<void> {
+	if (!explicitOverride) return;
+	const registry = (ctx as { modelRegistry?: ModelRegistryLike }).modelRegistry;
+	if (!registry) return;
+
+	let resolvedModel: unknown;
+	if (typeof registry.find === "function") {
+		resolvedModel = registry.find(selected.provider, selected.model);
+		if (!resolvedModel) {
+			throw new Error(
+				`Unknown subagent model: ${selected.provider}/${selected.model}. Check the provider and model id.`,
+			);
+		}
+	}
+
+	const hasConfiguredAuthCheck = resolvedModel !== undefined && typeof registry.hasConfiguredAuth === "function";
+	const hasProviderAuthStatusCheck = typeof registry.getProviderAuthStatus === "function";
+	const hasApiKeyAndHeadersCheck = resolvedModel !== undefined && typeof registry.getApiKeyAndHeaders === "function";
+
+	if (hasConfiguredAuthCheck) {
+		if (!registry.hasConfiguredAuth!(resolvedModel)) {
+			throw new Error(
+				`No credentials configured for subagent provider "${selected.provider}" (model ${selected.provider}/${selected.model}). Configure credentials (for example via /login or provider API key) before launching.`,
+			);
+		}
+	} else if (hasProviderAuthStatusCheck) {
+		const status = registry.getProviderAuthStatus!(selected.provider);
+		if (status && status.configured === false) {
+			throw new Error(
+				`No credentials configured for subagent provider "${selected.provider}" (model ${selected.provider}/${selected.model}). Configure credentials (for example via /login or provider API key) before launching.`,
+			);
+		}
+	}
+
+	if (hasApiKeyAndHeadersCheck) {
+		const auth = await registry.getApiKeyAndHeaders!(resolvedModel);
+		if (auth && auth.ok === false) {
+			throw new Error(
+				`No credentials configured for subagent model ${selected.provider}/${selected.model}: ${auth.error ?? "missing API key"}. Configure credentials (for example via /login or provider API key) before launching.`,
+			);
+		}
+	}
+
+	if (
+		!hasConfiguredAuthCheck &&
+		!hasProviderAuthStatusCheck &&
+		!hasApiKeyAndHeadersCheck &&
+		typeof registry.getApiKeyForProvider === "function"
+	) {
+		const apiKey = await registry.getApiKeyForProvider(selected.provider);
+		if (!apiKey) {
+			throw new Error(
+				`No credentials configured for subagent provider "${selected.provider}" (model ${selected.provider}/${selected.model}). Configure credentials (for example via /login or provider API key) before launching.`,
+			);
+		}
+	}
 }
 
 function formatActivity(activity: RunActivity | undefined): string | undefined {
@@ -2100,7 +2184,9 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	};
 
 	const killTmuxSession = async (run: RunRecord): Promise<void> => {
-		await pi.exec("tmux", tmuxArgs("kill-session", "-t", run.tmuxSession)).catch(() => undefined);
+		await pi
+			.exec("tmux", tmuxArgs("kill-session", "-t", run.tmuxSession), { timeout: TMUX_EXEC_TIMEOUT_MS })
+			.catch(() => undefined);
 	};
 
 	const reapSession = async (run: RunRecord): Promise<void> => {
@@ -2596,7 +2682,7 @@ const installWidget = (): void => {
 						ui: statusUi,
 						getRun: (runId) => runs.get(runId),
 						isShuttingDown: () => shuttingDown,
-						exec: (command, args) => pi.exec(command, args),
+						exec: (command, args, opts) => pi.exec(command, args, { timeout: TMUX_EXEC_TIMEOUT_MS, ...opts }),
 						launch: panelLauncher,
 					},
 					row.runId,
@@ -3002,7 +3088,7 @@ const noteInterrupt = async (
 			}
 
 			const paneResult = await pi.exec("tmux", tmuxArgs("capture-pane", "-p", "-J", "-t", run.tmuxTarget), {
-				timeout: 5_000,
+				timeout: TMUX_EXEC_TIMEOUT_MS,
 			});
 			if (paneResult.code === 0) {
 				clearTmuxFailures(run);
@@ -3019,7 +3105,9 @@ const noteInterrupt = async (
 				return;
 			}
 
-			const dead = await pi.exec("tmux", tmuxArgs("display-message", "-p", "-t", run.tmuxTarget, "#{pane_dead}"));
+			const dead = await pi.exec("tmux", tmuxArgs("display-message", "-p", "-t", run.tmuxTarget, "#{pane_dead}"), {
+				timeout: TMUX_EXEC_TIMEOUT_MS,
+			});
 			if (dead.code === 0) {
 				clearTmuxFailures(run);
 				if (dead.stdout.trim() === "1") {
@@ -3060,12 +3148,17 @@ const noteInterrupt = async (
 
 	const launchRun = async (run: RunRecord): Promise<void> => {
 		try {
-			const tmuxVersion = await pi.exec("tmux", ["-V"], { timeout: 5_000 });
+			if (run.status === "cancelled") return;
+			const tmuxVersion = await pi.exec("tmux", ["-V"], { timeout: TMUX_EXEC_TIMEOUT_MS });
 			if (tmuxVersion.code !== 0) {
 				throw new Error(`tmux is required for subagents: ${tmuxVersion.stderr.trim() || "tmux not found"}`);
 			}
 
-			const created = await pi.exec("tmux", tmuxArgs("new-session", "-d", "-s", run.tmuxSession, "-n", "pi", "-c", run.cwd));
+			const created = await pi.exec(
+				"tmux",
+				tmuxArgs("new-session", "-d", "-s", run.tmuxSession, "-n", "pi", "-c", run.cwd),
+				{ timeout: TMUX_EXEC_TIMEOUT_MS },
+			);
 			if (created.code !== 0) {
 				throw new Error(`Failed to create tmux session: ${created.stderr.trim() || created.stdout.trim()}`);
 			}
@@ -3073,6 +3166,7 @@ const noteInterrupt = async (
 			const remain = await pi.exec(
 				"tmux",
 				tmuxArgs("set-window-option", "-t", `${run.tmuxSession}:0`, "remain-on-exit", "on"),
+				{ timeout: TMUX_EXEC_TIMEOUT_MS },
 			);
 			if (remain.code !== 0) throw new Error(remain.stderr.trim() || "Failed to set remain-on-exit.");
 
@@ -3116,23 +3210,27 @@ const noteInterrupt = async (
 			// prepared. No child has started yet, so cancel here rather than launch a
 			// step the plan already marked cancelled.
 			if (run.status === "cancelled") {
-				await pi.exec("tmux", tmuxArgs("kill-session", "-t", run.tmuxSession)).catch(() => undefined);
+				await killTmuxSession(run);
 				return;
 			}
-			const sent = await pi.exec("tmux", tmuxArgs("send-keys", "-t", run.tmuxTarget, "-l", "--", childCommand));
+			const sent = await pi.exec("tmux", tmuxArgs("send-keys", "-t", run.tmuxTarget, "-l", "--", childCommand), {
+				timeout: TMUX_EXEC_TIMEOUT_MS,
+			});
 			if (sent.code !== 0) throw new Error(sent.stderr.trim() || "Failed to start child Pi.");
 			if (run.status === "cancelled") {
-				await pi.exec("tmux", tmuxArgs("kill-session", "-t", run.tmuxSession)).catch(() => undefined);
+				await killTmuxSession(run);
 				return;
 			}
-			const entered = await pi.exec("tmux", tmuxArgs("send-keys", "-t", run.tmuxTarget, "Enter"));
+			const entered = await pi.exec("tmux", tmuxArgs("send-keys", "-t", run.tmuxTarget, "Enter"), {
+				timeout: TMUX_EXEC_TIMEOUT_MS,
+			});
 			if (entered.code !== 0) throw new Error(entered.stderr.trim() || "Failed to submit child command.");
 			// The submission itself is also a window: a stop policy can abandon this
 			// step while Enter is in flight. Without this check the run resurrects
 			// from cancelled to running, a child the policy refused is left running,
 			// and the plan step it belongs to can never learn the outcome.
 			if (run.status === "cancelled") {
-				await pi.exec("tmux", tmuxArgs("kill-session", "-t", run.tmuxSession)).catch(() => undefined);
+				await killTmuxSession(run);
 				return;
 			}
 
@@ -3142,24 +3240,33 @@ const noteInterrupt = async (
 			scheduleWatch(run);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			await pi.exec("tmux", tmuxArgs("kill-session", "-t", run.tmuxSession)).catch(() => undefined);
+			await killTmuxSession(run);
 			await markRunFailed(run, message);
 		}
 	};
 
 	const drainQueue = async (): Promise<void> => {
 		while (activeCount() < maxConcurrent) {
-			const next = [...runs.values()].find((run) => run.status === "queued");
-			if (!next) return;
-			next.status = "running";
-			next.startedAt = Date.now();
-			launching.add(next.id);
-			await persist();
-			try {
-				await launchRun(next);
-			} finally {
-				launching.delete(next.id);
+			const admitted: RunRecord[] = [];
+			while (activeCount() < maxConcurrent) {
+				const next = [...runs.values()].find((run) => run.status === "queued");
+				if (!next) break;
+				next.status = "running";
+				next.startedAt = Date.now();
+				launching.add(next.id);
+				admitted.push(next);
 			}
+			if (admitted.length === 0) return;
+			await persist();
+			await Promise.allSettled(
+				admitted.map(async (run) => {
+					try {
+						await launchRun(run);
+					} finally {
+						launching.delete(run.id);
+					}
+				}),
+			);
 		}
 	};
 
@@ -3241,6 +3348,37 @@ const noteInterrupt = async (
 				// child with a conversation the user has already left.
 				if (!sessionContext) throw new Error("No parent session context is available for a handoff step.");
 				await prepareHandoffSession(run, sessionContext);
+			}
+			// A sibling failure under `failurePolicy: "stop"`, `subagent_cancel`, or
+			// `session_shutdown` may have ended the plan or step while async setup
+			// (`mkdir` / `writeFile` / `prepareHandoffSession`) was in flight. Re-check
+			// before `startRun(run)` so we never spawn an orphan tmux session.
+			if (shuttingDown || plan.status !== "running" || step.status !== "running") {
+				if (step.status === "running") {
+					step.status = "cancelled";
+					step.finishedAt = Date.now();
+					step.error ??=
+						plan.status === "failed"
+							? "Abandoned: the plan stopped after another step failed."
+							: shuttingDown
+								? "Cancelled: session shut down before the step launched."
+								: "Cancelled: the plan was cancelled before the step launched.";
+				}
+				run.status = "cancelled";
+				run.finishedAt = Date.now();
+				run.error = run.error ?? step.error ?? plan.reason ?? "Cancelled before launch.";
+				runs.set(run.id, run);
+				publishRunSettled(run);
+				notifyWaiters(run);
+				if (!shuttingDown && plan.status === "running") {
+					await applyPlanAdvance(plan, resolvePlan(plan));
+				} else {
+					publishPlanSettled(plan);
+					notifyPlanWaiters(plan);
+					await persist();
+					refreshStatusWidget();
+				}
+				return;
 			}
 			await startRun(run);
 		} catch (error) {
@@ -3548,7 +3686,7 @@ const noteInterrupt = async (
 			// removing it is how shutdown says "nobody is left to answer" (local patch
 			// 23). Its staleness check would notice within seconds regardless; this makes
 			// it the child's very next poll. No timer is involved on either side.
-			if (run.escalation && run.pendingRequest) {
+			if (run.escalation) {
 				await clearEscalationHeartbeat(escalationDir(run.runDir)).catch(() => undefined);
 			}
 			if (killOnShutdown && holdsChild(run.status)) {
@@ -3682,6 +3820,7 @@ const noteInterrupt = async (
 					const cwd = path.resolve(ctx.cwd, item.cwd?.trim() || ".");
 					await validateCwd(cwd);
 					const selectedModel = resolveModel(ctx, item.provider, item.model);
+					await validateModelSelection(ctx, selectedModel, hasExplicitModelOverride(item.provider, item.model));
 					specs.push({
 						id: item.id,
 						task: item.task,
@@ -3706,6 +3845,7 @@ const noteInterrupt = async (
 				await persist();
 
 				for (const stepId of readyStepIds(plan)) {
+					if (shuttingDown || plan.status !== "running") break;
 					const step = plan.steps.find((candidate) => candidate.id === stepId);
 					if (step) await launchPlanStep(plan, step);
 				}
@@ -3744,6 +3884,7 @@ const noteInterrupt = async (
 			await validateCwd(cwd);
 
 			const selectedModel = resolveModel(ctx, params.provider, params.model);
+			await validateModelSelection(ctx, selectedModel, hasExplicitModelOverride(params.provider, params.model));
 			const thinking = params.thinking ?? pi.getThinkingLevel();
 			const mode = (params.handoff ?? "standalone") as LaunchMode;
 			const id = randomUUID();
@@ -4362,7 +4503,9 @@ const noteInterrupt = async (
 				// 500ms quits the child, which would throw the transcript away. `-l`
 				// would send the literal word instead of the key, and a second
 				// `send-keys Enter` would submit whatever the child had typed.
-				const sent = await pi.exec("tmux", tmuxArgs("send-keys", "-t", run.tmuxTarget, "Escape"));
+				const sent = await pi.exec("tmux", tmuxArgs("send-keys", "-t", run.tmuxTarget, "Escape"), {
+					timeout: TMUX_EXEC_TIMEOUT_MS,
+				});
 				if (sent.code !== 0) {
 					run.interruptRequestedAt = undefined;
 					await persist();
@@ -4402,7 +4545,7 @@ const noteInterrupt = async (
 								]
 							: [
 									`Escape sent to subagent ${id}, but it did not confirm an interrupt within ${formatConfirmWindow(interruptConfirmMs)} (status is still ${run.status})${outcome.aborted ? ", and this tool call was cancelled" : ""}.`,
-									"The child was probably already idle — Escape does nothing while it waits at its prompt — or it is stuck somewhere Escape does not reach. Attach with ${run.attachCommand} to look, and use subagent_cancel to stop it.",
+									`The child was probably already idle — Escape does nothing while it waits at its prompt — or it is stuck somewhere Escape does not reach. Attach with ${run.attachCommand} to look, and use subagent_cancel to stop it.`,
 								];
 				return { content: [{ type: "text", text: lines.join("\n") }], details: run };
 			},
@@ -4522,6 +4665,8 @@ const noteInterrupt = async (
 						mode: "resume",
 						resumeOf: previous.id,
 						attempt: (previous.attempt ?? 1) + 1,
+						planId: undefined,
+						stepId: undefined,
 						sessionFile,
 					};
 					updateTmuxCommands(run);
@@ -4575,7 +4720,10 @@ const noteInterrupt = async (
 				const deleteFiles = params.delete_files ?? false;
 				const cutoff = Date.now() - (params.older_than_hours ?? 0) * 3_600_000;
 
-				const targets: RunRecord[] = [];
+				const targets: RunRecord[] = [...runs.values()];
+				const foreignRemovedIds = new Map<string, Set<string>>();
+				const runOrigin = new Map<RunRecord, string>();
+
 				if (params.all_sessions) {
 					const root = path.join(getAgentDir(), RUNS_DIR);
 					let dirs: Dirent[] = [];
@@ -4585,16 +4733,23 @@ const noteInterrupt = async (
 						dirs = [];
 					}
 					for (const entry of dirs) {
-						if (!entry.isDirectory()) continue;
+						if (!entry.isDirectory() || entry.name === sessionId) continue;
+						const indexPath = path.join(root, entry.name, "runs.json");
 						try {
-							const parsed = JSON.parse(await readFile(path.join(root, entry.name, "runs.json"), "utf8")) as RunRecord[];
-							targets.push(...parsed.filter((run) => run?.id));
+							const parsed = JSON.parse(await readFile(indexPath, "utf8")) as unknown;
+							if (!Array.isArray(parsed)) continue;
+							const foreignRuns = parsed.filter(
+								(run): run is RunRecord => Boolean(run && typeof run === "object" && (run as RunRecord).id),
+							);
+							foreignRemovedIds.set(indexPath, new Set());
+							for (const run of foreignRuns) {
+								targets.push(run);
+								runOrigin.set(run, indexPath);
+							}
 						} catch {
 							// No index for this directory.
 						}
 					}
-				} else {
-					targets.push(...runs.values());
 				}
 
 				let killed = 0;
@@ -4618,7 +4773,7 @@ const noteInterrupt = async (
 					// may still be running. pi holds the descriptor open, so the child
 					// would keep writing to an unlinked inode and lose every entry
 					// silently. Leave the dir alone and say so.
-					if (deleteFiles && run.runDir && runDirOwnsLiveTranscript(run, runs)) {
+					if (deleteFiles && run.runDir && runDirOwnsLiveTranscript(run, targets)) {
 						retained.push(run.id);
 						skipped++;
 						continue;
@@ -4636,10 +4791,35 @@ const noteInterrupt = async (
 						}
 						await rm(run.runDir, { recursive: true, force: true }).catch(() => undefined);
 						deleted++;
-						if (runs.get(run.id) === run) runs.delete(run.id);
+						if (runs.get(run.id) === run) {
+							runs.delete(run.id);
+						} else {
+							const origin = runOrigin.get(run);
+							if (origin) foreignRemovedIds.get(origin)?.add(run.id);
+						}
 					}
 				}
-				if (deleteFiles) await persist();
+				if (deleteFiles) {
+					await persist();
+					for (const [indexPath, removedIds] of foreignRemovedIds) {
+						if (removedIds.size === 0) continue;
+						try {
+							const parsed = JSON.parse(await readFile(indexPath, "utf8")) as unknown;
+							if (!Array.isArray(parsed)) continue;
+							const freshRuns = parsed.filter(
+								(run): run is RunRecord => Boolean(run && typeof run === "object" && (run as RunRecord).id),
+							);
+							const remaining = freshRuns.filter((run) => !removedIds.has(run.id));
+							await writeJsonAtomic(indexPath, remaining);
+						} catch (error) {
+							const code = (error as NodeJS.ErrnoException | undefined)?.code;
+							if (code === "ENOENT") continue;
+							console.error(
+								`[tmux-subagent] Failed to persist cleaned runs to ${indexPath}: ${error instanceof Error ? error.message : String(error)}`,
+							);
+						}
+					}
+				}
 				const summary = [`Cleaned ${killed} tmux session(s), deleted ${deleted} run dir(s), skipped ${skipped}.`];
 				if (deleteFiles && deletedTranscripts > 0) {
 					summary.push(

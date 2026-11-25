@@ -1,5 +1,5 @@
-import { existsSync } from "node:fs";
-import { appendFile, mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { constants, existsSync } from "node:fs";
+import { mkdir, open, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 
 import { getAgentDir, getPackageDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -122,8 +122,40 @@ function defaultIsPidAlive(pid: number): boolean {
 	}
 }
 
-async function runTmux(deps: BtwDeps, args: string[], what: string): Promise<void> {
-	const result = await deps.exec("tmux", args, { timeout: TMUX_TIMEOUT_MS });
+function throwIfAborted(signal: AbortSignal | undefined): void {
+	if (signal?.aborted) {
+		throw new DOMException("Aborted", "AbortError");
+	}
+}
+
+/**
+ * Append to an existing answer file without recreating it.
+ *
+ * `appendFile` opens with `O_CREAT`, so a late delta or footer racing with
+ * panel teardown recreates `answer.md` inside `runDir` (causing `rmdir` to
+ * fail with `ENOTEMPTY` or leaving a headerless fragment behind). Opening with
+ * `O_WRONLY | O_APPEND` fails atomically with `ENOENT` once the file is gone.
+ */
+async function appendExistingAnswer(answerPath: string, text: string): Promise<boolean> {
+	let handle: Awaited<ReturnType<typeof open>>;
+	try {
+		handle = await open(answerPath, constants.O_WRONLY | constants.O_APPEND);
+	} catch (error) {
+		if ((error as { code?: string }).code === "ENOENT") return false;
+		throw error;
+	}
+	try {
+		await handle.writeFile(text, "utf8");
+		return true;
+	} finally {
+		await handle.close();
+	}
+}
+
+async function runTmux(deps: BtwDeps, args: string[], what: string, signal?: AbortSignal): Promise<void> {
+	throwIfAborted(signal);
+	const result = await deps.exec("tmux", args, { timeout: TMUX_TIMEOUT_MS, ...(signal ? { signal } : {}) });
+	throwIfAborted(signal);
 	if (result.code !== 0) {
 		// pi.exec resolves rather than rejects on a non-zero exit, and leaves
 		// stderr empty when the binary itself could not be spawned.
@@ -333,7 +365,7 @@ async function panelState(deps: BtwDeps, paths: BtwPaths): Promise<PanelState> {
  * a reattach shows the same title the launch did; the panel builder sanitizes
  * and truncates it.
  */
-async function openBtwPopup(deps: BtwDeps, paths: BtwPaths, sessionId: string): Promise<boolean> {
+async function openBtwPopup(deps: BtwDeps, paths: BtwPaths, sessionId: string, signal?: AbortSignal): Promise<boolean> {
 	const attach = buildAttachCommand(paths.socket, paths.session);
 	const fallback = (message: string, type: "info" | "warning"): false => {
 		deps.notify(`${message} Attach with: ${attach}`, type);
@@ -377,6 +409,7 @@ async function openBtwPopup(deps: BtwDeps, paths: BtwPaths, sessionId: string): 
 			titlePrefix: "btw",
 			titleSuffix: await questionFromAnswer(paths.answer),
 		});
+		if (signal?.aborted) return false;
 		deps.launch(launch.command, launch.args, { detached: true, stdio: "ignore" }, (message) => {
 			deps.notify(`Could not open the panel: ${message}. Attach with: ${attach}`, "error");
 		});
@@ -472,27 +505,32 @@ async function questionFromAnswer(answerPath: string): Promise<string | undefine
 }
 
 /** Start (or restart) the view-only tmux session for an existing answer file. */
-async function startViewer(deps: BtwDeps, paths: BtwPaths, cwd: string): Promise<void> {
+async function startViewer(deps: BtwDeps, paths: BtwPaths, cwd: string, signal?: AbortSignal): Promise<void> {
+	throwIfAborted(signal);
 	await writePanelSpec(deps, paths);
 	await runTmux(
 		deps,
 		buildBtwSessionCreateArgs({ socket: paths.socket, session: paths.session, cwd }),
 		"Could not create the BTW tmux session",
+		signal,
 	);
 	await runTmux(
 		deps,
 		buildBtwRemainOnExitArgs({ socket: paths.socket, session: paths.session }),
 		"Could not keep the BTW pane after exit",
+		signal,
 	);
 	await runTmux(
 		deps,
 		buildBtwSendKeysArgs({ socket: paths.socket, target: paths.target, command: buildBtwViewerCommand(paths.answer, paths.panel) }),
 		"Could not start the BTW viewer",
+		signal,
 	);
 	await runTmux(
 		deps,
 		buildBtwSubmitArgs({ socket: paths.socket, target: paths.target }),
 		"Could not submit the BTW viewer",
+		signal,
 	);
 }
 
@@ -503,7 +541,7 @@ async function startViewer(deps: BtwDeps, paths: BtwPaths, cwd: string): Promise
  * no dead viewer to restart. A live panel that merely cannot be shown here
  * returns true, so the caller does not replace it by launching a new question.
  */
-export async function reattachBtwPanel(deps: BtwDeps, ctx: BtwContext): Promise<boolean> {
+export async function reattachBtwPanel(deps: BtwDeps, ctx: BtwContext, signal?: AbortSignal): Promise<boolean> {
 	let sessionId: string;
 	let paths: BtwPaths;
 	try {
@@ -513,6 +551,7 @@ export async function reattachBtwPanel(deps: BtwDeps, ctx: BtwContext): Promise<
 		return false;
 	}
 	const state = await panelState(deps, paths);
+	if (signal?.aborted) return true;
 	if (state === "unknown") return true;
 	if (state === "missing" || state === "dead") {
 		if (!existsSync(paths.answer)) {
@@ -528,16 +567,18 @@ export async function reattachBtwPanel(deps: BtwDeps, ctx: BtwContext): Promise<
 			if (!(await closePanelServer(deps, paths))) {
 				throw new Error("the previous BTW panel is still running; close it and try again");
 			}
-			await startViewer(deps, paths, ctx.cwd);
+			await startViewer(deps, paths, ctx.cwd, signal);
 		} catch (error) {
-			deps.notify(`Could not reopen the BTW panel: ${messageOf(error)}`, "warning");
+			if (!signal?.aborted) {
+				deps.notify(`Could not reopen the BTW panel: ${messageOf(error)}`, "warning");
+			}
 			return true;
 		}
-		await openBtwPopup(deps, paths, sessionId);
+		await openBtwPopup(deps, paths, sessionId, signal);
 		return true;
 	}
-	const shown = await openBtwPopup(deps, paths, sessionId);
-	if (!shown) {
+	const shown = await openBtwPopup(deps, paths, sessionId, signal);
+	if (!shown && !signal?.aborted) {
 		deps.notify("The running BTW panel was left in place; run /btw and submit a question to replace it.", "info");
 	}
 	return true;
@@ -578,18 +619,19 @@ async function appendFooter(deps: BtwDeps, paths: BtwPaths, outcome: BtwOutcome)
 	try {
 		answer = await readFile(paths.answer, "utf8");
 	} catch (error) {
+		if ((error as { code?: string }).code === "ENOENT") return;
 		deps.notify(`The BTW panel could not read the answer: ${messageOf(error)}`, "warning");
 	}
 	const closer = fenceCloser(answer);
 	if (closer) {
 		try {
-			await appendFile(paths.answer, closer, "utf8");
+			if (!(await appendExistingAnswer(paths.answer, closer))) return;
 		} catch (error) {
 			deps.notify(`The BTW panel could not close an open code fence: ${messageOf(error)}`, "warning");
 		}
 	}
 	try {
-		await appendFile(paths.answer, `${FOOTER}${sanitizeAnswerText(summary)}\n`, "utf8");
+		if (!(await appendExistingAnswer(paths.answer, `${FOOTER}${sanitizeAnswerText(summary)}\n`))) return;
 	} catch (error) {
 		deps.notify(`The BTW panel could not write its footer: ${messageOf(error)}`, "warning");
 	}
@@ -620,7 +662,14 @@ async function appendFooter(deps: BtwDeps, paths: BtwPaths, outcome: BtwOutcome)
  * question aborts the controller and awaits the completion before resetting the
  * paths, which keeps the old request from writing into the new answer file.
  */
-export async function launchBtwPanel(deps: BtwDeps, ctx: BtwContext, rawQuestion: string): Promise<BtwLaunch | null> {
+export async function launchBtwPanel(
+	deps: BtwDeps,
+	ctx: BtwContext,
+	rawQuestion: string,
+	options?: { signal?: AbortSignal },
+): Promise<BtwLaunch | null> {
+	const signal = options?.signal;
+	if (signal?.aborted) return null;
 	if (ctx.mode !== "tui") {
 		deps.notify("BTW needs the TUI.", "warning");
 		return null;
@@ -647,17 +696,24 @@ export async function launchBtwPanel(deps: BtwDeps, ctx: BtwContext, rawQuestion
 	}
 
 	try {
+		throwIfAborted(signal);
 		await resetPanel(deps, paths);
+		throwIfAborted(signal);
 		const quoted = sanitizeAnswerText(question).split("\n").join(`\n${ANSWER_QUOTE_PREFIX}`);
 		await writeFile(paths.answer, `${ANSWER_HEADING}\n\n${ANSWER_QUOTE_PREFIX}${quoted}\n\n`, {
 			encoding: "utf8",
 			mode: 0o600,
 		});
-		await startViewer(deps, paths, ctx.cwd);
-		await openBtwPopup(deps, paths, sessionId);
+		throwIfAborted(signal);
+		await startViewer(deps, paths, ctx.cwd, signal);
+		throwIfAborted(signal);
+		await openBtwPopup(deps, paths, sessionId, signal);
+		throwIfAborted(signal);
 	} catch (error) {
 		await destroyPanel(deps, paths);
-		deps.notify(`Could not start the BTW panel: ${messageOf(error)}`, "error");
+		if (!signal?.aborted) {
+			deps.notify(`Could not start the BTW panel: ${messageOf(error)}`, "error");
+		}
 		return null;
 	}
 
@@ -679,12 +735,15 @@ export async function launchBtwPanel(deps: BtwDeps, ctx: BtwContext, rawQuestion
 					// A second pi on the same session id resets this run dir under us
 					// and writes its own owner pid; appending then interleaves two
 					// answers into one file. Stop the request instead of writing into
-					// a panel this process no longer owns.
+					// a panel this process no longer owns, or if the answer file was
+					// already removed during teardown.
 					if ((await readOwnerPid(paths)) !== process.pid) {
 						controller.abort();
 						return;
 					}
-					await appendFile(paths.answer, text, "utf8");
+					if (!(await appendExistingAnswer(paths.answer, text))) {
+						controller.abort();
+					}
 				},
 			});
 		} catch (error) {
@@ -698,6 +757,8 @@ export async function launchBtwPanel(deps: BtwDeps, ctx: BtwContext, rawQuestion
 export default function btwExtension(pi: ExtensionAPI): void {
 	let active: BtwLaunch | undefined;
 	let starting = false;
+	let inFlightAbort: AbortController | undefined;
+	let inFlightOp: Promise<void> | undefined;
 	const depsFor = (ctx: ExtensionContext): BtwDeps => {
 		const settings = pi.getSettings();
 		return {
@@ -754,6 +815,8 @@ export default function btwExtension(pi: ExtensionAPI): void {
 				return;
 			}
 			starting = true;
+			const startController = new AbortController();
+			inFlightAbort = startController;
 			try {
 				const deps = depsFor(ctx);
 				// The command is deliberately argument-free. An empty submission
@@ -764,24 +827,31 @@ export default function btwExtension(pi: ExtensionAPI): void {
 					"BTW question (submit empty to reopen the panel):",
 					"ask about this conversation",
 				);
-				if (question === undefined) return; // cancelled
-				if (!question.trim()) {
-					if (!(await reattachBtwPanel(deps, ctx))) {
-						deps.notify("No BTW panel is running; type a question to start one.", "info");
+				if (question === undefined || startController.signal.aborted) return; // cancelled or shut down
+				const op = (async () => {
+					if (!question.trim()) {
+						if (!(await reattachBtwPanel(deps, ctx, startController.signal)) && !startController.signal.aborted) {
+							deps.notify("No BTW panel is running; type a question to start one.", "info");
+						}
+						return;
 					}
-					return;
-				}
-				await stopActive();
-				const launch = await launchBtwPanel(deps, ctx, question);
-				if (launch) {
-					active = launch;
-					// The completion holds the launch's closure; drop the slot once
-					// it finishes so the entries snapshot is not retained.
-					void launch.completion.catch(() => undefined).finally(() => {
-						if (active === launch) active = undefined;
-					});
-				}
+					await stopActive();
+					if (startController.signal.aborted) return;
+					const launch = await launchBtwPanel(deps, ctx, question, { signal: startController.signal });
+					if (launch) {
+						active = launch;
+						// The completion holds the launch's closure; drop the slot once
+						// it finishes so the entries snapshot is not retained.
+						void launch.completion.catch(() => undefined).finally(() => {
+							if (active === launch) active = undefined;
+						});
+					}
+				})();
+				inFlightOp = op;
+				await op;
 			} finally {
+				if (inFlightAbort === startController) inFlightAbort = undefined;
+				inFlightOp = undefined;
 				starting = false;
 			}
 		},
@@ -793,6 +863,8 @@ export default function btwExtension(pi: ExtensionAPI): void {
 		await reapBtwPanels(depsFor(ctx), event.reason, ctx.sessionManager.getSessionId());
 	});
 	pi.on("session_shutdown", async (event, ctx) => {
+		inFlightAbort?.abort();
+		if (inFlightOp) await inFlightOp.catch(() => undefined);
 		await stopActive();
 		await destroyBtwPanel(depsFor(ctx), event.reason, ctx.sessionManager.getSessionId());
 	});

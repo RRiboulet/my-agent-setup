@@ -198,3 +198,65 @@ test("an interrupted run fails when its tmux session disappears", async () => {
 		);
 	});
 });
+
+test("all tmux exec calls specify a 5s timeout and a timed-out display-message keeps the watcher alive", async () => {
+	await withHarness(undefined, async (h) => {
+		const run = (await h.call("subagent", { task: "slow display-message" })).details as unknown as RunRecord;
+
+		// Every launch tmux call must carry { timeout: 5_000 }.
+		const launchTmuxCalls = h.execCalls.filter((call) => call.command === "tmux");
+		assert.ok(launchTmuxCalls.length >= 4);
+		for (const call of launchTmuxCalls) {
+			assert.equal(
+				call.options?.timeout,
+				5_000,
+				`tmux call ${call.args.join(" ")} must carry timeout 5_000, got ${JSON.stringify(call.options)}`,
+			);
+		}
+
+		// Intercept display-message to simulate both a killed-timeout result and a rejection.
+		const pi = h.pi as { exec: (cmd: string, args: string[], opts?: Record<string, unknown>) => Promise<unknown> };
+		const origExec = pi.exec;
+		let mode: "killed" | "throw" | "normal" = "killed";
+		let killedHits = 0;
+		let throwHits = 0;
+		let normalDisplayHits = 0;
+		let displayTimeoutOpt: unknown;
+		pi.exec = async (cmd, args, opts) => {
+			if (args.includes("display-message")) {
+				displayTimeoutOpt = opts?.timeout;
+				if (mode === "killed") {
+					killedHits += 1;
+					mode = "throw";
+					return { code: 143, stdout: "", stderr: "", killed: true };
+				}
+				if (mode === "throw") {
+					throwHits += 1;
+					mode = "normal";
+					throw new Error("tmux display-message timed out");
+				}
+				normalDisplayHits += 1;
+			}
+			return origExec(cmd, args, opts);
+		};
+
+		await waitFor(() => killedHits >= 1 && throwHits >= 1 && normalDisplayHits >= 1);
+		assert.equal(displayTimeoutOpt, 5_000, "display-message must carry timeout 5_000");
+		assert.equal((await h.readRuns())[0].status, "running", "watcher must keep run alive after display-message timeouts");
+
+		await h.writeResult(run, { version: 1, status: "completed", output: "survived timeouts", finishedAt: Date.now() });
+		await waitForRunStatus(h, "completed", "watcher must still finalize after display-message timeouts");
+
+		// Verify interrupt and cancel tmux calls also carry { timeout: 5_000 }.
+		const run2 = (await h.call("subagent", { task: "interrupt and cancel timeout" })).details as unknown as RunRecord;
+		h.execCalls.length = 0;
+		await h.call("subagent_interrupt", { id: run2.id });
+		const escCall = h.execCalls.find((call) => call.args.includes("send-keys") && call.args.includes("Escape"));
+		assert.equal(escCall?.options?.timeout, 5_000, "subagent_interrupt send-keys must carry timeout 5_000");
+
+		h.execCalls.length = 0;
+		await h.call("subagent_cancel", { id: run2.id });
+		const killCall = h.execCalls.find((call) => call.args.includes("kill-session"));
+		assert.equal(killCall?.options?.timeout, 5_000, "kill-session must carry timeout 5_000");
+	});
+});

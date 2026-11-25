@@ -62,10 +62,26 @@ test("verification output keeps both ends when it exceeds the cap", () => {
 
 	const long = `${"A".repeat(600)}${"Z".repeat(600)}`;
 	const bounded = boundVerificationOutput(long, "", 200);
-	assert.ok(Buffer.byteLength(bounded, "utf8") < 400, "bounded output stays close to the cap");
+	assert.ok(Buffer.byteLength(bounded, "utf8") <= 200, "bounded output never exceeds maxBytes");
 	assert.match(bounded, /^A/, "the head survives");
 	assert.match(bounded, /Z$/, "the tail survives — that is where a failing assertion lives");
 	assert.match(bounded, /bytes omitted/);
+});
+
+test("boundVerificationOutput respects UTF-8 codepoint boundaries and strict maxBytes", () => {
+	assert.equal(boundVerificationOutput("hello", "world", 0), "");
+	assert.equal(boundVerificationOutput("hello", "world", -10), "");
+
+	// Multi-byte UTF-8 characters: 3-byte box drawing '─', 4-byte emoji '🚀', 2-byte 'é'.
+	const multi = `${"─".repeat(50)} middle ${"é".repeat(30)} ${"🚀".repeat(50)}`;
+	for (const limit of [1, 2, 3, 5, 10, 25, 64, 100, 150]) {
+		const out = boundVerificationOutput(multi, "", limit);
+		assert.ok(
+			Buffer.byteLength(out, "utf8") <= limit,
+			`limit ${limit}: got ${Buffer.byteLength(out, "utf8")} bytes`,
+		);
+		assert.equal(out.includes("\uFFFD"), false, `limit ${limit}: must never contain replacement char`);
+	}
 });
 
 test("classification names the reason a reader can act on", () => {
@@ -254,7 +270,7 @@ test("runVerification maps passed, failed, killed, truncated, throwing and malfo
 	assert.equal(malformed.status, "unavailable");
 });
 
-test("runVerification passes the timeout, the output cap and the abort signal to the host", async () => {
+test("runVerification passes the timeout, a generous capture buffer and the abort signal to the host", async () => {
 	const seen: Record<string, unknown>[] = [];
 	const controller = new AbortController();
 	await runVerification(SPEC, {
@@ -269,8 +285,36 @@ test("runVerification passes the timeout, the output cap and the abort signal to
 	assert.deepEqual(seen[0]?.args, ["-lc", "node --test"]);
 	assert.equal(seen[0]?.cwd, "/tmp/project");
 	assert.equal(seen[0]?.timeout, 1_000);
-	assert.equal(seen[0]?.maxBuffer, 200);
+	assert.equal(seen[0]?.maxBuffer, Math.max(2 * 1024 * 1024, SPEC.maxOutputBytes * 4));
 	assert.equal(seen[0]?.signal, controller.signal);
+});
+
+test("a real command emitting >16 KB passes with bounded output rather than getting killed or truncated", async () => {
+	const outcome = await runVerification(
+		{ command: "node -e \"process.stdout.write('A'.repeat(15000) + 'TAIL_END_' + 'Z'.repeat(15000))\"", timeoutMs: 10_000, maxOutputBytes: 16_000 },
+		{
+			exec: (command, args, options) =>
+				import("node:child_process").then(async ({ execFile }) => await new Promise<ExecResult>((resolve) => {
+					execFile(command, args, { timeout: options?.timeout, maxBuffer: options?.maxBuffer, encoding: "utf8" }, (error, stdout, stderr) => {
+						const code = (error as { code?: unknown } | null)?.code;
+						const truncated = code === "ENOBUFS";
+						const killed = Boolean((error as { killed?: boolean } | null)?.killed) || truncated;
+						resolve({
+							stdout: stdout ?? "",
+							stderr: stderr ?? "",
+							code: error ? (typeof code === "number" ? code : 1) : 0,
+							killed,
+							truncated,
+						});
+					});
+				})),
+		},
+	);
+	assert.equal(outcome.status, "passed");
+	assert.equal(outcome.truncated, false);
+	assert.ok(Buffer.byteLength(outcome.output, "utf8") <= 16_000);
+	assert.match(outcome.output, /^A/);
+	assert.match(outcome.output, /Z$/);
 });
 
 test("a real command that outlives its timeout is killed and reported, not passed", async () => {

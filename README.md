@@ -14,7 +14,7 @@ Verified on a clean agent dir and an empty project: both install every
 extension and skill the `pi` manifest below lists. That check predates
 `review.ts`, `continue.ts`, `opencode-go-provider/`, `repo-explorer/`,
 `review-triage/`, `btw/` and `voice/`; the manifest is kept honest by
-`test/package-manifest.test.ts`, and every entry point by the strict-ESM load
+`.pi/extensions/subagent/test/package-manifest.test.ts`, and every entry point by the strict-ESM load
 test under Tests.
 
 The one non-obvious part is that this needs the `pi` manifest in
@@ -29,6 +29,7 @@ each entry point explicitly:
 "pi": {
   "extensions": [
     ".pi/extensions/answer.ts",
+    ".pi/extensions/btw/index.ts",
     ".pi/extensions/continue.ts",
     ".pi/extensions/goal.ts",
     ".pi/extensions/mcp-catalogue.ts",
@@ -45,6 +46,7 @@ each entry point explicitly:
   ],
   "skills": [
     ".pi/skills/add-model",
+    ".pi/skills/architect",
     ".pi/skills/benchmark-checklist",
     ".pi/skills/blast-radius",
     ".pi/skills/commit",
@@ -60,6 +62,7 @@ each entry point explicitly:
     ".pi/skills/native-web-search",
     ".pi/skills/prevent-recurrence",
     ".pi/skills/prove-it-works",
+    ".pi/skills/recall",
     ".pi/skills/show-me-your-work",
     ".pi/skills/tdd",
     ".pi/skills/teach",
@@ -67,7 +70,8 @@ each entry point explicitly:
     ".pi/skills/to-spec",
     ".pi/skills/to-tickets",
     ".pi/skills/update-changelog",
-    ".pi/skills/worktree"
+    ".pi/skills/worktree",
+    ".pi/skills/writing-for-agents"
   ]
 }
 ```
@@ -338,31 +342,6 @@ never put `auth` in it — a credential belongs to the agent dir that signs in.
 The installer validates the catalogue before writing and exits `1` with the
 reason, rather than writing an entry pi would skip with one line in a log.
 
-## Upgrading to v1.12.0
-
-Two changes need an action on an existing install. This block is replaced at each
-release, not accumulated — the reasoning stays in the `CHANGELOG.md` entry.
-
-**Install this repo by local path, not `git:`.** If `pi` here now exits 1 with
-`Tool "…" conflicts with …`, the package and this working tree are both providing
-the extensions; that is the trap above under "One copy of the extensions, never
-two", and the fix is to replace the package entry:
-
-```bash
-pi remove git:github.com/RRiboulet/my-agent-setup
-pi install /path/to/my-agent-setup
-```
-
-**Delete any `opencode-go` web-search provider.** The Go plan never actually
-searched — its models accept the `web_search` tool definition and answer from
-memory — so an explicit `--provider opencode-go` or
-`PI_WEB_SEARCH_PROVIDER=opencode-go` is now an error instead of a silent
-fallback behind another plan's budget. Remove the value rather than replace it:
-**Brave is the first choice whenever a Brave key resolves** (`BRAVE_API_KEY`,
-else a `brave`/`brave-search` entry in `auth.json`), OpenRouter is the native
-default when it does not, and the `opencode-go` credential itself still serves
-`/model`.
-
 ## Contents
 
 | Path | What it is |
@@ -370,7 +349,7 @@ default when it does not, and the `opencode-go` credential itself still serves
 | `package.json` | the `pi` manifest that makes this repo installable as a package (see above) |
 | `.pi/extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent` (one run, or a `tasks` fan-out with per-step overrides and optional `dependsOn` dependency edges), `subagent_status`, `subagent_wait`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel`, `subagent_clean`, `subagent_answer` (a child's blocking question, answered only after `ctx.ui.confirm`; `subagent_ask` inside the child is the one deliberate blocking wait, and a progress update needs no answer), a live child-activity phase and a status widget above the editor; fan-out steps share the one concurrency queue and their plan is persisted in `plans.json` beside the runs; a plan survives reload (it resumes at the first unfinished step, adopts a run the plan index missed, and reconciles a step whose child is gone rather than re-running it), cancels with its live steps (`subagent_cancel` takes a plan id), and is inspectable as one row — `subagent_status` folds a plan's step runs into it so a ten-step plan costs one detail slot, and `subagent_wait({ plan })` waits for every wave; every run that reports a final answer (completed or failed) leaves a `report.md` artifact with it, plus a bounded copy and a pointer in its run record |
 | `.pi/extensions/todos.ts` | `/todos` TUI and the `todo` tool |
-| `.pi/extensions/orchestrator/` | The settlement gate, the loop breaker, the advisor and the typed orchestration event bus: `/gate` shows the last verdict, loop block and consultation, and at `agent_before_settle` the gate reports an active goal, open todos, edits without a verification run, a repeated failure signature and the remaining gate-block budget as a session `custom` entry. A committed `.pi/orchestrator.json` (example beside the extension) opts a **trusted** project into blocking checks — an open todo, a repeated failure, a project verification command run by the gate, and the tool-call loop breaker — plus the `orchestrator_override` tool every block reason names; its `advisor` key adds one bounded second opinion from a stronger model, injected as a prompt section rather than replacing the prompt. Its absence means report-only. **Ours** |
+| `.pi/extensions/orchestrator/` | The settlement gate, the loop breaker, the advisor, workspace coordination, tiered wave orchestration (`/orchestrate` + `orchestrator_wave`), and the typed orchestration event bus: `/gate` shows the last verdict, loop block and consultation, `/orchestrate <folder>` starts a tiered ticket wave gated on review/verify/commit order, and at `agent_before_settle` the gate reports an active goal, open todos, edits without a verification run, a repeated failure signature, any active wave and the remaining gate-block budget as a session `custom` entry. A committed `.pi/orchestrator.json` (example beside the extension) opts a **trusted** project into blocking checks — an open todo, a repeated failure, a project verification command run by the gate, and the tool-call loop breaker — plus the `orchestrator_override` tool every block reason names; its `advisor` key adds one bounded second opinion from a stronger model, injected as a prompt section rather than replacing the prompt. Its absence means report-only (aside from active-wave gates). **Ours** |
 | `.pi/extensions/answer.ts` | `/answer`: extract questions from the last response and answer them in a focused TUI |
 | `.pi/extensions/continue.ts` | `shift+alt+enter` sends the literal prompt `continue`, but only when the agent is idle, so it never steers or queues a message mid-run. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), unmodified |
 | `.pi/extensions/review.ts` | `/review` and `/end-review`: PR, branch, commit, folder and uncommitted review modes, loop-fixing, custom instructions, project-level `REVIEW_GUIDELINES.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with two local changes — see below |
@@ -423,11 +402,12 @@ skill's trigger text, is [below](#skills-and-how-they-are-invoked).
 
 ### The coding skill stack
 
-The fourteen skills from `in-your-own-words` to `handoff` were adapted from
+The fourteen skills adapted from
 [RRiboulet/agent-coding-skills](https://github.com/RRiboulet/agent-coding-skills)
-and are now maintained here as ours: pi invocation syntax (`/skill:<name>` for
-the six user-invoked entry points), this repo's commit and worktree rules,
-`dev` as the review base, the gate read from `AGENTS.md`, and the handoff written
+(`architect` through `to-tickets` in the generated index below) are now
+maintained here as ours: pi invocation syntax (`/skill:<name>` for the six
+user-invoked entry points), this repo's commit and worktree rules, `dev` as the
+review base, the gate read from `AGENTS.md`, and the handoff written
 under the persistent agent dir instead of `/tmp`. The stack adapts MIT material
 from mattpocock/skills and cursor/plugins `pstack`; their notices and the
 per-skill provenance are in [`licenses/NOTICE.md`](licenses/NOTICE.md).
@@ -509,10 +489,11 @@ The skills split on one axis: **who can invoke them**.
 
 - **User-invoked** are reachable only when you type them — pi spells that
   `/skill:<name>`. Their job is to orchestrate: `to-spec` writes the contract,
-  `to-tickets` cuts it up, `implement` builds it, `handoff` passes it on, `teach`
-  explains it later. They set `disable-model-invocation: true`, so their
-  descriptions are not in the model's context and they cost nothing until asked
-  for.
+  `to-tickets` cuts it up, `implement` builds it, `recall` rebuilds live state,
+  `handoff` passes it on, and `teach` explains it later (while `/orchestrate`
+  dispatches ticket waves through the orchestrator extension). They set
+  `disable-model-invocation: true`, so their descriptions are not in the
+  model's context and they cost nothing until asked for.
 - **Model-invoked** can be typed the same way, and the agent also loads one
   itself when the task matches the description in its frontmatter. They hold the
   reusable discipline — `tdd`, `blast-radius`, `diagnosing-bugs`,
@@ -535,11 +516,11 @@ list cannot drift the way a hand-written one does.
 
 ## Requirements
 
-- `@earendil-works/pi-coding-agent` **1.0.x**
+- `@earendil-works/pi-coding-agent` **`@latest`**
 - **Node 24+** — the tests execute TypeScript directly, with no build step
 - **tmux** — the subagent extension creates one tmux session per run, and the `tmux` skill drives interactive CLIs on a separate private socket
 - **A phone with Termux + Termux:API** for `/voice` — setup is in `.pi/extensions/voice/README.md`
-- An OpenRouter key for web search — in `~/.pi/agent/auth.json` under `openrouter`. The `web_search` tool and the native-web-search skill default to it (Brave when a Brave key is configured). The same key is used by `pi-session.sh`, which launches a model through OpenRouter. An `opencode-go` key is for the `/model` provider only; the Go plan's Anthropic models do not carry native web search.
+- An OpenRouter key for web search — in `~/.pi/agent/auth.json` under `openrouter`. The `web_search` tool and the native-web-search skill default to it (Brave when a Brave key is configured). The same key is used by `pi-session.sh`, which launches a model through OpenRouter. An `opencode-go` key is for the `/model` provider only; the Go plan's Anthropic models do not carry native web search (an explicit `--provider opencode-go` or `PI_WEB_SEARCH_PROVIDER=opencode-go` errors rather than falling back).
 
 The `.devcontainer/` provides all of these.
 
@@ -592,9 +573,12 @@ running them.
 
 ## Tests
 
+See [`AGENTS.md`](AGENTS.md#tests) for the full CI gate list (single source of
+truth). Quick run for the subagent and extension suite:
+
 ```bash
-bash .pi/extensions/subagent/test/setup-deps.sh      # symlinks pi's packages into node_modules
-node --test .pi/extensions/subagent/test/*.test.ts
+bash .pi/extensions/subagent/test/setup-deps.sh      # once: symlinks pi's packages into node_modules
+node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts
 ```
 
 ## `/review`
@@ -1001,28 +985,30 @@ The subagent management tools (`subagent_status`, `subagent_wait`,
 `subagent_answer`, `subagent_cancel`, `subagent_interrupt`, `subagent_resume`,
 `subagent_clean`) are hidden from the
 model's tool declarations when pi can reach them another way — that is, when
-`codemode` or `tool_search` is in your tool set:
+`codemode` or `tool_search` is in your tool set. This repo enables both in
+[`.pi/settings.json`](.pi/settings.json) and [`.devcontainer/pi/settings.json`](.devcontainer/pi/settings.json):
 
 ```jsonc
-// ~/.pi/agent/settings.json
-{ "defaultTools": ["+tool_search"] }
+// .pi/settings.json (and defaultTools / codemode in .devcontainer/pi/settings.json)
+{ "defaultTools": ["+tool_search", "+codemode"], "codemode": { "mode": "on" } }
 ```
 
-Use the modifier-only form. `resolveDefaultTools` (settings-manager.js:55)
-*replaces* the inherited selection as soon as a list contains any plain name,
-and only treats an all-modifier list as an addition — so this composes with
-whatever another layer's `defaultTools` says, where restating pi's four defaults
-would silently couple this repo to them.
+Use the modifier-only form for `defaultTools`. `resolveDefaultTools`
+(`settings-manager.js:55`) *replaces* the inherited selection as soon as a list
+contains any plain name, and only treats an all-modifier list as an addition —
+so this composes with whatever another layer's `defaultTools` says, where
+restating pi's four defaults would silently couple this repo to them.
 
-`tool_search` then loads one when the model asks for it, and a codemode script
-can call it as `tools.subagent_status({ id })`. Without either tool they stay
-declared exactly as before, so nothing depends on this being switched on.
+`tool_search` then loads a hidden management tool on demand, and a codemode
+script can call it as `tools.subagent_status({ id })`. Without either tool they
+stay declared directly, so nothing depends on this being switched on.
 
-### Measured, not assumed
+### Historical baseline (pi 1.0.2)
 
-Request payloads, real pi 1.0.2 with this extension, headless `--print` with a
-one-word prompt; bytes are the whole provider payload, averaged over the (single)
-request of each run:
+Request payloads measured on pi 1.0.2 with this extension, headless `--print`
+with a one-word prompt (before `subagent_wait` and before enabling `+codemode` in
+`.pi/settings.json`); bytes are the whole provider payload, averaged over the
+(single) request of each run:
 
 | `defaultTools` | payload | declared tools |
 |---|---|---|
@@ -1032,19 +1018,18 @@ request of each run:
 | `["+codemode", "+tool_search"]` | 21,809 B | 9 |
 | `["+codemode", "+tool_search"]` + `codemode.mode: "only"` | 19,985 B | 2 |
 
-So `+tool_search` alone is the win: **−3,578 B per request (~890 tokens)**, and
-0 of the 6 management tools declared (the table predates `subagent_wait`). `subagent` stays declared throughout, and
-a real run confirmed the model reaching `subagent_status` through `tool_search`
-when it was not declared.
+On raw single-request payload, `+tool_search` alone saved **3,578 B (~890
+tokens)** with 0 of the 6 management tools declared (pre-`subagent_wait`);
+`subagent` stays declared throughout.
 
-`+codemode` is deliberately *not* enabled. Its own description is 4,933 bytes,
-and with `codemode.mode: "on"` (the default) every declared tool also carries a
-`Codemode: tools.<name>(args) resolves to …` note — ~52 bytes × the declared
-set, which scales against you on a large tool set. Together they cost more than
-the hidden tools do. `mode: "only"` hides the base tools too, but its
-description then lists all of them, so it lands in the same place. Add
-`"+codemode"` if you want the script workflow and the prompt is worth its price
-to you; it is one entry, and nothing in the extension changes either way.
+`+codemode` adds its own tool description (4,933 B in 1.0.2) plus a short
+`Codemode: tools.<name>(args) ...` line per declared tool in `codemode.mode:
+"on"`, which is the upfront prompt cost traded for batching independent tool
+calls and filtering large outputs inside a single script turn. This repo
+enables both `+tool_search` and `+codemode` (`codemode.mode: "on"`) in
+`.pi/settings.json` and `.devcontainer/pi/settings.json` for that script
+workflow; remove `"+codemode"` from a project's `settings.json` if you prefer
+the minimal `+tool_search`-only payload.
 
 Subagent delegation is non-blocking: start independent tasks together, then
 call `subagent_wait` once per run (or once with `ids`) instead of polling.
@@ -1095,13 +1080,12 @@ record says so by carrying no `report`.
 
 <!-- skills-index:begin — generated by tools/skills-index.mjs --write; do not edit by hand -->
 
-### User-invoked — 7: only you can start these, by typing `/skill:<name>`
+### User-invoked — 6: only you can start these, by typing `/skill:<name>`
 
 | Skill | What it does, and when to reach for it |
 |---|---|
 | [`handoff`](.pi/skills/handoff/SKILL.md) | User-invoked /skill:handoff: write a handoff document a fresh agent in any harness can continue from. |
 | [`implement`](.pi/skills/implement/SKILL.md) | User-invoked /skill:implement: take a spec, ticket, ticket set or plan end to end in small verified units. |
-| [`orchestrate`](.pi/skills/orchestrate/SKILL.md) | User-invoked /skill:orchestrate: run a numbered ticket folder in tiered subagent waves — triaged dispatch, gated verified-only commits. |
 | [`recall`](.pi/skills/recall/SKILL.md) | User-invoked /skill:recall: rebuild recent working context from session records and live repository state into a status brief. |
 | [`teach`](.pi/skills/teach/SKILL.md) | User-invoked /skill:teach: teach a topic across sessions in a workspace of lessons and records, when the learning is the project, not one explanation. |
 | [`to-spec`](.pi/skills/to-spec/SKILL.md) | User-invoked /skill:to-spec: write a spec with test seams and acceptance criteria from the current conversation. |

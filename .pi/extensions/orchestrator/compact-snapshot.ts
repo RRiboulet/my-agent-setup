@@ -22,6 +22,7 @@
  */
 
 import type { LiveRunStatus } from "./events.ts";
+import type { WaveState } from "./wave.ts";
 
 /** The bound on the whole snapshot, matching the advisor digest's 4 KB. */
 export const MAX_COMPACT_SNAPSHOT_BYTES = 4096;
@@ -66,6 +67,8 @@ export interface CompactSnapshotInput {
 	liveRuns: readonly { runId: string; status: LiveRunStatus }[];
 	/** Null when the project configures no advisor: the section is then omitted. */
 	advisor: CompactSnapshotAdvisor | null;
+	/** Active or terminal wave state; included only when active. */
+	wave?: WaveState | null;
 	/** Test seam only; the production bound is {@link MAX_COMPACT_SNAPSHOT_BYTES}. */
 	maxBytes?: number;
 }
@@ -170,6 +173,26 @@ export function buildCompactSnapshot(input: CompactSnapshotInput): CompactSnapsh
 				? `; consumed triggers: ${advisor.consumedKeys.map((key) => collapse(key)).join(", ")}`
 				: "";
 		lines.push(`Advisor: ${advisor.attempts} of ${advisor.budget} attempts recorded${consumed}`);
+	}
+
+	const wave = input.wave;
+	if (wave && wave.status === "active") {
+		const tickets = Object.values(wave.tickets).sort((a, b) =>
+			a.id.localeCompare(b.id, undefined, { numeric: true }),
+		);
+		const doneCount = tickets.filter((t) => t.phase === "done").length;
+		const blockedCount = tickets.filter((t) => t.phase === "blocked").length;
+		const activeCount = tickets.length - doneCount - blockedCount;
+		lines.push(
+			`Active wave (${collapse(wave.folder)}): ${doneCount}/${tickets.length} done, ${activeCount} active, ${blockedCount} blocked`,
+		);
+		for (const ticket of tickets) {
+			const label =
+				ticket.tier !== undefined
+					? `${collapse(ticket.id)}:${ticket.phase}(T${ticket.tier})`
+					: `${collapse(ticket.id)}:${ticket.phase}`;
+			lines.push(`- ${label}`);
+		}
 	}
 
 	if (lines.length === 0) return { text: "", bytes: 0, truncated: false, empty: true };

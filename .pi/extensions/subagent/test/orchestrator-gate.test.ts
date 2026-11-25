@@ -556,9 +556,10 @@ test("reconstructGateState reads a ticket-08 entry, whose cap was called retryCa
 	assert.equal(state.lastVerdict?.scope, "parent");
 });
 
-test("reconstructGateState counts loop blocks, so a resume cannot reset the budget", () => {
+test("reconstructGateState tracks settlement attempts and loopAttempts separately", () => {
 	const state = reconstructGateState([gateStateEntry(1), loopEntry(2)]);
-	assert.equal(state.attempts, 2);
+	assert.equal(state.attempts, 1, "loop blocks must not increment settlement gate attempts");
+	assert.equal(state.loopAttempts, 2, "loop blocks are tracked separately in loopAttempts");
 	assert.equal(state.lastLoopVerdict?.action, "block");
 	assert.deepEqual(state.blockedConditions, ["todos"], "the condition memory survives a loop block");
 });
@@ -566,6 +567,7 @@ test("reconstructGateState counts loop blocks, so a resume cannot reset the budg
 test("reconstructGateState ignores malformed entries and a branch before any decision", () => {
 	assert.deepEqual(reconstructGateState([]), {
 		attempts: 0,
+		loopAttempts: 0,
 		lastVerdict: null,
 		lastLoopVerdict: null,
 		blockedConditions: [],
@@ -725,6 +727,194 @@ test("a persisted passed verdict clears edits only when it was a real pass", () 
 	);
 });
 
+function codemodeResult(
+	id: string,
+	calls: Array<{ id: string; name: string; arguments?: Record<string, unknown>; status: "ok" | "error" | "unfinished"; error?: string }>,
+	options: { isError?: boolean; text?: string } = {},
+): Entry {
+	return {
+		type: "message",
+		id: `result-${id}`,
+		message: {
+			role: "toolResult",
+			toolCallId: id,
+			toolName: "codemode",
+			content: [{ type: "text", text: options.text ?? "ok" }],
+			nestedCalls: { calls, complete: true },
+			isError: options.isError ?? false,
+		},
+	};
+}
+
+test("scanEditVerification tracks edits and verification commands inside codemode nestedCalls", () => {
+	const branch = [
+		assistantCall("cm1", "codemode", { code: "..." }),
+		codemodeResult("cm1", [
+			{ id: "cm1/1", name: "edit", arguments: { path: "src/a.ts" }, status: "ok" },
+			{ id: "cm1/2", name: "write", arguments: { path: "src/b.ts" }, status: "error", error: "EACCES" },
+			{ id: "cm1/3", name: "edit", arguments: { path: "src/c.ts" }, status: "unfinished" },
+		]),
+	];
+	assert.deepEqual(scanEditVerification(branch, { verificationCommand: "node --test" }), {
+		editedFiles: ["src/a.ts"],
+		verificationRuns: 0,
+		editResults: 1,
+	});
+
+	// Output-less nested bash running the configured verification command must NOT clear edits,
+	// preserving zero-test and successPattern enforcement until a run with real output happens.
+	const nestedRunWithoutOutput = [
+		...branch,
+		assistantCall("cm2", "codemode", { code: "..." }),
+		codemodeResult("cm2", [
+			{ id: "cm2/1", name: "bash", arguments: { command: "node --test" }, status: "ok" },
+			{ id: "cm2/2", name: "write", arguments: { path: "src/d.ts" }, status: "ok" },
+		]),
+	];
+	assert.deepEqual(scanEditVerification(nestedRunWithoutOutput, { verificationCommand: "node --test" }), {
+		editedFiles: ["src/a.ts", "src/d.ts"],
+		verificationRuns: 0,
+		editResults: 2,
+	});
+
+	// Failed or weak nested shell commands never verify, and nested failing bash is recorded by scanFailures.
+	const failedOrWeak = [
+		...branch,
+		assistantCall("cm3", "codemode", { code: "..." }),
+		codemodeResult("cm3", [
+			{ id: "cm3/1", name: "bash", arguments: { command: "node --test" }, status: "error", error: "exit 1" },
+			{ id: "cm3/2", name: "bash", arguments: { command: "node --test || true" }, status: "ok" },
+		]),
+		assistantCall("cm4", "codemode", { code: "..." }),
+		codemodeResult("cm4", [
+			{ id: "cm4/1", name: "bash", arguments: { command: "node --test" }, status: "error", error: "exit 1" },
+		]),
+	];
+	assert.deepEqual(scanEditVerification(failedOrWeak, { verificationCommand: "node --test" }), {
+		editedFiles: ["src/a.ts"],
+		verificationRuns: 0,
+		editResults: 1,
+	});
+	const failure = scanFailures(failedOrWeak);
+	assert.equal(failure?.count, 2);
+	assert.equal(failure?.tool, "bash");
+	assert.equal(failure?.detail, "exit 1");
+});
+
+test("scanEditVerification matches safe cd prefixes and formatting flags, never scoped or chained variants", () => {
+	const runCmd = (command: string, resultOpts: { text?: string; isError?: boolean; details?: Record<string, unknown> } = {}) => {
+		const branch = [
+			assistantCall("e1", "edit", { path: "src/a.ts" }),
+			toolResult("e1", "edit"),
+			assistantCall("b1", "bash", { command }),
+			toolResult("b1", "bash", { text: "pass 4", ...resultOpts }),
+		];
+		return scanEditVerification(branch, { verificationCommand: "pytest" });
+	};
+
+	const safeCommands = [
+		"pytest",
+		"pytest -q",
+		"pytest --quiet --tb=short --no-header --color=no",
+		"pytest -v --verbose -vv --tb=line",
+		"pytest --reporter=spec",
+		"pytest --reporter tap",
+		"cd packages/api && pytest",
+		"cd \"/tmp/my repo\" && pytest -q --tb=short",
+		"cd 'packages/my api' && pytest --reporter=json",
+	];
+	for (const cmd of safeCommands) {
+		const state = runCmd(cmd);
+		assert.deepEqual(state.editedFiles, [], `safe command must verify: ${cmd}`);
+		assert.equal(state.verificationRuns, 1, `safe command must count as verification run: ${cmd}`);
+	}
+
+	const unsafeCommands = [
+		"pytest tests/test_one.py",
+		"pytest -k test_foo",
+		"pytest -m unit",
+		"pytest --test-name-pattern=foo",
+		"pytest --test-name-pattern foo",
+		"pytest | head -n 20",
+		"pytest -q|cat",
+		"pytest > out.txt",
+		"pytest 2>&1",
+		"pytest || true",
+		"pytest; exit 0",
+		"pytest && echo ok",
+		"cd a && cd b && pytest",
+		"cd a; pytest",
+		"cd a || pytest",
+		"cd a && echo hi && pytest",
+		"pytest-cov",
+		"pytest --reporter",
+		"pytest --reporter=spec;true",
+	];
+	for (const cmd of unsafeCommands) {
+		const state = runCmd(cmd);
+		assert.deepEqual(state.editedFiles, ["src/a.ts"], `unsafe command must NOT verify: ${cmd}`);
+		assert.equal(state.verificationRuns, 0, `unsafe command must NOT count: ${cmd}`);
+	}
+
+	// Safe flags still pass through classifyVerificationEvidence (zero-test and exitCode checks).
+	assert.deepEqual(runCmd("cd packages/api && pytest -q", { text: "0 passing" }).editedFiles, ["src/a.ts"]);
+	assert.deepEqual(runCmd("pytest --reporter=spec", { details: { exitCode: 1 } }).editedFiles, ["src/a.ts"]);
+});
+
+test("scanEditVerification rejects unsafe test filters past column 160 on long verificationCommand", () => {
+	const longCommand = `node --test ${Array.from({ length: 10 }, (_, i) => `packages/module-${i}/test/unit.test.ts`).join(" ")}`;
+	assert.ok(longCommand.length > 160, `expected >160 chars, got ${longCommand.length}`);
+
+	const runLong = (command: string) =>
+		scanEditVerification(
+			[
+				assistantCall("e1", "edit", { path: "src/a.ts" }),
+				toolResult("e1", "edit"),
+				assistantCall("b1", "bash", { command }),
+				toolResult("b1", "bash", { text: "pass 4" }),
+			],
+			{ verificationCommand: longCommand },
+		);
+
+	assert.deepEqual(runLong(longCommand).editedFiles, [], "exact long verificationCommand verifies");
+	assert.deepEqual(runLong(`${longCommand} --quiet`).editedFiles, [], "safe flag past column 160 verifies");
+
+	for (const unsafeTail of ["--test-name-pattern=only_one", "--test-name-pattern only_one", "extra.test.ts"]) {
+		const state = runLong(`${longCommand} ${unsafeTail}`);
+		assert.deepEqual(state.editedFiles, ["src/a.ts"], `unsafe tail past column 160 must NOT verify: ${unsafeTail}`);
+		assert.equal(state.verificationRuns, 0);
+	}
+});
+
+test("scanFailures tracks repeated failures inside codemode nestedCalls", () => {
+	const nestedRepeated = [
+		assistantCall("cm1", "codemode", { code: "run1" }),
+		codemodeResult("cm1", [
+			{ id: "cm1/1", name: "bash", arguments: { command: "npm test" }, status: "error", error: "AssertionError: boom\n  at a.ts:1" },
+		]),
+		assistantCall("cm2", "codemode", { code: "run2" }),
+		codemodeResult("cm2", [
+			{ id: "cm2/1", name: "bash", arguments: { command: "npm test" }, status: "error", error: "AssertionError: boom\n  at a.ts:2" },
+		]),
+	];
+	const found = scanFailures(nestedRepeated);
+	assert.equal(found?.count, 2);
+	assert.equal(found?.tool, "bash");
+	assert.equal(found?.detail, "AssertionError: boom");
+
+	const okCalls = [
+		assistantCall("cm1", "codemode", { code: "run1" }),
+		codemodeResult("cm1", [
+			{ id: "cm1/1", name: "bash", arguments: { command: "npm test" }, status: "ok" },
+		]),
+		assistantCall("cm2", "codemode", { code: "run2" }),
+		codemodeResult("cm2", [
+			{ id: "cm2/1", name: "bash", arguments: { command: "npm test" }, status: "ok" },
+		]),
+	];
+	assert.equal(scanFailures(okCalls), null);
+});
+
 test("scanFailures reports the same failing invocation repeated, not two different failures", () => {
 	const repeated = [
 		assistantCall("b1", "bash", { command: "npm test" }),
@@ -815,7 +1005,7 @@ test("readGateConfig defaults when absent, and reports a malformed file rather t
 		assert.equal(missing.source, "default");
 		assert.equal(missing.config.attemptCap, 3);
 		assert.equal(missing.config.verification, null);
-		assert.deepEqual(missing.config.block, { openTodos: false, repeatedFailure: false, loops: false, waitForSubagents: false });
+		assert.deepEqual(missing.config.block, { openTodos: false, repeatedFailure: false, loops: false, waitForSubagents: false, wave: true });
 		assert.deepEqual(missing.config.workspace, { lockScope: "worktree" }, "reservations stay worktree-scoped unless a project opts in");
 		assert.equal(missing.warning, undefined);
 
@@ -842,7 +1032,8 @@ test("normalizeGateConfig validates the block keys, the verification command and
 			config: {
 				version: 1,
 				attemptCap: 5,
-				block: { openTodos: true, repeatedFailure: false, loops: true, waitForSubagents: true },
+				loopAttemptCap: 3,
+				block: { openTodos: true, repeatedFailure: false, loops: true, waitForSubagents: true, wave: true },
 				verification: {
 					command: "node --test",
 					timeoutMs: 300_000,
@@ -857,17 +1048,25 @@ test("normalizeGateConfig validates the block keys, the verification command and
 		"unknown keys are ignored, so a newer project can commit one",
 	);
 
+	const customLoopCap = normalizeGateConfig({ version: 1, loopAttemptCap: 5 });
+	assert.equal(customLoopCap.config.loopAttemptCap, 5);
+	assert.deepEqual(customLoopCap.warnings, []);
+	assert.equal(normalizeGateConfig({ version: 1, loopAttemptCap: 0 }).config.loopAttemptCap, 0);
+
 	const invalid = normalizeGateConfig({
 		version: 1,
 		attemptCap: -1,
+		loopAttemptCap: -2,
 		block: { openTodos: "yes", waitForSubagents: "yes" },
 		verification: { command: "" },
 	});
 	assert.equal(invalid.config.attemptCap, 3);
+	assert.equal(invalid.config.loopAttemptCap, 3);
 	assert.equal(invalid.config.block.openTodos, false);
 	assert.equal(invalid.config.block.waitForSubagents, false);
 	assert.equal(invalid.config.verification, null);
 	assert.match(invalid.warnings.join(" "), /attemptCap must be a non-negative integer/);
+	assert.match(invalid.warnings.join(" "), /loopAttemptCap must be a non-negative integer/);
 	assert.match(invalid.warnings.join(" "), /block\.openTodos must be a boolean/);
 	assert.match(invalid.warnings.join(" "), /block\.waitForSubagents must be a boolean/);
 	assert.match(invalid.warnings.join(" "), /verification\.command must be a non-empty string/);
@@ -1137,6 +1336,140 @@ test("an untrusted project's config is never executed and never blocks", async (
 			"a project the gate will not act in gets no escape hatch",
 		);
 	});
+});
+
+test("an untrusted project with .pi/orchestrator.json emits a one-time warning, and does not warn otherwise", async () => {
+	// 1. Untrusted + config exists -> warns once across lifecycle boundaries.
+	await withTempDir(async (dir) => {
+		await mkdir(path.join(dir, ".pi"), { recursive: true });
+		await writeFile(gateConfigPath(dir), JSON.stringify({ version: 1, block: { openTodos: true } }));
+
+		const host = createFakeHost({ sessionId: "untrusted-warn", cwd: dir, trusted: false });
+		orchestratorExtension(host.pi, { role: "parent" });
+		await host.fire("session_start", {});
+		await host.fire("session_tree", {});
+		await host.fire("before_agent_start", { systemPromptOptions: { sections: {} } });
+		await host.fire("tool_call", { toolName: "bash", input: { command: "ls" } });
+		await host.fire("agent_before_settle", boundaryEvent());
+
+		const warnings = host.notifications.filter((n) => n.type === "warning");
+		assert.equal(warnings.length, 1, "untrusted project with config must warn exactly once");
+		assert.match(warnings[0]!.message, /\.pi\/orchestrator\.json/);
+		assert.match(warnings[0]!.message, /untrusted/i);
+	});
+
+	// 2. Untrusted + no config -> no warning.
+	await withTempDir(async (dir) => {
+		const host = createFakeHost({ sessionId: "untrusted-no-config", cwd: dir, trusted: false });
+		orchestratorExtension(host.pi, { role: "parent" });
+		await host.fire("session_start", {});
+		await host.fire("agent_before_settle", boundaryEvent());
+		assert.equal(host.notifications.length, 0, "no config means no warning");
+	});
+
+	// 3. Trusted + config exists -> no warning.
+	await withTempDir(async (dir) => {
+		await mkdir(path.join(dir, ".pi"), { recursive: true });
+		await writeFile(gateConfigPath(dir), JSON.stringify({ version: 1, block: { openTodos: true } }));
+
+		const host = createFakeHost({ sessionId: "trusted-no-warn", cwd: dir, trusted: true });
+		orchestratorExtension(host.pi, { role: "parent" });
+		await host.fire("session_start", {});
+		await host.fire("agent_before_settle", boundaryEvent());
+		assert.equal(host.notifications.length, 0, "trusted project must not emit untrusted warning");
+	});
+
+	// 4. Delegated worker + untrusted + config exists -> no warning.
+	await withTempDir(async (dir) => {
+		await mkdir(path.join(dir, ".pi"), { recursive: true });
+		await writeFile(gateConfigPath(dir), JSON.stringify({ version: 1, block: { openTodos: true } }));
+
+		const host = createFakeHost({ sessionId: "worker-no-warn", cwd: dir, trusted: false });
+		orchestratorExtension(host.pi, { role: "worker" });
+		await host.fire("session_start", {});
+		await host.fire("agent_before_settle", boundaryEvent());
+		assert.equal(host.notifications.length, 0, "delegated worker must not warn");
+	});
+});
+
+test("orchestrator_override uses codemode exposure when codemode or tool_search is active and stays omitted when untrusted", async () => {
+	for (const activeTool of ["codemode", "tool_search"]) {
+		await withTempDir(async (dir) => {
+			await mkdir(path.join(dir, ".pi"), { recursive: true });
+			await writeFile(gateConfigPath(dir), JSON.stringify({ version: 1, block: { openTodos: true } }));
+
+			let activeTools = ["read", "bash", "edit", "write", activeTool];
+			const host = createFakeHost({ sessionId: `override-codemode-${activeTool}`, cwd: dir, trusted: true });
+			(host.pi as unknown as { getActiveTools: () => string[] }).getActiveTools = () => [...activeTools];
+			orchestratorExtension(host.pi, { role: "parent" });
+
+			await host.fire("session_start", {});
+			assert.equal(
+				host.tools.get(GATE_OVERRIDE_TOOL)?.exposure,
+				"codemode",
+				`orchestrator_override must adopt codemode exposure when ${activeTool} is active`,
+			);
+			const registrationsAfterStart = host.toolOrder.filter((name) => name === GATE_OVERRIDE_TOOL).length;
+
+			// Unchanged active tools on before_agent_start must not churn registrations.
+			await host.fire("before_agent_start", { systemPromptOptions: { sections: {} } });
+			assert.equal(host.toolOrder.filter((name) => name === GATE_OVERRIDE_TOOL).length, registrationsAfterStart);
+
+			// Turning codemode/tool_search off mid-session re-registers as direct.
+			activeTools = ["read", "bash", "edit", "write"];
+			await host.fire("before_agent_start", { systemPromptOptions: { sections: {} } });
+			assert.equal(host.tools.get(GATE_OVERRIDE_TOOL)?.exposure, undefined);
+		});
+	}
+
+	// Untrusted projects never register orchestrator_override even when codemode is active.
+	await withTempDir(async (dir) => {
+		await mkdir(path.join(dir, ".pi"), { recursive: true });
+		await writeFile(gateConfigPath(dir), JSON.stringify({ version: 1, block: { openTodos: true } }));
+
+		const host = createFakeHost({ sessionId: "override-untrusted-codemode", cwd: dir, trusted: false });
+		(host.pi as unknown as { getActiveTools: () => string[] }).getActiveTools = () => ["read", "codemode", "tool_search"];
+		orchestratorExtension(host.pi, { role: "parent" });
+
+		await host.fire("session_start", {});
+		await host.fire("before_agent_start", { systemPromptOptions: { sections: {} } });
+		await host.fire("agent_before_settle", boundaryEvent());
+		assert.equal(host.tools.has(GATE_OVERRIDE_TOOL), false);
+	});
+});
+
+test("orchestrator_override transitioning direct to codemode calls setActiveTools to remove it from activeTools", async () => {
+	for (const activeTool of ["codemode", "tool_search"]) {
+		await withTempDir(async (dir) => {
+			await mkdir(path.join(dir, ".pi"), { recursive: true });
+			await writeFile(gateConfigPath(dir), JSON.stringify({ version: 1, block: { openTodos: true } }));
+
+			let activeTools = ["read", "bash", "edit", "write", GATE_OVERRIDE_TOOL];
+			const setActiveCalls: string[][] = [];
+			const host = createFakeHost({ sessionId: `override-direct-to-${activeTool}`, cwd: dir, trusted: true });
+			const api = host.pi as unknown as {
+				getActiveTools: () => string[];
+				setActiveTools: (names: string[]) => void;
+			};
+			api.getActiveTools = () => [...activeTools];
+			api.setActiveTools = (names: string[]) => {
+				setActiveCalls.push([...names]);
+				activeTools = [...names];
+			};
+			orchestratorExtension(host.pi, { role: "parent" });
+
+			await host.fire("session_start", {});
+			assert.equal(host.tools.get(GATE_OVERRIDE_TOOL)?.exposure, undefined);
+			assert.equal(setActiveCalls.length, 0);
+
+			activeTools = ["read", "bash", "edit", "write", GATE_OVERRIDE_TOOL, activeTool];
+			await host.fire("before_agent_start", { systemPromptOptions: { sections: {} } });
+			assert.equal(host.tools.get(GATE_OVERRIDE_TOOL)?.exposure, "codemode");
+			assert.equal(setActiveCalls.length, 2, "workspace and override transitions each update activeTools");
+			assert.equal(activeTools.includes(GATE_OVERRIDE_TOOL), false);
+			assert.deepEqual(activeTools, ["read", "bash", "edit", "write", activeTool]);
+		});
+	}
 });
 
 // --- Worker role ------------------------------------------------------------

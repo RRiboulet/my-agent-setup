@@ -1,17 +1,11 @@
-// Tests for the orchestrate ladder reader.
+// Tests for `.pi/extensions/orchestrator/wave-ladder.mjs`.
 //
-// The reader's contract is the one `.pi/extensions/orchestrator/config.ts`
-// states for the gate config: a malformed file is reported, never thrown, and
-// the caller dispatches from a safe default in the meantime. Most cases below
-// therefore assert two things at once — the warning that names the problem, and
-// the usable ladder that comes back anyway.
-//
-// The first two tests pin the shipped data file to DEFAULT_LADDER and to the
-// reader's default path. Without them the constant and the JSON could drift, and
-// "fail open" would quietly mean "dispatch from a different policy".
+// Ports the full contract from `.pi/skills/orchestrate/ladder.test.mjs` and adds
+// coverage for env/agent-dir override resolution (`PI_ORCHESTRATE_LADDER`,
+// `PI_CODING_AGENT_DIR/orchestrate-ladder.json`) and `resolvePin(ladder, role)`.
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
@@ -24,69 +18,200 @@ import {
 	defaultLadderPath,
 	normalizeLadder,
 	readLadder,
-} from "./ladder.mjs";
+	resolvePin,
+} from "../../orchestrator/wave-ladder.mjs";
+import { withEnv } from "./helpers.ts";
 
 const SHIPPED = JSON.parse(readFileSync(defaultLadderPath(), "utf8"));
 
-function tempDir(t) {
-	const dir = mkdtempSync(path.join(tmpdir(), "orchestrate-ladder-"));
+function tempDir(t: test.TestContext): string {
+	const dir = mkdtempSync(path.join(tmpdir(), "orchestrator-wave-ladder-"));
 	t.after(() => rmSync(dir, { recursive: true, force: true }));
 	return dir;
 }
 
-/** Write `value` (an object, or a raw string) as ladder.json in a fresh dir. */
-function writeLadder(t, value) {
+function writeLadder(t: test.TestContext, value: unknown, filename = "wave-ladder.json"): string {
 	const dir = tempDir(t);
-	const file = path.join(dir, "ladder.json");
+	const file = path.join(dir, filename);
 	writeFileSync(file, typeof value === "string" ? value : `${JSON.stringify(value, null, 2)}\n`, "utf8");
 	return file;
 }
 
-function warningsOf(result) {
+function warningsOf(result: { warnings: string[] }): string {
 	assert.ok(Array.isArray(result.warnings), "warnings must always be an array");
 	return result.warnings.join("; ");
 }
 
-/** A deep copy of the shipped ladder that a test may edit freely. */
-function shipped() {
+function shipped(): Record<string, any> {
 	return structuredClone(SHIPPED);
 }
 
-test("the shipped ladder.json normalizes with no warnings", () => {
-	const result = readLadder();
-	assert.equal(result.source, "file");
-	assert.deepEqual(result.warnings, []);
-	assert.deepEqual(result.ladder, DEFAULT_LADDER);
+test("the shipped wave-ladder.json normalizes with no warnings when no overrides are set", async (t) => {
+	const fakeHome = tempDir(t);
+	await withEnv({ HOME: fakeHome, PI_ORCHESTRATE_LADDER: undefined, PI_CODING_AGENT_DIR: undefined }, () => {
+		const result = readLadder();
+		assert.equal(result.source, "file");
+		assert.deepEqual(result.warnings, []);
+		assert.deepEqual(result.ladder, DEFAULT_LADDER);
+	});
 });
 
-test("the shipped ladder carries the tier and pin policy this repository decided", () => {
-	const { ladder } = readLadder();
-	assert.equal(ladder.version, LADDER_VERSION);
-	assert.deepEqual(ladder.roster, [...KNOWN_ROSTER_TYPES]);
+test("the shipped ladder carries the clean upstream tier and pin policy", async (t) => {
+	const fakeHome = tempDir(t);
+	await withEnv({ HOME: fakeHome, PI_ORCHESTRATE_LADDER: undefined, PI_CODING_AGENT_DIR: undefined }, () => {
+		const { ladder } = readLadder();
+		assert.equal(ladder.version, LADDER_VERSION);
+		assert.deepEqual(ladder.roster, [...KNOWN_ROSTER_TYPES]);
 
-	const byTier = new Map(ladder.tiers.map((tier) => [tier.tier, tier]));
-	assert.equal(byTier.size, 3);
-	assert.deepEqual(
-		{ provider: byTier.get(1).provider, model: byTier.get(1).model, thinking: byTier.get(1).thinking },
-		{ provider: "opencode-go", model: "hy4-flash-free", thinking: "max" },
-	);
-	assert.deepEqual(
-		{ provider: byTier.get(2).provider, model: byTier.get(2).model, thinking: byTier.get(2).thinking },
-		{ provider: "opencode-go", model: "deepseek-v4.1-flash", thinking: "medium" },
-	);
-	assert.deepEqual(
-		{ provider: byTier.get(3).provider, model: byTier.get(3).model, thinking: byTier.get(3).thinking },
-		{ provider: "mistral", model: "zai-glm-5-3", thinking: "high" },
+		const byTier = new Map(ladder.tiers.map((tier: any) => [tier.tier, tier]));
+		assert.equal(byTier.size, 3);
+		assert.deepEqual(
+			{ provider: byTier.get(1).provider, model: byTier.get(1).model, thinking: byTier.get(1).thinking },
+			{ provider: "opencode-go", model: "hy4-flash-free", thinking: "max" },
+		);
+		assert.deepEqual(
+			{ provider: byTier.get(2).provider, model: byTier.get(2).model, thinking: "medium" },
+			{ provider: "opencode-go", model: "deepseek-v4.1-flash", thinking: byTier.get(2).thinking },
+		);
+		assert.deepEqual(
+			{ provider: byTier.get(3).provider, model: byTier.get(3).model, thinking: byTier.get(3).thinking },
+			{ provider: "mistral", model: "zai-glm-5-3", thinking: "high" },
+		);
+
+		assert.deepEqual(ladder.pins.triage, {
+			kind: "model",
+			provider: "opencode",
+			model: "jev-1.13-free",
+		});
+		assert.deepEqual(ladder.pins.reviewer, { kind: "tier", tier: 2 });
+		assert.deepEqual(ladder.pins.verifier, { kind: "tier", tier: 2, thinking: "high" });
+		assert.deepEqual(ladder.gates, { reviewer: { throughTier: 1 } });
+	});
+});
+
+test("override precedence: PI_ORCHESTRATE_LADDER > PI_CODING_AGENT_DIR/orchestrate-ladder.json > bundled", async (t) => {
+	const envLadder = shipped();
+	envLadder.tiers[0].model = "env-model";
+	const envFile = writeLadder(t, envLadder, "custom-env-ladder.json");
+
+	const agentDir = tempDir(t);
+	const agentDirLadder = shipped();
+	agentDirLadder.tiers[0].model = "agent-dir-model";
+	writeFileSync(path.join(agentDir, "orchestrate-ladder.json"), `${JSON.stringify(agentDirLadder, null, 2)}\n`, "utf8");
+
+	// 1. Both set -> PI_ORCHESTRATE_LADDER wins with source "env"
+	await withEnv({ PI_ORCHESTRATE_LADDER: envFile, PI_CODING_AGENT_DIR: agentDir }, () => {
+		const res = readLadder();
+		assert.equal(res.source, "env");
+		assert.deepEqual(res.warnings, []);
+		assert.equal(res.ladder.tiers[0].model, "env-model");
+	});
+
+	// 2. Only PI_CODING_AGENT_DIR set and file exists -> source "agent-dir"
+	await withEnv({ PI_ORCHESTRATE_LADDER: "", PI_CODING_AGENT_DIR: agentDir }, () => {
+		const res = readLadder();
+		assert.equal(res.source, "agent-dir");
+		assert.deepEqual(res.warnings, []);
+		assert.equal(res.ladder.tiers[0].model, "agent-dir-model");
+	});
+
+	// 3. PI_CODING_AGENT_DIR set but orchestrate-ladder.json absent -> bundled file
+	const emptyAgentDir = tempDir(t);
+	await withEnv({ PI_ORCHESTRATE_LADDER: undefined, PI_CODING_AGENT_DIR: emptyAgentDir }, () => {
+		const res = readLadder();
+		assert.equal(res.source, "file");
+		assert.deepEqual(res.warnings, []);
+		assert.equal(res.ladder.tiers[0].model, "hy4-flash-free");
+	});
+
+	// 4. Explicit path argument bypasses env overrides
+	await withEnv({ PI_ORCHESTRATE_LADDER: envFile, PI_CODING_AGENT_DIR: agentDir }, () => {
+		const explicitFile = writeLadder(t, shipped());
+		const res = readLadder(explicitFile);
+		assert.equal(res.source, "file");
+		assert.equal(res.ladder.tiers[0].model, "hy4-flash-free");
+	});
+});
+
+test("default ~/.pi/agent/orchestrate-ladder.json is discovered when PI_CODING_AGENT_DIR is unset", async (t) => {
+	const fakeHome = tempDir(t);
+	const defaultAgentDir = path.join(fakeHome, ".pi", "agent");
+	mkdirSync(defaultAgentDir, { recursive: true });
+	const homeLadder = shipped();
+	homeLadder.tiers[0].model = "home-agent-dir-model";
+	writeFileSync(
+		path.join(defaultAgentDir, "orchestrate-ladder.json"),
+		`${JSON.stringify(homeLadder, null, 2)}\n`,
+		"utf8",
 	);
 
-	assert.deepEqual(ladder.pins.triage, {
-		kind: "model",
+	await withEnv({ HOME: fakeHome, PI_ORCHESTRATE_LADDER: undefined, PI_CODING_AGENT_DIR: undefined }, () => {
+		const res = readLadder();
+		assert.equal(res.source, "agent-dir");
+		assert.deepEqual(res.warnings, []);
+		assert.equal(res.ladder.tiers[0].model, "home-agent-dir-model");
+	});
+});
+
+test("invalid or missing PI_ORCHESTRATE_LADDER never throws and falls back to DEFAULT_LADDER with warnings", async (t) => {
+	const fakeHome = tempDir(t);
+	const missingPath = path.join(tempDir(t), "nope.json");
+	await withEnv({ HOME: fakeHome, PI_ORCHESTRATE_LADDER: missingPath, PI_CODING_AGENT_DIR: undefined }, () => {
+		const res = readLadder();
+		assert.equal(res.source, "default");
+		assert.deepEqual(res.ladder, DEFAULT_LADDER);
+		assert.match(warningsOf(res), /no ladder file at/);
+	});
+
+	const brokenEnvFile = writeLadder(t, "{ not valid json", "broken.json");
+	await withEnv({ HOME: fakeHome, PI_ORCHESTRATE_LADDER: brokenEnvFile, PI_CODING_AGENT_DIR: undefined }, () => {
+		const res = readLadder();
+		assert.equal(res.source, "default");
+		assert.deepEqual(res.ladder, DEFAULT_LADDER);
+		assert.match(warningsOf(res), /is not valid JSON/);
+	});
+});
+
+test("resolvePin resolves model pins, tier pins with/without thinking override, and missing pins", () => {
+	assert.deepEqual(resolvePin(DEFAULT_LADDER, "triage"), {
 		provider: "opencode",
 		model: "jev-1.13-free",
 	});
-	assert.deepEqual(ladder.pins.reviewer, { kind: "tier", tier: 2 });
-	assert.deepEqual(ladder.pins.verifier, { kind: "tier", tier: 2, thinking: "high" });
-	assert.deepEqual(ladder.gates, { reviewer: { throughTier: 1 } });
+	assert.deepEqual(resolvePin(DEFAULT_LADDER, "reviewer"), {
+		provider: "opencode-go",
+		model: "deepseek-v4.1-flash",
+		thinking: "medium",
+	});
+	assert.deepEqual(resolvePin(DEFAULT_LADDER, "verifier"), {
+		provider: "opencode-go",
+		model: "deepseek-v4.1-flash",
+		thinking: "high",
+	});
+	assert.equal(resolvePin(DEFAULT_LADDER, "implementer"), null);
+
+	const customLadder = {
+		...structuredClone(DEFAULT_LADDER),
+		pins: {
+			triage: { kind: "model", provider: "opencode", model: "triage-m", thinking: "low" },
+			reviewer: { kind: "model", provider: "anthropic", model: "claude-sonnet", thinking: "high" },
+			verifier: { kind: "tier", tier: 3 },
+		},
+	};
+	assert.deepEqual(resolvePin(customLadder, "triage"), {
+		provider: "opencode",
+		model: "triage-m",
+		thinking: "low",
+	});
+	assert.deepEqual(resolvePin(customLadder, "reviewer"), {
+		provider: "anthropic",
+		model: "claude-sonnet",
+		thinking: "high",
+	});
+	assert.deepEqual(resolvePin(customLadder, "verifier"), {
+		provider: "mistral",
+		model: "zai-glm-5-3",
+		thinking: "high",
+	});
 });
 
 test("readLadder returns the parsed ladder for a valid file", (t) => {
@@ -107,8 +232,6 @@ test("an absent file falls open with a warning instead of throwing", (t) => {
 });
 
 test("an unreadable path falls open with a warning instead of throwing", (t) => {
-	// A directory is unreadable as a file on every platform this runs on, which a
-	// chmod-based test is not: it would pass while running as root.
 	const dir = tempDir(t);
 	const result = readLadder(dir);
 	assert.equal(result.source, "default");
@@ -134,30 +257,25 @@ test("a JSON value that is not an object falls open with a warning", (t) => {
 
 test("a missing tier is reported and the built-in ladder is used", (t) => {
 	const ladder = shipped();
-	ladder.tiers = ladder.tiers.filter((tier) => tier.tier !== 2);
+	ladder.tiers = ladder.tiers.filter((tier: any) => tier.tier !== 2);
 	const file = writeLadder(t, ladder);
 	const result = readLadder(file);
 	assert.match(warningsOf(result), /no tier 2/);
 	assert.deepEqual(
-		result.ladder.tiers.map((tier) => tier.tier),
+		result.ladder.tiers.map((tier: any) => tier.tier),
 		[1, 2, 3],
-		"a hole at tier 2 would make escalation skip a rung, so nothing usable is kept",
 	);
 });
 
 test("a ladder whose top tier is missing is reported and the built-in ladder is used", (t) => {
 	const ladder = shipped();
-	ladder.tiers = ladder.tiers.filter((tier) => tier.tier !== 3);
+	ladder.tiers = ladder.tiers.filter((tier: any) => tier.tier !== 3);
 	const file = writeLadder(t, ladder);
 	const result = readLadder(file);
 	assert.equal(result.source, "file");
-	assert.match(
-		warningsOf(result),
-		/escalation would run off the ladder/,
-		"a missing ceiling is silent drift: escalation from Tier 2 would find no target and every exhausted ticket would block instead",
-	);
+	assert.match(warningsOf(result), /escalation would run off the ladder/);
 	assert.deepEqual(
-		result.ladder.tiers.map((tier) => tier.tier),
+		result.ladder.tiers.map((tier: any) => tier.tier),
 		[1, 2, 3],
 	);
 });
@@ -172,7 +290,6 @@ test("a thinking level outside pi's enum is reported", (t) => {
 	for (const level of THINKING_LEVELS) {
 		assert.ok(warnings.includes(level), `the warning should name ${level}`);
 	}
-	// Tier 2 was dropped, which leaves a hole at 2, so the ladder falls back.
 	assert.deepEqual(result.ladder.tiers, [...DEFAULT_LADDER.tiers]);
 });
 
@@ -183,8 +300,7 @@ test("a pin to a tier the ladder does not define has no tier coverage and is rep
 	const result = readLadder(file);
 	assert.match(warningsOf(result), /pins\.implementer is pinned to tier 9/);
 	assert.match(warningsOf(result), /implementer has no tier coverage/);
-	assert.equal(result.ladder.pins.implementer, undefined, "an unusable pin does not survive normalization");
-	// The rest of the ladder is still usable, so it is kept rather than replaced.
+	assert.equal(result.ladder.pins.implementer, undefined);
 	assert.deepEqual(result.ladder.tiers, [...DEFAULT_LADDER.tiers]);
 	assert.deepEqual(result.ladder.pins.triage, DEFAULT_LADDER.pins.triage);
 });
@@ -227,13 +343,13 @@ test("an unknown roster entry is reported and dropped", (t) => {
 	const result = readLadder(file);
 	const warnings = warningsOf(result);
 	assert.match(warnings, /roster names an unknown type "implementor"/);
-	assert.ok(warnings.includes("triage"), "the warning should list the known types");
+	assert.ok(warnings.includes("triage"));
 	assert.deepEqual(result.ladder.roster, [...KNOWN_ROSTER_TYPES]);
 });
 
 test("a roster entry the dispatcher knows but the file omits is not invented", (t) => {
 	const ladder = shipped();
-	ladder.roster = ladder.roster.filter((type) => type !== "researcher");
+	ladder.roster = ladder.roster.filter((type: string) => type !== "researcher");
 	delete ladder.pins.reviewer;
 	ladder.pins.verifier = { tier: 2, thinking: "high" };
 	const file = writeLadder(t, ladder);
@@ -243,7 +359,7 @@ test("a roster entry the dispatcher knows but the file omits is not invented", (
 
 test("a pin for a type that is not in the roster is reported and ignored", (t) => {
 	const ladder = shipped();
-	ladder.roster = ladder.roster.filter((type) => type !== "researcher");
+	ladder.roster = ladder.roster.filter((type: string) => type !== "researcher");
 	ladder.pins.researcher = { tier: 3 };
 	const file = writeLadder(t, ladder);
 	const result = readLadder(file);
@@ -276,7 +392,7 @@ test("a pin with half a provider/model pair is reported", (t) => {
 	const result = readLadder(file);
 	const warnings = warningsOf(result);
 	assert.match(warnings, /pins\.triage\.provider and pins\.triage\.model must both be non-empty strings/);
-	assert.match(warnings, /pins\.triage is required/, "with no usable pin, the exempt type is uncovered again");
+	assert.match(warnings, /pins\.triage is required/);
 });
 
 test("a malformed gates block falls back to the built-in reviewer gate", (t) => {
@@ -285,10 +401,7 @@ test("a malformed gates block falls back to the built-in reviewer gate", (t) => 
 	const file = writeLadder(t, ladder);
 	const result = readLadder(file);
 	assert.match(warningsOf(result), /gates\.reviewer\.throughTier must be a positive integer/);
-	assert.equal(
-		result.ladder.gates.reviewer.throughTier, 1,
-		"a malformed gate must fall back to the built-in gate, not to a disabled one: 0 would drop the Tier-1 quality floor silently",
-	);
+	assert.equal(result.ladder.gates.reviewer.throughTier, 1);
 });
 
 test("an explicit zero reviewer gate is refused, not accepted as gate-off", (t) => {
@@ -298,10 +411,7 @@ test("an explicit zero reviewer gate is refused, not accepted as gate-off", (t) 
 	const result = readLadder(file);
 	assert.equal(result.source, "file");
 	assert.match(warningsOf(result), /the gate cannot be disabled/);
-	assert.equal(
-		result.ladder.gates.reviewer.throughTier, 1,
-		"a zero throughTier would drop the Tier-1 quality floor — the spec's headline value — so the ladder refuses it and keeps the built-in gate",
-	);
+	assert.equal(result.ladder.gates.reviewer.throughTier, 1);
 });
 
 test("an unknown version is reported but the keys this build knows are read", (t) => {
@@ -341,7 +451,7 @@ test("normalizeLadder never throws, whatever it is handed", () => {
 	];
 	for (const value of nonsense) {
 		const result = normalizeLadder(value);
-		assert.ok(result.ladder, `no ladder for ${JSON.stringify(value) ?? String(value)}`);
+		assert.ok(result.ladder);
 		assert.ok(Array.isArray(result.warnings));
 		assert.ok(Array.isArray(result.ladder.roster));
 		assert.ok(Array.isArray(result.ladder.tiers));

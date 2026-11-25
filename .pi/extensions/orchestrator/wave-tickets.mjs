@@ -1,4 +1,4 @@
-// tickets.mjs — the ticket graph the orchestrate skill dispatches over.
+// wave-tickets.mjs — the ticket graph the wave orchestrator dispatches over.
 //
 // A `to-tickets` folder is a graph written in prose plus a three-key frontmatter
 // block (`.pi/skills/to-tickets/SKILL.md` §4): `status`, `blocked-by`, and an
@@ -6,92 +6,30 @@
 // and answers the questions a dispatcher must ask BEFORE it starts anything —
 // which tickets are on the frontier, and whether the graph is dispatchable at
 // all (cycles, dangling blockers). Those two checks live in code rather than in
-// skill prose for the reason `.pi/skills/orchestrate/ladder.mjs` exists: a rule
-// written only in a prompt cannot fail, so it cannot be trusted.
+// skill prose for the reason `.pi/extensions/orchestrator/wave-ladder.mjs`
+// exists: a rule written only in a prompt cannot fail, so it cannot be trusted.
 //
-// **Reported, never thrown.** The reader's failure rule is the one this repo's
-// gate config reader and ladder reader already state, with one split: a
-// malformed file must never trap a session, so every read returns a graph plus
-// an `issues` list and nothing here throws. What is left to the caller is the
-// gate — `blockingIssues(graph)` — because a cycle or a dangling blocker is not
-// a malformed input to work around, it is a reason not to dispatch. Severity is
-// per issue: a numbered file with no frontmatter is a broken ticket (`error`),
-// while a stray `README.md` in the folder is reported (`warning`) without
-// stopping a run that has nothing to do with it.
-//
-// **Why a hand-written YAML subset and not a parser.** The contract is three
-// keys; a full YAML parser would also accept shapes the contract forbids, which
-// hides the drift between what `to-tickets` writes and what the orchestrator
-// reads — the exact failure a second copy of a table causes. It would also mean
-// this repo's first npm dependency, and there is no build step to carry it.
-//
-// **Why a ticket's id is its filename's number.** Frontmatter carries no id
-// field, so the id has to come from somewhere that cannot disagree with itself;
-// the filename is also what a human cites (`03`). `blocked-by` ids are quoted in
-// the template (`["01"]`) precisely so a zero-padded id stays the string `01`
-// instead of the number `1`, which would never match a filename.
-//
-// **Why the frontier is recomputed from the files on every call.** Ticket status
-// is the mid-run status surface: `setTicketStatus` writes it, a plain `grep`
-// reads it, and the next wave re-reads the folder. A cached node status would
-// dispatch a finished ticket a second time.
-//
-// **Why write-back edits two lines instead of re-serializing.** A ticket's body
-// is prose a human maintains. Re-emitting the file from a parsed model would
-// reformat it, drop unknown frontmatter keys and rewrap the body; editing the
-// two `status` fields in place leaves every other byte identical, which is what
-// makes a status update safe to run on a file full of in-flight work.
+// **Reported, never thrown.** Every read returns a graph plus an `issues` list
+// and nothing here throws. `blockingIssues(graph)` surfaces dispatch blockers
+// (cycles, dangling blockers, duplicate ids, unreadable numbered ticket
+// contracts).
 //
 // **Why `tier-override` is range-checked here and not at parse time.** The
-// ladder owns how many tiers exist (`ladder.json`, read by `ladder.mjs`), so
-// this module takes `maxTier` from the caller. An override naming a tier the
-// ladder does not define would dispatch nothing at all, so it is reported and
-// the classification stands in.
+// ladder owns how many tiers exist (`wave-ladder.json`, read by
+// `wave-ladder.mjs`), so `resolveTier` takes `maxTier` from the caller.
 
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
 
-/**
- * The statuses the ticket contract names, in the order a ticket normally moves
- * through them. `in-progress` and `blocked` are both "not on the frontier":
- * `blocked` because a human or an exhausted escalation put it aside, which is a
- * decision the orchestrator must not undo by re-dispatching.
- */
 export const TICKET_STATUSES = Object.freeze(["ready", "in-progress", "done", "blocked"]);
-
-/**
- * What a ticket with no `status` field means. The `to-tickets` template says so
- * in prose and the reader has to agree: "a missing status reads as ready" is the
- * machine reading of "None (can start immediately)".
- */
 export const DEFAULT_STATUS = "ready";
-
-/**
- * The tier a ticket dispatches at when neither a `tier-override` nor a triage
- * classification is available. Tier 1 is the quality floor: escalation moves up
- * one tier from there, so the safe wrong answer is cheap rather than expensive.
- */
 export const DEFAULT_TIER = 1;
-
-/**
- * The tier count assumed when a caller does not say. It mirrors the shipped
- * `ladder.json`, but the ladder is the source of truth — a caller that has read
- * the ladder passes `ladder.tiers.length` and this constant stops mattering.
- */
 export const DEFAULT_MAX_TIER = 3;
 
 const FRONTMATTER_DELIMITER = "---";
 const TICKET_FILE = /\.md$/i;
 const NUMBERED_FILE = /^\d+/;
-
-/**
- * The codes that mean "this file's machine contract could not be read". Their
- * severity depends on the filename: a numbered file claims to be a ticket, so a
- * broken contract is an error that stops dispatch; any other markdown file in
- * the folder is reported as a warning and does not.
- */
 const CONTRACT_CODES = new Set(["missing-frontmatter", "unterminated-frontmatter", "malformed-frontmatter"]);
-
 const READY_STATUS = DEFAULT_STATUS;
 
 function stripCr(line) {
@@ -114,21 +52,12 @@ function messageOf(error) {
 	return error instanceof Error ? error.message : String(error);
 }
 
-/** One reportable problem. `code` is the checkable part; `message` is for humans. */
 function makeIssue(code, severity, message, extra = {}) {
 	return { code, severity, message, ...extra };
 }
 
 // --- Frontmatter -----------------------------------------------------------
 
-/**
- * Locate the frontmatter block. It has to open the file: a `---` further down is
- * a markdown horizontal rule, and treating it as a delimiter would read prose as
- * fields. A byte-order mark is tolerated because an editor may add one.
- *
- * Returns line indexes of the opening and closing delimiters, or which of the two
- * ways the block can be unusable was found.
- */
 function findFrontmatter(lines) {
 	const opening = stripCr(lines[0] ?? "").replace(/^\uFEFF/, "").trim();
 	if (opening !== FRONTMATTER_DELIMITER) return { missing: true };
@@ -150,11 +79,6 @@ function unquote(value) {
 	return trimmed;
 }
 
-/**
- * Split a YAML flow sequence (`["01", "02"]`) on commas that are not inside a
- * quoted item, so a blocker id containing a comma survives. Empty items are
- * dropped: `[]` is the empty list, not a list of one empty string.
- */
 function splitFlowSequence(inner) {
 	const items = [];
 	let current = "";
@@ -177,15 +101,6 @@ function splitFlowSequence(inner) {
 	return items.map((item) => unquote(item)).filter((item) => item.length > 0);
 }
 
-/**
- * Read one ticket's text into the three contract fields, the body, and whatever
- * could not be read. `present` is false when there is no usable frontmatter
- * block; the fields then hold the contract defaults, because a caller that
- * ignores `present` should still get something safe rather than `undefined`.
- *
- * Unknown frontmatter keys are parsed past and dropped on purpose: a ticket
- * written for a newer build must still dispatch here.
- */
 export function parseTicketText(text) {
 	const source = typeof text === "string" ? text : "";
 	const lines = source.split("\n");
@@ -242,7 +157,6 @@ export function parseTicketText(text) {
 		}
 		if (key === "blocked-by") {
 			if (value === "") {
-				// A block sequence: consume the `- item` lines that follow.
 				const items = [];
 				while (index + 1 < where.end) {
 					const next = stripCr(lines[index + 1]).trim();
@@ -283,16 +197,9 @@ export function parseTicketText(text) {
 				);
 			}
 		}
-		// Every other key is ignored: the contract is three fields, and a newer
-		// ticket may carry more.
 	}
 
 	if (malformed) {
-		// A line that is not `key: value` means the block is not the contract: the
-		// fields that did parse may be the half that happens to be spelled right,
-		// and dispatching from defaults when the broken line was `blocked-by:` would
-		// run a ticket that is genuinely blocked. So the node is withheld and the
-		// broken line is reported — a refusal a human can fix, not a guess.
 		return { present: false, status: DEFAULT_STATUS, blockedBy: [], tierOverride: undefined, body, issues };
 	}
 
@@ -309,22 +216,22 @@ export function parseTicketText(text) {
 	return { present: true, status, blockedBy, tierOverride, body, issues };
 }
 
-/** The ticket id: the filename's leading number when it has one, else the stem. */
 export function ticketIdFromFile(file) {
 	const stem = path.basename(file).replace(TICKET_FILE, "");
 	const numbered = NUMBERED_FILE.exec(stem);
 	return numbered ? numbered[0] : stem;
 }
 
-/**
- * Read one ticket file. The node it returns is small on purpose — id, file,
- * status, blockers, override — because everything else (acceptance criteria, the
- * `Validation` section) is prose the dispatcher reads from the file itself.
- *
- * `ticket` is null when the file cannot serve as a node: unreadable, no
- * frontmatter, or frontmatter broken mid-block. The issues say which, and they
- * carry the file so a report can name it.
- */
+function titleFromBody(body, id, fallback) {
+	if (typeof body !== "string") return fallback;
+	const match = /^[ \t]*#[ \t]+(.+?)[ \t]*$/m.exec(body);
+	if (!match) return fallback;
+	const raw = match[1].trim();
+	const prefix = new RegExp(`^${id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*:\\s*`);
+	const stripped = raw.replace(prefix, "").trim();
+	return stripped || raw || fallback;
+}
+
 export function readTicket(file) {
 	let text;
 	try {
@@ -348,9 +255,11 @@ export function readTicket(file) {
 	}));
 	if (!parsed.present) return { ticket: null, issues };
 
+	const id = ticketIdFromFile(file);
 	const ticket = {
-		id: ticketIdFromFile(file),
+		id,
 		file,
+		title: titleFromBody(parsed.body, id, id),
 		status: parsed.status,
 		blockedBy: [...parsed.blockedBy],
 	};
@@ -360,11 +269,6 @@ export function readTicket(file) {
 
 // --- Graph -----------------------------------------------------------------
 
-/**
- * Rotate a cycle so its smallest id comes first, then serialize it. Two walks
- * that find the same loop from different entry points produce the same key, so a
- * cycle is reported once rather than once per ticket in it.
- */
 function cycleKey(cycle) {
 	let smallest = 0;
 	for (let index = 1; index < cycle.length; index += 1) {
@@ -373,14 +277,6 @@ function cycleKey(cycle) {
 	return [...cycle.slice(smallest), ...cycle.slice(0, smallest)].join(">");
 }
 
-/**
- * Find every dependency cycle, as arrays of ticket ids in dependency order.
- *
- * Iterative rather than recursive: a folder is small, but "never throws" is the
- * rule this module is built on, and a recursive walk over a pathological folder
- * turns a report into a stack overflow. An edge to a missing ticket is not a
- * cycle candidate — that is a dangling blocker, reported separately.
- */
 export function findCycles(graph) {
 	const colour = new Map();
 	const pathStack = [];
@@ -422,7 +318,6 @@ export function findCycles(graph) {
 	return cycles;
 }
 
-/** Add the two errors that must be visible before dispatch to `graph.issues`. */
 function reportGraphProblems(graph) {
 	for (const ticket of graph.tickets) {
 		for (const blocker of ticket.blockedBy) {
@@ -449,14 +344,6 @@ function reportGraphProblems(graph) {
 	}
 }
 
-/**
- * Build a graph from already-read nodes. Pure: no filesystem, so tests and a
- * caller holding nodes for another reason get the same queries.
- *
- * Duplicate ids are reported and the first node wins, because a graph has to
- * stay a function: two nodes with one id would make "whose status is it" a coin
- * toss, and the report names both files so a human can pick.
- */
 export function buildGraph(tickets, options = {}) {
 	const byId = new Map();
 	const nodes = [];
@@ -491,11 +378,6 @@ export function buildGraph(tickets, options = {}) {
 	return graph;
 }
 
-/**
- * Read a tickets folder. Flat, one `.md` file per ticket, as `to-tickets` writes
- * them. Never throws: an unreadable folder comes back as an empty graph with an
- * issue naming it, so a caller printing the graph does not have to catch.
- */
 export function readTickets(dir) {
 	let entries;
 	try {
@@ -531,27 +413,10 @@ export function readTickets(dir) {
 	return graph;
 }
 
-/**
- * The issues that must be empty before anything dispatches: a cycle, a dangling
- * blocker, a duplicate id, a ticket whose contract could not be read. Warnings
- * (an odd status, a stray file) are reported and do not stop a run.
- */
 export function blockingIssues(graph) {
 	return graph.issues.filter((issue) => issue.severity === "error");
 }
 
-/**
- * The frontier: tickets whose own status is `ready` and whose every blocker is
- * `done`, plus — for every other ticket — why it is not there.
- *
- * Reasons are per-cause rather than one string, so the report can say "waiting
- * on 02 (in-progress)" instead of "not ready". A blocking ticket that is absent
- * from the folder gets `blocker-missing` and never becomes ready by waiting.
- *
- * This function does not check the graph for cycles: a caller gates dispatch on
- * `blockingIssues` first, and a cycle's members are `not done` anyway unless
- * someone marked a whole loop done, which the cycle report still names.
- */
 export function frontier(graph) {
 	const ready = [];
 	const waiting = [];
@@ -578,19 +443,6 @@ function inTierRange(tier, maxTier) {
 	return typeof tier === "number" && Number.isInteger(tier) && tier >= 1 && tier <= maxTier;
 }
 
-/**
- * Which tier a ticket dispatches at, and where that number came from.
- *
- * `tier-override` wins over everything, which is the point of the field: it is
- * the human's decision, recorded in the ticket, and a triage model must not be
- * able to talk past it. Without an override, the triage classification stands;
- * without either, the quality floor (Tier 1) does.
- *
- * An override naming a tier outside the ladder is reported rather than honoured:
- * dispatching at a tier the ladder does not define is not a dispatch at all. The
- * classification then stands in, so the ticket still runs — one tier of quality
- * is a recoverable miss, a ticket that never starts is not.
- */
 export function resolveTier(ticket, classification = null, options = {}) {
 	const maxTier =
 		typeof options.maxTier === "number" && Number.isInteger(options.maxTier) && options.maxTier >= 1
@@ -625,39 +477,10 @@ export function resolveTier(ticket, classification = null, options = {}) {
 
 // --- Status write-back -----------------------------------------------------
 
-/**
- * The prose value a status writes. The machine field stays a bare status; the
- * human line carries the reason, because the frontmatter contract is three keys
- * and a fourth (`blocked-reason`) would be a contract change made by a writer
- * that no reader agreed to.
- */
 function proseValueFor(status, reason) {
 	return status === "blocked" && reason ? `${status} — ${reason}` : status;
 }
 
-/**
- * Move one ticket to `status`, in the frontmatter and in the prose
- * `**Status:**` line beside it, which the `to-tickets` contract requires to
- * agree. Idempotent: writing the status a ticket already has changes nothing and
- * reports `changed: false`, so a retried wave is not a file churn.
- *
- * Every other byte of the file is preserved — that is the whole design of this
- * function. The two `status` lines are edited in place, nothing is re-serialized,
- * and a file is written only when a line actually differs.
- *
- * Refusals, all without touching the file: a status outside `TICKET_STATUSES`
- * (the contract has no such state), a missing or unterminated frontmatter block
- * (there is no machine field to write), and an unwritable file. A numbered
- * ticket with a missing prose line is written and reported: the frontmatter is
- * the machine contract, so the write is still correct.
- *
- * Transitions are not policed — any status may move to any other. The graph is
- * recomputed from disk each wave, so a stale transition cannot wedge a run, and a
- * human reopening a `blocked` or `done` ticket is a legitimate edit rather than
- * an error this function should refuse.
- *
- * `reason` is appended to the prose line for `blocked` only, and only when given.
- */
 export function setTicketStatus(file, status, options = {}) {
 	const reason = typeof options.reason === "string" && options.reason.trim().length > 0 ? options.reason.trim() : null;
 	if (!TICKET_STATUSES.includes(status)) {
@@ -719,10 +542,6 @@ export function setTicketStatus(file, status, options = {}) {
 		break;
 	}
 	if (!wroteField) {
-		// A ticket may omit `status` (it then reads as ready), but a write-back has
-		// to leave a field behind or the next reader would disagree with this one.
-		// The inserted line takes the file's own line ending, so a file that was
-		// CRLF before the write is not left half-CRLF after it.
 		lines.splice(where.start + 1, 0, `status: ${status}${carriageReturn(lines[where.start])}`);
 		previous = DEFAULT_STATUS;
 	}

@@ -1,23 +1,7 @@
-// Tests for the ticket-graph parser.
+// Tests for `.pi/extensions/orchestrator/wave-tickets.mjs`.
 //
-// The contract these pin is the ticket frontmatter written by `to-tickets`
-// (`.pi/skills/to-tickets/SKILL.md` §4 and its ticket template): `status`,
-// `blocked-by` (quoted ids), and an optional `tier-override`. Everything here is
-// built from real files in a temp folder rather than from hand-made objects,
-// because the two properties that matter — "a plain file read sees the status"
-// and "the rest of the file survives a write untouched" — can only be asserted
-// against bytes on disk.
-//
-// The reader's failure rule is the one `ladder.mjs` and the orchestrator config
-// reader already state: a malformed input is REPORTED, never thrown, so a
-// half-broken ticket folder neither dispatches silently nor traps the session.
-// A cycle and a dangling blocker are the two errors that must be visible before
-// any dispatch, which is why they are asserted both as named issues and through
-// `blockingIssues`.
-//
-// The frontier cases run as one progression — diamond, dispatch one, re-read —
-// because the graph is recomputed from disk every wave. A parser that cached
-// node status would pass a single-read assertion and be wrong in the skill.
+// Ports the full ticket-graph parser contract from
+// `.pi/skills/orchestrate/tickets.test.mjs` and adds external CWD tests.
 
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -38,29 +22,25 @@ import {
 	resolveTier,
 	setTicketStatus,
 	ticketIdFromFile,
-} from "./tickets.mjs";
-import { readLadder } from "./ladder.mjs";
+} from "../../orchestrator/wave-tickets.mjs";
+import { readLadder } from "../../orchestrator/wave-ladder.mjs";
+import { withEnv } from "./helpers.ts";
 
-function tempDir(t) {
-	const dir = mkdtempSync(path.join(tmpdir(), "orchestrate-tickets-"));
+function tempDir(t: test.TestContext): string {
+	const dir = mkdtempSync(path.join(tmpdir(), "orchestrator-wave-tickets-"));
 	t.after(() => rmSync(dir, { recursive: true, force: true }));
 	return dir;
 }
 
-/**
- * A ticket file shaped like the `to-tickets` template. `body` is appended after
- * the prose `**Status:**` line so a test can prove a write-back leaves the body
- * alone.
- */
 function ticketMarkdown({
 	id = "01",
 	title = "A ticket",
 	status = DEFAULT_STATUS,
-	blockedBy = [],
-	tierOverride,
-	frontmatterExtra = [],
+	blockedBy = [] as string[],
+	tierOverride = undefined as number | undefined,
+	frontmatterExtra = [] as string[],
 	body = "The end-to-end behavior this ticket makes work.",
-} = {}) {
+} = {}): string {
 	const lines = ["---", `status: ${status}`];
 	lines.push(`blocked-by: [${blockedBy.map((blocker) => JSON.stringify(blocker)).join(", ")}]`);
 	if (tierOverride !== undefined) lines.push(`tier-override: ${tierOverride}`);
@@ -80,39 +60,33 @@ function ticketMarkdown({
 	return lines.join("\n");
 }
 
-/** Write a ticket into `dir`; the filename defaults to `<id>-ticket.md`. */
-function writeTicket(dir, spec = {}) {
+function writeTicket(dir: string, spec: Record<string, any> = {}): string {
 	const name = spec.name ?? `${spec.id ?? "01"}-ticket.md`;
 	const file = path.join(dir, name);
 	writeFileSync(file, spec.text ?? ticketMarkdown(spec), "utf8");
 	return file;
 }
 
-/** A ticket file whose content is raw text, for malformed-input cases. */
-function writeRaw(dir, name, text) {
+function writeRaw(dir: string, name: string, text: string): string {
 	const file = path.join(dir, name);
 	writeFileSync(file, text, "utf8");
 	return file;
 }
 
-function codes(issues) {
+function codes(issues: Array<{ code: string }>): string[] {
 	return issues.map((issue) => issue.code);
 }
 
-/** The status write-back must care about these, so a drift is a named failure. */
 test("the ticket statuses are the four the contract names", () => {
 	assert.deepEqual([...TICKET_STATUSES], ["ready", "in-progress", "done", "blocked"]);
 	assert.equal(DEFAULT_STATUS, "ready");
 });
 
-/**
- * The default tier ceiling stands in for the ladder's own count when a caller
- * does not pass one, so it has to be the ladder's count. Without this pin a
- * fourth tier could be added to `ladder.json` and every `tier-override: 4` would
- * be quietly ignored until someone read the warnings.
- */
-test("the default tier ceiling matches the shipped ladder", () => {
-	assert.equal(DEFAULT_MAX_TIER, readLadder().ladder.tiers.length);
+test("the default tier ceiling matches the shipped ladder", async (t) => {
+	const fakeHome = tempDir(t);
+	await withEnv({ HOME: fakeHome, PI_ORCHESTRATE_LADDER: undefined, PI_CODING_AGENT_DIR: undefined }, () => {
+		assert.equal(DEFAULT_MAX_TIER, readLadder().ladder.tiers.length);
+	});
 });
 
 // --- Frontmatter -----------------------------------------------------------
@@ -132,19 +106,19 @@ test("parseTicketText reads the template frontmatter and keeps quoted ids quoted
 	assert.equal(parsed.present, true);
 	assert.equal(parsed.status, "ready");
 	assert.deepEqual(parsed.blockedBy, ["01", "02"]);
-	assert.equal(parsed.tierOverride, undefined, "a commented-out override is not an override");
+	assert.equal(parsed.tierOverride, undefined);
 	assert.deepEqual(parsed.issues, []);
-	assert.match(parsed.body, /^# 03: A ticket/m, "the body is everything after the closing delimiter");
-	assert.doesNotMatch(parsed.body, /blocked-by/, "the frontmatter is not part of the body");
+	assert.match(parsed.body, /^# 03: A ticket/m);
+	assert.doesNotMatch(parsed.body, /blocked-by/);
 });
 
 test("absent frontmatter fields take the contract defaults", () => {
 	const parsed = parseTicketText(["---", "owner: someone", "---", "", "Body.", ""].join("\n"));
 	assert.equal(parsed.present, true);
-	assert.equal(parsed.status, DEFAULT_STATUS, "a missing status reads as ready");
+	assert.equal(parsed.status, DEFAULT_STATUS);
 	assert.deepEqual(parsed.blockedBy, []);
 	assert.equal(parsed.tierOverride, undefined);
-	assert.deepEqual(parsed.issues, [], "an unknown frontmatter key is ignored, not reported");
+	assert.deepEqual(parsed.issues, []);
 });
 
 test("blocked-by may be written as a YAML block sequence", () => {
@@ -177,7 +151,7 @@ test("a ticket with no frontmatter block is reported and not graphed", (t) => {
 	const graph = readTickets(dir);
 	assert.deepEqual(graph.tickets, []);
 	assert.deepEqual(codes(graph.issues), ["missing-frontmatter"]);
-	assert.match(graph.issues[0].message, /notes\.md/, "the report names the file");
+	assert.match(graph.issues[0].message, /notes\.md/);
 });
 
 test("malformed and unterminated frontmatter are reported, never thrown", (t) => {
@@ -188,12 +162,11 @@ test("malformed and unterminated frontmatter are reported, never thrown", (t) =>
 
 	const graph = readTickets(dir);
 	assert.deepEqual(
-		graph.tickets.map((ticket) => ticket.id),
+		graph.tickets.map((ticket: any) => ticket.id),
 		["04"],
-		"an unreadable contract cannot become a node",
 	);
 	assert.deepEqual(
-		graph.issues.map((issue) => [issue.code, path.basename(issue.file ?? "")]),
+		graph.issues.map((issue: any) => [issue.code, path.basename(issue.file ?? "")]),
 		[
 			["unterminated-frontmatter", "02-unterminated.md"],
 			["malformed-frontmatter", "03-bad-line.md"],
@@ -212,7 +185,7 @@ test("a three-node diamond is dispatched in dependency order", (t) => {
 	const first = frontier(readTickets(dir));
 	assert.deepEqual(first.ready, [{ id: "01", file: path.join(dir, "01-root.md") }]);
 	assert.deepEqual(
-		first.waiting.map((entry) => [entry.id, entry.reasons.map((reason) => reason.code)]),
+		first.waiting.map((entry: any) => [entry.id, entry.reasons.map((reason: any) => reason.code)]),
 		[
 			["02", ["blocker-not-done"]],
 			["03", ["blocker-not-done", "blocker-not-done"]],
@@ -226,14 +199,14 @@ test("a three-node diamond is dispatched in dependency order", (t) => {
 
 	setTicketStatus(path.join(dir, "01-root.md"), "done");
 	const second = frontier(readTickets(dir));
-	assert.deepEqual(second.ready.map((entry) => entry.id), ["02"]);
+	assert.deepEqual(second.ready.map((entry: any) => entry.id), ["02"]);
 
 	setTicketStatus(path.join(dir, "02-left.md"), "done");
 	const third = frontier(readTickets(dir));
-	assert.deepEqual(third.ready.map((entry) => entry.id), ["03"]);
+	assert.deepEqual(third.ready.map((entry: any) => entry.id), ["03"]);
 
 	setTicketStatus(path.join(dir, "03-join.md"), "done");
-	assert.deepEqual(frontier(readTickets(dir)).ready, [], "a done ticket is not dispatched again");
+	assert.deepEqual(frontier(readTickets(dir)).ready, []);
 });
 
 test("a ticket already in progress is not on the frontier", (t) => {
@@ -251,16 +224,16 @@ test("a two-ticket cycle is a named error", (t) => {
 	writeTicket(dir, { id: "03" });
 
 	const graph = readTickets(dir);
-	assert.deepEqual(graph.issues.filter((issue) => issue.code === "cycle").map((issue) => issue.cycle), [
-		["01", "02"],
-	]);
+	assert.deepEqual(
+		graph.issues.filter((issue: any) => issue.code === "cycle").map((issue: any) => issue.cycle),
+		[["01", "02"]],
+	);
 	assert.deepEqual(findCycles(graph), [["01", "02"]]);
 	assert.deepEqual(
-		blockingIssues(graph).map((issue) => issue.code),
+		blockingIssues(graph).map((issue: any) => issue.code),
 		["cycle"],
-		"a cycle blocks dispatch",
 	);
-	assert.deepEqual(frontier(graph).ready.map((entry) => entry.id), ["03"], "the unrelated ticket is unaffected");
+	assert.deepEqual(frontier(graph).ready.map((entry: any) => entry.id), ["03"]);
 });
 
 test("a ticket that blocks itself is a cycle of one", (t) => {
@@ -268,7 +241,10 @@ test("a ticket that blocks itself is a cycle of one", (t) => {
 	writeTicket(dir, { id: "01", blockedBy: ["01"] });
 	const graph = readTickets(dir);
 	assert.deepEqual(findCycles(graph), [["01"]]);
-	assert.deepEqual(graph.issues.filter((issue) => issue.code === "cycle").map((issue) => issue.cycle), [["01"]]);
+	assert.deepEqual(
+		graph.issues.filter((issue: any) => issue.code === "cycle").map((issue: any) => issue.cycle),
+		[["01"]],
+	);
 });
 
 test("a dangling blocker is a named error and keeps its ticket off the frontier", (t) => {
@@ -276,12 +252,12 @@ test("a dangling blocker is a named error and keeps its ticket off the frontier"
 	writeTicket(dir, { id: "01", blockedBy: ["09"] });
 
 	const graph = readTickets(dir);
-	const dangling = graph.issues.filter((issue) => issue.code === "dangling-blocker");
+	const dangling = graph.issues.filter((issue: any) => issue.code === "dangling-blocker");
 	assert.equal(dangling.length, 1);
 	assert.equal(dangling[0].id, "01");
 	assert.equal(dangling[0].blocker, "09");
 	assert.match(dangling[0].message, /09/);
-	assert.deepEqual(blockingIssues(graph).map((issue) => issue.code), ["dangling-blocker"]);
+	assert.deepEqual(blockingIssues(graph).map((issue: any) => issue.code), ["dangling-blocker"]);
 	assert.deepEqual(frontier(graph).waiting[0].reasons, [{ code: "blocker-missing", blocker: "09" }]);
 });
 
@@ -291,7 +267,7 @@ test("two files claiming one ticket id are reported once and the first wins", (t
 	writeTicket(dir, { id: "02", name: "02-second.md" });
 
 	const graph = readTickets(dir);
-	const duplicate = graph.issues.filter((issue) => issue.code === "duplicate-id");
+	const duplicate = graph.issues.filter((issue: any) => issue.code === "duplicate-id");
 	assert.equal(duplicate.length, 1);
 	assert.equal(duplicate[0].id, "02");
 	assert.deepEqual(duplicate[0].files, [first, path.join(dir, "02-second.md")]);
@@ -304,7 +280,7 @@ test("an unknown status is reported and never on the frontier", (t) => {
 	writeTicket(dir, { id: "01", status: "finished" });
 	const graph = readTickets(dir);
 	assert.deepEqual(codes(graph.issues), ["unknown-status"]);
-	assert.deepEqual(blockingIssues(graph), [], "an odd status is a warning, not a dispatch error");
+	assert.deepEqual(blockingIssues(graph), []);
 	assert.deepEqual(frontier(graph).ready, []);
 });
 
@@ -320,6 +296,34 @@ test("an unreadable directory is reported, never thrown", () => {
 	const graph = readTickets(path.join(tmpdir(), "orchestrate-tickets-does-not-exist"));
 	assert.deepEqual(graph.tickets, []);
 	assert.deepEqual(codes(graph.issues), ["unreadable-directory"]);
+});
+
+test("readTickets and setTicketStatus work on external CWD paths outside the repository", (t) => {
+	const externalDir = tempDir(t);
+	const ticketFile = writeTicket(externalDir, {
+		id: "01",
+		name: "01-external.md",
+		title: "External worktree ticket",
+		status: "ready",
+	});
+	writeTicket(externalDir, {
+		id: "02",
+		name: "02-external.md",
+		title: "Second external ticket",
+		blockedBy: ["01"],
+	});
+
+	const graph = readTickets(externalDir);
+	assert.equal(blockingIssues(graph).length, 0);
+	assert.deepEqual(frontier(graph).ready.map((e: any) => e.id), ["01"]);
+	assert.equal(graph.byId.get("01").title, "External worktree ticket");
+
+	const updated = setTicketStatus(ticketFile, "done");
+	assert.equal(updated.ok, true);
+	assert.equal(updated.changed, true);
+
+	const nextGraph = readTickets(externalDir);
+	assert.deepEqual(frontier(nextGraph).ready.map((e: any) => e.id), ["02"]);
 });
 
 // --- Tier precedence -------------------------------------------------------
@@ -340,7 +344,7 @@ test("without an override the classification is used, and without either a safe 
 
 test("an override outside the ladder is reported and does not dispatch", () => {
 	const resolved = resolveTier({ id: "01", tierOverride: 9 }, { tier: 2 }, { maxTier: 3 });
-	assert.equal(resolved.tier, 2, "the classification stands in rather than an off-ladder tier");
+	assert.equal(resolved.tier, 2);
 	assert.equal(resolved.source, "triage");
 	assert.deepEqual(codes(resolved.issues), ["tier-override-out-of-range"]);
 });
@@ -364,7 +368,6 @@ test("a status change rewrites frontmatter and prose, and a plain read sees it",
 		before
 			.replace("status: ready", "status: in-progress")
 			.replace("**Status:** ready", "**Status:** in-progress"),
-		"every byte outside the two status fields is untouched",
 	);
 	assert.equal(parseTicketText(after).status, "in-progress");
 	assert.match(after, /^\*\*Status:\*\* in-progress$/m);
@@ -389,7 +392,7 @@ test("a blocked status carries its reason in prose only, idempotently", (t) => {
 
 	assert.equal(setTicketStatus(file, "blocked", { reason: "tier 3 exhausted" }).changed, true);
 	const after = readFileSync(file, "utf8");
-	assert.match(after, /^status: blocked$/m, "frontmatter stays the machine field");
+	assert.match(after, /^status: blocked$/m);
 	assert.match(after, /^\*\*Status:\*\* blocked — tier 3 exhausted$/m);
 
 	const again = setTicketStatus(file, "blocked", { reason: "tier 3 exhausted" });
@@ -397,7 +400,7 @@ test("a blocked status carries its reason in prose only, idempotently", (t) => {
 	assert.equal(readFileSync(file, "utf8"), after);
 
 	assert.equal(setTicketStatus(file, "ready").changed, true);
-	assert.match(readFileSync(file, "utf8"), /^\*\*Status:\*\* ready$/m, "leaving blocked drops the reason");
+	assert.match(readFileSync(file, "utf8"), /^\*\*Status:\*\* ready$/m);
 	assert.doesNotMatch(readFileSync(file, "utf8"), /tier 3 exhausted/);
 });
 
@@ -440,7 +443,6 @@ test("a CRLF ticket is written back without changing its line endings", (t) => {
 	assert.equal(
 		readFileSync(file, "utf8"),
 		"\uFEFF---\r\nstatus: done\r\nblocked-by: []\r\n---\r\n\r\n# 01: A ticket\r\n\r\n**Status:** done\r\n",
-		"the inserted field and both edits keep the file's CRLF endings, and the BOM survives",
 	);
 	assert.equal(parseTicketText(readFileSync(file, "utf8")).status, "done");
 });

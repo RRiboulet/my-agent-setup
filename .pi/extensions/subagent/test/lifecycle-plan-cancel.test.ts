@@ -7,11 +7,13 @@
 // second place (after the finaliser) that knows a step ended.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import * as path from "node:path";
 import { test } from "node:test";
 
 import type { RunRecord } from "../index.ts";
 import type { PlanRecord, PlanStepState } from "../plan.ts";
-import { withHarness, type Harness } from "./lifecycle-harness.ts";
+import { SESSION_ID, withHarness, type Harness } from "./lifecycle-harness.ts";
 import { waitFor } from "./helpers.ts";
 
 const completed = (output = "ok") => ({ version: 1, status: "completed", output, finishedAt: Date.now() });
@@ -255,5 +257,53 @@ test("a plan-level cancel drops the steps that never started and the queued one"
 			settled.steps.map((step) => step.status),
 			["cancelled", "cancelled", "cancelled"],
 		);
+	});
+});
+
+test("cancelling a plan while prepareHandoffSession is pending spawns zero tmux sessions for that step", async () => {
+	await withHarness({ maxConcurrent: "4", sessionManager: "liveBranch" }, async (h, agentDir) => {
+		const sessionManager = h.ctx.sessionManager as {
+			getBranch: (leafId?: string) => unknown[];
+		};
+		const origGetBranch = sessionManager.getBranch.bind(sessionManager);
+		let cancelPromise: Promise<unknown> | undefined;
+		sessionManager.getBranch = (leafId?: string) => {
+			const plans = JSON.parse(
+				readFileSync(path.join(agentDir, "tmux-subagents", SESSION_ID, "plans.json"), "utf8"),
+			) as PlanRecord[];
+			if (!cancelPromise && plans[0]) {
+				// Fires subagent_cancel while forkLiveBranch's async writeFile is in flight.
+				cancelPromise = h.call("subagent_cancel", { id: plans[0].id });
+			}
+			return origGetBranch(leafId);
+		};
+
+		const { plan } = await callPlan(h, [
+			{ id: "a", task: "task a" },
+			{ id: "b", task: "task b", handoff: "fork" },
+		]);
+		assert.ok(cancelPromise, "getBranch must trigger cancellation while prepareHandoffSession is pending");
+		await cancelPromise;
+
+		const settled = await waitForPlan(h, (candidate) => candidate.status === "cancelled", "the plan never cancelled");
+		const stepB = stepOf(settled, "b");
+		assert.equal(stepB.status, "cancelled");
+		const newSessions = h.execCalls.filter((call) => call.args.includes("new-session"));
+		assert.equal(
+			newSessions.length,
+			1,
+			`only step a may spawn a tmux session; step b must not spawn an orphan (${JSON.stringify(newSessions)})`,
+		);
+		const runBId = stepB.runIds.at(-1);
+		if (runBId) {
+			assert.equal(
+				h.execCalls.filter((call) => call.args.some((arg) => arg.includes(runBId))).length,
+				0,
+				`zero tmux exec calls for cancelled step b (${runBId})`,
+			);
+			const storedB = (await h.readRuns()).find((run) => run.id === runBId);
+			if (storedB) assert.equal(storedB.status, "cancelled");
+		}
+		assert.equal(plan.status, "cancelled");
 	});
 });

@@ -1,43 +1,27 @@
-// ladder.mjs — the dispatch policy the orchestrate skill reads, and a pure
+// wave-ladder.mjs — the dispatch policy the wave orchestrator reads, and a pure
 // reader for it.
 //
-// `.pi/skills/orchestrate/ladder.json` is the ONE place the roster, the tier
-// models, the thinking pins and the reviewer gate are written. The skill prose
-// points at this file; a future enforcement extension reads the same one. A
-// second copy of the table in a prompt is the failure this module exists to
-// prevent.
+// `.pi/extensions/orchestrator/wave-ladder.json` is the single bundled source
+// for the roster, tier models, thinking pins, and reviewer gate. Callers using
+// `readLadder()` without an explicit path resolve optional overrides in order:
+//   1. `process.env.PI_ORCHESTRATE_LADDER` (`source: "env"`)
+//   2. `<PI_CODING_AGENT_DIR or ~/.pi/agent>/orchestrate-ladder.json` when present (`source: "agent-dir"`)
+//   3. bundled `wave-ladder.json` beside this module (`source: "file"`)
 //
-// Reader rule, copied from `.pi/extensions/orchestrator/config.ts`: a malformed
-// file is never fatal. `readLadder` returns a ladder plus a list of warnings and
-// never throws; a caller shows the warnings and dispatches from the safe
-// built-in ladder rather than trapping a session. The one deliberate difference
-// is absence. An absent project config there is normal and silent; an absent
-// ladder here is not — this repository ships one, so its absence means dispatch
-// would run from an unversioned copy and is warned about like any other
-// malformation.
-//
-// Why a model is two keys (`provider`, `model`) rather than one
-// `provider/model` string: model ids contain slashes of their own
-// (`typesafe/jev-1.13`), so the single-string form cannot be split without
-// guessing where the provider ends. The advisor config in
-// `.pi/extensions/orchestrator/config.ts` makes the same choice for the same
-// reason, and the subagent tools take `provider` and `model` separately anyway.
-//
-// Why the tiers must be contiguous from tier 1: escalation is "one tier up".
-// A ladder with a hole at tier 2 turns that step into a jump past the workhorse
-// model, which is a silent policy change rather than a dispatch. A hole is
-// therefore treated as a malformed tier table and the built-in three are used.
+// Reader rule: a malformed or absent file never throws. `readLadder` returns a
+// usable ladder plus warnings and falls back to `DEFAULT_LADDER` (`source: "default"`).
 
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
-export const LADDER_BASENAME = "ladder.json";
+export const LADDER_BASENAME = "wave-ladder.json";
+export const AGENT_DIR_LADDER_BASENAME = "orchestrate-ladder.json";
 export const LADDER_VERSION = 1;
 
 /**
- * pi's thinking levels, in ascending order. A level outside this list cannot be
- * dispatched: the subagent tools take this closed enum, so a typo would be
- * rejected at run start rather than read as a nearby level.
+ * pi's thinking levels, in ascending order.
  */
 export const THINKING_LEVELS = Object.freeze([
 	"off",
@@ -50,9 +34,7 @@ export const THINKING_LEVELS = Object.freeze([
 ]);
 
 /**
- * The types the dispatcher knows how to write a task for. A roster entry outside
- * this list cannot be dispatched — there is no prompt for it — so it is dropped
- * with a warning instead of reaching a run that has nothing to say.
+ * The types the dispatcher knows how to write a task for.
  */
 export const KNOWN_ROSTER_TYPES = Object.freeze([
 	"triage",
@@ -63,11 +45,7 @@ export const KNOWN_ROSTER_TYPES = Object.freeze([
 ]);
 
 /**
- * Types the tier ladder cannot serve at all. Triage decides which tier a ticket
- * needs; it does not do the ticket, and the tier models are not decision models.
- * A tier-exempt type therefore has to be pinned to a literal (provider, model)
- * pair — with no pin it cannot be dispatched, which is a warning rather than a
- * silent fallback to Tier 1.
+ * Types the tier ladder cannot serve at all.
  */
 export const TIER_EXEMPT_TYPES = Object.freeze(["triage"]);
 
@@ -80,15 +58,7 @@ function deepFreeze(value) {
 }
 
 /**
- * The safe ladder: what a caller dispatches from when the file is missing,
- * unreadable or malformed. It is the shipped `ladder.json` normalized, and
- * `ladder.test.mjs` asserts the two stay equal so this constant cannot drift
- * from the data file it stands in for.
- *
- * Capability here is bought with deliberation rather than model size: every
- * tier model is free, so the quality dial is thinking. Tier 1 spends `max` on
- * small work, Tier 2 stays at `medium`, and only the escalation target runs at
- * `high`.
+ * The safe built-in ladder: matches the shipped `wave-ladder.json`.
  */
 export const DEFAULT_LADDER = deepFreeze({
 	version: LADDER_VERSION,
@@ -197,14 +167,6 @@ function normalizeTier(raw, index, warnings) {
 	return { tier, provider: provider.trim(), model: model.trim(), thinking };
 }
 
-/**
- * Validate the tier table. Every tier is checked, unusable entries are dropped
- * with a warning, and the survivors must then cover 1..N with no hole — a hole
- * makes "escalate one tier" skip a rung — and reach the built-in top tier: a
- * ladder whose ceiling is missing is silent drift, since escalation from the
- * second-highest tier would find no target and every exhausted ticket would
- * block without a warning saying why.
- */
 function normalizeTiers(raw, warnings) {
 	if (raw === undefined) {
 		warnings.push("tiers is missing; using the built-in three tiers");
@@ -251,20 +213,6 @@ function normalizeTiers(raw, warnings) {
 
 // --- Pins ------------------------------------------------------------------
 
-/**
- * One type's dispatch pin. Two shapes, because they answer different questions:
- *
- *   * `{ provider, model, thinking? }` — a literal model. Tier-exempt: the type
- *     does not dispatch from the ladder at all. Triage is the one type that
- *     must use this shape, because a decision model is not a tier model.
- *   * `{ tier, thinking? }` — dispatch at a rung of the ladder, optionally at a
- *     different thinking level than the tier's. The reviewer and verifier are
- *     pinned this way; the verifier's `high` is deliberate, since its pass/fail
- *     authorizes the commit.
- *
- * Both keys at once is a typo rather than an intent — nothing says which wins —
- * so such a pin is dropped with a warning instead of guessed at.
- */
 function normalizePin(type, raw, tiers, warnings) {
 	if (!isPlainObject(raw)) {
 		warnings.push(`pins.${type} must be an object; ignoring it`);
@@ -314,8 +262,6 @@ function normalizePin(type, raw, tiers, warnings) {
 function normalizePins(raw, roster, tiers, warnings) {
 	const pins = {};
 	if (raw === undefined) {
-		// Not an error by itself: a roster of purely tiered types needs no pins.
-		// The coverage pass below is what reports a type that cannot be served.
 		return pins;
 	}
 	if (!isPlainObject(raw)) {
@@ -351,15 +297,6 @@ function normalizePins(raw, roster, tiers, warnings) {
 
 // --- Gates -----------------------------------------------------------------
 
-/**
- * Gate policy. Kept here, next to the models it gates, because a rule written in
- * skill prose and a model written here drift apart the moment one is edited.
- * `throughTier` is the highest tier whose output still passes the reviewer: Tier
- * 1 gets an independent grader, Tier 2 and above are ungated. The gate cannot be
- * disabled from config: `throughTier: 0` is refused with a warning and the
- * built-in gate is kept, because dropping the Tier-1 grader is exactly the
- * silent quality-floor loss this ladder exists to prevent.
- */
 function normalizeGates(raw, warnings) {
 	const gates = { reviewer: { throughTier: 1 } };
 	if (raw === undefined) return gates;
@@ -390,14 +327,38 @@ function normalizeGates(raw, warnings) {
 	return { reviewer: { throughTier } };
 }
 
-// --- Reader ----------------------------------------------------------------
+// --- Reader & Pin Resolution -----------------------------------------------
 
 /**
- * Validate an already-parsed ladder. Never throws: every field is checked
- * independently, an unusable one falls back to its built-in value, and anything
- * that could not be read is reported in `warnings`. Unknown top-level keys are
- * ignored on purpose, so a ladder written for a newer build still dispatches.
+ * Resolve a pinned role (`"triage" | "reviewer" | "verifier"`, etc.) from a
+ * normalized (or raw) ladder to `{ provider, model, thinking? }`, or `null`
+ * if the role has no usable pin.
  */
+export function resolvePin(ladder, role) {
+	if (!isPlainObject(ladder) || !isPlainObject(ladder.pins)) return null;
+	const pin = ladder.pins[role];
+	if (!isPlainObject(pin)) return null;
+	const isModelPin = pin.kind === "model" || (pin.kind === undefined && nonEmptyString(pin.provider) && nonEmptyString(pin.model));
+	if (isModelPin) {
+		if (!nonEmptyString(pin.provider) || !nonEmptyString(pin.model)) return null;
+		return pin.thinking !== undefined
+			? { provider: pin.provider.trim(), model: pin.model.trim(), thinking: pin.thinking }
+			: { provider: pin.provider.trim(), model: pin.model.trim() };
+	}
+	const isTierPin = pin.kind === "tier" || (pin.kind === undefined && typeof pin.tier === "number");
+	if (isTierPin) {
+		if (!Array.isArray(ladder.tiers)) return null;
+		const tierEntry = ladder.tiers.find((entry) => entry && entry.tier === pin.tier);
+		if (!tierEntry) return null;
+		return {
+			provider: tierEntry.provider,
+			model: tierEntry.model,
+			thinking: pin.thinking ?? tierEntry.thinking,
+		};
+	}
+	return null;
+}
+
 export function normalizeLadder(raw) {
 	const warnings = [];
 	if (!isPlainObject(raw)) {
@@ -421,26 +382,47 @@ export function normalizeLadder(raw) {
 	};
 }
 
+function resolveDefaultLadderTarget(options) {
+	const envLadder = typeof process.env.PI_ORCHESTRATE_LADDER === "string" ? process.env.PI_ORCHESTRATE_LADDER.trim() : "";
+	if (envLadder.length > 0) {
+		return { filePath: envLadder, source: "env" };
+	}
+	const agentDir =
+		options?.agentDir ?? (process.env.PI_CODING_AGENT_DIR?.trim() || path.join(homedir(), ".pi", "agent"));
+	if (typeof agentDir === "string" && agentDir.length > 0) {
+		const candidate = path.join(agentDir, AGENT_DIR_LADDER_BASENAME);
+		if (existsSync(candidate)) {
+			return { filePath: candidate, source: "agent-dir" };
+		}
+	}
+	return { filePath: defaultLadderPath(), source: "file" };
+}
+
 /**
- * Read a ladder file. `path` defaults to the `ladder.json` beside this module;
- * tests point it at a temporary directory.
+ * Read a ladder file. When `explicitPath` is omitted, checks overrides in order:
+ *   1. `process.env.PI_ORCHESTRATE_LADDER` (`source: "env"`)
+ *   2. `<agentDir or PI_CODING_AGENT_DIR or ~/.pi/agent>/orchestrate-ladder.json` if it exists (`source: "agent-dir"`)
+ *   3. bundled `wave-ladder.json` beside this module (`source: "file"`)
  *
- * The return value is `{ ladder, warnings, source }`. `source` is `"file"` when
- * the file was found and parsed (even if parts of it were malformed, which the
- * warnings then describe) and `"default"` when nothing could be read at all.
- * The ladder is always a usable object, and mutating it never touches
- * `DEFAULT_LADDER`.
+ * Never throws; returns `{ ladder, warnings, source }`, falling back to
+ * `DEFAULT_LADDER` (`source: "default"`) if the chosen file cannot be read or
+ * parsed.
  */
-export function readLadder(path = defaultLadderPath()) {
+export function readLadder(explicitPath, options) {
+	const target =
+		explicitPath !== undefined
+			? { filePath: explicitPath, source: "file" }
+			: resolveDefaultLadderTarget(options);
+
 	let text;
 	try {
-		text = readFileSync(path, "utf8");
+		text = readFileSync(target.filePath, "utf8");
 	} catch (error) {
 		const code = error !== null && typeof error === "object" ? error.code : undefined;
 		const reason =
 			code === "ENOENT"
-				? `there is no ladder file at ${path}`
-				: `could not read the ladder at ${path}: ${message(error)}`;
+				? `there is no ladder file at ${target.filePath}`
+				: `could not read the ladder at ${target.filePath}: ${message(error)}`;
 		return {
 			ladder: cloneLadder(DEFAULT_LADDER),
 			warnings: [`${reason}; using the built-in ladder`],
@@ -454,11 +436,11 @@ export function readLadder(path = defaultLadderPath()) {
 	} catch (error) {
 		return {
 			ladder: cloneLadder(DEFAULT_LADDER),
-			warnings: [`the ladder at ${path} is not valid JSON: ${message(error)}; using the built-in ladder`],
+			warnings: [`the ladder at ${target.filePath} is not valid JSON: ${message(error)}; using the built-in ladder`],
 			source: "default",
 		};
 	}
 
 	const { ladder, warnings } = normalizeLadder(parsed);
-	return { ladder, warnings, source: "file" };
+	return { ladder, warnings, source: target.source };
 }

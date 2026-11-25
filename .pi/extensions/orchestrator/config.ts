@@ -61,6 +61,7 @@ import { join } from "node:path";
 export const GATE_CONFIG_BASENAME = "orchestrator.json";
 export const GATE_CONFIG_VERSION = 1;
 export const DEFAULT_ATTEMPT_CAP = 3;
+export const DEFAULT_LOOP_ATTEMPT_CAP = 3;
 export const DEFAULT_VERIFICATION_TIMEOUT_MS = 300_000;
 export const DEFAULT_VERIFICATION_MAX_OUTPUT_BYTES = 16_000;
 /** A verification run longer than an hour is a configuration mistake. */
@@ -122,7 +123,9 @@ export interface VerificationConfig {
 	successPattern: string | null;
 }
 
-/** Which conditions may stop a settlement. Every key defaults to `false`. */
+/** Which conditions may stop a settlement. Every opt-in key defaults to
+ *  `false`; `wave` defaults to `true` so an active wave cannot silently settle
+ *  early unless a project disables it. */
 export interface GateBlockConfig {
 	openTodos: boolean;
 	repeatedFailure: boolean;
@@ -132,6 +135,8 @@ export interface GateBlockConfig {
 	 *  an attempt on a turn with nothing new to act on. The parent is woken once
 	 *  when the last run settles. */
 	waitForSubagents: boolean;
+	/** Block settlement when an active wave still has unfinished tickets. */
+	wave: boolean;
 }
 
 /**
@@ -170,8 +175,10 @@ export interface AdvisorConfig {
 
 export interface GateConfig {
 	version: number;
-	/** Gate blocks allowed on one branch. `0` disables blocking entirely. */
+	/** Settlement gate blocks allowed on one branch. `0` disables settlement blocking entirely. */
 	attemptCap: number;
+	/** Mid-run loop-breaker blocks allowed on one branch. `0` disables loop blocking entirely. */
+	loopAttemptCap: number;
 	block: GateBlockConfig;
 	/** `null` means no command is configured: verification is only reported. */
 	verification: VerificationConfig | null;
@@ -194,7 +201,8 @@ export interface GateConfigRead {
 export const DEFAULT_GATE_CONFIG: GateConfig = {
 	version: GATE_CONFIG_VERSION,
 	attemptCap: DEFAULT_ATTEMPT_CAP,
-	block: { openTodos: false, repeatedFailure: false, loops: false, waitForSubagents: false },
+	loopAttemptCap: DEFAULT_LOOP_ATTEMPT_CAP,
+	block: { openTodos: false, repeatedFailure: false, loops: false, waitForSubagents: false, wave: true },
 	verification: null,
 	advisor: null,
 	workspace: { lockScope: "worktree" },
@@ -209,6 +217,7 @@ function defaultConfig(): GateConfig {
 	return {
 		version: GATE_CONFIG_VERSION,
 		attemptCap: DEFAULT_ATTEMPT_CAP,
+		loopAttemptCap: DEFAULT_LOOP_ATTEMPT_CAP,
 		block: { ...DEFAULT_GATE_CONFIG.block },
 		verification: null,
 		advisor: null,
@@ -229,6 +238,19 @@ function normalizeAttemptCap(record: Record<string, unknown>): { attemptCap: num
 	return { attemptCap: value, warnings };
 }
 
+function normalizeLoopAttemptCap(record: Record<string, unknown>): { loopAttemptCap: number; warnings: string[] } {
+	const warnings: string[] = [];
+	const value = record.loopAttemptCap;
+	if (value === undefined) return { loopAttemptCap: DEFAULT_LOOP_ATTEMPT_CAP, warnings };
+	if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || !Number.isInteger(value)) {
+		return {
+			loopAttemptCap: DEFAULT_LOOP_ATTEMPT_CAP,
+			warnings: [`loopAttemptCap must be a non-negative integer; using ${DEFAULT_LOOP_ATTEMPT_CAP}`],
+		};
+	}
+	return { loopAttemptCap: value, warnings };
+}
+
 function normalizeBlock(raw: unknown): { block: GateBlockConfig; warnings: string[] } {
 	const block = { ...DEFAULT_GATE_CONFIG.block };
 	const warnings: string[] = [];
@@ -241,7 +263,7 @@ function normalizeBlock(raw: unknown): { block: GateBlockConfig; warnings: strin
 		const value = record[key];
 		if (value === undefined) continue;
 		if (typeof value !== "boolean") {
-			warnings.push(`block.${key} must be a boolean; leaving it off`);
+			warnings.push(`block.${key} must be a boolean; leaving it ${block[key] ? "on" : "off"}`);
 			continue;
 		}
 		block[key] = value;
@@ -450,6 +472,7 @@ export function normalizeGateConfig(raw: unknown): { config: GateConfig; warning
 		warnings.push(`unsupported config version ${String(record.version)}; using known fields`);
 	}
 	const attempt = normalizeAttemptCap(record);
+	const loopAttempt = normalizeLoopAttemptCap(record);
 	const block = normalizeBlock(record.block);
 	const verification = normalizeVerification(record.verification);
 	const advisor = normalizeAdvisor(record.advisor);
@@ -458,6 +481,7 @@ export function normalizeGateConfig(raw: unknown): { config: GateConfig; warning
 		config: {
 			version: GATE_CONFIG_VERSION,
 			attemptCap: attempt.attemptCap,
+			loopAttemptCap: loopAttempt.loopAttemptCap,
 			block: block.block,
 			verification: verification.verification,
 			advisor: advisor.advisor,
@@ -466,6 +490,7 @@ export function normalizeGateConfig(raw: unknown): { config: GateConfig; warning
 		warnings: [
 			...warnings,
 			...attempt.warnings,
+			...loopAttempt.warnings,
 			...block.warnings,
 			...verification.warnings,
 			...advisor.warnings,
