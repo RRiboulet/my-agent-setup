@@ -19,6 +19,7 @@
         // sharing state with another. Empty values are harmless here.
         "OPENCODE_API_KEY": "${localEnv:OPENCODE_API_KEY}",
         "OPENROUTER_API_KEY": "${localEnv:OPENROUTER_API_KEY}",
+        "MISTRAL_API_KEY": "${localEnv:MISTRAL_API_KEY}",
         "BRAVE_API_KEY": "${localEnv:BRAVE_API_KEY}",
         "TYPESAFE_API_KEY": "${localEnv:TYPESAFE_API_KEY}",
         "PI_VOICE_API_KEY": "${localEnv:OPENROUTER_API_KEY}",

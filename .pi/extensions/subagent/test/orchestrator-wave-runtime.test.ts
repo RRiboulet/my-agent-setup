@@ -106,7 +106,7 @@ test("happy-path wave lifecycle through orchestratorExtension, git commit guard,
 
 		const { host, branch } = createLiveBranchHost({
 			cwd: repo,
-			model: { provider: "mistral", id: "zai-glm-5-3" },
+			model: { provider: "mistral", id: "zai-glm-5-3-flash" },
 		});
 		orchestratorExtension(host.pi);
 		await host.fire("session_start", {});
