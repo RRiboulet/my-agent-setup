@@ -1,0 +1,320 @@
+#!/usr/bin/env bash
+#
+# pi-agent-dir — the package-free agent dir that makes this checkout's worktrees
+# usable, on a host that also installs this repo as a pi package.
+#
+# Why it exists. A linked worktree discovers *its own* `.pi/extensions`, while an
+# installed package resolves to the *main checkout's* copy. pi treats the second
+# registration of the same tool name (and of the subagent launcher's
+# `--attach-subagent` flag) as a load error, so a child rooted in
+# `.worktrees/<slug>` exits 1 before any model call:
+#
+#   Tool "get_goal" conflicts with .../.worktrees/<slug>/.pi/extensions/goal.ts
+#
+# There is no flag or env var that suppresses only the package copy, so the fix
+# is the one the devcontainer already uses (README, "One copy of the extensions,
+# never two"): give the checkout an agent dir of its own that installs no
+# package, and let the working tree's `.pi/` be the single source. This script
+# creates that dir on a host and, with `--shell`, a shell hook that selects it
+# whenever you run `pi` inside the checkout or any worktree of it.
+#
+# Usage:
+#   pi-agent-dir                 ensure this repo's per-project agent dir; print it
+#   pi-agent-dir --project <p>   same, for another checkout (or a worktree of one)
+#   pi-agent-dir --print         print the path only; change nothing
+#   pi-agent-dir --shell         also install the cwd hook in ~/.bashrc, once
+#   pi-agent-dir --check         report the state; exit 1 if a package would conflict
+#
+#   -h, --help                   this text
+#
+# Environment:
+#   PI_AGENT_ROOT   directory the agent dirs live in  (default: ~/.pi)
+#   PI_AGENT_BASE   shared agent dir to seed from      (default: $PI_AGENT_ROOT/agent)
+#   PI_SHELL_RC     file `--shell` appends to          (default: ~/.bashrc)
+#
+# Naming: `$PI_AGENT_ROOT/agent-<main checkout directory name>` — the *shape*
+# `.devcontainer/devcontainer.json` declares for this repo (and `lol-dataset`'s
+# devcontainer for its own): a sibling of the shared agent dir, so one host can
+# hold both without either being nested inside the other.
+#
+# The name is the checkout directory's, not the project's, and the two coincide
+# only when the clone was made into a directory named after the repo. `gh repo
+# clone` does that; a devcontainer mount does not. This repo is mounted at
+# /workspace, so this script computes `agent-workspace` *inside* the container
+# while `PI_CODING_AGENT_DIR` there carries the project's name. That is intended
+# rather than drift: the script exists for hosts (the container installs no
+# package, so it needs no script-created dir of its own), and a host that names
+# the directory differently needs no configuring either, because the hook below
+# derives the same name at call time. Resolving through `--git-common-dir`
+# rather than `--show-toplevel` is load-bearing: a worktree must map to its main
+# checkout's dir, or every worktree would get a fresh, unseeded one of its own.
+#
+# What it writes, and what it never touches:
+#   * settings.json — seeded from the base agent dir with `.packages` and the
+#     package bookkeeping in `.extensionChangelogVersions` removed. Written only
+#     when missing: from then on the file belongs to this project, like the
+#     container's does (postCreate.sh makes the same promise).
+#   * auth.json, models-store.json, models.json, voice.json,
+#     review-triage.json — copied when absent, never overwritten.
+#   * trust.json — the main checkout added, other entries preserved. Project
+#     trust is what makes pi read `<checkout>/.pi/` at all; without it the
+#     package-free dir is a *silent empty* agent rather than a working one.
+#     Saved decisions apply to a directory or its parents, so one entry covers
+#     `.worktrees/<slug>`.
+#   * mcp.json — seeded once from this package's catalogue (`mcp/catalogue.json`,
+#     every server disabled) through `tools/mcp-catalogue.mjs --if-missing`, and
+#     never read, merged into or rewritten afterwards: from then on the file is
+#     this project's, so an entry deleted here stays deleted across re-runs. The
+#     module owns that contract; this script only calls it. Failing to seed it is
+#     a warning rather than a `die`, because what it adds is two disabled servers
+#     while aborting would throw away the settings, credentials and trust above.
+#   * ~/.bashrc — only with `--shell`, inside a marker-delimited block, exactly
+#     once.
+#
+# It does not install, remove or rewrite a pi package: that stays `pi install`
+# / `pi remove`. On a host that keeps the package for *other* projects, that is
+# the point — this repo just stops loading it.
+#
+# Verification (the second line must print 0; `grep -c` exits 1 on no matches,
+# which is why the `|| true` is there):
+#
+#   D=$(bin/pi-agent-dir --print)          # e.g. ~/.pi/agent-<main checkout directory name>
+#   (cd "$PWD/.worktrees/x" && PI_CODING_AGENT_DIR="$D" pi --list-models 2>&1 | grep -c 'conflicts with' || true)
+
+set -euo pipefail
+
+AGENT_ROOT="${PI_AGENT_ROOT:-$HOME/.pi}"
+BASE="${PI_AGENT_BASE:-$AGENT_ROOT/agent}"
+SHELL_RC="${PI_SHELL_RC:-$HOME/.bashrc}"
+MARKER_BEGIN='# >>> pi-agent-dir >>>'
+MARKER_END='# <<< pi-agent-dir <<<'
+
+# The script's own directory, resolved once: `--project` can point at another
+# checkout, and the catalogue module below is this package's, so it is found
+# relative to this script rather than to the caller's cwd or to $PROJECT.
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+CATALOGUE_CLI="$SELF_DIR/../tools/mcp-catalogue.mjs"
+
+PROJECT=''
+PRINT_ONLY=''
+INSTALL_SHELL=''
+CHECK_ONLY=''
+
+die() {
+	printf 'pi-agent-dir: %s\n' "$*" >&2
+	exit 1
+}
+
+note() {
+	printf '%s\n' "$*" >&2
+}
+
+usage() {
+	sed -n '3,/^#   --shell/p' "$0" | sed 's/^# \{0,1\}//'
+}
+
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--project)
+		[ $# -ge 2 ] || die "--project needs a path"
+		PROJECT="$2"
+		shift 2
+		;;
+	--project=*)
+		PROJECT="${1#*=}"
+		shift
+		;;
+	--print) PRINT_ONLY=1; shift ;;
+	--shell) INSTALL_SHELL=1; shift ;;
+	--check) CHECK_ONLY=1; shift ;;
+	-h | --help) usage; exit 0 ;;
+	*) die "unknown argument: $1 (try --help)" ;;
+	esac
+done
+
+# The checkout to serve. Defaults to the repo this script lives in, so running
+# `bin/pi-agent-dir` from any subdirectory of any worktree does the right thing.
+if [ -z "$PROJECT" ]; then
+	PROJECT="$SELF_DIR"
+fi
+[ -d "$PROJECT" ] || die "not a directory: $PROJECT"
+
+# The *main* checkout, not the tree we were pointed at. `--git-common-dir` is
+# absolute on a modern git and the parent of it is the main checkout; from the
+# main checkout itself this is a no-op. A failure here means "not a checkout",
+# and guessing (dirname "" is ".") would write an agent dir for the wrong repo.
+COMMON="$(git -C "$PROJECT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" ||
+	die "not a git checkout: $PROJECT"
+[ -n "$COMMON" ] || die "cannot resolve the git common dir of $PROJECT"
+MAIN="$(dirname "$COMMON")"
+[ -d "$MAIN/.git" ] || [ -f "$MAIN/.git" ] || die "resolved a main checkout that is not one: $MAIN"
+
+NAME="$(basename "$MAIN")"
+DIR="$AGENT_ROOT/agent-$NAME"
+
+if [ -n "$PRINT_ONLY" ]; then
+	printf '%s\n' "$DIR"
+	exit 0
+fi
+
+if [ -n "$CHECK_ONLY" ]; then
+	status=0
+	if [ -f "$DIR/settings.json" ]; then
+		if grep -q '"packages"' "$DIR/settings.json"; then
+			note "FAIL settings.json in $DIR still lists packages: this dir would conflict with project discovery"
+			status=1
+		fi
+		printf 'settings: %s\n' "$DIR/settings.json"
+	else
+		note "FAIL no per-project agent dir at $DIR (run: bin/pi-agent-dir)"
+		status=1
+	fi
+	if [ -f "$DIR/trust.json" ] && grep -qF "$MAIN" "$DIR/trust.json"; then
+		printf 'trust:    %s includes %s\n' "$DIR/trust.json" "$MAIN"
+	else
+		note "FAIL $DIR/trust.json does not trust $MAIN: the package-free dir would load no extensions or skills"
+		status=1
+	fi
+	# WARN, not FAIL: the dir works without a catalogue. It only means no MCP
+	# servers come seeded, and deleting this file is a legitimate way to keep a
+	# project off them altogether. The same weight for a file that exists but does
+	# not parse, which is *worse* than a missing one and reads as healthy without
+	# this check: seeding is `--if-missing`, so it never rewrites a file that is
+	# there, and the broken file survives every re-run — while pi reports its parse
+	# error at each session start and uses none of the servers in it. Validating
+	# here is what turns "the file is present" into "the file is usable".
+	if [ -f "$DIR/mcp.json" ]; then
+		if ! command -v jq >/dev/null 2>&1; then
+			# Not a verdict on the file: jq is a hard dependency of the seeding path
+			# (`--check` is the one path that runs before that guard), so say what is
+			# missing instead of blaming the catalogue.
+			note "WARN cannot check $DIR/mcp.json: jq is not installed"
+		elif jq -e . "$DIR/mcp.json" >/dev/null 2>&1; then
+			printf 'catalogue: %s\n' "$DIR/mcp.json"
+		else
+			note "WARN $DIR/mcp.json exists but is not valid JSON (a 0-byte file counts): pi reports it at every session start and no server in it is usable — delete it and re-run bin/pi-agent-dir to re-seed"
+		fi
+	else
+		note "WARN no $DIR/mcp.json: run bin/pi-agent-dir to seed this package's MCP catalogue (nothing connects either way)"
+	fi
+	if grep -qF "$MARKER_BEGIN" "$SHELL_RC" 2>/dev/null; then
+		printf 'shell:    %s has the cwd hook\n' "$SHELL_RC"
+	else
+		note "WARN $SHELL_RC has no cwd hook: run bin/pi-agent-dir --shell, or export PI_CODING_AGENT_DIR=$DIR yourself"
+	fi
+	exit "$status"
+fi
+
+command -v jq >/dev/null 2>&1 || die "jq is required to seed settings.json and trust.json"
+
+mkdir -p "$DIR"
+
+# --- settings: the whole point is the absence of .packages -------------------
+if [ -f "$DIR/settings.json" ]; then
+	note "kept     $DIR/settings.json"
+elif [ -f "$BASE/settings.json" ] && jq -e . "$BASE/settings.json" >/dev/null 2>&1; then
+	jq 'del(.packages, .extensionChangelogVersions)' "$BASE/settings.json" >"$DIR/settings.json.tmp" &&
+		[ -s "$DIR/settings.json.tmp" ] ||
+		{ rm -f "$DIR/settings.json.tmp"; die "could not derive settings.json from $BASE/settings.json"; }
+	mv "$DIR/settings.json.tmp" "$DIR/settings.json"
+	note "created  $DIR/settings.json (from $BASE/settings.json, minus packages)"
+else
+	# No base settings to inherit: an empty object still works, but says so,
+	# because provider/model/tool defaults are now this dir's to configure.
+	printf '{}\n' >"$DIR/settings.json"
+	note "created  $DIR/settings.json (minimal: $BASE/settings.json was missing or invalid)"
+fi
+
+# --- credentials and per-machine extension config: copied once --------------
+for name in auth.json models.json models-store.json voice.json review-triage.json; do
+	if [ -f "$DIR/$name" ]; then
+		continue
+	fi
+	if [ -f "$BASE/$name" ]; then
+		cp "$BASE/$name" "$DIR/$name"
+		[ "$name" = "auth.json" ] && chmod 600 "$DIR/auth.json"
+		note "copied   $DIR/$name"
+	fi
+done
+
+# --- project trust: additive, so a second project does not evict the first ---
+if [ -f "$DIR/trust.json" ] && ! jq -e . "$DIR/trust.json" >/dev/null 2>&1; then
+	# pi's own reader throws on an unparseable trust.json at every startup, so
+	# repair it rather than leaving a file that bricks the dir.
+	note "warning: $DIR/trust.json was not valid JSON; rewriting it"
+	rm -f "$DIR/trust.json"
+fi
+if [ -f "$DIR/trust.json" ]; then
+	jq --arg main "$MAIN" '. + {($main): true}' "$DIR/trust.json" >"$DIR/trust.json.tmp" &&
+		mv "$DIR/trust.json.tmp" "$DIR/trust.json"
+else
+	jq -n --arg main "$MAIN" '{($main): true}' >"$DIR/trust.json.tmp" && mv "$DIR/trust.json.tmp" "$DIR/trust.json"
+fi
+
+# --- MCP catalogue: seeded once, then the project's own ---------------------
+# `--if-missing` is the seeding semantics (spec R5): create the file from the
+# catalogue only when it is absent, and otherwise leave it untouched — not read,
+# not merged into, not rewritten — so an entry deleted on purpose is not
+# resurrected by a re-run. Merging is the *installing* mode, for a person asking;
+# this runs unattended on every rebuild, which is why the two differ.
+#
+# The module's stdout is captured and dropped: this script's stdout is the agent
+# dir and nothing else, and "kept" is the expected state of a re-run rather than
+# a report. Only a file this run created gets a line, in the same column as the
+# other seeding notes.
+#
+# A failure here is a warning, not an abort: settings, credentials and trust are
+# already seeded above, and aborting would cost them for two disabled servers.
+had_mcp=0
+[ -f "$DIR/mcp.json" ] && had_mcp=1
+if mcp_output=$(PI_CODING_AGENT_DIR="$DIR" node "$CATALOGUE_CLI" --if-missing 2>&1); then
+	if [ "$had_mcp" -eq 0 ] && [ -f "$DIR/mcp.json" ]; then
+		note "created  $DIR/mcp.json (from the catalogue, every server disabled)"
+	fi
+else
+	note "warning: could not seed $DIR/mcp.json from the catalogue; carrying on without it"
+	printf '%s\n' "$mcp_output" | sed 's/^/         /' >&2
+fi
+
+# --- optional shell hook ----------------------------------------------------
+# Generic on purpose: it derives the candidate from the checkout at call time
+# instead of baking this project's path in, so one block serves every project
+# that has a `<base>/agent-<name>` dir and never needs editing when projects
+# come or go.
+if [ -n "$INSTALL_SHELL" ]; then
+	if grep -qF "$MARKER_BEGIN" "$SHELL_RC" 2>/dev/null; then
+		note "kept     $SHELL_RC (cwd hook already present)"
+	else
+		cat >>"$SHELL_RC" <<'HOOK'
+
+# >>> pi-agent-dir >>>
+# A checkout whose repo has a per-project agent dir (created by this repo's
+# bin/pi-agent-dir) runs pi with it, so the working tree's .pi/ stays the only
+# source of extensions and a linked worktree does not load the installed
+# package's copy as well. Resolved through --git-common-dir, so a worktree maps
+# to its main checkout. Delete this block to uninstall; nothing else reads it.
+__pi_agent_dir_for_pwd() {
+	local common dir
+	common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 0
+	dir="$HOME/.pi/agent-$(basename "$(dirname "$common")")"
+	[ -f "$dir/settings.json" ] || return 0
+	printf '%s' "$dir"
+}
+pi() {
+	local dir
+	dir=$(__pi_agent_dir_for_pwd)
+	if [ -n "$dir" ]; then
+		PI_CODING_AGENT_DIR="$dir" command pi "$@"
+	else
+		command pi "$@"
+	fi
+}
+# <<< pi-agent-dir <<<
+HOOK
+		note "created  $SHELL_RC (cwd hook; start a new shell to pick it up)"
+	fi
+fi
+
+printf '%s\n' "$DIR"
+note "main checkout: $MAIN"
+note "run 'pi' from inside the checkout or any worktree to use it (new shell, or: export PI_CODING_AGENT_DIR=$DIR)"

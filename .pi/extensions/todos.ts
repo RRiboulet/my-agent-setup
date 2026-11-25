@@ -2,7 +2,11 @@
 // Upstream commit a3f8ab1 (chore(pi): migrate to earendil packages).
 //
 // Local patches on top of upstream:
-//   (none)
+//   (1) A successful todo mutation publishes the typed
+//       `orchestrator:todo-changed` event (`.pi/extensions/orchestrator/events.ts`).
+//       Both the `todo` tool and the `/todos` manager publish; list/get actions
+//       do not, because they change nothing. The directory stays the source of
+//       truth — a subscriber that misses an event can still read it.
 //
 // Provides the `todo` tool (list, list-all, get, create, update, append,
 // delete, claim, release) and the `/todos` interactive manager. Todos are
@@ -48,6 +52,7 @@ import path from "node:path";
 import fs from "node:fs/promises";
 import { existsSync } from "node:fs";
 import crypto from "node:crypto";
+import { ORCHESTRATION_EVENTS, publishOrchestrationEvent } from "./orchestrator/events.ts";
 import {
 	Container,
 	type Focusable,
@@ -1042,6 +1047,27 @@ function todoToolResult(action: TodoSingleAction, todo: TodoRecord) {
 }
 
 /**
+ * Publish the mutation event after the file write succeeded. A subscriber gets
+ * a bounded record, not the body: the todo directory remains the source of
+ * truth, and a subscriber that wants the text can read the file. Publication is
+ * total (see the events module), so a broken subscriber cannot fail the tool.
+ */
+function publishTodoChanged(
+	pi: ExtensionAPI,
+	ctx: ExtensionContext,
+	action: "create" | "update" | "append" | "delete" | "claim" | "release",
+	todo: Pick<TodoRecord, "id" | "title" | "status">,
+): void {
+	publishOrchestrationEvent(pi, ORCHESTRATION_EVENTS.todoChanged, {
+		action,
+		id: todo.id,
+		title: todo.title,
+		status: todo.status,
+		sessionId: ctx.sessionManager.getSessionId(),
+	});
+}
+
+/**
  * Build a failed tool result for an action that returns one todo. `text`
  * defaults to `error`; the three paths that differ are the id-required guard
  * (`"Error: id required"` shown, `"id required"` stored), `create`'s
@@ -1573,6 +1599,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 					});
 
 					if (isError(result)) return todoToolError("create", result.error);
+					publishTodoChanged(pi, ctx, "create", todo);
 					return todoToolResult("create", todo);
 				}
 
@@ -1602,6 +1629,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 					if (isError(result)) return todoToolError("update", result.error);
 
 					const updatedTodo = result as TodoRecord;
+					publishTodoChanged(pi, ctx, "update", updatedTodo);
 					return todoToolResult("update", updatedTodo);
 				}
 
@@ -1625,6 +1653,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 					if (isError(result)) return todoToolError("append", result.error);
 
 					const updatedTodo = result as TodoRecord;
+					publishTodoChanged(pi, ctx, "append", updatedTodo);
 					return todoToolResult("append", updatedTodo);
 				}
 
@@ -1633,6 +1662,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 					const result = await claimTodoAssignment(todosDir, params.id, ctx, Boolean(params.force));
 					if (isError(result)) return todoToolError("claim", result.error);
 					const updatedTodo = result as TodoRecord;
+					publishTodoChanged(pi, ctx, "claim", updatedTodo);
 					return todoToolResult("claim", updatedTodo);
 				}
 
@@ -1641,6 +1671,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 					const result = await releaseTodoAssignment(todosDir, params.id, ctx, Boolean(params.force));
 					if (isError(result)) return todoToolError("release", result.error);
 					const updatedTodo = result as TodoRecord;
+					publishTodoChanged(pi, ctx, "release", updatedTodo);
 					return todoToolResult("release", updatedTodo);
 				}
 
@@ -1650,7 +1681,9 @@ export default function todosExtension(pi: ExtensionAPI) {
 					if ("error" in resolved) return todoToolError("delete", resolved.error);
 					const result = await deleteTodo(todosDir, resolved.id, ctx);
 					if (isError(result)) return todoToolError("delete", result.error);
-					return todoToolResult("delete", result as TodoRecord);
+					const deletedTodo = result as TodoRecord;
+					publishTodoChanged(pi, ctx, "delete", deletedTodo);
+					return todoToolResult("delete", deletedTodo);
 				}
 			}
 		},
@@ -1856,6 +1889,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 						}
 						const updatedTodos = await listTodos(todosDir);
 						selector?.setTodos(updatedTodos);
+						publishTodoChanged(pi, ctx, "release", record);
 						ctx.ui.notify(`Released todo ${formatTodoId(record.id)}`, "info");
 						return "stay";
 					}
@@ -1868,6 +1902,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 						}
 						const updatedTodos = await listTodos(todosDir);
 						selector?.setTodos(updatedTodos);
+						publishTodoChanged(pi, ctx, "delete", record);
 						ctx.ui.notify(`Deleted todo ${formatTodoId(record.id)}`, "info");
 						return "stay";
 					}
@@ -1881,6 +1916,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 					const updatedTodos = await listTodos(todosDir);
 					selector?.setTodos(updatedTodos);
+					publishTodoChanged(pi, ctx, "update", { ...record, status: nextStatus });
 					ctx.ui.notify(
 						`${action === "close" ? "Closed" : "Reopened"} todo ${formatTodoId(record.id)}`,
 						"info",

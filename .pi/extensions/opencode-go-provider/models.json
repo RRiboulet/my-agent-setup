@@ -1,5 +1,30 @@
 [
   {
+    "id": "hungerg-free",
+    "name": "HungerG Free",
+    "api": "openai-completions",
+    "baseUrl": "https://opencode.ai/zen/go/v1",
+    "reasoning": true,
+    "input": [
+      "text",
+      "image"
+    ],
+    "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    },
+    "contextWindow": 1000000,
+    "maxTokens": 65536,
+    "compat": {
+      "supportsStore": false,
+      "supportsDeveloperRole": false,
+      "supportsStrictMode": true,
+      "maxTokensField": "max_tokens"
+    }
+  },
+  {
     "id": "mimo-v2.6-pro",
     "name": "MiMo-V2.6-Pro",
     "api": "openai-completions",
@@ -66,10 +91,10 @@
     "maxTokens": 500000
   },
   {
-    "id": "longcat-2.5-preview-free",
-    "name": "LongCat 2.5 Preview Free",
+    "id": "longcat-2.5-free",
+    "name": "LongCat 2.5 Free",
     "api": "openai-completions",
-    "baseUrl": "https://opencode.ai/zen/go/v1",
+    "baseUrl": "https://opencode.ai/inference/go/openai/v1",
     "reasoning": true,
     "input": [
       "text",
@@ -82,7 +107,7 @@
       "cacheWrite": 0
     },
     "contextWindow": 1000000,
-    "maxTokens": 131072
+    "maxTokens": 262144
   },
   {
     "id": "glm-5.3-flash",
@@ -351,7 +376,7 @@
     "baseUrl": "https://opencode.ai/zen/go/v1",
     "reasoning": true,
     "thinkingLevelMap": {
-      "off": null,
+      "off": "none",
       "minimal": null,
       "low": "low",
       "medium": "medium",
@@ -434,7 +459,7 @@
     "baseUrl": "https://opencode.ai/zen/go/v1",
     "reasoning": true,
     "thinkingLevelMap": {
-      "off": null,
+      "off": "none",
       "minimal": null,
       "low": "low",
       "medium": null,
@@ -489,7 +514,7 @@
     "baseUrl": "https://opencode.ai/zen/go/v1",
     "reasoning": true,
     "thinkingLevelMap": {
-      "off": null,
+      "off": "none",
       "minimal": null,
       "low": "low",
       "medium": "medium",
@@ -544,7 +569,7 @@
     "baseUrl": "https://opencode.ai/zen/go/v1",
     "reasoning": true,
     "thinkingLevelMap": {
-      "off": null,
+      "off": "none",
       "minimal": null,
       "low": null,
       "medium": null,
@@ -711,5 +736,39 @@
     },
     "contextWindow": 1000000,
     "maxTokens": 384000
+  },
+  {
+    "id": "beam-free",
+    "name": "Beam Free",
+    "api": "openai-completions",
+    "baseUrl": "https://opencode.ai/zen/go/v1",
+    "reasoning": true,
+    "thinkingLevelMap": {
+      "off": null,
+      "minimal": null,
+      "low": "low",
+      "medium": "medium",
+      "high": "high",
+      "xhigh": "xhigh",
+      "max": "max"
+    },
+    "input": [
+      "text"
+    ],
+    "cost": {
+      "input": 0,
+      "output": 0,
+      "cacheRead": 0,
+      "cacheWrite": 0
+    },
+    "contextWindow": 1048576,
+    "maxTokens": 131072,
+    "compat": {
+      "supportsStore": false,
+      "supportsDeveloperRole": false,
+      "supportsStrictMode": true,
+      "maxTokensField": "max_tokens",
+      "requiresReasoningContentOnAssistantMessages": true
+    }
   }
 ]

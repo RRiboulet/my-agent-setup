@@ -251,6 +251,20 @@ export const DEFAULT_BUDGET_CHARS = 12_000;
  */
 export const DEFAULT_MANIFEST_LIMIT = 200;
 export const DEFAULT_PATCH_CHARS = 4_000;
+/**
+ * The smallest slice of a patch worth carrying: a file header and the first
+ * hunk. A shorter slice says no more than the counts already in the manifest,
+ * so this is only *reserved* when the budget can afford it for every file with
+ * a patch — below that, the priority order spends the budget instead of
+ * starving every file equally.
+ *
+ * The floor exists because the budget used to be spent strictly in priority
+ * order: on a branch diff the first files took everything and the rest were
+ * recorded as `omitted` with no patch at all. A judge that cannot see a file is
+ * deciding without evidence; a judge that sees 200 characters of it can at least
+ * see what the file is for.
+ */
+export const MIN_PATCH_FLOOR = 200;
 
 export interface DossierInput {
 	items: readonly EvidenceItem[];
@@ -322,6 +336,19 @@ export function normalisePath(path: string): string {
 	}
 	const joined = segments.join("/");
 	return absolute ? `/${joined}` : joined;
+}
+
+/**
+ * Cut a patch to `allowance` characters without splitting a line. A diff cut
+ * mid-line loses the rest of that line and can read as a different edit than the
+ * one in the file; a line boundary at least ends on a whole `-`/`+` entry. A
+ * single line longer than the allowance has no boundary to cut at, so it is cut
+ * where the budget says.
+ */
+function cutAtLineBoundary(patch: string, allowance: number): string {
+	if (patch.length <= allowance) return patch;
+	const lastNewline = patch.lastIndexOf("\n", allowance);
+	return lastNewline > 0 ? patch.slice(0, lastNewline) : patch.slice(0, allowance);
 }
 
 /**
@@ -822,25 +849,46 @@ export function buildDossier(input: DossierInput): BuiltDossier {
 	// 6. Patch budget, in the already-prioritised order. One allowance covers
 	// both the per-file cap and the remaining total, so a truncated patch cannot
 	// jump the queue ahead of a later security path.
-	const artifactEvidence: DossierPatch[] = [];
+	//
+	// Every file with a patch first gets MIN_PATCH_FLOOR, when the budget can
+	// afford that for all of them; the rest is then spent in priority order. So a
+	// big budget still favours the security path, while a small one cannot make a
+	// whole file invisible to the judge.
+	const patchItems = kept.filter((item) => item.patch !== undefined);
+	const floor = Math.min(patchChars, MIN_PATCH_FLOOR);
+	const reserveFloor = patchItems.length > 0 && floor * patchItems.length <= patchBudgetChars;
+	const granted = new Map<string, number>();
 	let patchUsed = 0;
+	for (const item of patchItems) {
+		if (!reserveFloor) break;
+		granted.set(item.path, floor);
+		patchUsed += floor;
+	}
+
+	const artifactEvidence: DossierPatch[] = [];
 	for (const item of kept) {
 		if (item.patch === undefined) continue;
 		const patch = mask(item.patch, `the patch for ${item.path}`);
-		const allowance = Math.min(patchChars, patchBudgetChars - patchUsed);
+		const reserved = granted.get(item.path) ?? 0;
+		// The top-up is bounded by the per-file cap beyond the reservation and by
+		// what is left of the total; the reservation itself is already spent.
+		const allowance = reserved + Math.min(patchChars - reserved, Math.max(0, patchBudgetChars - patchUsed));
 		if (allowance <= 0) {
 			artifactEvidence.push({ path: item.path, patch: "", omitted: true });
 			exclusions.push(`patch omitted for ${item.path} (total patch budget reached)`);
 			continue;
 		}
 		if (patch.length > allowance) {
-			artifactEvidence.push({ path: item.path, patch: patch.slice(0, allowance), omitted: true });
-			patchUsed += allowance;
-			exclusions.push(`patch truncated for ${item.path} to ${allowance} characters (kept the first ${allowance})`);
+			const keptText = cutAtLineBoundary(patch, allowance);
+			artifactEvidence.push({ path: item.path, patch: keptText, omitted: true });
+			patchUsed += keptText.length - reserved; // may release an unused reservation
+			exclusions.push(
+				`patch truncated for ${item.path} to ${keptText.length} characters (kept the first ${keptText.length}, cut at a line boundary)`,
+			);
 			continue;
 		}
 		artifactEvidence.push({ path: item.path, patch });
-		patchUsed += patch.length;
+		patchUsed += patch.length - reserved; // may release an unused reservation
 	}
 
 	// Risk signals carry their observed paths, deduplicated by label.

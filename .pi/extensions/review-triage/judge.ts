@@ -16,9 +16,10 @@
  *
  * The client itself is pi's, reached through `ctx.modelRegistry.classify()`.
  * That means no second API client, no key handling here, and the call's usage
- * lands in the session cost like any other classifier call. OpenRouter's
- * `typesafe/jev-1.13` is a classifier model in pi's catalogue, so the same
- * credential the user already has is what authenticates the judge.
+ * lands in the session cost like any other classifier call. OpenCode Zen's
+ * `jev-1.13-free` is a classifier model in pi's catalogue, authenticated by the
+ * `OPENCODE_API_KEY` the reviewer provider already needs — so the judge costs
+ * nothing and adds no second credential to the machine.
  */
 
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";

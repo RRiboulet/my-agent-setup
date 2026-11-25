@@ -12,7 +12,12 @@
  * "we skipped review here" is auditable after the fact rather than invisible.
  *
  * Config: ~/.pi/agent/review-triage.json (all fields optional).
- * Judge:  a pi classifier model, `openrouter` / `typesafe/jev-1.13` by default.
+ * Judge:  a pi classifier model, `opencode` / `jev-1.13-free` by default.
+ *
+ * Besides the `review-triage` session entry, every successful plan publishes
+ * the bounded `orchestrator:triage-planned` event (see
+ * `../orchestrator/events.ts`). The full plan stays in the entry; a subscriber
+ * receives the identity and counts needed to react, not a second copy.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -46,10 +51,12 @@ import {
 	type ReviewPlan,
 } from "./compose.ts";
 import { buildDossier, RISK_RULES_VERSION, type EvidenceItem } from "./dossier.ts";
+import { authSourceFromRegistry, credentialReport } from "./credentials.ts";
 import type { PolicyGates } from "./policy.ts";
 import { formatPlan } from "./format.ts";
 import { readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { ORCHESTRATION_EVENTS, publishOrchestrationEvent } from "../orchestrator/events.ts";
 
 const TARGETS = ["uncommitted", "branch", "commit", "task", "none"] as const;
 type TargetParam = (typeof TARGETS)[number];
@@ -192,6 +199,26 @@ function availableModels(ctx: ExtensionContext): AvailableModel[] {
 }
 
 /**
+ * Publish a plan after it has been appended to the session. Bounded on purpose:
+ * the entry is the durable record, and a subscriber that needs the full plan can
+ * read it rather than receiving a copy of it. Publication is total, so a broken
+ * subscriber cannot fail the tool call.
+ */
+function publishTriagePlan(pi: ExtensionAPI, entry: TriageRun): void {
+	publishOrchestrationEvent(pi, ORCHESTRATION_EVENTS.triagePlanned, {
+		target: entry.evidence.target,
+		verdict: entry.plan.verdict,
+		status: entry.plan.status,
+		judge: entry.plan.judge,
+		files: entry.evidence.files.length,
+		added: entry.evidence.added,
+		removed: entry.evidence.removed,
+		signals: entry.evidence.signals.length,
+		...(entry.fingerprint ? { fingerprint: entry.fingerprint } : {}),
+	});
+}
+
+/**
  * The whole pipeline, shared by the tool and the `/triage` command. Config is
  * re-read on every call so an edit takes effect without reloading pi.
  */
@@ -218,11 +245,24 @@ async function runTriage(
 		} catch {
 			// Durable entries are a convenience; never let one break the tool call.
 		}
+		publishTriagePlan(pi, entry);
 		return entry;
 	}
 
 	const available = availableModels(ctx);
-	const candidates = resolveCandidates(config, available);
+	const resolvedCandidates = resolveCandidates(config, available);
+	// Check credentials before the catalog. `generateCatalog` filters candidates
+	// by the models the session can use, so a provider with no credential would
+	// otherwise lose its whole band to a one-line note — and an agent reading
+	// `candidates` directly would not even see that. The check is provider-level
+	// and reports the gap as an actionable limitation; an unknown status counts
+	// as usable so a working provider is never disabled on a guess.
+	const credentials = credentialReport({
+		judge: config.judge,
+		candidates: resolvedCandidates,
+		auth: authSourceFromRegistry(ctx.modelRegistry),
+	});
+	const candidates = credentials.candidates;
 	const catalog = generateCatalog({
 		candidates,
 		ladder: config.thinkingLadder,
@@ -273,6 +313,10 @@ async function runTriage(
 	// own collector limitation, so the absence note stays out of the way.
 	const suppliedValidations = Array.isArray(resolved.validations) && resolved.validations.length > 0;
 	const limitations = [
+		// Credential gaps come first: they are the one limitation with a fix the
+		// caller can apply immediately, and every later omission is downstream of
+		// a model that could not run.
+		...credentials.gaps.map((gap) => gap.message),
 		...resolved.warnings,
 		...(config.redactionNotes ?? []),
 		...(suppliedValidations ? [] : ["no validation results were supplied for this run"]),
@@ -337,41 +381,50 @@ async function runTriage(
 		mandatoryReview: config.policy.mandatoryReview ?? false,
 	};
 
-	onProgress?.(`asking ${config.judge.provider}/${config.judge.model}`);
 	let judgment: Judgment | undefined;
 	let plan: ReviewPlan;
-	try {
-		judgment = await askJudge(ctx.modelRegistry, config, built, catalog.options, signal);
-		plan = composePlan({
-			judgment,
-			fingerprint: built.fingerprint,
-			context,
-			config,
-			candidates,
-			available,
-			catalog: catalog.options,
-			gates,
-			evidence: planEvidence,
-			summary: maskedSummary,
-		});
-	} catch (error) {
-		if (!(error instanceof JudgeError)) throw error;
-		// An abort is a cancellation, not a judge failure. Fail-open exists for an
-		// unreachable judge; composing a plan from a user's Esc and writing it to
-		// the session as an audited verdict is the fabrication this tool forbids.
-		if (error.failure === "aborted") throw error;
+	const composeArgs = {
+		fingerprint: built.fingerprint,
+		context,
+		config,
+		candidates,
+		available,
+		catalog: catalog.options,
+		gates,
+		evidence: planEvidence,
+		summary: maskedSummary,
+	};
+	if (credentials.judgeGap) {
+		// Asking a judge whose provider has no credential spends a round trip to
+		// learn what pi already reported. Report it as the existing `unavailable`
+		// failure kind, with the actionable gap message as its reason.
 		plan = failOpenPlan({
-			fingerprint: built.fingerprint,
-			context,
-			config,
-			candidates,
-			available,
-			catalog: catalog.options,
-			gates,
-			evidence: planEvidence,
-			summary: maskedSummary,
-			reason: error.message,
+			...composeArgs,
+			reason: credentials.judgeGap.message,
+			kind: "unavailable",
+			message: credentials.judgeGap.message,
+			latencyMs: 0,
 		});
+	} else {
+		onProgress?.(`asking ${config.judge.provider}/${config.judge.model}`);
+		const judgeStartedAt = Date.now();
+		try {
+			judgment = await askJudge(ctx.modelRegistry, config, built, catalog.options, signal);
+			plan = composePlan({ ...composeArgs, judgment });
+		} catch (error) {
+			if (!(error instanceof JudgeError)) throw error;
+			// An abort is a cancellation, not a judge failure. Fail-open exists for an
+			// unreachable judge; composing a plan from a user's Esc and writing it to
+			// the session as an audited verdict is the fabrication this tool forbids.
+			if (error.failure === "aborted") throw error;
+			plan = failOpenPlan({
+				...composeArgs,
+				reason: error.message,
+				kind: error.failure,
+				message: error.message,
+				latencyMs: Date.now() - judgeStartedAt,
+			});
+		}
 	}
 
 	const entry: TriageRun = {
@@ -395,6 +448,7 @@ async function runTriage(
 	} catch {
 		// Durable entries are a convenience; never let one break the tool call.
 	}
+	publishTriagePlan(pi, entry);
 	return entry;
 }
 
@@ -498,7 +552,7 @@ function registerTriageTool(pi: ExtensionAPI) {
 			context: Type.Optional(
 				Type.String({
 					description:
-						"Optional JSON for evidence git cannot see: { artifacts: [{ path, before?, after?, added?, removed?, status? }], validations: [{ check, outcome?, provenance?, ranAt?, snapshot?, detail? }], harness: { objective?, acceptanceCriteria?, identity?, recordedEdits?, toolResults?, unresolvedIssues? } }. Validation results are consumed, never run; an unrecognised outcome becomes 'unknown', never 'passed'.",
+						"Optional JSON for evidence git cannot see: { artifacts: [{ path, before?, after?, added?, removed?, status? }], validations: [{ check, outcome?, provenance?, ranAt?, snapshot?, detail? }], harness: { objective?, acceptanceCriteria?, identity?, recordedEdits?, toolResults?, unresolvedIssues? } }. Every text field takes one string, except `harness.acceptanceCriteria`, `toolResults` and `unresolvedIssues`, which also take a list of strings; `artifacts[].before`/`after` are whole file snapshots the diff is computed from. Validation results are consumed, never run; an unrecognised outcome becomes 'unknown', never 'passed'.",
 				}),
 			),
 		}),

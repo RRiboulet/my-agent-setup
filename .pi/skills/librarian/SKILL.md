@@ -1,6 +1,6 @@
 ---
 name: librarian
-description: "Cache and refresh remote git repositories under the pi agent dir so later references reuse a local checkout. Use when the user points you to a remote git repository as reference, or you encounter one through other means."
+description: "Cache and refresh remote git repositories under the pi agent dir so later references reuse a local checkout. Use when: the user points you to a remote git repository as reference; or you encounter one through other means."
 license: Apache-2.0
 ---
 
@@ -13,8 +13,9 @@ license: Apache-2.0
      LOCAL ADAPTATIONS (also marked in place):
        A. the cache root: upstream caches under ~/.cache/checkouts, which is
           container-local in this devcontainer and lost on rebuild; the default
-          is now <pi agent dir>/cache/checkouts, which lives on the persistent
-          pi-agent-config volume. LIBRARIAN_CACHE_ROOT still overrides it.
+          is now <pi agent dir>/cache/checkouts, which lives on the
+          container's private persistent pi volume. LIBRARIAN_CACHE_ROOT still
+          overrides it.
        B. the command path: checkout.sh is invoked as ./checkout.sh, which pi
           resolves against this skill's directory, instead of a bare name that
           only works from inside that directory.
@@ -42,8 +43,9 @@ where `<agent dir>` is `${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}`. Example:
 
 <!-- LOCAL ADAPTATION A: upstream stored these under ~/.cache/checkouts. On
      this devcontainer ~/.cache is container-local — discarded on every rebuild
-     — while /home/vscode/.pi is the persistent pi-agent-config volume, so the
-     default moved under the agent dir and now survives rebuilds. -->
+     — while /home/vscode/.pi is this container's private persistent pi
+     volume, so the default moved under the agent dir and now survives
+     rebuilds. -->
 
 The cache is read-only reference material: keep it out of the workspace, do
 not commit it, and do not edit a cached checkout in place (see below).

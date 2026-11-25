@@ -40,8 +40,9 @@ built-in-conflict warning and shadows `app.session.rename` in the main
 editor (rename still works in the session selector).
 
 A value is validated against pi's key grammar **and** against what pi can
-actually match: `ctrl+f5` and `alt+escape` are grammatical but can never fire
-(pi refuses modifiers on `escape` and `f1`–`f12`), so they are rejected. Every
+actually match: `alt+escape` (and `ctrl+esc`) are grammatical but can never fire
+(pi refuses modifiers on `escape`/`esc`), so they are rejected. Function keys `f1`–`f12`
+do accept modifiers via Kitty functional-key sequences (e.g. `\x1b[15;5~`), so `ctrl+f5` is valid. Every
 rejected value falls back to the previous setting — the defaults, normally —
 and the reason is shown once as a warning at session start, because a
 rejected override that silently kept the default would look like a working
@@ -88,7 +89,9 @@ Termux (the terminal app) plus the Termux:API app, on the same phone:
   fail.
 - `sshd` running in Termux, the devcontainer's key in `~/.ssh/authorized_keys`,
   and a host alias in `~/.ssh/config` — the default `sshTarget` is `phone`, and
-  `ssh phone true` should succeed before `/voice` is tried.
+  `ssh phone true` should succeed before `/voice` is tried. The phone must also
+  keep the reverse forward open: `ssh -N -R 0.0.0.0:8022:localhost:8022
+  <user>@<host>` (see `.devcontainer/voice-container.md`).
 - **Use the absolute recorder path.** The non-interactive ssh `PATH` does not
   include Termux's `usr/bin`, so a bare `termux-microphone-record` fails there.
   The default, verified on 2026-10-15, is
@@ -109,20 +112,24 @@ recorder).
 ## Container rebuilds
 
 The extension lives in this repo, so a container rebuild costs nothing on
-its own. Three container-side pieces of the `/voice` setup do not survive a
-rebuild — the ssh config under `~/.ssh`, the `netcat-openbsd` package the
-ssh proxy command needs, and the `tailscaled` process that tunnels to the
-phone — and one command puts them all back:
+its own. One container-side piece of the `/voice` setup does not survive a
+rebuild — the ssh config under `~/.ssh` — and one command puts it back:
 
 ```
 bash /workspace/.devcontainer/restore-post-rebuild.sh
 ```
 
 The devcontainer's post-create hook runs it automatically on container
-creation. What the container-side setup is (ssh key, tailscale tunnel, ssh
-config, `voice.json`) and how to redo it from scratch if the pi-config volume
-is ever wiped is documented in `.devcontainer/voice-container.md`, with the
-phone-side steps in the prerequisites above.
+creation. What the container-side setup is (ssh key, the phone's reverse
+forward, ssh config, `voice.json`) and how to redo it from scratch if the
+pi-config volume is ever wiped is documented in `.devcontainer/voice-container.md`,
+with the phone-side steps in the prerequisites above.
+
+**No tailnet is involved.** The phone opens an ordinary ssh remote forward to
+the host (`ssh -N -R 0.0.0.0:8022:localhost:8022 <user>@<host>`, with
+`GatewayPorts clientspecified` in the host's sshd), and the container reaches
+it at `host.docker.internal:8022`. Earlier versions ran a userspace
+`tailscaled` plus a SOCKS5 `ProxyCommand` here; both are gone.
 
 ## Configuration
 
@@ -145,7 +152,7 @@ registered even when the config cannot be read.
 | `language` | unset | `PI_VOICE_LANGUAGE` | optional hint (`gpt-4o-mini-transcribe` rejects it) |
 | `prompt` | unset | `PI_VOICE_PROMPT` | optional vocabulary/style hint (same caveat) |
 | `timeoutMs` | `60000` | `PI_VOICE_TIMEOUT_MS` | upload timeout, clamped 5000–300000 |
-| `shortcut` | `["ctrl+shift+r", "alt+r"]` | `PI_VOICE_SHORTCUT` | pi key id(s) that toggle the recorder; an array, a single id, or a comma-separated list. `[]` or `""` disables it, in the file **or** the env var. **One invalid entry rejects the whole value** and keeps the previous setting, like every other field. A comma-based key (`ctrl+,`) is read as one id, so it cannot share the string form with another — use the array form. `escape` and `f1`–`f12` take no modifier |
+| `shortcut` | `["ctrl+shift+r", "alt+r"]` | `PI_VOICE_SHORTCUT` | pi key id(s) that toggle the recorder; an array, a single id, or a comma-separated list. `[]` or `""` disables it, in the file **or** the env var. **One invalid entry rejects the whole value** and keeps the previous setting, like every other field. A comma-based key (`ctrl+,`) is read as one id, so it cannot share the string form with another — use the array form. `escape`/`esc` take no modifier; `f1`–`f12` accept modifiers via Kitty functional-key sequences |
 
 Booleans accept `1/true/yes/on` and `0/false/no/off`; an unrecognised value is
 ignored rather than guessed.

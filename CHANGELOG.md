@@ -4,7 +4,2523 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+## v1.17.1 — 2026-11-24
+
 Added:
+
+- **The shape of a change is now argued on paper instead of discovered through
+  the diff.** `.pi/skills/architect/` is model-invoked and fires when a module or
+  feature is being designed, a boundary is being reshaped, a workaround keeps
+  coming back, or two abstractions compete. It maps every caller and boundary
+  the change crosses, sketches two genuinely distinct shapes — different
+  ownership, seams and types, not one idea renamed — and tests both on the
+  deletion test, single ownership, minimal caller knowledge and
+  replace-don't-layer. Then it picks the simpler shape and says why the other
+  lost, or hands the decision to the user when both carry real product or
+  irreversible tradeoffs. Upstream's scrap signal survives: friction that is a
+  pattern rather than an instance means the boundary is wrong, so the sketch is
+  thrown out instead of guarded.
+
+- **A sixth user-invoked entry point, `/skill:recall`, rebuilds where the work
+  stands before it is resumed.** It mines the session records under the agent
+  dir through a `subagent` fan-out, then verifies every state claim against
+  `git` and `gh` instead of trusting the transcript that made it. It adds a
+  source upstream did not have: `orchestrator_workspace` `peers`, the other pi
+  sessions live on this repository right now — read as a heartbeat, so a stale
+  presence claim is verified against git rather than repeated. Tests:
+  `coding-skills.test.ts`.
+
+- **The stealth reasoning model `hungerg-free` is available in the OpenCode Go
+  provider, including offline.** The curated entry registers `HungerG Free` on
+  the canonical OpenAI-compatible Go endpoint with text and image input, a
+  1,000,000-token context window, 65,536 output tokens and zero pricing. The
+  live API advertises reasoning support without an effort list, so the entry
+  enables reasoning but leaves pi's default thinking levels in charge rather
+  than inventing a level map. Its minimal compatibility flags disable stored
+  messages and the developer role while retaining strict mode and
+  `max_tokens`; live probes confirmed ordinary assistant history works without
+  requiring `reasoning_content`, and both text and image input remain exposed
+  through pi's model type.
+
+## v1.17.0 — 2026-11-23
+
+Added:
+
+- **A parent with live delegated runs parks its settlement instead of spending an
+  attempt on a turn with nothing to act on.** A block starts another turn, so a
+  parent that had just launched background subagents could burn its
+  `attemptCap` before the first child reported, and the completion notice does
+  not wake an idle session. The new `block.waitForSubagents` key (default
+  `false`) opts a project into parking: a settlement that would block while a
+  delegated run is live returns no continuation, spends no attempt, and records
+  `parked: true` with the live run ids. The orchestrator keeps that set from the
+  new `orchestrator:run-started`, `orchestrator:runs-snapshot` and
+  `orchestrator:run-settled` lifecycle events, rebuilds it from the snapshot on
+  reload, and sends exactly one `orchestrator-resume` message with
+  `triggerTurn: true` when the last run settles — normal completion notices stay
+  non-waking. `run-settled` now also reports `cancelled` and `interrupted`, so a
+  cancelled or interrupted only-run releases the park; a worker never parks.
+  Tests: `orchestrator-gate.test.ts`, `lifecycle-launch.test.ts`.
+
+- **"Passed" now means the verification command actually verified something.**
+  The settlement gate used to trust exit code 0, which made three common
+  misconfigurations read as green: a configured `npm test || true`, a runner that
+  matched no test files, and a model's own matching shell call whose output
+  nobody read. A command that syntactically discards its own failure (`|| true`,
+  `|| :`, `; true`, `; exit 0`, a trailing `2>/dev/null`, `set +e`) is now
+  reported as `weak-command` and names the construct; a run whose bounded output
+  matches a documented zero-test indicator (`0 passing`, `no tests found`,
+  `ran 0 tests`, `0 tests`, `no test files` — not `0 tests failed`) is
+  `inconclusive` and says why. Both new statuses fail open, so a false positive
+  settles the run instead of trapping it. The opt-in
+  `verification.successPattern` is a regular expression the bounded output must
+  match for `passed`; a mismatch is `failed`, with the pattern as the reason. A
+  model-run of the configured command clears the unverified edits only when its
+  result classifies as a real pass, and a persisted `passed` verdict written
+  before these statuses existed is re-checked against today's rules rather than
+  trusted. Tests:
+  `orchestrator-verify.test.ts`, `orchestrator-gate.test.ts`.
+
+- **A project can ask for reservations that hold across linked worktrees, not
+  just inside one.** `workspace.lockScope` in the committed
+  `.pi/orchestrator.json` is `"worktree"` (the default, which reproduces the
+  previous behaviour exactly: two linked worktrees may each reserve the same
+  repository-relative file, and one worktree still refuses it twice) or
+  `"repo"`, which maps every reservation into the shared repository root — the
+  main checkout, resolved from the git common directory — so the same relative
+  path is one claim across all of them. A repo-scoped claim is enforced against
+  a session that kept the default scope, because the write guard maps its
+  candidate into the holder's namespace before matching; a path outside the
+  worktree keeps its absolute pattern and gains no cross-tree meaning. Records
+  are version 2 and carry the scope and the reserving worktree's root; a version
+  1 record is still read and enforced as worktree-scoped with no migration
+  write, an unknown scope is unusable rather than guessed (it blocks nothing),
+  and presence and peer messages keep version 1 so an older build in the next
+  worktree neither loses its peers nor drops its inbox. The key is not a gate
+  block: it neither blocks a settlement nor changes when `orchestrator_override`
+  is registered. Tests: `orchestrator-reservations.test.ts`,
+  `orchestrator-workspace.test.ts`.
+
+
+- **The orchestration advisor redacts its digest, can fail over once, and its
+  cost is now visible in `/session-breakdown`.** The digest already excluded
+  tool-output bodies, but a file name, todo title, verification summary or loop
+  detail can carry a credential, so every field it keeps now passes through a
+  documented redactor (`advisor.redact`, on by default): an `sk-…` key, a GitHub
+  `ghp_`/`github_pat_` token, an `AKIA…` access key id, a Slack `xox…` token, a
+  `Bearer` header's token, and the value of an `api_key`/`access_token`/`secret`/
+  `password` assignment — the key name stays, the value becomes `[redacted]`.
+  Prose and paths are untouched, and the digest's shape and 4 KB bound are
+  unchanged because redaction replaces characters before the bound is applied.
+  `advisor.fallback` names one other provider/model tried once when the primary
+  call fails with a provider error or rate limit; it is not used for a credential
+  refusal or an abort, where a retry would hide a configuration error or keep
+  calling after nobody is waiting, and an empty answer is reported rather than
+  spent on a second provider. The record names the model that answered and the
+  primary it replaced, and two provider calls are still one record and one budget
+  unit. Separately, `/session-breakdown` counted only `type: "message"` entries,
+  so pi's `appendUsage` entries — one per advisor consultation — were billed to
+  nobody; the vendored file gains a fifth `LOCAL PATCH` that accounts those
+  entries' tokens and cost (and their model bucket) without counting a message,
+  and an inherited usage entry is excluded by the existing fork patch. Tests:
+  `orchestrator-advisor.test.ts`, `session-breakdown.test.ts`.
+
+- **After a successful compaction the model is told the orchestrator's state
+  again.** Gate and advisor state already survive compaction — both are rebuilt
+  from the active branch — but the model's own context does not, so after a
+  compaction it could be unaware of an open goal, open todos, a pending
+  verification, live delegated runs or a spent advisor budget. The new
+  `session_compact` observer appends exactly one `orchestrator:compact-snapshot`
+  `custom_message` naming the active goal, the open todo ids and titles, the gate
+  attempts and `attemptCap` with every blocked condition's evidence and the last
+  verdict's reason, the live delegated run ids with their `queued`/`running`
+  status, and the advisor's budget, recorded attempts and consumed trigger keys.
+  It is sent with `display: false` and `triggerTurn: false`, is bound to 4 KB
+  with a truncation note, and is not sent at all when there is nothing to report
+  or when the compaction failed. Compaction itself stays pi's: no
+  `session_before_compact` handler is registered, no `compaction` result is
+  returned, and nothing is read back from the snapshot — `/gate` and the next
+  settlement reconstruct the same attempts and blocked evidence as before.
+  Tests: `orchestrator-compact-snapshot.test.ts`.
+
+Fixed:
+
+- **The advisor's provider call now carries the parent session id.** OpenCode Go
+  requires `x-opencode-session` and rejected the consultation with
+  `MissingSessionID`; the registry derives that header from a `sessionId` option,
+  which the side call omitted. The primary and the fallback use the parent
+  session's id, so a provider that routes by conversation can answer.
+- **A failed advisor call's reported usage is no longer dropped when a fallback
+  answers.** The record is still one attempt, but its usage and cost are the sum
+  of both provider calls; a provider that reports none on a failed call
+  contributes nothing rather than a guess.
+- **Advisor redaction no longer misses a passphrase, a Basic-auth header or a URL's
+  userinfo.** A quoted value containing spaces aborted the old assignment
+  pattern, so `password: "correct horse battery staple"` reached the provider
+  verbatim, and an unquoted value left its tail behind. Quoted values (doubled
+  quotes included) and unquoted values through the end of the assignment are now
+  replaced, and `Basic <token>`, `scheme://user:password@host` and a lowercase
+  `bearer` are covered. A fallback whose own credential check refuses now records
+  that the primary was called, instead of claiming no call was made. A sentence
+  that uses one of the key words as a label is over-redacted; that is the safe
+  direction for evidence about to be sent to another provider.
+- **A delegated worker no longer passes its role to a `pi` its shell starts.**
+  `PI_ORCHESTRATOR_ROLE=worker` is inherited by every bash-tool subprocess, so a
+  nested `pi` launched from a worker's shell resolved as a worker and skipped its
+  own gate and advisor. The child now removes the marker at `session_start` —
+  after every extension factory has read it, and before any tool can spawn a
+  process — so it cannot outlive the run it was written for. The legacy
+  `PI_TMUX_SUBAGENT_CHILD` fallback still assumes the orchestrator loads before
+  the subagent factory, which the package manifest's order guarantees.
+- **A parked settlement is released by every terminal state, including after a
+  reload.** An interrupted run is terminal in-process, but the reload snapshot
+  listed it as live, so a parent that parked before a reload could wait forever
+  for an event the interrupt marker can no longer publish; `interrupted` is now
+  excluded from the snapshot. A park also no longer runs the verification command
+  whose result it would discard, and an aborted run clears the park so a late
+  child cannot wake a session the user stopped. The subagent→orchestrator path is
+  covered by a cross-factory test over one live event bus.
+- **A delegated child no longer runs the project's verification command or blocks
+  its own settlement.** The orchestrator decided "am I a child?" by reading
+  `PI_TMUX_SUBAGENT_CHILD` at every boundary, while the subagent extension reads
+  that variable in its factory and then deletes it so a `pi` spawned from the
+  child's shell tool cannot re-enter child mode — so by the first
+  `agent_before_settle` the guard was gone and the child was held to the parent's
+  policy, stalling the delegation its parent was waiting on. The role is now
+  resolved once at module load (`.pi/extensions/orchestrator/role.ts`) from the
+  launcher-set `PI_ORCHESTRATOR_ROLE=worker`, with the legacy
+  `PI_TMUX_SUBAGENT_CHILD=1` still honoured, so scrubbing the environment cannot
+  change it. A worker reports with `scope: child`, runs no command, blocks
+  nothing, consults no advisor and registers no override tool; a top-level run
+  (`pi -p`, RPC, CI) carries no marker and settles normally. The child command
+  now writes `PI_ORCHESTRATOR_ROLE=worker` as a literal, and a fresh-process test
+  drives the real factory with the launcher's environment instead of only the
+  test seam, which is what let the original bug through. A child-side test proves
+  the marker is removed at `session_start`. Tests: `orchestrator-role.test.ts`,
+  `orchestrator-gate.test.ts`, `lifecycle-launch.test.ts`.
+
+Maintenance:
+
+- Documented the lock-scope boundary: a repo-scoped claim binds edits inside the
+  writer's own worktree, a path outside it keeps its absolute form, and a v1
+  record's root is its recorded cwd.
+
+## v1.16.0 — 2026-11-23
+
+Added:
+
+- **Workspace coordination now expires the state a crashed session leaves
+  behind.** A presence record is refreshed with the session's current branch on
+  every heartbeat, so a checkout that changes branch mid-session does not keep
+  advertising the join-time branch. An unparsable presence file is left alone
+  while it is fresh (a newer build may own it) and swept once it is old, instead
+  of being re-reported on every `peers` call. A reservation whose holder process
+  is gone stops blocking immediately rather than waiting out its TTL, matching
+  how presence already treats a dead pid: a reservation is held by a live
+  process, not by the file. The delivered-id ledger is capped and
+  prunes its oldest entries, and the live-peer list says how many old peers its
+  cap omitted rather than dropping them silently. Tests:
+  `orchestrator-workspace.test.ts`, `orchestrator-reservations.test.ts`,
+  `orchestrator-steering.test.ts`.
+
+- **A session can send one targeted message to a peer, delivered at the peer's
+  next safe boundary.** The new `orchestrator_message` tool queues a bounded,
+  expiring message in the recipient's inbox; the recipient's own poller wakes an
+  idle session with a turn, steers a busy one without aborting it, and waits
+  while a human prompt or queued human input is pending. One peer message is
+  released per turn, delivery is idempotent per message id (a replayed id is
+  delivered once; an undelivered message that expires is reported rather than
+  silently dropped), and the message appears in the recipient's session with the
+  sender's id and directory. The poller starts when the session joins and is
+  cleared and unref'd on leave, shutdown and session replacement, so no timer
+  keeps the process alive. A peer that left or expired is reported as gone.
+  Tests: `orchestrator-steering.test.ts`.
+
+- **A reserved workspace path refuses another session's `write` or `edit`
+  before it runs, naming the holder and the reason.** The new
+  `orchestrator_reserve` tool reserves a file, a directory (trailing slash) or a
+  wildcard (`*` within a segment, `**` across) with a reason and a TTL. Paths are
+  canonicalised through their deepest existing ancestor, so relative, absolute
+  and symlinked spellings of one file cannot slip past as a second name. A
+  refusal names the holder, its reason and the one-shot override, which is
+  granted and then consumed as two recorded session entries. Reservations expire,
+  are released on leave or shutdown, and a directory lock refreshed by its holder
+  makes two reservers' overlap check and write one critical section across
+  processes, so two reservers cannot both believe they hold the same path.
+  Re-reserving supersedes this session's earlier overlapping record instead of
+  leaking a second one. Deliberately advisory:
+  the tool description and every refusal say that shell commands and nested tool
+  execution are not prevented, and the host's per-file mutation queue is
+  untouched. Tests: `orchestrator-reservations.test.ts`.
+
+- **Pi sessions working in one repository, including linked worktrees, can now
+  see each other.** Joining is explicit: the new `orchestrator_workspace` tool
+  publishes a presence entry with the session id, pid, working directory, branch,
+  heartbeat and TTL, and `peers` lists the other live sessions with their
+  directory, branch and last-seen time. The registry lives at
+  `<git-common-dir>/pi-agents/` — the one key that makes the main checkout and
+  every linked worktree share state without making unrelated projects share it —
+  and never in the working tree or the agent directory, so a checkout stays
+  clean and `.git` stays invisible to git. Each record is one atomically written
+  JSON file, so concurrent joins and heartbeats never expose a half-written
+  registry. `leave` removes the entry promptly; a killed session is swept as soon
+  as its pid is gone or, failing that, within its TTL. Outside a git repository
+  every action is a no-op that says why. Tests:
+  `orchestrator-workspace.test.ts`.
+
+- **The settlement gate can ask a stronger model for one bounded second opinion
+  when it keeps failing the same way.** A committed `advisor` block in
+  `.pi/orchestrator.json` names the provider and model; the consultation runs at
+  `before_agent_start` when the branch holds an unanswered trigger — a loop block,
+  or `minGateBlocks` settlement blocks (default 2) reporting the same conditions —
+  and its verdict is added to the prompt as an additive `sections.advisor` — on
+  the next prompt, not on the run that was stuck, because a boundary continuation
+  skips `before_agent_start`; a trigger disarmed only by a successful
+  consultation, so a problem fixed before the next prompt can still be described.
+  The
+  system prompt is never replaced, the session model and thinking level are never
+  switched, and nothing is called if the provider has no credentials: the refusal
+  names the provider and the fix instead of skipping silently. One completion
+  against the host's model registry resolves credentials and records usage like
+  any other call, including in the session totals. A trigger is answered once per
+  branch, and `cooldownMs` and `budget` bound the rest; the digest is capped at
+  4 KB and built from the gate's reasons, the verification summary, failure
+  signatures, edited files, todos and the goal, never tool output bodies. It
+  acts only in a trusted project and never in a delegated child. Tests:
+  `orchestrator-advisor.test.ts`.
+
+- **The settlement gate can now stop a run from settling, but only where a
+  project opts in.** A committed `.pi/orchestrator.json` turns each check on
+  separately: `block.openTodos` and `block.repeatedFailure` make an open todo or
+  a repeated failure signature commit one more turn, `verification.command`
+  names the project's own check — run by the gate through `pi.exec` with a
+  timeout and an output cap, and what the edits-without-verification condition
+  now means — and `block.loops` arms the tool-call loop breaker. With no config
+  nothing is run and nothing is blocked, which is exactly the previous
+  behaviour.
+
+  A block is a `continue` plus a message carrying the reason and the
+  verification output. It never terminates the run, and it is bounded twice: a
+  condition blocks once per piece of evidence — a new edit or todo re-arms it —
+  and every block spends one of the branch's `attemptCap`, which `retryCap` is
+  renamed to now that it counts blocks rather than settles. Every reason names the new `orchestrator_override` tool, whose
+  one-shot override lets the next block through and is recorded in the session.
+  A check that times out, exceeds its output cap or cannot be parsed fails open
+  and says so in the verdict, so the gate's own failure never becomes the run's
+  trap. The gate acts only in a project pi trusts: the config is a committed
+  file that names a command, and this extension also loads in clones that were
+  never trusted. The loop breaker reads no-progress evidence — the same
+  `edit`/`write` invocation with the same result three times and no other edit in
+  between, or any loop tool failing with the same signature three times — so a
+  status poll and a status command after each edit
+  are both untouched; it shares the branch budget and is capped at one block per
+  turn. Inside a delegated child the gate records `scope: child` and acts on
+  nothing, because the parent owns the decision and a blocked child would stall
+  the delegation, and every verdict states the limit a blocking check has: it
+  sees this session's own tool calls, not edits made by children. Tests:
+  `orchestrator-gate.test.ts` covers the decision, config, override and resume
+  paths; `orchestrator-loop.test.ts` the loop evidence and both bounds;
+  `orchestrator-verify.test.ts` the command, each fail-open outcome, and a real
+  process killed at its timeout.
+
+- **A settlement gate now reports what a project considers a finished run, and
+  publishes typed orchestration events.** A new `.pi/extensions/orchestrator/`
+  extension runs at `agent_before_settle` and records a verdict — an active
+  goal, open todos, files edited since the last successful verification
+  command, a repeated failure signature, and the remaining retry allowance —
+  as an append-only `custom` session entry. The entry is ignored by the model
+  context, so a verdict per settlement costs no tokens; `/gate` prints the last
+  one and `/gate --json` returns it verbatim. The attempt count is reconstructed
+  from the active branch on `session_start` and `session_tree`, so a resume or a
+  tree navigation cannot reset a cap. The gate composes with other boundary
+  handlers: it carries forward every entry proposed before it and leaves
+  `continue` alone, so an active goal keeps ownership of the next turn. A
+  condition it cannot evaluate is reported as unknown and the run still settles.
+
+  It landed report-only first: the gate recorded a verdict and never blocked,
+  ran a command or requested a continuation. Configuration is a committed
+  `<project>/.pi/orchestrator.json`, shipped as
+  `.pi/extensions/orchestrator/orchestrator.example.json`; the bullet above adds
+  the blocking checks, the verification command, the override and the loop
+  breaker, and renames `retryCap` to `attemptCap`.
+
+  The same extension owns the typed event bus: `orchestrator:run-settled`,
+  `orchestrator:plan-settled`, `orchestrator:todo-changed`,
+  `orchestrator:triage-planned` and `orchestrator:gate-decided`, with payload
+  types in `events.ts`. The subagent, todo and review-triage extensions now
+  publish their events after the state is persisted; publishing is total, so a
+  missing bus or a throwing subscriber cannot affect the operation observed.
+  The events are local to one parent session — no cross-process or cross-worktree
+  delivery is promised. Tests: `orchestrator-gate.test.ts` covers the decision
+  function, the readers, resume/tree reconstruction, entry composition and
+  fail-open; `orchestrator-events.test.ts` covers the bus contract and one
+  emitter per publishing extension.
+
+- **A finished subagent run now leaves a standalone report artifact, so its
+  complete answer is readable without opening the child's transcript.** Each
+  child is asked to end with a fenced `subagent-report` block carrying `status`
+  (`ok`/`blocked`/`failed`), a `summary`, and optional `files`, `commands` and
+  `unresolved` lists. When a run reports a final answer — completed, or failed
+  with an error — the parent writes the child's complete final text to
+  `<runDir>/report.md`, beside `result.json`, and puts a bounded copy in the run
+  record: the artifact path and full byte count, a head bounded with
+  pi's own `truncateHead` limits (a very long report is never loaded whole into
+  `runs.json`), and the parsed fields. The existing `output` field keeps its
+  meaning and cap, so a reader built before this change still works, and the
+  optional `report` field added to `result.json` is ignored by an older parent.
+  A cancelled or shutdown-killed run has no artifact, because its child never
+  reported an answer.
+  Validation is lenient because a child may run another branch's build: a
+  missing, malformed or incompatible report degrades to the plain final text
+  with the reason recorded rather than failing the run, while a compatible
+  older or newer version is accepted and its skew reported. `subagent_status`
+  prints the artifact path, size and any degradation. Tests: `report.test.ts`
+  covers the contract and `lifecycle-report.test.ts` proves the artifact is
+  written at settlement, the run index stays bounded, and every degradation and
+  skew path still completes.
+
+- **A blocked subagent can ask its parent a question, and only a human answers
+  it.** A child launched by this build can call `subagent_ask`: a question is
+  written atomically to `<runDir>/escalation/<id>.request.json`, and the tool
+  waits — honouring the call's abort signal and a deadline (300 s by default) —
+  for the reply, which arrives as its tool result so it continues in the same
+  turn. The parent's existing watcher tick reads the channel, so escalation adds
+  no timer of its own; it records the question on the run record, delivers it to
+  the parent session, and `subagent_answer({ id, answer })` asks
+  `ctx.ui.confirm` before writing the reply. The gate is that tool, not the
+  filesystem: the channel is same-uid, so a model able to write files could forge
+  a reply — the honest path is human-confirmed, and the docs say so rather than
+  pretending a file protocol authenticates its writer. A decision is therefore
+  confirmed by a human or refused: with no UI (print and JSON mode) the tool says why and
+  writes nothing, and the child reaches its deadline and is told to report the
+  blocker and its partial result and stop. Every other non-answer path says the
+  same thing, so a blocked child never hangs: a request past its deadline is
+  never delivered, and a parent that stopped ticking is detected from a stale
+  heartbeat in seconds rather than at the deadline. `kind: "progress"` is the
+  non-blocking half — the update reaches the session with no human gate and no
+  answer. A blocked child keeps its concurrency slot, and `subagent_status`
+  reports `? waiting on a question`, distinctly from a stalled or interrupted
+  run; the widget gets its own glyph. The channel is a file protocol across
+  builds, like `result.json`: the shape is the gate and the version advisory, a
+  partial write is never read as a request, a replayed request or reply is
+  handled once, and a child of an older parent registers no tool at all because
+  such a parent sets no channel. Tests: `escalation.test.ts` covers atomicity,
+  bounds, expiry, replay and every exit from the wait;
+  `lifecycle-escalation.test.ts` drives the round trip through the real child
+  tool and parent tick, both UI modes, the no-parent path, the no-timer
+  assertion and the status rendering.
+
+- **A launcher wrapper gives non-interactive invocations the agent dir a login
+  shell would have picked.** `bin/pi-wrapped` exists because the `--shell` hook
+  `bin/pi-agent-dir` installs lives in `~/.bashrc`, and a tmux child, a CI step
+  or an editor task gets the environment without the rc — so it started `pi` on
+  the shared, package-installed agent dir, and a run rooted in a linked worktree
+  hit the duplicate-tool load error with nobody watching. The wrapper forwards
+  every argument to `pi` unchanged and has no option of its own (a flag it saw is
+  a flag for `pi`; `--`, `@file` arguments and values with spaces are passed as
+  given); a `PI_CODING_AGENT_DIR` already in the environment wins over the derived
+  one, because an explicit choice outranks a derived one; and the project dir is
+  resolved by `bin/pi-agent-dir --print --project "$PWD"`, so the wrapper cannot
+  drift from the helper's own rule and a worktree maps to its main checkout. (The
+  `--shell` hook is an inline copy of that rule that assumes the default root and
+  overrides an explicit `PI_CODING_AGENT_DIR`; this wrapper honours it.) Outside a checkout — or when the project's dir was never created — it
+  runs `pi` with its defaults and says why on stderr, because a launcher that
+  dies over a path it could not derive is worse than one that runs with defaults.
+  It deliberately does not create the dir: running the helper without `--print`
+  would seed the user's agent root as a side effect of starting `pi`, needs `jq`
+  present, and a dir it half-created trusts nothing — a *silently empty* agent
+  rather than a working one. `pi-wrapped.test.ts` pins all of it against a stub
+  `pi` on PATH, including a real linked worktree.
+
+- **One `subagent` request can fan out N children and run a dependency plan.**
+  `subagent({ tasks: [...] })` is the one plan shape: each item may override
+  `task`, `cwd`, provider, model, thinking and handoff, and may declare
+  `dependsOn` step ids — a plain fan-out is just a plan with no edges. The tool
+  returns the runs in the requested order, and the children go through the same
+  `startRun`/`drainQueue` path as standalone runs, so they share one concurrency
+  budget rather than opening a second queue. A step starts only after every
+  dependency completed successfully; a cycle, self-dependency, unknown id or
+  duplicate id is rejected before the plan is recorded and before any run
+  exists. A permanently failed step follows `failurePolicy`: `continue` (the
+  default) cancels only its transitive dependents and keeps independent branches
+  running, while `stop` starts nothing further, abandons a step whose run was
+  still queued, and marks the plan failed (the failure policy does not kill live
+  children; `subagent_cancel` is what stops a run). A stop that lands while a
+  child is being
+  submitted kills that child instead of writing the abandoned run back as
+  running. `retries` per step, or a plan-level `retryLimit`,
+  is enforced as a new run per attempt with its own run id, report and usage, so
+  `attempts`, `retries` and every attempt's id stay visible. The plan is a
+  `plans.json` record beside `runs.json`, written through the same atomic writer
+  and persist chain and advanced only by the existing settle path
+  (`finalizeRun`/`markRunFailed`), with an idempotency guard so a replayed or
+  stale settlement launches nothing twice. `plan.test.ts` pins the pure
+  readiness/graph/policy/retry rules and `lifecycle-plan.test.ts` covers fan-out
+  ordering, budget sharing, dependency order, rejection, both policies and the
+  retry cap.
+
+- **A dependency plan now survives reload, cancels cleanly and is inspectable as
+  one row.** Loading a session reconciles each persisted plan against the run
+  index once: a step whose run is still queued, running or interrupted is left
+  alone — its child can outlive the parent reload and the watcher re-arms for it —
+  while a step whose run already completed, failed or was cancelled is folded in
+  rather than re-run. A run the plan index never recorded, which is exactly the
+  state a crash between the two `runs.json`/`plans.json` renames leaves, is
+  adopted instead of being launched a second time; only a step with no live run at
+  all is reported as interrupted and follows the plan's policy, and it is never
+  reported as complete. A resumed step that needs a fork snapshot hands off from
+  the session that is loading, not the one that created the plan.
+  `subagent_cancel` now settles a plan step. A cancel produces no `result.json`,
+  so the finaliser never saw it, and a `continue` plan whose only step was
+  cancelled used to sit `running` with a `running` step and nothing able to settle
+  it. Cancelling one step cancels its transitive dependents, which can never run
+  now and so must not be left `pending`, and keeps independent branches alive;
+  under `stop` it starts nothing further and ends the plan as `cancelled`, because
+  a deliberate cancel is not a failure. A plan id is a handle wherever it matters:
+  `subagent_cancel({ id })` cancels the whole plan and its live children and keeps
+  completed steps' records, `subagent_status({ id })` shows every step with its
+  latest run id and error, and `subagent_wait({ plan })` blocks until the plan is
+  over — added because a dependency plan's later waves have no run ids to name in
+  the reply, so the plan id is the only handle that covers them. The status list
+  shows a plan as one row with its step runs folded into it, so a ten-step plan
+  spends the list's detail budget once rather than once per step; the one-line
+  form carries progress while it runs and the stop reason once it ends. Tests:
+  `plan.test.ts` pins the cancellation and reconciliation rules, and
+  `lifecycle-plan-reload.test.ts`, `lifecycle-plan-cancel.test.ts` and
+  `lifecycle-plan-status.test.ts` drive the real factory through each one.
+
+Fixed:
+
+- **The settlement gate now actually blocks in a real session.** It used to
+  treat pi's `context.canContinue` as the final capability, but pi builds that
+  snapshot from the drafts proposed before the gate runs: on a normal completed
+  run the last message is the assistant's, so `canContinue` is false even though
+  the gate's own continuation message would make the next request possible. The
+  gate therefore reported and settled instead of blocking in a live TUI, while
+  the fake-host tests (which did not set the field) passed. It no longer consults
+  the pre-draft snapshot; pi validates the post-commit proposal itself and
+  reports an invalid continuation rather than trapping the run. Tests:
+  `orchestrator-gate.test.ts` pins a real boundary shape with
+  `canContinue: false` and an open todo.
+  Because the old suppression also skipped the policy, a trusted project that
+  opted into blocking now actually runs its verification command at settlement,
+  and a block spends the branch's attempt budget (shared with the loop breaker).
+
+Changed:
+
+- **A settlement block now has to be resolved or explicitly overridden.** The
+  gate no longer treats a condition as settled after one block for the same
+  evidence: an unresolved open todo, failed verification or repeated failure
+  blocks again on the next settlement, spends another attempt, and settles only
+  when the condition changes, `orchestrator_override` is used, or `attemptCap`
+  is reached. A passed verification remains informational once. The project's
+  verification command re-runs when the files under verification change — a
+  second edit of the same file counts as a new state — even after the block
+  budget is spent, and not for evidence it already checked. This makes the override necessary rather
+  than decorative, and `attemptCap` (default 3) still bounds repeated blocks so
+  a run cannot be trapped. Tests: `orchestrator-gate.test.ts` covers repeated
+  blocks, override consumption, the cap and the verification re-run rule.
+
+Maintenance:
+
+- **`/goal` now asks for its next turn at the settlement boundary instead of
+  mid-run, so a continuation is final and composes with other handlers.** The
+  vendored extension called `sendMessage(..., { triggerTurn: true })` from
+  `agent_end`, which fires before pi has finished with the run: pi may still
+  auto-retry, compact and retry, or drain a queued follow-up after it. A message
+  sent there is input to whatever run pi starts next, not a proposal the
+  settlement boundary composes with — so nothing else at that boundary can see it
+  or yield to it. The request is now a
+  `custom_message` draft returned from `agent_before_settle` alongside
+  `continue: true`, appended to `event.entries` so an earlier handler's proposal
+  survives. Behaviour is unchanged from the user's side — an active goal still
+  continues, and a paused, blocked, budget-limited, usage-limited or complete one
+  still does not — with two deliberate differences: an aborted run requests no
+  continuation at all (pi skips that boundary for an abort; the pause prompt
+  stays in `agent_end`, where the run is still active, and now says that
+  declining leaves the goal waiting for the user's next message), and a `/goal`
+  command that lands between pi's post-run check and the boundary stands it
+  down, because its follow-up is flushed only afterwards; without that guard the
+  goal would add a continuation on top of a turn already coming.
+  Usage and elapsed accounting, the budget limit, the error-stop decision and the
+  abort prompt all still run at `agent_end`, so recorded values are unchanged.
+  The draft keeps the same customType and `details.goalId`, which is what the
+  `context` hook keys on to drop a consumed continuation. Recorded as local
+  change 3 in `goal.ts`'s vendored-file header; `goal.test.ts` now asserts the
+  boundary's returned proposal rather than a sent message, across two consecutive
+  runs, with the `/goal` command's own continuation standing it down and a run's
+  usage still recorded against the goal.
+
+- **A fake extension host makes a factory's event wiring testable without tmux
+  or a model.** The suite could prove what an extension computes and, for the
+  subagent extension, what its run state machine does; it could not prove *when*
+  a factory acts, because pi's event wiring only runs under a real session. The
+  vendored `/goal` was the visible gap: its pure helpers were covered and the
+  claim that a completed run continues the goal was not. A new double records
+  registrations in order, dispatches an event to every handler over one mutable
+  event object (so a later handler sees an earlier mutation, and the last
+  non-undefined result is what the double returns), records messages with their
+  delivery options and
+  appended session entries, and runs a registered tool with the host context.
+  What it deliberately does not model — pi's chained-transform composition,
+  boundary-proposal merging, `tool_result` chaining, provider hooks, argument
+  validation, interactive UI answers — is stated in its header, so
+  a test that needs those extends it rather than trusting a plausible-looking
+  default. The goal suite now drives the factory through it: one continuation
+  per completed run, none for an inactive goal, and a pause rather than a
+  continuation after an abort with no UI. The harness itself changes no
+  production file.
+
+## v1.15.2 — 2026-11-22
+
+Fixed:
+
+- **A nested `pi` can no longer hijack a subagent run's `result.json`, and the
+  child-mode variables no longer leak into the child's tool subprocesses.** The
+  tmux launcher exports `PI_TMUX_SUBAGENT_CHILD`, `_RESULT` and `_INTERRUPT`
+  into the child's shell, and every bash tool call the child makes inherits
+  them, so a `pi` spawned from a subagent's bash tool re-entered child mode on
+  the same `result.json` and overwrote the run's status, output, session file
+  and model with its own. That happened for real: the run
+  `c2428902-14b8-48f0-be5a-3b63e94bec50` reported `completed`/`"ok"` from a
+  nested pi's session under `sessions/--home-ubuntu-…/` while the run's own
+  session under the run dir held 16 assistant turns, so the parent treated the
+  run as finished and cut it off. Two defences: the child branch deletes the
+  three variables from `process.env` right after registering its reporter (the
+  parent's launch path writes them into the tmux command as literals, so
+  nothing reads them afterwards), and a report refuses to replace a
+  `result.json` whose record names a different session file, so a second writer
+  cannot replace a finished record — the run's own child keeps write access, an
+  impostor does not. The interrupt path is untouched: it writes the marker
+  file, not the result. Tests in `lifecycle-result.test.ts` pin the scrub, the
+  owner's landing write, and the refusal in both write orders.
+
+- **`branch-base` no longer tells `dev` itself to start a branch or open a pull
+  request into itself.** The v1.15.1 changelog claimed the tool "no longer tells
+  the integration branch to start a branch", but two paths still did: on
+  `HEAD == origin/dev` the line ended `next: git checkout -b <change-name>
+  origin/dev`, and on dev with unpushed commits it ended `next: git push -u
+  origin dev && gh pr create --base dev --fill` — a pull request from dev into
+  dev, which is not a step in this repository's flow. Both now check the branch
+  name the way the `superseded` guard already does (`git symbolic-ref --short
+  -q HEAD` is `dev`): the equal case says there is nothing to do and to start
+  the next change on a branch cut from dev, and the unpushed-commits case says
+  `git push -u origin dev`, the push being all a release needs. Every other
+  classification and exit code is byte-identical; the feature-branch and
+  detached-HEAD `next:` lines are pinned by tests so they cannot regress.
+
+- **The bench preflight only checks the repos of cells that will actually run,
+  so a resumed grid no longer fails on fixtures it would skip.**
+  `preflightRepos` ran before the per-cell skip, so re-running `--tasks all`
+  against a grid whose stored results already covered a task exited 1 on that
+  task's repo — for instance after the fixture worktrees it named were gone —
+  even though every one of its cells would have been skipped. The skip decision
+  needs no repo access, so it now runs first and scopes the preflight: a task
+  whose every cell is covered by a stored result is out of scope, `--force` and
+  `--recheck` put a cell back in scope, and the whole refusal still happens
+  before any cell starts, naming every offending task and its fix. `--dry-run`
+  follows the same rule on the same code path and now marks skipped cells in
+  its output. A cell that will be written is never preflighted late.
+
+- **The two `devc` bench tasks set `"allowDirty": true`, so `--tasks all` runs
+  while the checkout is dirty.** Their `repo` is `.` — the checkout the operator
+  is editing — but their prompts read nothing from the workspace, and the dirty
+  refusal preflighted that checkout anyway, so the default task set refused to
+  start whenever work was in flight. The runner already supported and recorded
+  the field; the tasks now carry it, and `tools/bench/README.md` documents the
+  exemption where it discusses where a task runs and isolation: it is for
+  workspaces that cannot be clean by choice, not for tasks that want to edit.
+
+## v1.15.1 — 2026-11-21
+
+Fixed:
+
+- **`node tools/branch-base.mjs` no longer goes red on `dev` itself when a push
+  supersedes the commit under test, and it no longer tells the integration
+  branch to start a branch.** The gate compares against the *live* `origin/dev`,
+  so any run that finished after a newer push failed on a commit that was never
+  wrong — the exact symptom being removed is a red build on `dev` whose line
+  ends "next: git checkout -b <change-name> origin/dev". CI run 44956803480
+  checked out `805e79e`, which by then was already an ancestor of `origin/dev`
+  at `15c6c3a` because the release bump landed while the run was still going,
+  and reported it as `behind-dev`. The rule the tool enforces is about feature
+  branches — a branch must descend from current `origin/dev` and carry only its
+  own commits — and on `dev` it is vacuous. So `superseded` is now its own
+  classification: the checked-out branch is `origin/dev`'s own branch and `HEAD`
+  is an ancestor of `origin/dev`, which exits 0 with a line saying a newer push
+  landed while the run was still going and that there is no branch base to
+  check. The tool already knew the branch it was checking (`git symbolic-ref
+  --short -q HEAD` is `dev` on a push-event checkout, because actions/checkout
+  uses `ref: dev`), so this needs no CI flag, no `checks.yml` change and no new
+  gate. Every other classification is byte-identical: `behind-dev` stays red for
+  a feature branch that is behind, which is the case it exists for, and a
+  detached pull-request checkout is pinned to its current behaviour by its own
+  test alongside the race reproduction.
+
+- **The bench runner's workspace is resolved instead of hardcoded, and `--repo`
+  exists.** All 14 `tools/bench/tasks/*.json` files carried an absolute path under
+  one machine's agent directory as their `repo`, so the recorded set ran nowhere
+  else — it failed with "not a git work tree" in this repository's own container
+  and on CI — and `tools/bench/README.md` promised a `--repo` override that
+  `run.mjs`'s `parseArgs` never had. The tasks now record `.worktrees/bench-fixture`,
+  `.worktrees/bench-tdd-baseline` or `.` (the two `devc` scenarios, whose prompt
+  reads nothing from the workspace), resolved against the repository root, so the
+  set is portable without a flag; absolute paths are still accepted, and
+  `--repo <path>` wins over both so one recorded set can be pointed at any clean
+  checkout. The resolved path is recorded on every cell, beside `repoConfigured`
+  (what the file said) and `repoOverride` (the flag, or `null`). A repo that does
+  not exist, is not inside a git work tree, or is dirty without `--allow-dirty`
+  now fails the whole invocation before the first token is spent, listing every
+  offending task with its fix — previously a non-git repo was quietly recorded as
+  `isGit: false` and the cell ran anyway. `tools/bench/run.test.mjs` pins the
+  resolution order and the refusals through the CLI with `--list` and `--dry-run`,
+  so the gate spends no tokens; it is listed in `AGENTS.md`'s Tests block and run
+  as its own `checks.yml` step, which `checks-parity.test.ts` requires in both
+  directions.
+
+## v1.15.0 — 2026-11-21
+
+Added:
+
+- **The implementation loop is in `implement`, where it is already in context,
+  and `tdd` is small enough to load on a whim.** Measured earlier: across six
+  real runs of one task, `tdd`'s description changed the order (3/3 wrote the
+  test first with it available, 0/3 without) while the 4.6 KB body was opened in
+  only one of three. So the body was doing little and the pointer was doing the
+  work. Three changes follow from that. `tdd/SKILL.md` drops from 4,607 B to
+  2,902: the seam detail moves to `references/seams.md`, the anti-pattern list
+  and the mocking boundary to `references/anti-patterns.md`, and the body keeps
+  the loop, the two-imagined-edits test, the exceptions and the report. The loop
+  itself is now also in `implement` section 4, so a unit build has it without
+  loading anything, and `coding-skills.test.ts` compares the two copies byte for
+  byte between `tdd-loop` markers, so they cannot drift. `prove-it-works` gains
+  the consequence that makes the body matter: revert the new behavior in one
+  edit, confirm the covering test fails, restore and re-run, and report the test
+  that failed - a change with no test that can fail is `not_run`, never `passed`.
+  `tdd`'s body carries a 3,000 B cap in the same test file so it cannot grow
+  back.
+
+- **The README says which skills you start and which the agent starts, and it
+  cannot drift.** The inventory was 24 rows of 25 skills, five of them labelled
+  `User-invoked /skill:<name>:` and the rest unlabelled, so "unlabelled means
+  model-invoked" was a convention a reader had to infer and `add-model` was
+  missing entirely. The README now has a **Skills and how they are invoked**
+  section that states the axis and the two rules that follow — user-invoked
+  orchestrates and may load model-invoked skills but never starts another
+  user-invoked one; model-invoked is reached by the agent when its description
+  matches, and costs its description in context every turn — followed by two
+  tables, 5 user-invoked and 20 model-invoked, each row linking to the skill and
+  carrying its trigger text. The tables are generated from the frontmatter by
+  `tools/skills-index.mjs --write` (stdlib only, `--check` for the gate), and
+  `skills-index.test.ts` fails when the README and the skills disagree in either
+  direction: editing the README by hand or a description without re-rendering
+  are both red. The layout follows mattpocock/skills' `## Reference` split by
+  who-can-invoke, with pstack's "use it when" column doing the work in each row.
+  The Contents table gains the missing `add-model` row and a legend pointing at
+  the new section; the Tests gate gains `node tools/skills-index.mjs --check`.
+
+- **`writing-for-agents` is ported, and `worktree` stops being one 32 KB read.** The
+  port is MIT material from mattpocock/skills at the commit already pinned in
+  `licenses/NOTICE.md`, model-invoked because the trigger — writing or editing a
+  skill, or changing a rule or pointer in `AGENTS.md` — is something the agent
+  notices mid-task. Its description is rewritten in the house form (202 B, what it
+  does then the trigger branches), its `SKILL-MECHANICS.md` moves to
+  `references/skill-mechanics.md` to match the other skills and to be covered by
+  the "every `references/*.md` is linked" assertion this branch's ticket adds, and
+  upstream's `agents/openai.yaml` is not installed because pi does not read it.
+  The body is upstream's text apart from a title heading. It is registered in the
+  `pi` manifest, the README table, `licenses/NOTICE.md` and
+  `coding-skills.test.ts`'s `PORTED` list, and it has a bullet in `AGENTS.md`'s
+  trigger list. Its role is split from `prevent-recurrence` in both bodies: that
+  skill decides which level a lesson lands on and records the row; this one
+  decides how the line is worded.
+
+  `worktree` becomes a 147-line `SKILL.md` and three grouped references —
+  `lifecycle.md` (create, list, open, remove), `review-repair.md` (inspect, test,
+  `git worktree repair`) and `parallel.md` (one branch per worktree, subagent
+  `cwd`, and the duplicate-extension failure a child rooted in a worktree hits).
+  The loaded file is 8,483 B where it was 32,235, and `worktree` was 41 of 241
+  skill loads in the last 242 sessions, so it was 47.8% of all loaded skill
+  bytes. The split is checked mechanically: all 12 original headings are present,
+  and all 22 code blocks are byte-identical. Three pointers that crossed a file
+  boundary now name their anchor (`lifecycle.md` § Create, `review-repair.md` §
+  Review, `lifecycle.md` § Remove) instead of saying "above".
+
+  Ticket 05 is re-scoped from "23 skills become ~15" to "consistent, concise,
+  correctly triggered": the measured load is 241 across 242 sessions, so the
+  dormancy the prune assumed is not there, and every zero-load skill has a
+  workflow reference that keeps it. The count is an output (25). The remainder —
+  the `add-model` split at line-level boundaries, the 250 B/150 B description cap
+  with its four new test assertions, and making `tdd` the stated default
+  implementation style instead of a seam-gated option — is recorded on the
+  ticket with its acceptance criteria.
+
+- **`subagent_wait` replaces polling a subagent's status with a single wait.
+  #163** The session baseline recorded 681 `subagent_status` calls against 39
+  `subagent` starts — 17 model turns per run asking "done yet?", each one
+  context the parent pays for. The new management tool blocks once: with `id`
+  it resolves when the run reaches a terminal state and returns the same record
+  `subagent_status` returns; with `ids` it waits out a whole fan-out and returns
+  every settled run plus the still-running ones; on timeout it returns the
+  current record plus the latest pane, never an error, with a run still queued
+  reported as `queued` and every failed-to-start, cancelled, dead or
+  interrupted run returned at once. If the session ends first, the wait says so
+  (`details.ended`) and returns the live record; it never calls a run settled
+  because shutdown killed it, including under `PI_SUBAGENT_KILL_ON_SHUTDOWN`.
+  A `timeoutMs` above 2^31-1 is clamped, because `setTimeout` would otherwise
+  fire after 1 ms. It adds no second poll loop: waiters are resolved by the
+  terminal transitions the existing settle watcher (and cancel, interrupt,
+  shutdown) already drive, so a result lands within the 500 ms
+  watcher tick. The tool descriptions and `AGENTS.md` now teach "start, then
+  wait once" — `subagent_status` keeps the live what-is-it-doing-now question —
+  and `subagent-wait.test.ts` pins the acceptance: a scripted three-child
+  fan-out records exactly 3 starts, 1 wait and zero status calls. A fan-out
+  wait returns a settled run's output but not its pane — a dead TUI frame full
+  of spinner remnants once the child is gone — so three children no longer add
+  three panes to the parent's context; only a still-running or interrupted run
+  carries a pane, the same rule the status list uses, and the record keeps the
+  last snapshot for `subagent_status({ id })`. A failed run whose result file is
+  unusable now carries that pane inside its error, because the session is reaped
+  the moment the run settles and the snapshot is otherwise the only readable
+  trace left.
+
+- **The branch-base rule is a check now, not a review round.**
+  `tools/branch-base.mjs` fetches `origin/dev` and classifies the branch in one
+  line: `correct` (what the branch adds has exactly one root, and that root sits
+  on the current `origin/dev`), `behind-dev` (the dev tip already contains HEAD,
+  so it gets the start-again line rather than a base failure), `foreign-commits`
+  (the range starts on an older dev because dev was merged in instead of rebased
+  onto, or a merge brought a second lineage in — the shape a single
+  "oldest commit" test reported as `correct` while the foreign commits rode
+  along), and `wrong-base` (it never descends from `origin/dev` at all — the
+  branch-off-`main` mistake — with the branch point named on the line). Exit 0
+  only for `correct`, 1 with the fix otherwise, and 2 whenever the check could
+  not run, which is never a pass: no `origin/dev`, a fetch that failed (it would
+  otherwise classify against a stale base), a shallow clone whose grafted
+  history cannot decide ancestry, or a repository with no commit yet. This rule has three recorded misses
+  in `AGENTS.md`, every one caught by a reviewer; `prove-it-works` now runs the
+  check before a commit, and a new `.github/workflows/checks.yml` runs it on
+  every pull request into `dev` and push to `dev` alongside the subagent,
+  provider, rule-table and branch-base test trees — full history, the pull
+  request's head commit rather than the merge commit, and pi installed globally
+  first, because `setup-deps.sh` links the globally installed packages and a
+  clean runner has none. The rule is the first row of `AGENTS.md`'s new "Rules
+  and enforcement" table, so the rule-table checker validates the rule that
+  produced it. Stated in the script's header rather than papered over: a branch
+  stacked on an *unmerged* feature branch still reads `correct` while that base
+  is unmerged, because the range then has a single root on `origin/dev`; and a
+  commit committed on top of this branch's own is indistinguishable from its own
+  work, which the root count cannot see.
+
+- **`prevent-recurrence` is a loadable skill now, with the Python adapter its
+  first conversion needs.** The scaffold that shipped with the checker was
+  deliberately hidden from model selection: an advertised skill with no process
+  behind it is worse than an absent one. This change writes the process. The
+  description advertises the second correction of one mistake class; the body
+  pins the inputs (conversation, review comment, revert, fix commit, or bad and
+  good snippets), the ordered ladder — architecture, type, lint, test, prose —
+  with a required reason why every higher rung did not work, the question that
+  sends a semantic rule to a type or a test instead of a brittle lint,
+  existing-tool-first, the bad-and-good proof with both commands and exit codes,
+  the shrinking ratchet, the no-suppression rule, and the stop before committing
+  or starting a review. It ends with a fixed report: rule, evidence, level, why
+  not higher, check, proof, ratchet, table row, checker result, open work. The
+  Python adapter is `references/python.md`: Ruff `TID251` with a `msg` that names
+  the replacement, the stock rules worth selecting first (`S110`, `BLE001`,
+  `B006`, `RUF006`, `PGH003`, `RUF100`), ast-grep with `message`, `note`, `fix`
+  and `sg test`, `import-linter` contracts, and a project test as the fallback.
+  Every recipe has a worked bad and good example and the exact command; they
+  were run on 2026-11-20 with Ruff 0.17.6, ast-grep 0.51.3, import-linter 2.17
+  and Python 3.12.3 in a scratch venv only — this repository still consumes no
+  Python or npm package. The dry run on a `/tmp` fixture records the whole path:
+  `TID251` exits 1 on the bad revision and 0 on the fix, the row validates, and
+  the checker exits 0; the transcript is
+  `docs/experiments/prevent-recurrence-dry-run.md`. The checker itself is the
+  canonical `scripts/rule-table.mjs`, unchanged; a project vendors it under
+  `tools/` and records the contract version and hash beside it. The four-week
+  branch experiment is ticket 05 and is not in this change. `diagnosing-bugs`,
+  `implement` and `prove-it-works` now name the skill at their trigger, the
+  `coding-skills` test checks its frontmatter and links with the other skills,
+  and README, `AGENTS.md` and `licenses/NOTICE.md` advertise and credit it (the
+  package manifest already listed it).
+
+- **The skill's JS/TS adapter lands too, every recipe run rather than
+  remembered.** `references/js-ts.md` carries the half of the stack a JavaScript
+  or TypeScript repository needs, in the Python adapter's shape and with the same
+  command-plus-exit-code discipline: `no-restricted-imports` and
+  `no-restricted-syntax` for zero-code bans whose message names the replacement;
+  a local flat-config rule (`meta.messages`, `meta.hasSuggestions`, `suggest`)
+  for the case where the diagnostic must name the canonical file or symbol;
+  dependency-cruiser for the module direction a line cannot prove;
+  typescript-eslint's `no-floating-promises` and `no-misused-promises` for the
+  root causes a syntax rule cannot see, with the project-service requirement
+  spelled out; oxlint for the inner loop and, explicitly, what it cannot yet
+  carry; and the `eslint-disable` / `@ts-ignore` / `@ts-expect-error` audit.
+  Everything was run on 2026-11-20 against two scratch projects under `/tmp` —
+  ESLint 10.15.0 and `@eslint/js` 10.0.1, typescript-eslint 8.73.0 on TypeScript
+  6.0.3, oxlint 1.94.0 with `oxlint-tsgolint` 7.0.2007, dependency-cruiser 18.8.0,
+  `@eslint-community/eslint-plugin-eslint-comments` 4.8.1 on Node 24.22.2 — with
+  the bad and good exit codes recorded for every recipe (exit 1 at the bad
+  revision, 0 at the good one, above). The limits are stated with the passing run as evidence, not
+  as prose: `no-restricted-imports` does not catch an inline `import("…")` type;
+  `--fix` never applies a `suggest` (both `--fix` and `--fix-type suggestion`
+  leave the file unchanged), and dropping `meta.hasSuggestions` makes ESLint 10
+  exit 2 instead of reporting; oxlint 1.94.0 rejects `no-restricted-syntax`
+  outright, exits 0 on a floating-promise file when `--type-aware` is omitted
+  (so the fast pass is not the typed gate), and surfaces no suggestions;
+  dependency-cruiser's console reporter prints the rule name but not its
+  `comment`, which is why the name carries the fix; and TypeScript 7.0.2 makes
+  typescript-eslint 8.73.0 exit 2 with the message that tells you to run it on
+  the TS 6 API, which is why the runs pin 6.0.3. `SKILL.md` and the README name
+  the new reference. No dependency is added to this repository: the examples are
+  scratch projects, the manifest is unchanged, and the harness still consumes no
+  npm packages.
+
+- **The MCP servers this package uses are a catalogue now, installed by one
+  command and off until a project asks for them.** `pi install` shipped this
+  package's extensions and skills and none of its MCP servers, because the `pi`
+  manifest has no MCP key and pi reads MCP configuration only from
+  `<agent dir>/mcp.json` and a trusted project's `.pi/mcp.json`. A colleague
+  therefore got the operator's setup minus Figma and Playwright, and the obvious
+  cure — `pi mcp add` on each machine — cannot write a *disabled* entry, so it
+  switched both on in every project at once, with an OAuth prompt and two
+  background processes attached. `mcp/catalogue.json` is now the one list
+  (Figma over streamable HTTP with Figma's `oauth.clientName` compatibility
+  value, Playwright through `npx -y @playwright/mcp@latest`), every entry
+  `"enabled": false` with an explicit `"exposure": "codemode"` and no `auth`;
+  `tools/mcp-catalogue.mjs` is the one merge; and it has two surfaces over it —
+  `bin/mcp-catalogue` for a setup script or a container, `/mcp-catalogue` inside
+  a session. The merge is add-only: a name already in the file, pinned or edited,
+  is left byte-identical and reported as skipped, the entries are spliced into
+  the existing text rather than re-serialised so unrelated keys, key order and
+  indentation survive, and a second run reports nothing added and changes
+  nothing. Seeding is deliberately the other semantic: `--if-missing` creates the
+  file only when it is absent and never merges, which is what `bin/pi-agent-dir`
+  (whose `--check` now reports the catalogue) and this repo's `postCreate.sh` use
+  on a fresh dir or volume, so an entry deleted on purpose is not resurrected by
+  a rebuild. Nothing connects until a project opts in: a trusted project's
+  `.pi/mcp.json` carrying only `{"figma": {"enabled": true}}`, or `/mcp` →
+  *Enable in this project*, which writes the same override — measured with
+  `pi mcp list` in a temp agent dir, which listed both as `disabled (codemode,
+  global)` and exited 0 without contacting either. The README gains an "MCP
+  servers" section covering that recipe, worktrees, which agent dirs seed
+  themselves, adding a server, the Figma `clientName` note and the Playwright
+  pin, and it no longer refers to a `$(pi agent dir)` command that does not exist
+  (`pi --help` lists no `agent` subcommand; the dir is `PI_CODING_AGENT_DIR`,
+  else `~/.pi/agent`). No setting, no server registration and no credential is
+  added by any of it.
+
+- **The CI gate runs the README's skill-index check, and a test holds the gate
+  list to `AGENTS.md`'s `## Tests` block so a listed check cannot go unrun.**
+  `node tools/skills-index.mjs --check` was named in the Tests block — the list
+  a session actually runs — and above, in this section, but had no step in
+  `.github/workflows/checks.yml`, so the generated skill index could go stale on
+  a branch whose local suite was green. The workflow's own comment claiming to
+  be "the gate, run the way AGENTS.md → 'Tests' runs it" is exactly what missed
+  it: prose about parity is not parity. It is now a `Skill index` step, in the
+  position `AGENTS.md` orders it. `checks-parity.test.ts` compares the two lists
+  in both directions and in order — every gate `AGENTS.md` names must appear as
+  a `run:` step, and every `run:` step must be a gate `AGENTS.md` names — so
+  adding one without the other is red. The three environment-prep commands
+  (installing pi, fetching `origin/dev`, and linking pi's packages through
+  `setup-deps.sh`, which `AGENTS.md` annotates `once`) are enumerated in the
+  test as prep rather than inferred from a step's name, and the checkout and
+  Node setup are `uses:` steps with no command at all, so a new `run:` step has
+  to be classified by hand before it can pass.
+
+Fixed:
+
+- **The Playwright catalogue entry asks for Chromium and headless, so a real
+  action works on the hosts pi runs on.** The bare `npx -y @playwright/mcp@latest`
+  launch connected and listed its 25 tools, and then failed every call twice
+  over: the server's default browser is the `chrome` channel, which Playwright
+  cannot install on arm64 (`ERROR: not supported on Linux Arm64`), and its
+  default is headed, which has no window on an agent host with no `DISPLAY`.
+  Measured here on an arm64 host: with the flags added, `browser_navigate` to
+  `https://example.com` returned the page and its snapshot, and a pi session
+  driving it through codemode reported the real page title. The catalogue now
+  passes `--browser chromium --headless`, and the README carries the one-time
+  per-machine step that makes them work — `playwright install chromium` through
+  the same Playwright version the server ships, plus `install-deps` for the
+  system libraries — and states that a change to the catalogue's arguments does
+  not reach an entry someone already has, because the merge is add-only.
+- **The worktree sweep no longer goes blind on a C-locale host.** The Remove
+  recipe reads `tmux list-panes -a` as two fields and used a tab as the
+  separator. tmux rewrites a tab in `-F` output to `_` when the *server* ran in
+  a non-UTF-8 locale - measured on the stock Ubuntu and Debian packages
+  (tmux 3.2a-3.6) whenever `LANG` and `LC_ALL` are unset - so `awk -F'\t'` saw
+  one field, matched no pane and killed nothing, after which the removal deleted
+  the tree under a live shell and reported success. The separator is `|` now: it
+  is printable in every locale, and a path containing one is pathological. Two
+  tests pin it, because a build that keeps the tab even in C (this host's tmux
+  3.4 does) cannot fail the live one: a static assertion that the recipe embeds
+  no control character, and a sweep against a server started with `LC_ALL=C`,
+  which fails on the stock packages before the fix with "a session rooted in the
+  removed tree survived the sweep". The same separator replaces the tab in the
+  fake-tmux fixture and in the live fixture's own listing, so neither harness can
+  pass by inheriting a UTF-8 locale either.
+
+- **A child rooted in a worktree is told which agent dir to use, before the
+  duplicate-extension failure costs another run.** The `subagent` tool has no
+  `env` parameter, so a child inherits the parent's `PI_CODING_AGENT_DIR` — which
+  here is the *shared* agent dir with this repo installed as a package. Rooted in
+  `.worktrees/<slug>`, pi then loads both that package and the worktree's own
+  `.pi/` and exits 1 on duplicate tool registration before any model call. The
+  fact that this host already has the fix (`bin/pi-agent-dir` gives the checkout
+  `~/.pi/agent-my-agent-setup`) was recorded but not connected to the `subagent`
+  tool, so the workaround used instead was `cwd` = the main checkout, which runs
+  the *main* checkout's extensions and skills — enough for file edits, wrong for
+  anything testing the branch. `AGENTS.md` now states the failure, the exact
+  invocation (`PI_CODING_AGENT_DIR="$(bin/pi-agent-dir --print)" pi -p "<task>"`
+  from inside the worktree), and that this is how a child runs the branch's own
+  skills. The path is resolved, never written: `devcontainer-agent-dir.test.ts`
+  allows the literal in `devcontainer.json` only, so a copied directory name in a
+  tracked doc fails the suite — which is how the first version of this entry
+  landed red and had to be corrected;
+  `worktree/references/parallel.md` gained the same line beside its
+  package-copy paragraph, which previously described only the worse fallbacks.
+
+- **The mutation-proof requirement is measured: it is followed when it is in
+  context, and it changes evidence rather than test quality.** `AGENTS.md`'s
+  "name the test that fails when this change is reverted" was tested on one task
+  with two models, 3 runs per cell, arms differing only in whether that rule is in
+  `AGENTS.md`. deepseek-v4.1-flash: 3/3 performed the check with the rule, 2/3
+  with only the skill-body mentions, and 0/9 before any such requirement existed;
+  glm-5.3-flash: 1/3 either way, and it *claimed* the check in 2/3 while the
+  transcript showed no revert — a confident model describing the check instead of
+  doing it. Reverting the implementation failed 2–15 tests in all twelve runs, so
+  the requirement did not improve the tests on a task with an obvious seam; what
+  it changed is whether "done" came with evidence. Record, method, per-run table
+  and caveats: `docs/experiments/mutation-proof-step.md`.
+
+Maintenance:
+
+- **Four lifecycle assertions no longer read the completion message on the
+  statement after the status.** `settleRun` writes the run's terminal status
+  (`await persist()`) and only then notifies (`await notifyCompletion`), so the
+  status is observable before `sendMessage` has been called: the two are
+  separate observables, and asserting one immediately after the other assumes a
+  simultaneity the product never promises. That shape failed the `dev` gate in
+  CI run 44714766416 (attempt 1, `lifecycle-interrupt.test.ts:275`,
+  "and the run reports its completion normally  0 !== 1"), on the identical tree
+  that had passed on the pull request minutes earlier and passed again on
+  attempt 2 in 48 s. The failing test took 1016.9 ms, the same as a green run, so
+  it was not a slow machine: the record it read was already fully correct
+  (`completed`, the child's output, `interrupts: 1`) with no message recorded
+  yet. The four sites — three in `lifecycle-result.test.ts` and one in
+  `lifecycle-interrupt.test.ts` — now wait for the message with
+  `waitForCompletionMessage`, which names the status and the record if no
+  message ever arrives, so a run that stops notifying still fails and says
+  which half is missing. No assertion was relaxed: each still requires exactly
+  one message, or the one message's content. The mechanism, which the first
+  write-up left open: `writeJsonAtomic` publishes the status with `rename(2)`,
+  and everything from there to `sendMessage` is microtasks — the write chain's
+  continuation, `settleRun`'s, and the synchronous push — so a `readFile` issued
+  from another continuation can see the new bytes *before* the settle path's own
+  continuation runs. The test's poll issues its read from a timer, which is the
+  exposed shape: measured with the same two calls in a scratch harness under
+  load, reads that saw the new bytes saw them before the writer moved on in
+  1.3-3% of trials, with a window of about 1 ms median and 8 ms worst, and only
+  when a poll landed inside the ~1 ms write chain. That makes the flake rare
+  rather than mysterious — a few runs in a thousand across the four sites —
+  which is also why 60 replays saw nothing (about a 95% chance of that) and why
+  the failing run took 1016.9 ms against the green rerun's 1006.5 ms, with no
+  retried tick, no watcher restart and no logged notify failure anywhere in the
+  job. It is a harness artefact, not a product race: an in-process observer
+  cannot see the gap (it sits inside a microtask drain) and an out-of-process
+  one cannot see `messages` at all, so `persist`-then-notify — durable state
+  first, notification after — stays as it is. Making the notification 50 ms
+  late in the product reproduced the CI's exact `0 !== 1` with the old shape and
+  left the new shape green.
+
+- **`lifecycle.test.ts` is nine topic files now, so its waits overlap and the
+  suite's 8-lane floor is no longer dominated by one file.** It was 2,473 lines
+  with 89 tests, and it cost 97.3 s of wall clock on its own while using 4% CPU:
+  71 `waitFor` calls and 20 fixed sleeps, all orbiting the extension's
+  `POLL_INTERVAL_MS = 500`. Node runs test FILES concurrently but tests inside a
+  file strictly sequentially, so none of those waits could overlap with
+  anything, and because that one file took 97.3 s it alone set the floor for the
+  whole suite at `--test-concurrency=8` — every other file was ≤ 16.2 s. Split
+  by behaviour (launch/queueing, result finalisation, failure detection, the
+  activity snapshot and its stall rule, interrupt, shutdown/reload, the widget,
+  handoff/resume, and tool exposure) the waits run in parallel: the whole suite
+  went from 117.2-121.6 s to 46.3-53.9 s at `--test-concurrency=8` on this
+  machine, and the 8-lane floor the shape tool computes from a serial pass went
+  from 98.8 s to 24.2 s (the shape tool's serial pass over each tree; the
+  baseline was an untouched `origin/dev` worktree). The heaviest lifecycle file
+  is 21.3 s. All 89 tests moved unchanged — the count is identical, no assertion
+  was relaxed, and each new file passes on its own — with the fake
+  `ExtensionAPI`, its waits and its fixtures in `lifecycle-harness.ts`. Product
+  code and `POLL_INTERVAL_MS` are untouched: those intervals are the behaviour
+  under test. Worth knowing: the denser suite is what surfaced the
+  two tight bounds in the entry below — the `btw` viewer's 8 s wait for a
+  spawned `node`, and the widget's 20 ms ticker needing two ticks in 120 ms.
+  Both are widened there; this split did not cause either.
+- **The suite runs its files concurrently, which is what it always claimed to do.**
+  Node defaults `--test-concurrency` to `availableParallelism() - 1`, so on this
+  2-core host the runner was running **one file at a time**: 184 s of wall clock
+  for 67 s of CPU (36 %), which says the suite is wait-bound rather than
+  CPU-bound. The documented command now passes `--test-concurrency=8`: measured
+  2026-11-16 at 119-132 s, with no further gain at 16 (132 s), so the number is
+  fixed rather than derived from `nproc`. It is documented in `AGENTS.md` with
+  the reason, because a bare command loses the flag on the next copy-paste.
+
+  Parallelism also found two tests that had only ever passed because nothing ran
+  beside them, both fixed here rather than papered over: the `btw` viewer test
+  waited 8 s for a spawned node process to render (now 30 s), and a widget ticker
+  needed two 20 ms ticks inside 120 ms (now 500 ms). Both now assert behaviour
+  rather than the machine, which is the rule `helpers.ts` already states for its
+  own poll bound.
+- **The repeat-breaker ladder is withdrawn on measurement, and the frozen
+  baseline's corpus is corrected.** Row 7 of the harness ranking rested on "14×
+  the same `docker ps`; 8–9× the same suite", which counts commands that mention
+  `docker ps`/`node --test`, not repeats: no reachable session has 14 repeats of
+  one command, and the closest are 18 `docker ps` calls (all distinct) and 32
+  `node --test` calls (31 distinct). Re-measured over the frozen window across the host
+  agent dirs plus this container's private volume — reachable over `docker
+  exec`; the survey's 108-session baseline was host-only, despite the Method
+  paragraph — a consecutive bash exact-args streak of 3 fires in **0 of 124**
+  sessions, an identical-output streak of 3 in 1 (5 s), and the largest
+  verb-level run, 17 `docker exec` calls, is 17 different commands inside a
+  185-call session (75 of its calls are `docker exec`) — `devc` latency, not a
+  loop. Across all tools the only repeats
+  are `subagent_status`/`codemode` polling, the traffic `subagent_wait` (#163)
+  removed, so the reminder has no workload left. The candidate is rejected
+  rather than deferred, with its revival trigger in
+  `docs/tickets/harness-advancements/07-repeat-breaker.md`.
+  Ticket 03 is marked landed (#163) and ticket 00 in progress, where both had
+  still said `ready`.
+- **The comment question is measured, and the answer is `pupkeep` yes,
+  `analytics-agent` no.** R13 asked whether comment slop is a real problem in the
+  two projects before any comment skill was written: a stratified sample of 30
+  comments each, classified as invariant, external quirk, workaround
+  justification or narration, with 20% workaround justification as the bar. The
+  measurement is `tools/comment-audit.mjs` — stdlib only, read-only, `git
+  ls-files` for the inventory, ±3-line strata for suppressions and
+  timers/retries/async, and a fixed-seed draw with content-addressed IDs — plus
+  `docs/experiments/comment-audit.md` with all 60 units and the per-unit reason
+  for its class. `pupkeep` lands at 7 of 30 (23.3%, weighted 23.1% over 3,616
+  units), so a comment experiment is justified there; `analytics-agent` lands at
+  1 of 30 (3.3%, weighted 3.2% over 962), so nothing supports one there. The
+  margin in `pupkeep` is one unit: five of the seven are workarounds of a defect
+  or a hazard and two justify an error path, and dropping both error-path units
+  puts it at 5 of 30 (16.7%), below the bar — which is why the report tabulates
+  all three readings rather than quoting 23.3% alone. Two findings outlast the
+  percentage. `analytics-agent` has 49 suppression directives in 13 files, 44 of
+  them in `tests/`, and 6 of the 10 suppression-adjacent sample units are bare
+  `# type: ignore[...]` / `# noqa` with no reason recorded — the practice R8 now
+  forbids. `pupkeep` has none at all, and 17 of its 30 sampled comments are
+  invariants. No comment skill is added: R13 only asks that the question be
+  settled before one is written, and the ticket's scope refuses the skill either
+  way. The draft this replaces was re-derived from scratch, not adjusted: its 83
+  `analytics-agent` files were 86, its 63 directive lines were 49, its 218
+  `pupkeep` files counted the four vendored `web/vendor/*.mjs` it said it
+  excluded, and because it identified units by a sequential index no inherited
+  number — including its 10%/10% decision — could be carried over. Two
+  corrections to the draft were themselves wrong and are recorded in §6: 44 of
+  the 49 directives do sit in `tests/`, and an S pool larger than the directive
+  count is expected, not impossible, because adjacency is a window (63 S units
+  from 49 directives here).
+
+- **The review-triage judge is OpenCode's free Jev, not OpenRouter's paid one.**
+  The judge was `openrouter`/`typesafe/jev-1.13`; it is now
+  `opencode`/`jev-1.13-free`. Same System One protocol, same model family, one
+  fewer credential: `jev-1.13-free` is served by OpenCode Zen and authenticates
+  with the `OPENCODE_API_KEY` the four reviewers already need, so a machine with
+  the reviewer key but no OpenRouter key was losing triage entirely to a judge it
+  could have run for nothing. The provider is `opencode` and not `opencode-go`
+  because the Go endpoint serves chat models only — its provider registers no
+  classifier API at all — so the free Jev sits one provider over from the
+  reviewers, on the same key; `PROVIDER_ENV_VARS` now says so for both. Checked
+  against the live service before switching: a Choice question over that key
+  returned calibrated probabilities (`{"yes":0.82,"no":0.18}`) with `cost: 0`.
+  The built-in defaults, `review-triage.example.json`, the devcontainer seed, the
+  docs and the pinned tests move together, and `judgment().judge` reports
+  `opencode/jev-1.13-free` in the plan.
+
+- **`.devcontainer/pi/review-triage.json` had drifted to a judge the repository
+  never documented, and a test now pins it.** The seed file was added naming
+  `openrouter`/`perplexity/pplx-decider-v1.3:free` while the extension's defaults
+  and its example file named `typesafe/jev-1.13`; nothing read both, so a fresh
+  container was judged by a policy no test or document described. The new test
+  loads the seed and the example and requires the same judge and the same
+  candidates, because the seed exists to install *this* policy — which is what
+  the entry above assumed when it moved the judge.
+
+## v1.14.0 — 2026-11-16
+
+Added:
+
+- **review-triage ships its judge and reviewer tiers as built-in defaults, and
+  reports a missing provider credential instead of losing a band quietly.**
+  Installing the package used to leave `candidates` empty, so a fresh project
+  fell back to bucketing whatever models the session could use by catalogue
+  price — a coarse guess, not the three-band capability judgement this
+  repository actually wants. The judge (`openrouter`/`typesafe/jev-1.13`) and
+  the four `opencode-go` reviewers are now `DEFAULT_CANDIDATES` in `config.ts`,
+  the same policy `review-triage.example.json` writes out for editing, with the
+  file and `PI_REVIEW_TRIAGE_*` overrides still layered on top. A test pins the
+  example and the defaults together so they cannot drift, and an explicit empty
+  `candidates` array still means "synthesise from the session".
+
+- **A provider with no credential is named before a model is offered, rather
+  than after a subagent fails.** `generateCatalog` filtered candidates by what
+  the session could run, so an unauthenticated provider's band vanished into one
+  `notes:` line; an agent reading `candidates` directly (as `AGENTS.md` tells it
+  to) saw no filtering at all and got `No API key found for <provider>` later.
+  A new `credentials.ts` asks pi's model registry for each policy provider's
+  status — no secret is read, and the source is injected so tests use a fake —
+  and produces one actionable gap per provider naming the provider, every
+  blocked `provider/model`, and the fix (`OPENCODE_API_KEY` / `OPENROUTER_API_KEY`,
+  `/login`, or an `auth.json` entry). Missing reviewer credentials drop that
+  provider's candidates and bands, and when nothing is left both tracks report
+  `unavailable`; a missing judge credential short-circuits the classifier call
+  as `judgeFailure: { kind: "unavailable" }`. A machine with at least one usable
+  band still gets a plan, marked with the gap, so unrelated work is not
+  hard-failed. An unknown status counts as usable, because a false "missing"
+  would disable a provider that authenticates where pi cannot see it.
+
+- **The devcontainer seeds the review-triage policy and refreshes pi's model
+  catalogues, so a fresh volume starts on this repository's policy instead of the
+  extension's defaults.** The policy lives on the container's private volume,
+  which meant a new volume — or the same checkout on another host — began on
+  whatever `DEFAULT_CANDIDATES` happened to be, and the judge the policy names
+  (`openrouter`/`perplexity/pplx-decider-v1.3:free`) is newer than the OpenRouter
+  list pi ships with, so it was absent from the catalogue until someone ran
+  `pi update --models` by hand. `.devcontainer/pi/review-triage.json` is now the
+  committed policy (that judge plus the four `opencode-go` reviewers), installed
+  only when the agent dir has none and never over an existing file, so an edit
+  made inside a running container survives a rebuild. `postCreate.sh` then
+  refreshes the catalogues. The refresh fails soft — a host with no network or no
+  provider key still gets a usable container — but not silent: it says so when
+  the policy's judge is missing from the resulting catalogue, because the only
+  other symptom is triage quietly falling back to its most expensive profile. A
+  malformed seed template still fails loudly.
+
+Fixed:
+
+- **`devc doctor` counts a stale container, so a report whose only finding is
+  staleness no longer ends in "nothing blocking".** The stale branch printed
+  `  stale      devcontainer config changed; devc up will recreate it` and never
+  incremented `problems`, so a container that is genuinely out of date was
+  reported in a section that then summarised as "nothing blocking" — the same
+  contradiction between detail and summary the root-style skip was, and the same
+  way of hiding a finding a user is meant to act on. It is now counted with
+  everything else above it. The summary's own wording for a non-zero count is
+  "%d item(s) need attention", which is what a stale container is: `devc up`
+  fixes it, so it is not *blocking* in the uid-mismatch sense, but it is not
+  current either — no wording changed, and `.pi/skills/devcontainer/SKILL.md`
+  needs none, since its "if it says nothing blocking, go ahead" line and its
+  `stale` → `devc up` row already assume doctor reports it. The existing test
+  `devc doctor reports a stale container, and only once the config moved` now
+  pins both halves: a current container still ends in "nothing blocking", and
+  editing the config makes the same run say `1 item(s) need attention` and stop
+  saying "nothing blocking". Against the previous script the second half failed
+  with exactly the old output.
+
+## v1.13.0 — 2026-11-15
+
+Added:
+
+- **`grilling` and `teach` are ported as ours from mattpocock/skills, in the shape
+  the coding stack already uses.** `grilling` is model-invoked and joins the
+  trigger list in `AGENTS.md`: the full design-tree interview, run in rounds —
+  ask the whole frontier, one recommended answer per question, facts found by the
+  agent (with a `subagent` when an environment can settle them) and decisions
+  left to the user — ending at an empty frontier and an explicit confirmation,
+  never at an edit, a commit or a review. It absorbs upstream's user-invoked
+  `grill-me` wrapper, whose whole body is "call `grilling`", because pi runs a
+  model-invoked skill as `/skill:<name>` too; the wrapper's prose (count rounds
+  not questions, there is no cap, split an over-long scope, hand the session to
+  `to-spec`) moved into the skill, and the boundary with `in-your-own-words`
+  (the cheap playback, still the default, which now names `grilling` where to
+  escalate) and `to-spec` (which deliberately does
+  not interview) is stated in place rather than left to the reader. `teach` is
+  the fifth user-invoked entry point: a stateful teaching workspace of numbered
+  HTML lessons, reference sheets, reusable `assets/`, a glossary, `RESOURCES.md`
+  and ADR-style learning records, continued by starting a session in that
+  directory. Two deviations matter. The workspace goes to a directory the user
+  names, or `<agent dir>/learning/<slug>` — never into a project checkout, where
+  upstream's "the directory `/teach` ran in" would litter every later diff with
+  course files. And `GLOSSARY-FORMAT.md` is linked from `SKILL.md`, because
+  upstream ships it orphaned
+  ([#559](https://github.com/mattpocock/skills/issues/559)) and the glossary it
+  describes is therefore never built. The quiz defect upstream measured — the
+  correct answer lands first however the instructions are worded
+  ([#335](https://github.com/mattpocock/skills/issues/335)) — is answered with a
+  component in `assets/` that shuffles at render time, not with wording alone,
+  and the gaps its own docs admit (nothing schedules review, no exit criteria,
+  no assessment step) are stated in "Honest limits" instead of being left for
+  the user to discover. Both are listed in the `pi` manifest and in
+  `licenses/NOTICE.md`, and `coding-skills.test.ts` now carries them as a
+  `PORTED` list so the name, description-length, invocation and relative-link
+  assertions apply to them too.
+
+- **`bin/pi-agent-dir` gives a host the devcontainer's agent-dir split, so a
+  subagent rooted in this checkout's worktree starts instead of exiting 1 on
+  duplicate tool registrations.** A linked worktree discovers *its own*
+  `.pi/extensions`, while an installed package resolves to the main checkout's
+  copy; pi treats that as a load error, and there is no flag that suppresses only
+  the package copy (`-ne` also drops built-in extensions and every extension not
+  named with `-e`, and `--no-approve` starts but runs the main checkout's code
+  rather than the branch's). The script creates
+  `~/.pi/agent-<main checkout directory name>`, a sibling of the shared `agent`
+  dir — the *shape* `devcontainer.json` declares, though not the same name
+  source: the script reads the checkout's directory while the container reads the
+  project's (see the `Fixed:` bullet below on `pi-agent-dir.test.ts`). It is
+  seeded from the shared `settings.json` with `.packages` and its
+  `extensionChangelogVersions` bookkeeping removed,
+  copies credentials once, merges (never replaces) a `trust.json` entry for the
+  checkout, and, with `--shell`, appends one marker-delimited `pi` function to
+  `~/.bashrc` that selects that dir from anywhere inside the checkout or a
+  worktree. It resolves the main checkout through `--git-common-dir`, so a
+  worktree maps to the same dir instead of getting a fresh unseeded one;
+  `trust.json` matters because a
+  saved decision covers a directory or its parents, and without the entry the
+  package-free dir is a silently empty agent. Every write is
+  create-if-missing and every file lands through a temp file and a rename, so
+  re-running it cannot overwrite a project's own settings or a rotated key, and
+  `--check` reports the three things that would still conflict. Verified against
+  throwaway HOME and repo trees: the seeded settings have no `packages`, a
+  second run leaves hand-edited settings and credentials untouched, a linked
+  worktree and its main checkout resolve to one dir, the installed hook resolves
+  both to that dir and nothing outside any checkout, and the shape matches the
+  one `devcontainer.json` declares. Mutation-checked the same way — using
+  `--show-toplevel`, keeping `.packages`, or appending the hook unconditionally
+  each turns the suite red. The README section "One copy of the extensions,
+  never two" and `.pi/skills/worktree/` now name this as the host remedy.
+
+Fixed:
+
+- **The `add-model` skill no longer contradicts itself about `baseUrl`, and its
+  merge rules now match `mergeWithEmbedded`.** It offered both `zen/go/v1` and
+  the payload's `inference/go/openai/v1` without saying which is canonical, and
+  it claimed "a curated entry always beats the live API" — false for `cost`
+  (live wins per field when non-zero), `contextWindow` (live → curated →
+  `131072`) and `reasoning` (curated, except an explicit live
+  `supported: false`, which demotes). The rewrite names `…/zen/go/v1` canonical
+  for `openai-completions` and `…/zen/go` for `anthropic-messages` — without the
+  trailing `/v1`, because pi's Anthropic client appends `/v1/messages`, so
+  keeping it requests `/v1/v1/messages` — calls the advertised
+  `inference/go/...` URLs aliases rather than the manual default (naming the
+  one deliberate curated alias, `longcat-2.5-free`, so an audit does not
+  "fix" it), replaces the claim with a per-field table, and adds the
+  `patch.json` caveats: a patch refines a `custom-models.json` entry as well as
+  a curated one, and a patch id in neither list is silently dropped. The
+  cost-tier section now opens with pi repricing the whole request at the
+  highest matching tier instead of reading as progressive billing, and states
+  which band shapes map: an open-ended `{ "gt": N }` does, while a `gte`
+  threshold and a bounded `{ "gt", "lte" }` band are skipped, as is a
+  condition outside the band. The
+  payload-is-untrusted note says the "malformed rate is skipped" rule covers
+  tier overrides only and that the four flat rates are parsed the same way
+  (both paths guard through `nonNegativeNumber`), and the
+  `cost.text.overrides` / `cost.multipliers` note is in the same pass. Verified by running the real
+  `transformApiModel`/`mergeWithEmbedded`/`buildModels` against a hand-written
+  payload: a non-string `base_url` falls back to `zen/go/v1`, a messages `…/v1`
+  is stripped, a live non-zero rate wins per field while a curated `cacheRead`
+  survives a live 0, a live `limit.context` beats a curated 1M, an explicit
+  `supported: false` drops `thinkingLevelMap`, a patch lands on a custom id and
+  a `ghost` id registers nothing, and `gt: 200000` becomes a tier while an
+  override carrying `service_tier` is skipped. Docs only; no provider behaviour
+  changed.
+- **opencode-go charged a payload's bounded or `gte` context tier as a permanent
+  one, and could crash on a hand-corrupted model cache.** `transformApiModel`
+  checked that a price override carried nothing besides `when.context`, but not
+  what was inside it: a band of `{ gt, lte }` had its lower bound mapped to an
+  open-ended `inputTokensAbove` tier, so the upper band's rate was charged to
+  every request above the threshold, and `gte: N` was mapped to `N` even though
+  pi-ai's `calculateCost` matches with a strict `>`, so a request of exactly `N`
+  tokens paid the flat rate. The recorded payload uses only open-ended `gt`, so
+  neither was reachable from a live fetch; a band is now accepted only as exactly
+  `{ gt }`, and `gte` is dropped rather than mapped (a faithful mapping needs
+  `N - 1`, not the `N + 1` the finding suggested, and no payload uses `gte`), so
+  a `gte`-only override keeps the base rate. Separately, `loadCachedModels`
+  validated the cache envelope but not its elements, so a current-format
+  `{"format":2,"models":[null]}` threw `Cannot read properties of null (reading
+  'id')` out of extension init, `["oops"]` was registered with no id or name,
+  and an object carrying only an `id` was registered with `cost: undefined`,
+  which throws from pi-ai's `calculateCost` on the first request; one bad element
+  now fails the read, and the curated list is served for that cold start as it
+  already was for every other unrecognised cache shape. The element check covers
+  the id, the pricing block (four finite rates, and tiers when present), the
+  `input` array and `contextWindow`, which are the fields downstream dereferences
+  without a fallback: a garbled rate prices the session `NaN` silently, a missing
+  `input` throws from pi's read tool on `model.input.includes(...)`, and a
+  non-numeric `contextWindow` makes compaction's comparison false instead of
+  throwing, so it switches compaction off with no signal at all. Review also
+  found that the writer could produce what this reader rejects — `transformApiModel`
+  copied the flat `price` through unchecked where the tier path already used
+  `nonNegativeNumber` — so a payload reporting `"0.1"` was written into the cache
+  and then refused on every later start, with revalidation rewriting the same
+  element: a cache that never converges, and a `NaN` price in the live session
+  until the next cold start. Both flat and tier rates are guarded now. The tests
+  also pin the bounds the first pass left open — an empty or non-string id, a
+  missing or non-numeric rate, malformed tiers, a missing `input`, a string
+  `contextWindow` — and prove a realistic cache written from the recorded payload
+  plus the real catalogue is still read back whole (31 of 31 elements), so the
+  new checks do not cost existing users a cold start. Every new case fails
+  against the previous code; the provider suite passes 95/95 (`cd
+  .pi/extensions/opencode-go-provider && node --test`).
+- **`devc doctor` now examines a repo-root `.devcontainer.json` project
+  instead of skipping it and reporting the run as clean.** `doctor()` built its
+  config path as `$d/.devcontainer/devcontainer.json` and did `[ -f "$dc" ] ||
+  continue`, so the root layout — which `has_devcontainer` accepts in every
+  membership test, `projects` lists and `cfg_hash` hashes since PR #124 — never
+  reached a single per-project check: no Docker-in-Docker warning, no uid
+  comparison, no stale-config report. The silence was the bug, because the run
+  then ended in "nothing blocking" for a container it had not examined.
+  Membership is now the existing `has_devcontainer` helper, with the config path
+  picked from whichever layout exists; the Dockerfile check stays guarded on
+  `.devcontainer/Dockerfile`, and so does the compose/ports check on
+  `.devcontainer/docker-compose.yml`, so both remain silent for a root-style
+  project that puts them at the repo root — a narrower gap than before, not
+  none. The stale check needed no change because `cfg_hash` already handles both
+  shapes. `devc.test.ts` gains the coverage it lacked for the root style:
+  `doctor proj` and `doctor` with no name both print the project's section and
+  its current line, and editing the root config then reports `stale`. A second
+  test pins the other half — the config path itself — by putting
+  Docker-in-Docker in the root file and requiring the privileged line, which a
+  membership-only fix would miss while the section around it printed. Both fail
+  against the previous script, which printed no section at all.
+
+- **`devc`'s config stamp is keyed
+- **`devc`'s config stamp is keyed on the resolved workspace path, so two
+  projects with the same basename no longer read each other's staleness.** The
+  stamp lived at `$STATE_DIR/$(basename "$dir").cfgsha`, so `~/a/web` and
+  `~/b/web` shared one file: whichever ran last owned it, and `ensure_up`'s
+  stale detection then compared against the *other* project's hash — either
+  recreating a current container or, when the sibling's last-written hash
+  happened to equal this project's config hash (both configs identical is the
+  easy way there), leaving a stale one alone with "already running".
+  `devc doctor`'s stale report read the same file, so it could flag a project
+  stale that was not, or reassure one that was. Same class as the shared-lock
+  bug, same fix: the path hash that `lock_file` already computed is factored
+  into a `workspace_key` helper, and every read and write of the stamp —
+  `ensure_up`'s write and read, `cmd_rebuild`'s write, `doctor`'s read — uses
+  it. Migration is safe by construction: the first run after the upgrade finds
+  no keyed stamp, `have` is empty, and `ensure_up` recreates only when `have`
+  is non-empty *and* differs, so nothing existing is destroyed; that run writes
+  the keyed stamp and detection is correct from then on. The cost is one
+  missed reconcile on each project's first run after upgrading. The new tests
+  fail against the pre-fix script, and mutation-checked both ways — reverting
+  every stamp site to the basename, or only `doctor`'s read, turns the
+  corresponding tests red.
+
+- **`pi-agent-dir.test.ts` no longer fails wherever the checkout directory is not
+  named after the repo.** The test tied the host script's convention to the one
+  `.devcontainer/devcontainer.json` declares by comparing the declared directory
+  against `agent-` + `basename(REPO_ROOT)`. That is the *checkout* directory, not
+  the repo's identity, so it held only for a clone made into a directory named
+  after the repo: it was red on untouched `dev` inside this repo's own container,
+  which mounts the repo at `/workspace`, where the check computed
+  `agent-workspace` against the declared project name. The expected side now
+  comes from `package.json`'s `name` — the repo's declared identity, independent
+  of where it is cloned. That is not the same mechanism as the sibling guard's
+  volume literal, which is hard-coded, so a project rename now turns this test
+  red while that literal stays green: one stale name caught instead of none. And
+  renaming the declared directory still turns it red — checked by renaming it to
+  `agent-renamed-drift` and reading the failure, which names the expected value.
+  Both sides stay computed, so the "exactly one literal" guard is unaffected, and
+  the sandbox tests keep pinning the script's own rule
+  (`agent-<main checkout directory name>`) against a temp HOME. The naming prose is
+  now exact about the two sources instead of implying they are one convention:
+  the header comment in `bin/pi-agent-dir` and the README table row both say the
+  script names its dir after the main checkout's *directory* while the container
+  names its own after the *project*, so the two agree only for a directory named
+  after the repo — and that this is intended, since the container installs no
+  package and the shell hook derives the host name at call time.
+
+- **`/explore`'s changed-files colouring now diffs against a branch's configured
+  upstream.** `index.ts` passes `choice.refname` — a full `refs/heads/<name>` —
+  and `upstreamOf` built its probe as `${branch}@{upstream}`, which git rejects
+  with `fatal: no such branch` (exit 128), because `@{upstream}` is only accepted
+  after a *short* branch name. So the "`@{upstream}` wins" half never ran in
+  production. It usually fell through to the conventional `origin/<branch>` and
+  looked right, but a branch whose configured upstream is a differently named
+  ref and has no `origin/<branch>` — `branch.feature.merge` pointing at
+  `refs/heads/main`, say — fell through to the merge base with the integration
+  branch and painted the branch's whole history red. The probe now uses the
+  `short` name `upstreamOf` already computes. Pinned by a test that is red on the
+  old form and asserts the probe's argv as well as the resulting paths, because a
+  resolver that misses the probe and falls back can produce plausible paths
+  anyway; the fixture makes the two answers disjoint (the upstream sits one
+  commit past the merge base) and omits `origin/feature` so nothing rescues it.
+  Mutating `${short}` back to `${branch}` turns that one test red.
+
+Maintenance:
+
+- **`README.md` now carries an "Upgrading to v1.12.0" block, and it says to
+  delete a stale web-search provider rather than replace it.** Both v1.12.0
+  changes needed an action and were reachable only from the startup error, the
+  skill's provider notes or the changelog entry: install this repo by local path
+  rather than `git:`, and drop `--provider opencode-go` /
+  `PI_WEB_SEARCH_PROVIDER=opencode-go`. The block states the second as *delete*,
+  because Brave is already the first choice when a key resolves and OpenRouter is
+  the native default otherwise — the changelog told a reader to add an
+  `openrouter` credential, which is needed only on a machine that has neither.
+  Verified on this machine's agent dir, which keeps `defaultProvider:
+  "opencode-go"` in `settings.json` and a `brave` credential in `auth.json`:
+  `pickProvider(undefined, settings, auth)` resolves `brave`, and an explicit
+  `opencode-go` throws the documented `Unknown provider` error. Docs only; no
+  provider precedence changed.
+
+- **`/explore`'s changed-files colouring now has tests, and writing them found
+  a real bug in it, fixed in the `Fixed:` block above.** `git.changedFiles`,
+  `FileBrowser.changedFiles`/`changedDirs` and the handler wiring shipped in
+  v1.12.0 with no coverage: `grep changedFiles` in the repo-explorer tests found
+  nothing, and every branch had a plausible wrong answer. The new tests pin the
+  four behaviours the v1.12.0 bullet claims. The configured upstream winning
+  over `origin/<branch>` (and the fallback when it is unset) — with the two refs
+  holding disjoint commits, so an implementation that diffed both and unioned
+  the results is caught rather than passing. A remote-tracking
+  ref never being diffed — in both shapes that matter, because the guards are
+  two: the early return is what stops a symref-`HEAD`-at-`origin/main` browse
+  from collecting the local working tree, and removing it *and* the
+  `!branch.startsWith("refs/remotes/")` guard is what would let the merge-base
+  fallback paint the whole tree. Uncommitted changes reaching the checked-out
+  branch only. The merge-base candidate order `origin/dev` → `dev` →
+  `origin/main` → `main`, asserted through the argv git actually received, not
+  just the resulting paths, and a non-ASCII path pinned from `-z` output (without
+  it git shell-quotes the name, so dropping the flag cannot pass). The browser
+  painting a changed file and every folder above it with
+  `theme.fg("error", …)`, leaving unaffected rows plain and a selected changed
+  row still red *without* being repainted in the selection colour — assertions
+  that were checked against those mutations, not just written — and the handler
+  turning a failed diff into
+  one `warning:` notify plus an empty set that still opens the browser with the
+  file list intact. The failed diff is a real git failure (`mktree --missing`
+  fabricates a tree that cannot be read), not a shim. Mutation-checked as the
+  todo asked: dropping the remote-tracking guard turns two tests red, dropping
+  `headBranch === branch` turns the uncommitted-changes test red; both restored,
+  the production diff is empty. `.pi/extensions/subagent/test/README.md`'s
+  coverage table gains the new coverage in the three repo-explorer rows, since
+  it is what AGENTS.md points at for "what is and is not covered".
+
+Changed:
+
+- **Devcontainers are independent: no container mounts the shared
+  `pi-agent-config` volume any more.** This repo's container keeps its existing
+  state on a new private volume, `pi-agent-my-agent-setup`, migrated from the
+  old one; both it and every other project stack now own their pi sessions,
+  trust and gh config. The shared volume's clone had silently frozen at `main`
+  (`eabebf4`) while `dev` moved on, which is the failure this removes: nothing
+  outside the checkout could report that the extensions were a release behind.
+
+- **This repo's own container still installs no package.** Its
+  `PI_CODING_AGENT_DIR` is unchanged, but the volume under it is private, and a
+  missing `settings.json` now starts from the committed
+  `.devcontainer/pi/settings.json` template instead of being seeded from the
+  shared `agent` dir. `postCreate.sh` also strips any `my-agent-setup` package
+  entry a migrated volume still carries, so the checkout's `.pi/` remains the
+  only source of extensions and skills (README, "One copy of the extensions,
+  never two").
+
+- **Other projects' images bake this repo, pinned to `v1.12.0`.** Each image
+  clones the tag to `/opt/pi-packages/my-agent-setup`, outside `$AGENT_DIR` so a
+  named volume cannot freeze the first container's copy, and exposes the pin as
+  `PI_AGENT_SETUP_TAG`, the `org.rriboulet.pi-package` label and
+  `/opt/pi-packages/my-agent-setup/.pi-agent-setup-tag`. Their `postCreate`
+  declares that baked path in the container's own agent settings and fails if a
+  stale image does not match the checkout's `.devcontainer/pi-agent-setup.version`.
+  The tag is deliberately `v1.12.0`: it predates the `devc` fixes and the
+  `grilling`/`teach` port, so those images start one release behind `dev` on
+  purpose, and the next release's bump brings them current.
+
+- **Credentials travel as environment variables, never as a copied `auth.json`
+  on a shared volume.** `OPENCODE_API_KEY`, `OPENROUTER_API_KEY`,
+  `BRAVE_API_KEY`, `TYPESAFE_API_KEY`, `PI_VOICE_API_KEY` and `GH_TOKEN` are
+  forwarded into every container from the host environment with
+  `${localEnv:...}`. `devc` sources `~/.config/devc/env` (mode 600, never
+  committed) before `devcontainer up`, so one host-side file can supply every
+  project while no container shares state with another. The values are visible
+  in `docker inspect` and in child-process environments; that is the deliberate
+  trade-off, and the alternative — a mount — is the coupling this change
+  removes.
+
+## v1.12.0 — 2026-11-13
+
+Added:
+
+- **A test harness for `bin/devc`** (`devc.test.ts`), which had none: it runs
+  the real script against a throwaway project with `docker`, `devcontainer` and
+  `tmux` stubbed on PATH. Every test it shipped with fails against the previous
+  script, which is the point — none of these bugs is reachable from the dry run,
+  so the artefacts they assert on are the ones that were wrong: exit status, the
+  stamp file, the argv the CLI actually received, and whether the lock was held
+  at the moment `up` ran.
+
+- **`/explore` marks a branch's changed files in red, and the folders that
+  contain them.** `git.changedFiles(branch)` diffs the branch against
+  `@{upstream}` when set, else `origin/<branch>`; a local branch with no remote
+  counterpart is diffed from the merge base with `origin/dev`, `dev`,
+  `origin/main` or `main`, whichever exists first, and a remote-tracking branch
+  is not diffed at all — browsing `origin/main` does not paint the whole tree
+  red. Uncommitted changes are added for the checked-out branch only, paths come
+  from NUL-delimited `git diff --name-only -z`, and a failed diff warns through
+  the UI instead of blanking the browser. Folders inherit the colour from any
+  changed path below them, and a changed row keeps its label when selected
+  instead of being repainted with the selection accent.
+
+Fixed:
+
+- **A subagent could not start in a project that delegates its extensions to an
+  installed package.** The child was launched with `--extension <cwd>/.pi/extensions/
+  subagent/index.ts` *and* with discovery enabled, so a project that excludes its own
+  tree — `"extensions": ["!extensions/**"]`, the rule this devcontainer uses — loaded
+  the package's copy and the excluded copy at once, and pi refused to start on the
+  duplicate `--attach-subagent` flag. The tool reported it as "Child Pi exited before
+  reporting a result", with nothing about extensions, so it read as a failed task
+  rather than a failed launch, and it failed identically in a worktree and in the
+  main checkout. `resolveChildExtensionPath` now reads the child project's
+  `.pi/settings.json` and, when that project excludes its own copy (`!glob` or
+  `-path`, honouring a `+path` re-inclusion), names the copy *this* process is already
+  running instead of the excluded one — which in that shape is the package's, and is
+  the same file discovery loads, so pi sees one resolved path. Both project shapes
+  stay covered: a worktree carrying its own copy still gets that copy named, an
+  untrusted cwd still gets the fallback, and a delegated project gets a copy that
+  exists rather than a launch that defers and might inherit nothing. Found while
+  running subagents in parallel worktrees on the `lol-dataset` scaffold.
+- **A tiered-price model was reported at its cheapest rate however much context
+  the request used.** `claude-haiku-5-5` is priced per context tier — 0.1 / 0.5
+  per 1M input/output up to 100K input tokens, then 0.5 / 2.5 above it, with
+  cache read/write at 0.05 / 0.625 — and the payload says so under
+  `cost.text.input.overrides` and `cost.text.output.overrides`. `transformApiModel`
+  read only the flat `price`, so a 1M-context session past 100K tokens was
+  reported at a fifth of its real cost. #117 pinned that on purpose (the test
+  `reads pricing from the payload's cost.text block` asserted the flattened
+  cost), which is why flipping it is an explicit decision rather than a bug fix.
+  Display only, not billing: pi computes these numbers locally from the
+  registered model.
+
+  The overrides now map onto pi's `cost.tiers`, which `calculateCost` already
+  consumes, taking the highest tier whose `inputTokensAbove` the request's total
+  input exceeds. The mapping is 1:1 because the payload lists input and output
+  tiers as two parallel arrays keyed by the same `when.context.gt`, and a tier
+  needs all four rates: each array contributes its own two, and a rate an
+  override does not list keeps the base price rather than becoming zero. Measured
+  against pi-ai's own `calculateCost` with the real transform and the recorded
+  fixture, 150K input tokens plus 1K output now reports $0.0775 where the flat
+  read reported $0.0155; at 50K input the two agree, so the tier only engages
+  where it should. `cost.multipliers` (peak-hour pricing) stays ignored on
+  purpose: pi has no counterpart to map it to, and the decision is now written
+  down in `add-model` next to the tier documentation instead of living in a code
+  comment.
+
+  Tiers survive the rest of the pipeline: `mergeWithEmbedded` prefers live tiers
+  and falls back to curated ones, `patch.json` carries them through an unrelated
+  cost override and can replace them, and a tierless model's `cost` keeps exactly
+  its previous shape — the key is absent, not `undefined` or `[]`. `cost` remains
+  one of the fields the stale path serves from the cache, so a tier edited in
+  `models.json` still needs the cache deleted before it shows up offline, which
+  `add-model` now says explicitly. The cache format marker goes to 2 for this,
+  because a cache written before it has no `tiers` to serve and would keep
+  reporting the flat rate — the same replay the marker exists to stop.
+
+- **An upgraded provider kept replaying the previous transform's model routing
+  from cache.** The model cache
+  (`$PI_CODING_AGENT_DIR/cache/opencode-go-models.json`) was a bare array with
+  nothing in it saying which transform wrote it, and `loadStaleModels` served it
+  wholesale — after #120 it refreshed only `reasoning` and `thinkingLevelMap`.
+  So a cache written before #117 kept `claude-haiku-5-5` on
+  `openai-completions` / `zen/go/v1` with four zero costs, text-only input and
+  `maxTokens: 0` until the first *successful* revalidation rewrote the file:
+  seconds with a healthy API, indefinitely offline — which is exactly when the
+  stale path is the one in use. A container makes it worse than a host, because
+  the cache lives in the agent dir on the `pi-agent-config` volume: a rebuild
+  replaces the code and keeps the cache, and `postCreate.sh` deliberately copies
+  no cache.
+
+  The file now carries a `format` marker, and a cache missing it or carrying a
+  different one is not upgraded in place but ignored — a cache whose contents
+  cannot be attributed is precisely the case in hand. An upgrade therefore costs
+  one cold start: the stale path falls back to the curated `models.json`, and
+  live-only models return with the first revalidation. Bumping
+  `CACHE_FORMAT_VERSION` is the discipline for any future change to what the
+  pipeline writes; the writer and the reader share the constant, and a test
+  writes through `cacheModels` and reads back through `loadStaleModels`, because
+  a bump that moves one and not the other would freeze the model list at the
+  curated entries forever.
+
+  The stale path also refreshes the fields curation owns — `name`, `api`,
+  `baseUrl`, `input`, `maxTokens`, `reasoning`, `thinkingLevelMap`, and `compat`
+  when the curated entry defines one — since those are `models.json` data rather
+  than something the cache observed, which is the argument #120 made for
+  `reasoning` alone. `cost` and `contextWindow` stay cached deliberately: those
+  are the two fields `mergeWithEmbedded` gives to the live payload first, so a
+  cached value that disagrees with `models.json` is a live observation rather
+  than stale curation. A live-only entry still cannot be corrected this way,
+  because curation
+  has nothing to correct it with, so the marker rather than the field refresh is
+  what fixes the recorded case. Verified against the real module and the real
+  catalogue rather than the fixture: a hand-written pre-#117 cache no longer
+  serves `claude-haiku-5-5`, while a current-format cache holding
+  `qwen3.8-flash` on `openai-completions` / `zen/go/v1` and text-only input comes
+  back with its curated endpoint, `input: ["text", "image"]`, name and
+  `maxTokens`. The provider README documents the cache and the marker, and
+  `add-model`'s "After editing" step now says which edits still need the file
+  deleted (`cost`, `contextWindow`) and which no longer do, using
+  `$PI_CODING_AGENT_DIR` rather than the hard-coded host path.
+- **The picker offered a longcat id that no longer exists and, offline, omitted
+  the one that does.** `models.json` carried `longcat-2.5-preview-free`
+  (1M / 131072) while the API serves `longcat-2.5-free` (1M / 262144, same
+  `canonical_id` `meituan/longcat-2.5`, released 2026-11-02), so the preview id
+  was selectable and the GA id existed only while the live fetch had succeeded.
+
+  Absence from the model list was not evidence enough to act on: what that
+  endpoint returns depends on the credential (6 ids for this account, a wider
+  catalogue unauthenticated) and models can be switched off per model in the
+  console. Asking the endpoint for the model separates the cases, which is what
+  the decision rests on — `longcat-2.0` answers `403 "Model access is
+  disabled."` (it exists, this account has it off), `longcat-2.5-preview-free`
+  answers `400 "Upstream request failed: Model is unavailable."` (the id resolves
+  to nothing upstream), and `longcat-2.5-free` answers 200. The probe needs
+  `x-opencode-session` like every other request, which the extension already
+  sends and a bare `curl` does not.
+
+  The same probe then found that the drift is wider than this one id, so it is
+  recorded here rather than fixed quietly: of the other curated ids missing from
+  the list, `deepseek-v4-flash`, `deepseek-v4-flash-vision-exp`, `space-bunny`
+  and `grok-4.6` answer `400 Model is unavailable`, while `mimo-v2.5`,
+  `mimo-v2.5-pro` and `minimax-m2.7` answer `410 ModelDeprecated` naming the
+  successor to use instead. Those seven cannot complete a request and want the
+  same move `longcat-2.5-preview-free` gets; the rest are disabled in the console
+  and answer `403` (spot-checked on `qwen3.8-flash`).
+
+  The preview id therefore moves to `deprecated-models.json` stamped with today's
+  `deprecatedAt`: it keeps being served for the 14-day grace period, so a saved
+  model setting is not yanked mid-run, and is then evicted. `longcat-2.5-free` is
+  curated in its place — `openai-completions` on the advertised
+  `inference/go/openai/v1`, `1M / 262144`, toggle-only reasoning so no
+  `thinkingLevelMap` — because the offline half is the half that was missing.
+
+  `claude-haiku-5-5` stays live-only, and that is now a decision on record rather
+  than an omission. Since #117 the payload describes it completely
+  (`anthropic-messages` on `inference/go/anthropic`, 1M / 128K, image input,
+  effort `low…max`, tiered pricing), and none of the five curated
+  `anthropic-messages` entries carries a `compat` block, so a curated copy would
+  add no field — only pin `maxTokens` and `contextWindow` against later payload
+  corrections. `add-model` now says this as a rule: curate what the payload cannot
+  express, not what it already derives.
+
+  Two data tests came out of it. `no model is both curated and deprecated` pins
+  the half-finished move, which is otherwise silent — `withDeprecated` keeps the
+  curated entry on an id conflict, so the model still appears exactly once and
+  the deprecation never happens; `every deprecated model carries a parseable
+  deprecation date` pins the other silent failure, an entry with no usable date
+  being evicted immediately instead of after its grace period. One existing test
+  also had to change for a reason worth stating: `applies a patch to a custom
+  model` read `buildModels(...)[0]`, which is the first grace-period deprecated
+  entry whenever the base list is empty. It passed only because every deprecation
+  in the file had already expired, and adding one inside its window made it read
+  the wrong model; it now finds its model by id. `add-model` gains "Curate only
+  what the live API cannot say" and "Deprecating a model", and records that
+  `scripts/update-models.js` — the program that normally performs this move — is
+  not vendored into this tree, so the deprecation path has been running by hand or
+  not at all.
+
+- **The review-triage policy named a provider with no credential.** The config at
+  `~/.pi/agent/review-triage.json` listed `deepseek-v4.1-flash` and
+  `glm-5.3-flash` under `opencode`; only `opencode-go` and `openrouter` are
+  authenticated here. The two consumers behave differently, which is worth
+  stating exactly: `generateCatalog` filters candidates against what the session
+  can run, so it did not *fail* — the medium and high bands quietly lost their
+  candidates and the plan carried one `no available <band>-band model; its
+  profiles are not offered` note that never names the provider; but `AGENTS.md`
+  tells the agent to read `candidates` directly to choose the reviewer, and that
+  path is not filtered at all. That is the one that failed, as
+  `Error: No API key found for opencode.`, when the model this config named was
+  handed to a review sub-agent.
+
+  The repository now ships a starting policy as
+  `.pi/extensions/review-triage/review-triage.example.json` (copy it to
+  `~/.pi/agent/review-triage.json`, or `$PI_CODING_AGENT_DIR/review-triage.json`
+  in a container, and edit that copy — nothing keeps the two in step). Every
+  candidate is on `opencode-go`; the judge — a decision model, not a reviewer — is
+  the sole `openrouter` entry. `.pi/extensions/subagent/test/review-triage.test.ts`
+  loads that file through the extension's own `loadConfig` and fails if a
+  candidate's provider leaves `opencode-go`, if the judge changes, if a stated
+  `cost` disagrees with the opencode-go catalogue (`deepseek-v4.1-flash` was
+  shipped at 0.3 against a catalogue 0.15 — a stated cost overrides the catalogue
+  in what Jev reads, so that is a silent 2× error in the routing decision, and it
+  is pinned now), or if a band has no candidate at all. What no repo test can pin
+  is whether this machine holds credentials for a provider; that stays a human
+  check, and the extension README says so.
+
+  Two band changes ride along, both from the machine policy this file was taken
+  from rather than from the provider fix, and both now visible instead of
+  implied: the **high** band is `glm-5.3-flash` (0.15), where the README block
+  this replaces had `glm-5.3` (1.4) and explicitly said `glm-5.3-flash` was
+  `notFor` hostile review — restore `glm-5.3` to `high` if the cheaper high band
+  was not intended; and the **low** band resolves to `beam-free` because the
+  catalogue picks the first listed candidate, so listing order is routing.
+  `deepseek-v4.1-flash` also sets `medium: null` in its thinking map, so
+  `medium:medium` is pruned at run time — a band can keep a candidate and still
+  lose a rung.
+- **The triage dossier could ask the judge to decide on a change it had not been
+  shown, and the one argument meant to fix that threw.** Two independent caps ate
+  the evidence. The git collector captured at most 8,000 characters of the
+  combined diff (`evidence.ts`), so on a 22,847-character branch diff the last
+  four files — including both new test files and the new config the change was
+  about — were absent, not truncated; the dossier then spent its patch budget
+  (half of `stateChars`, 6,000 characters by default) strictly in priority order,
+  so the first files took everything and the rest were recorded `omitted` with no
+  patch at all. Meanwhile `context`, the documented channel for evidence git
+  cannot see, failed with `((intermediate value) ?? []).map is not a function`
+  whenever a caller wrote a single string where the collector expected a list —
+  `acceptanceCriteria: "done when the suite is green"` is the natural way to
+  write that field, and it cost the run its whole context. The capture cap is now
+  256,000 characters and is documented as a memory guard rather than a relevance
+  budget, so the per-file budget is the only thing deciding what the judge reads;
+  that budget first reserves a 200-character floor for every file with a patch
+  (header plus first hunk) and only then spends the remainder in priority order,
+  releasing unused floors back to the queue, and cuts a truncated patch at a line
+  boundary instead of mid-line; and the harness collector accepts one string or a
+  list of strings for `acceptanceCriteria`, `toolResults` and `unresolvedIssues`,
+  with anything else still recorded as a limitation. Tests pin the floor
+  (`[200,200,200]` where the old code produced `[600,0,0]`), the priority
+  remainder, the released floor, the line-boundary cut, and the string-or-list
+  forms that used to throw. The default budget itself (`stateChars` 12,000) is
+  unchanged here: this fixes which evidence survives the budget, not how large it
+  is.
+
+- **`pi` could not start in this repository's own checkout — on the host or in
+  its devcontainer.** The checkout is itself a pi package (`package.json` →
+  `pi.extensions` / `pi.skills`), and in both places it was *also* installed as
+  `git:github.com/RRiboulet/my-agent-setup` — on the host in `~/.pi/agent`, in the
+  container in the shared `pi-agent-config` volume. Pi discovers resources from
+  the project *and* from every installed package, so every extension was loaded
+  twice — `.pi/extensions/…` from the project scope and
+  `…/git/github.com/RRiboulet/my-agent-setup/.pi/extensions/…` from the package —
+  and its duplicate detector reports that as a load error, not a diagnostic: one
+  `Tool "todo" conflicts with /workspace/.pi/extensions/todos.ts`
+  per duplicated tool and flag (`get_goal`, `create_goal`, `update_goal`,
+  `web_search`, `triage_change`, `todo`, `subagent`, `--attach-subagent`), then
+  the TUI exited 1 with nothing but `Hint: Start without extensions using "pi
+  -ne".` Non-interactive invocations hid it (`pi --version` and
+  `pi --list-models` print the same errors and carry on), and the extensions that
+  register no tool or flag — `/answer`, `/btw`, `/continue`, `/review`,
+  `/session-breakdown`, repo-explorer, `/voice` — loaded twice in silence.
+  Skills collided the same way, but as a first-one-wins collision diagnostic, so
+  they never raised the error and only made the packaged copies dead weight.
+  Deleting the package from the volume was not an option: `pi-agent-config` is
+  shared with the `lol-dataset` devcontainer, which has no `.pi/` of its own and
+  needs it. This container now runs its own agent dir inside that volume
+  (`PI_CODING_AGENT_DIR=/home/vscode/.pi/agent-my-agent-setup` in
+  `devcontainer.json`), so no package is installed here and the working tree is
+  the only source of extensions and skills. `postCreate.sh` seeds the dir once
+  from the shared one: `settings.json` with `.packages` and
+  `.extensionChangelogVersions` removed (provider, model, thinking level and tool
+  defaults survive; the package list does not), `auth.json`, `voice.json`,
+  `review-triage.json`, and a `trust.json` entry for `/workspace` — trust is what
+  makes pi read project-local `.pi/` at all, so without it the package removal
+  would leave an agent with no extensions rather than a visible failure. Seeding
+  only writes files that are missing, so a rebuild keeps whatever was configured
+  in the container; the theme is the one exception and is re-pinned to
+  `kokomi-theme` on every run, as it always was. Two things the first version got
+  wrong, found in review: the volume was chowned *after* the first write into it,
+  so a genuinely fresh, root-owned first-run volume aborted postCreate with
+  `mkdir: cannot create directory '/home/vscode/.pi/themes': Permission denied`
+  before reaching the chown that fixes it — the same trap the script's own
+  `GH_CONFIG_DIR` comment already documented, and reproducible with a throwaway
+  volume and an image whose `vscode` is not remapped to the host uid; and
+  `trust.json` was written in place behind a write-once guard, so an interrupted
+  run could leave a 0-byte file that pi then refuses to parse and that the guard
+  never repairs. The chown now runs before anything writes into the volume, and
+  settings and trust are written through temp files with a non-empty check, with
+  a stderr warning when a corrupt or empty shared `settings.json` forces the
+  minimal fallback instead of silently dropping provider, model and tool defaults.
+  The host had the same duplication, from the same `git:`
+  install: running `pi` anywhere in the checkout loaded the clone *and* the
+  working tree, so the fix there is the install rule —
+  `pi remove git:github.com/RRiboulet/my-agent-setup` followed by
+  `pi install /path/to/my-agent-setup`, the local path, which resolves to the
+  same files project discovery already found and therefore dedupes instead of
+  conflicting (and leaves no clone to fall behind the checkout; the old one is
+  deleted by `pi remove`). Both rules are in the README under "One copy of the
+  extensions, never two", and `AGENTS.md` says to install by local path so an
+  agent does not reintroduce the git form. Verified on the host as well: pi in
+  the checkout lists 21 skills and 13 extensions once with a clean stderr, and
+  pi outside the checkout still loads all of them from the checkout. On the
+  recreated container: pi starts, 21 skills and 13 extensions listed once with no
+  diagnostics, `pi list` reports "No packages installed", and the shared
+  `~/.pi/agent` still declares the package for the other projects that mount the
+  volume.
+
+- **`devc up|rebuild|stop|doctor <unknown>` used to carry on with an empty
+  workspace folder.** `find_project` dies with "no project named", but that
+  `die` ran inside `$( … )` in *argument* position, where a failed command
+  substitution does not abort under `set -e` — the callee simply receives `""`.
+  So `devc rebuild nosuchproj` printed the error and then ran `devcontainer up
+  --workspace-folder '' --remove-existing-container`: it recreated the container
+  of whatever directory the user happened to be standing in, while `devc up
+  nosuchproj` reported ` is already running` and exited 0. Every caller now
+  resolves the project into a variable first, whose failed assignment does
+  abort, and a test asserts the CLI is never reached with an empty path. Found
+  by reviewing the `devc` changes below — the same silent-error-path class they
+  fix, one function over.
+
+- **`devc` no longer dies silently on a project that has no `.dockerignore`.**
+  `cfg_hash` ended with `[ -f .dockerignore ] && cat .dockerignore`, so the
+  group's exit status was 1 for any project without that file, and under
+  `set -e` inside a command substitution `want="$(cfg_hash …)"` took the whole
+  run down: rc=1 with no output at all, `touch .dockerignore` and it was rc=0.
+  Every project without one — which is most of them — could not be opened at
+  all. The predicate is now an `if`, so the ignore file is still folded into the
+  hash when it exists and its absence is simply not a failure.
+- **`devc`'s dry run now prints the command it would run, not a sketch of it.**
+  The previews were hand-written next to separately-written `exec` calls, and
+  the printed line had already lost the `--remote-env PI_TRUE_COLOR=1
+  --remote-env COLORTERM=truecolor` pair — the one thing that flips pi's
+  truecolor detection — so a user copying a dry run to debug was copying a
+  command that behaves differently from the real one. The argv is now built
+  once and either printed shell-quoted or exec'd, and `+` marks only that argv:
+  `ensure_up`'s conditional step is a note, because which branch it takes is not
+  knowable without probing the daemon. A dry run also takes no lock: it used to
+  queue behind a live build for up to fifteen silent minutes before printing
+  anything, while holding the lock for nothing, and `rebuild`'s preview now says
+  "would recreate" rather than the affirmative "recreating".
+- **`devc rebuild` takes the project lock, and the lock's scope is written
+  down.** It never called `lock_project`, so `--remove-existing-container` could
+  interleave with a concurrent `devc up`. It is serialized now that the lock is
+  released before an interactive exec — and the comment says plainly what it
+  still cannot do: it does not protect a shell already attached, so a rebuild on
+  an attached project replaces the container under that session. Holding the
+  lock for a session's lifetime instead is what deadlocked the project for
+  every other run.
+- **A dry-run `devc rebuild` no longer writes the config stamp.** It printed the
+  command, then hashed the (unchanged) config and wrote the stamp anyway,
+  claiming the container had been rebuilt from the current config — so
+  `devc doctor` then reported a stale container as current.
+
+- **Native web search no longer claims the `opencode-go` plan, which never
+  actually searched.** The Go path sent Anthropic's `web_search_20260318` tool
+  to `https://opencode.ai/zen/go/v1/messages` on `claude-haiku-5-5`, and the
+  endpoint accepted the request — but the model answered from memory, because
+  the Go plan does not carry the hosted search tool for its Anthropic models.
+  A live probe against both `/zen/go/v1/messages` and
+  `/inference/go/anthropic/v1/messages` returned "I can't run a live web
+  search", and an explicit `tool_choice` was rejected with "the web_search
+  hosted tool isn't available on OpenCode's models". The tool definition was
+  silently ignored, so the failure looked like a working search returning a
+  stale answer rather than an error. `opencode-go` is removed from the provider
+  list, the credential chain, the default model/base-URL tables, the session
+  headers and the tests; OpenRouter is the native default again, ahead of
+  `openai-codex` and `anthropic`. Brave remains first when its key is
+  configured. The Go plan is still a `/model` provider; it is simply not a
+  web-search provider.
+
+- **A subagent's `result.json` is now validated before the parent acts on it,
+  so a child from another build fails the run instead of stalling it forever.**
+  `ChildResult` has always carried a `version`, but the parent cast the parse
+  and never checked it — nothing verified the shape. That was survivable while
+  both sides were always the same build; it stopped being so once a child can
+  run a different branch's copy of the extension (the trusted-copy resolution),
+  which makes `result.json` a protocol spoken across versions. A child that
+  renamed or dropped `output` made finalisation throw inside the watch tick,
+  which only logged the error and rescheduled it: the run stayed `running`
+  forever, one error every poll, and the result was never consumed. An
+  unrecognised `status` mislabelled a good run as failed with no text. The
+  reader now lives in `result.ts` beside `activity.ts`/`interrupt.ts`, uses the
+  same `{ ok, reason }` shape, and validates every field finalisation
+  dereferences: a `status` that is neither `completed` nor `failed`, a missing
+  or non-string `output`, a non-string optional field, and a `finishedAt` that
+  is not a finite number. The *shape* is the gate and `version` is advisory —
+  it is quoted when a failure looks like version skew, so a newer protocol
+  version with a compatible shape still reports instead of being thrown away
+  with its answer. An unusable read is not fatal on sight either: a child from
+  another build may publish the file non-atomically, and `EMFILE`/`ESTALE`/a
+  permission blip look like bad bytes, so the watcher tolerates three
+  consecutive unusable reads (the policy already used for an unreachable tmux)
+  and a good result at any point still wins. When the file really is unusable
+  the run fails once and the watcher stops; the message names the file and the
+  child's transcript rather than offering a tmux capture, because the session is
+  reaped immediately and is usually gone by the time it is read. Finalisation
+  also refuses to overwrite a run that another path already settled, so a
+  cancel landing inside a watch tick is no longer replaced by a failure.
+
+- **The `worktree` skill's ignore guard now edits the main checkout's
+  `.gitignore`, not the copy belonging to whichever worktree it runs from.**
+  The guard appended `.worktrees/` to a *relative* `.gitignore`, and
+  `## Location convention` is the first section an agent reads while the guard
+  runs before Create's main-checkout refusal — so it is routinely executed from
+  inside a linked worktree, where that relative path is the tree's own ignored
+  copy. The write succeeded, which is the problem: the branch that would commit
+  the entry never gained it, and the tree that did is the one that gets deleted.
+  It now resolves the root the way every other recipe does,
+  `dirname "$(git rev-parse --path-format=absolute --git-common-dir)"`, and
+  runs both the newline prelude and the `grep -qxF` probe against
+  `$MAIN/.gitignore`, exiting non-zero with a message when that root cannot be
+  resolved instead of silently using an empty variable — `dirname ""` is `.`,
+  which would edit an unrelated file. The guard's properties are unchanged: a
+  literal whole-line match, and the newline added first so a file with no
+  trailing newline still gains `node_modules\n.worktrees/\n` rather than
+  `node_modules.worktrees/`. Two executable tests pin it: running the block
+  from a linked worktree leaves that worktree's `.gitignore` byte-identical
+  while the main checkout's gains the entry idempotently, and running it
+  outside a repository fails loudly rather than writing into the cwd.
+  Restoring the relative paths turns both red, and so does deleting the
+  newline prelude.
+- **The `worktree` skill's Create recipe now refuses an unmerged feature branch
+  as its base instead of silently stacking on it.** Its comment claimed an
+  unmerged `BASE` "fails on purpose", but the only check was
+  `git merge-base --is-ancestor origin/dev "$BASE"`, and a branch that already
+  contains `origin/dev` passes that while carrying its own unpushed commits —
+  reproduced: `BASE=feature/x` was accepted, and the new worktree was cut from
+  the unmerged tip. That is the second half of AGENTS.md's base check arriving
+  after the first: ancestry cannot see commits *ahead* of `origin/dev`, only a
+  `git log origin/dev..BASE` can. The recipe now lists those commits and exits
+  1, naming both remedies (rebase onto `origin/dev` or cut from it), and
+  `BASE_STACKED=1` is the deliberate opt-in for the legitimate stacked case —
+  which proceeds and prints a one-line warning on **stderr**, where the
+  recipe's later output cannot swallow it. The comment now describes exactly
+  what runs. Covered by executable tests in `worktree-skill.test.ts` against a
+  scratch repository: the default `origin/dev` base still creates the worktree,
+  an unmerged base fails without creating one, and `BASE_STACKED=1` cuts from
+  that base's tip with the warning on stderr; mutation-checked by disabling the
+  log check (the three new assertions go red) and by moving the warning to
+  stdout (the stacking test goes red).
+- **The `worktree` skill's session sweep now hands the worktree path to `awk`
+  through the environment, and kills each session once.** `awk -v wt="$WT"`
+  interprets C-style escapes in its value, so a worktree path containing a
+  backslash reached the comparison as a different string and matched no pane:
+  the sweep silently did nothing, and the `git worktree remove` on the next line
+  took the tree away from a shell still running in it. Nothing reports the miss
+  — an empty sweep and a completed sweep are the same output. The path now
+  arrives as `WT="$WT" awk ... ENVIRON["WT"]`, which is passed verbatim. The
+  same block also killed a session once per *pane*: `list-panes -a` prints a row
+  per pane, so a two-pane session produced two `kill-session` calls and the
+  second failed with tmux's "can't find session", because the first had already
+  done the job. `sort -u` now feeds the kill loop.
+
+  Both were reproduced before being fixed. The Remove block runs against a fake
+  `tmux` in a temp bin dir, first on `PATH`, which answers `list-panes -a -F`
+  with two panes of one session rooted at the worktree plus one pane of an
+  unrelated session, and refuses a second kill of a session it has already
+  killed, in tmux's own words. The scratch root's name contains `\t`: git
+  records absolute paths in a worktree's metadata, so the tree cannot be renamed
+  into shape afterwards, and `\t` rather than `\s` because `awk -v` only
+  rewrites the escapes it recognises — mawk leaves an unknown `\s` alone, which
+  would let the bug through. Restoring `-v wt="$WT"` leaves zero kill lines;
+  dropping `sort -u` leaves two. `scratchRepo` gained a `rootPrefix` option so a
+  test can choose the path's shape.
+- **The `worktree` skill's removal recipe now stops at the first failure, so a
+  refused removal of a dirty tree no longer reads as success.** `git worktree
+  remove` exits 128 when the tree has uncommitted work, the tree survives and
+  `git worktree list` still lists it — but the block ended in
+  `rmdir -p ... 2>/dev/null || true`, which absorbed that status, so the whole
+  block exited 0. Reproduced: removal 128, block 0, worktree and its untracked
+  file intact. An agent reads exit 0 as "removed" and moves on to the branch
+  cleanup with the branch still checked out. The removal block, the branch
+  cleanup and the end-state check now each set `set -euo pipefail`, and the
+  prose says so, because a reader pasting one into a larger script turns on
+  errexit for the rest of it. They also resolve the main checkout from
+  `--path-format=absolute --git-common-dir` behind an explicit guard and run
+  every git call as `git -C "$R"`: with a deleted cwd that command exits 128 and
+  prints nothing, while `dirname ""` yields `.`, so the old blocks built `$WT`
+  from `./.worktrees/<slug>` and ran git in the wrong directory instead of
+  saying to run from a live checkout. Only the tmux `list-panes` sweep keeps a
+  `|| true` — no server running is the normal case, and under `pipefail` that
+  status would otherwise abort a clean removal — while the removal itself has no
+  escape hatch, and the `rmdir -p ... || true` survives only after a successful
+  removal. Pinned by executable tests in `worktree-skill.test.ts`: a dirty
+  worktree leaves the block non-zero with the tree and its file intact, a clean
+  one removes it and prints no tmux noise, and the end-state and branch-cleanup
+  blocks fail with "run from a live checkout" when their cwd has been deleted.
+- **`opencode-go` live models now carry their real pricing, modalities and
+  endpoint.** `transformApiModel` read fields the `/v1/models` payload does not
+  have — a flat `cost.input`, `modalities.input === "image"`, and a
+  `provider.npm` that is never sent — so every model the API reported arrived
+  with four zero costs, text-only input and the provider's default endpoint.
+  The payload actually prices under `cost.text.*`, lists concrete MIME types
+  (`image/jpeg`, `image/png`, ...), and names its endpoint in
+  `api["chat-completions"]` or `api.messages`. The transform reads those now,
+  and strips a trailing `/v1` from the Anthropic URL because pi's client
+  appends `/v1/messages` of its own (the doubled path 404s, verified against
+  the live endpoint). The `limit` reads were already right and are unchanged.
+  The difference shows on models with no curated entry: `claude-haiku-5-5` was
+  listed free and text-only over the OpenAI-compatible default, and now reports
+  0.1 / 0.5 / 0.01 / 0.125 per 1M tokens, accepts images, and routes to
+  `anthropic-messages` on `https://opencode.ai/inference/go/anthropic`;
+  `longcat-2.5-free` gains image input and its advertised
+  `inference/go/openai/v1` base URL. Curated models are unaffected, because
+  `mergeWithEmbedded` still prefers their entry for `api`, `baseUrl`, `input`
+  and `compat`. Pinned by `tests/models.test.ts`, whose three characterization
+  cases for this bug are now ordinary expectations. The payload is read as
+  untrusted input: a `base_url` that is not a usable string falls back to the
+  provider default instead of registering — and caching — a URL the SDK throws
+  on for every request, a non-array `modalities` block means text-only, and one
+  malformed model is skipped rather than discarding the whole live refresh.
+
+- **The `github` skill no longer tells the release merge to pass
+  `--delete-branch`, which deletes `dev`.** Local adaptation B prescribed
+  `gh pr merge <n> --merge --delete-branch` for the one merge that is not a
+  squash, then told the reader to re-create `dev` locally if it vanished —
+  papering over the flag instead of dropping it. The head of a `dev`→`main` pull
+  request is `dev` itself, the integration branch every feature branch is cut
+  from, so the flag deletes it on the remote and `gh` attempts the local delete
+  too. That is the failure AGENTS.md's Releases step 3 refuses in so many words
+  ("do not pass `--delete-branch`"), and the skill's own header claimed the
+  release merge "must not delete dev" while its body gave the command that
+  does. It now says `gh pr merge <n> --merge` with no `--delete-branch`, names
+  `dev` as the head branch and the reason, and points at AGENTS.md's
+  tag-and-fast-forward steps instead of the re-create workaround;
+  `--squash --delete-branch` stays for feature branches into `dev`, where
+  deleting the merged branch is the point. A new `github-skill.test.ts` pins the
+  asymmetry — no adjacent `--merge --delete-branch` in either document, the
+  release sentence naming `dev`, the feature form intact, and AGENTS.md in
+  agreement — because the failure is not observable without a live remote and
+  its consequence is a deleted integration branch. Both directions were
+  mutation-checked: restoring the old release sentence turns the two skill
+  assertions red, and adding the flag to AGENTS.md turns the agreement test red.
+- **`opencode-go` no longer serves stale reasoning levels after a model is
+  corrected in `models.json`.** The stale-while-revalidate path appended curated
+  models the cache lacked but never refreshed the ones it already had, so a
+  model whose `reasoning` or `thinkingLevelMap` was fixed kept the values
+  captured when the cache was written — until a live revalidation succeeded,
+  which is exactly what is not happening while the stale path is in use. The
+  refresh now covers those two fields from the curated entry, including
+  removing a level map curation dropped, while leaving cached cost and context
+  windows alone: refreshing those from the curated list is the shape that got
+  the earlier revalidation change reverted. Pinned by the model-pipeline tests,
+  with a case that fails if cost or context start being refreshed.
+
+- **`devc` hashed nothing at all for projects that use a repo-root
+  `.devcontainer.json`.** `has_devcontainer` accepts both layouts — the
+  `.devcontainer/` directory and the file beside it — but `cfg_hash` only read
+  `find .devcontainer`, so for the root style the hash was sha256 of an empty
+  stream (`e3b0c442…`), constantly, forever. `ensure_up` therefore never saw a
+  config change and `devc doctor` could never call a container stale: editing
+  the only config the project has moved nothing. The root file is folded into
+  the hashed stream now, behind an `if` like the ignore file below and never a
+  trailing `&&`, so those projects get a real hash that follows their content.
+  The "matched no config file at all" case is no longer an empty hash either:
+  it dies naming the project, because a 64-hex stamp for nothing and a 64-hex
+  stamp for a config are indistinguishable once written. Directory-style
+  projects hash byte-identically to before — checked by computing both forms
+  over the same tree — so existing stamps do not churn on upgrade. Tests: a
+  root-only project gets a non-empty, stable hash, editing the file moves it,
+  and the following `up` reports "config changed; recreating".
+- **`devc` treats an unreadable config file as an unknown config, not as a
+  shorter one.** Three input states, three different silent outcomes before. A
+  *missing* `.dockerignore` was tolerated, which is right. An *unreadable* one
+  was the original silent death back by another route: the failed `cat` was the
+  group's last command, `pipefail` carried its status, and the run exited 1
+  with no message. And an unreadable file under `.devcontainer/` leaked
+  `cat: … Permission denied` to stderr yet *still wrote a fresh stamp*, because
+  a failing `find | sort | xargs cat` is not the group's last command and
+  `set -e` is suppressed for non-final pipeline members — so the hash covered a
+  partial stream and the next run reported "config changed; recreating" every
+  time, for a config devc had never read. All three were reproduced against the
+  previous script (the last one: rc=0, stamp written, `cat:` on stderr). Every
+  read now fails loudly and names the file — `devc: cannot read
+  .devcontainer/devcontainer.json`, exit 1, nothing reached the container, no
+  stamp written — while a missing file stays ordinary. Tests chmod 000 each of
+  the two kinds and assert the status, the naming message and the absent stamp;
+  they skip when running as root, which reads a 000 file regardless.
+
+- **`opencode-go` stops offering thinking levels when the live API explicitly
+  withdraws reasoning support.** A curated entry always won `reasoning` and
+  `thinkingLevelMap`, so a model that lost the capability upstream kept a
+  picker that did nothing until someone edited `models.json`. The transform now
+  records an explicit `capabilities.reasoning.supported: false`, and a merge
+  demotes that model — `reasoning: false`, no level map — while curation still
+  wins for input, compat, name and cost. The signal is deliberately explicit: a
+  payload with no capability block is information-free rather than a denial, so
+  a partial or regressed response cannot silently disable thinking on a curated
+  model. The marker is stripped before the model is cached or registered, and
+  both directions are mutation-checked in `tests/models.test.ts`.
+- **A `review-triage` fallback now says *why* the judge failed.** Every failure
+  printed `Judge unavailable in 0 ms`: the latency was a literal `0` whenever
+  there was no judgment, and the `JudgeFailure` kind and message were never
+  published — only the `judge-failure` reason code — so a typo'd model id, a
+  provider with no credential and a provider error were indistinguishable. The
+  fail-open verdict then read like a calibration result instead of an outage,
+  which is exactly how this session lost an afternoon of review decisions. The
+  plan now carries `judgeFailure: { kind, message }` and the measured wall time,
+  and the rendered plan prints `Judge failed (<kind>) in <n> ms: <message>`. A
+  successful judgment still carries no failure field.
+
+Maintenance:
+
+- **The per-container pi agent dir is now written down once.** The previous entry
+  introduced `PI_CODING_AGENT_DIR=/home/vscode/.pi/agent-my-agent-setup` and then
+  repeated the literal in `.devcontainer/restore-post-rebuild.sh` and
+  `voice-container.md`, with the mechanism's prose in five files — copies stay
+  correct only until one of them is edited. `devcontainer.json` owns the value,
+  the README section owns the explanation, and everything else refers to
+  `$PI_CODING_AGENT_DIR`. `.pi/extensions/subagent/test/devcontainer-agent-dir.test.ts`
+  fails if the
+  literal reappears anywhere else, or if the two files that used to restate the
+  rationale stop pointing at the README section instead.
+
+- **The `opencode-go` model pipeline is now covered by tests.**
+  `transformApiModel`, `mergeWithEmbedded`, `loadStaleModels` and
+  `buildModels` had none — the suite exercised formatting, glyphs,
+  multiprovider and usage only — so the live-API derivation the `add-model`
+  skill documents, and the four-way precedence underneath it, had nothing to
+  fail against. `tests/models.test.ts` feeds a captured `/zen/go/v1/models`
+  payload through the transform (effort-list mapping including `none` → `off`,
+  toggle-only models that must omit the map, `limit` reads, the text-input
+  default) and pins the merge, stale-cache and patch rules, including that
+  curation still wins when the live API reports no reasoning. Fields the live
+  payload shape got wrong were pinned as characterization tests named after
+  their fix, so correcting them was an explicit change and not a quietly
+  rewritten expectation — which is what the live-payload fix above did for the
+  three transform cases, and what the stale-cache case has since become: #120
+  made the stale path refresh curated reasoning instead of serving it, so that
+  expectation is now the plain statement of the behaviour. `buildModels` is
+  exported for the tests; nothing else in the provider changed.
+
+- **Upgrading native web search: OpenRouter is the native default again, and
+  the removed `opencode-go` values are now rejected.** Add an `openrouter`
+  entry to `~/.pi/agent/auth.json` (or pass `--provider openai-codex|anthropic`)
+  to keep the native chain available. Without one, a Brave failure ends in an
+  error that names both the Brave reason and the missing credential instead of
+  falling back; a Brave-only setup keeps working while its key is configured,
+  but has no fallback until a native credential is added. Explicit
+  `--provider opencode-go` and `PI_WEB_SEARCH_PROVIDER=opencode-go` (or
+  `opencode`) are now errors, even when a Brave key is configured; a composite
+  id such as `opencode-go/claude-haiku-5-5` is rejected rather than routed to
+  the direct Anthropic API. The `opencode-go` credential itself remains valid
+  for the `/model` provider.
+
+- **The `worktree` skill's recipes are now executed, not just read.**
+  `worktree-skill.test.ts` was twelve `SKILL.includes(...)` assertions, and that
+  is how two broken recipes shipped green: a Create block that died on its first
+  command until the launcher fix, and a Remove block whose `rmdir -p ... || true`
+  turned a refused dirty-tree removal (exit 128) into exit 0. A new
+  `test/worktree-recipes.ts` extracts the fenced bash blocks from `SKILL.md` by
+  section and runs them with `bash -c` in a scratch repository — a bare
+  `origin`, a clone on `dev`, and a `.gitignore` with no trailing newline, which
+  is the guard's documented failure mode — so a recipe is pinned by what it does.
+  The runner is deliberately not wrapped in `set -e`: a block is pasted into a
+  shell as written, and a recipe that only looks safe because the harness added
+  errexit would pin the wrong thing. `errexit: true` is a separate, explicit
+  mode that prepends `set -euo pipefail`, so the shape the removal fix
+  introduces can be asserted and a block that relies on a failing probe being
+  ignored is caught. The new tests cover Create end to end (worktree on the new
+  branch, at the `origin/dev` tip, registered under `.worktrees/`), Create
+  refusing a cwd inside a linked worktree, Create failing non-zero when the
+  slug's branch is already checked out elsewhere and when re-run for the same
+  slug, and the ignore guard being newline-safe and idempotent when actually
+  executed. Both behaviours were mutation-checked: deleting the guard's newline
+  prelude and weakening Create's main-checkout guard each turn a test red, while
+  the static assertions alone caught only the first.
+
+- **The `worktree` skill's Create section now says what `BASE_STACKED` is for,
+  and its root-resolution note no longer overstates what the ignore guard
+  does.** The guard added in #113 was described as appending
+  `.worktrees/<slug>` like every other recipe, but it appends the directory
+  pattern (`.worktrees/`) — the sentence claimed something the block does not
+  do, and the two cases are now stated separately. Separately, `BASE_STACKED`
+  — the opt-in #114 added for deliberately stacking on an unmerged base —
+  existed only inside the recipe's comment, so a reader who skims the section
+  instead of pasting the block never learned that an unmerged `BASE` is refused
+  rather than silently accepted. The notes now say the check is both ancestry
+  and `git log origin/dev..BASE`, and that `BASE_STACKED=1` proceeds with a
+  warning on stderr. Prose only: no recipe and no test changed.
+
+- **The `worktree` skill can now recover a worktree after the main checkout, or
+  the whole repository root, moves.** That section was missing, and it is the
+  one that matters after a remount: a moved `/workspace` leaves every linked
+  tree's `.git` naming the old main and the main's `worktrees/<slug>/gitdir`
+  naming the old tree, so `git -C <tree>` exits 128 while `worktree list` shows
+  a dead path marked `prunable`. The new `## Repair` section documents the
+  remedy and, more importantly, the two traps around it, both verified on git
+  2.56.0. **A bare `git worktree repair` does nothing in that case** — it only
+  repairs the trees it can find, so it works when the main moved and the trees
+  stayed put, and exits 0 with no output when the whole root moved — so the
+  recipe passes each tree's current path. **`git worktree prune` must not be run
+  first**: in this state it deletes the administrative entry (silently; `-n` is
+  the only way to see what it will remove), and a `repair` afterwards fails with
+  "unable to locate repository", leaving the tree permanently unusable. The
+  recipe then verifies with `worktree list` and a `git -C` inside the tree
+  instead of trusting `repair`'s exit status, which is 0 even when it prints a
+  `fatal:` line and repairs nothing. It also records that a **copied** worktree
+  directory cannot be repaired into a second worktree: both copies share one
+  administrative entry, so repair re-points it, `worktree list` then names the
+  copy and the original is left unlisted. Three executable tests pin the
+  behaviour: recovery after the whole root moves (mutation-checked by reverting
+  the recipe to the bare form, which turns it red), the bare form's legitimate
+  case, and the copy re-pointing its listing rather than adding a second entry.
+
+- **`devc`'s per-project lock is now keyed on the workspace path, and lives in
+  the per-user state dir instead of `/tmp`.** It was
+  `${TMPDIR:-/tmp}/devc-$basename.lock`, so `~/a/web` and `~/b/web` serialized
+  against each other for up to `flock -w 900` on work neither had asked for —
+  and because `rebuild` takes the same lock, that stall was no longer limited to
+  `up`. `/tmp` is also world-writable: another local user could pre-create
+  `devc-<name>.lock`, hold it (a denial of service), or symlink it to redirect
+  the `exec 9>` write. The file is now
+  `${XDG_STATE_HOME:-$HOME/.local/state}/devc/locks/devc-<name>-<key>.lock`,
+  where `<key>` is the first 16 hex characters of the resolved workspace path
+  and the basename is kept only so the file is recognisable; the directory is
+  created `0700`. Two projects with the same name under different roots now take
+  independent locks. Everything else about the lock is unchanged: a dry run
+  takes none, a real wait says it is waiting, the wait is bounded, and the
+  failure names the lock file. A test holds one `web`'s lock and asserts the
+  other `web` finishes without waiting, and another asserts no lock file appears
+  in `TMPDIR` and that the lock directory is `0700`.
+
+- **The lock release before an interactive attach is pinned, and four test gaps
+  in the `devc` harness are closed.** `.pi/skills/devcontainer/SKILL.md`
+  promises the lock "is released before an interactive session attaches", and
+  nothing tested it — regression #104, a lock fd surviving into the exec'd tmux
+  session so that every later `devc` run for that project died on
+  `flock -w 900`, would have passed the suite. The `tmux` stub inherits fd 9
+  through the `exec`, so it can take `LOCK_EX` on the lock file itself: the
+  build-time half of the run must see it held, and the session must see it
+  free. Both were mutation-checked — deleting `flock -u 9` turns the session
+  assertion red, and keying the lock on a constant basename turns the
+  same-basename test red by blocking the second project. The parity tests now
+  compare argv *elements*: the stub logs one NUL-terminated field per argument
+  instead of the `$*` join, because a single argument containing spaces reads
+  identically to two arguments through a join — dropping `%q` from the preview
+  was invisible before and is caught now. Also pinned: `--no-cache` reaching the
+  CLI as `--build-no-cache`, the uid-mismatch refusal (status, message, and that
+  nothing attaches or spawns a session), and `devc doctor`'s stale-config report
+  against a running container, which is the failure the config stamp exists for
+  and was itself untested. All four were mutation-checked by removing the
+  behaviour from a scratch copy of the script.
+
+- **tmux: the truecolor block says what it actually does, and a config edit now
+  says how to make it take effect.** The paragraph above
+  `set -as terminal-features ",*:RGB"` claimed that *that* setting is what tmux
+  hands to inner programs and what flips pi's colour detection. Measured on tmux
+  3.3a, it is not: with or without those two lines the inner environment is
+  identical — `TERM=tmux-256color`, `tput colors` 256, `COLORTERM=truecolor`,
+  `PI_TRUE_COLOR=1` — because the `setenv -g` pair, not the terminal-features
+  pair, is what puts the variables there. The lines are kept (they are a claim
+  about the *outer* terminal's rendering, and removing them would change
+  behaviour on real terminals that a detached server in this container cannot
+  measure), the comment now states the measured truth and the accepted trade
+  that `",*:RGB"` asserts 24-bit for every client, including a 256-colour one
+  over SSH.
+
+  The companion trap is that a long-lived server never re-reads the file.
+  Measured: a `setenv -g` issued after startup is absent from an existing pane's
+  `/proc/<pid>/environ` while `show-environment -g` already lists it, and a new
+  window sees it. So "the colours did not change after I edited `~/.tmux.conf`"
+  is not a broken config, it is an unread one. Both skills now say so: the
+  devcontainer troubleshooting row points at `setenv` instead of
+  `terminal-features`, and the `tmux` skill names the symptom and the only
+  remedy — a server restart, which is `kill-server` on the very sockets whose
+  rules otherwise forbid it (the subagent socket takes every running child Pi
+  with it, the default socket every `devc` session), so it is for an idle
+  server, or the change waits for new windows.
+
+- **The `worktree` skill's session sweep is now pinned against a real `tmux`
+  server, not only a fake one.** Every Remove test until now drove a `/bin/sh`
+  stand-in that answered `list-panes` from a hand-written tab-separated
+  fixture, so the sweep's contract with tmux itself was an assumption the suite
+  restated: one row per *pane*, the meaning of the `-F` field order, and what a
+  second `kill-session` of a dead session does. Change the `-F` string's order
+  and the fake still matches, because it prints its own file. That is the wrong
+  half to leave untested, since the behaviour #115 exists for — deduplication
+  before the kill loop — is only visible in a listing a real server produced,
+  and its failure mode is silent: the sweep does nothing, and the
+  `git worktree remove` on the next line takes the tree from under a live pane.
+  A new test in `worktree-skill.test.ts` starts a private server on a socket
+  under the scratch repo, creates one session with two panes rooted inside the
+  tree (the tree itself and a subdirectory) plus a decoy rooted outside it,
+  asserts the pre-sweep listing really has two rows for the target session — so
+  the case cannot decay into a single-pane one that passes for the wrong reason
+  — and then runs `Remove[0]`: exit 0, the tree gone, no session with a pane
+  inside it left, the decoy alive, and no "can't find session" on stderr, which
+  is the only trace a repeated kill leaves because the sweep tolerates its own
+  failure with `|| true`. Both regressions were shown red live: deleting
+  `sort -u` prints `can't find session: pi-wt-live-sweep` on stderr, and
+  reverting to `awk -F'\t' -v wt="$WT"` leaks the session, whose panes report
+  `…/live-sweep (deleted)` — the tree removed, a shell still sitting in it. The
+  scratch root carries a literal backslash, as the fake test's does, and the
+  fixture creates the subdirectory first because `split-window -c` silently
+  falls back to the server's cwd for a missing path. Isolation is the socket
+  plus a `kill-server` in `finally` that is itself asserted: `list-sessions`
+  must report no server, which was mutation-checked by deleting the
+  `kill-server` (the guard names the session it left running), and confirmed
+  after a deliberately failing run with the scratch root kept, so `rm -rf`
+  could not be credited for it. The trade is stated rather than hidden: on a
+  host without `tmux` the live test skips with that reason while the fake tests
+  keep running, so a format or flag drift there is still uncatchable — the fake
+  pins the argv shape, nothing pins tmux's answer.
+- **The `-C "$R"` contract in the `worktree` skill's branch-cleanup and
+  end-state blocks is now observed at the argv git actually receives.** Since
+  #116 both blocks run git as `git -C "$R" …`, where `$R` is the main checkout
+  resolved from `--git-common-dir`, so that they act on the checkout they just
+  resolved rather than on wherever the reader happens to be standing. Nothing
+  tested it, and nothing *behavioural* can: linked worktrees share refs, so a
+  bare `git branch -D <slug>` and `git -C <main> branch -D <slug>` delete the
+  same ref with identical output and exit status from any cwd inside the
+  repository, and the end-state checks read the same shared `worktree list` and
+  `branch --list`. An edit that dropped `-C` — or resolved some other root —
+  would therefore pass the whole suite. `GIT_TRACE=1` is not a seam either:
+  `-C` is consumed before tracing, so it prints `built-in: git branch -D
+  task-name` whether the flag was passed or not (git 2.56.0), and asserting the
+  string against `SKILL.md` would pass even if the harness stopped running the
+  block. So the test prepends a `git` wrapper to `PATH` that appends its argv to
+  a per-test log and then `exec`s the real binary, resolved from the previous
+  `PATH` before the wrapper's directory is installed — no hardcoded
+  `/usr/bin/git`, and the wrapper cannot find itself. `exec` forwards argv
+  verbatim, so exit status, stdout and stderr stay git's own. Both recipes run
+  from a *linked worktree* cwd, and every call after the initial `git rev-parse
+  --path-format=absolute --git-common-dir` — which carries no `-C` by design,
+  there is no root to point at yet — must start with `-C` and the root the test
+  resolves with that same command, not a hardcoded path. The recorded argv was
+  `-C <root> branch -D task-branch-cleanup` for the cleanup, and `-C <root>
+  worktree list`, `-C <root> worktree prune -n`, `-C <root> branch --list
+  task-end-state` for the end state. Both mutations were shown red, each while
+  the branch and the listing were still correct — which is the point: dropping
+  `-C` from the `branch -D` fails with "every call after the root discovery
+  must carry -C <root>, got: branch -D task-branch-cleanup", and dropping it
+  from all three end-state calls fails the same assertion on `worktree list`.
+  The deleted-cwd tests stay unchanged as the behavioural half (the guard and
+  its exit status); this pins only the rooting, and deliberately covers no
+  other recipe — `Create`, `Open`, `List` and `Review` have observable effects,
+  so an argv assertion there would be noise.
+
+- **The two test-fidelity specs behind the live-tmux and argv-recorder tests are
+  now in the tree.** `docs/specs/2026-11-10-worktree-tmux-sweep-live-coverage.md`
+  and `docs/specs/2026-11-10-worktree-resolved-root-observability.md` record what
+  was missing before #129 and #130 — the sweep's only fixture was a fake `tmux`,
+  and the removal recipes' `-C "$R"` contract was invisible to every behavioural
+  test because linked worktrees share refs — together with the seam each test
+  now uses, the alternatives rejected after trying them (`GIT_TRACE` cannot see
+  `-C`; a hand-written fixture cannot catch tmux format drift), the acceptance
+  criteria the implementations were verified against, and the assumptions left
+  open (a host without tmux skips the live test, so format drift stays
+  uncatchable there; the argv assertion is a shape test, not a behavioural one).
+  They were written before the code and are committed after it, so the reasoning
+  survives the pull-request bodies it was first stated in.
+
+- **The "one copy of the extensions, never two" rule now covers linked
+  worktrees, and the `worktree` skill's subagent note names the one failure the
+  launcher cannot fix.** The local-path install dedupes against project
+  discovery only because both name files in the same checkout. A child rooted in
+  `.worktrees/<slug>` discovers *that tree's* copy while the package still
+  resolves to the main checkout's, so pi exits 1 with one `Tool "…" conflicts`
+  line per extension. Verified by running the real child argv in tmux: it
+  reproduces with no `--extension` at all, so the launcher's flag is not the
+  cause and nothing it can pass removes it selectively — `PI_PACKAGE_DIR`
+  overrides pi's own install path, not the installed extensions;
+  `--no-extensions` drops package discovery but also the built-ins and every
+  extension not named with `-e`; and `--no-approve` would only make the child run
+  the main checkout's code. It does *not* reproduce in the two
+  shapes #103 was written for: this repo's worktree with a package-free agent
+  dir, and a separate project using the package. The parent already carries the
+  dead child's pane in the failure it reports, so the missing piece was the rule,
+  not the diagnostic. The remedy is host configuration — a package-free agent
+  dir, as this devcontainer uses, or uninstalling the package on a host that
+  works in this repo's worktrees. The reproduction matrix and commands are in
+  `docs/specs/2026-11-13-subagent-rooted-in-a-worktree.md`, and a static test in
+  `worktree-skill.test.ts` pins the new sentence against a silent revert.
+
+## v1.11.0 — 2026-11-09
+
+Added:
+
+- **A twelve-skill coding stack, adapted from
+  [`RRiboulet/agent-coding-skills`](https://github.com/RRiboulet/agent-coding-skills)
+  and wired into this repository's workflow.** The model-invoked half covers the
+  loop around a change — `in-your-own-words` (play the goal back before
+  building), `blast-radius` (what the diff can break, and the one fact it is safe
+  because of), `tdd`, `diagnosing-bugs`, `idempotent-operations`,
+  `benchmark-checklist`, `show-me-your-work` and `prove-it-works` (real
+  artifact, real gate, honest statuses). The four user-invoked entry points are
+  `/skill:to-spec`, `/skill:to-tickets`, `/skill:implement` and
+  `/skill:handoff`; they set `disable-model-invocation`, which pi honors, so the
+  agent cannot start them on its own. They are maintained here as ours rather
+  than tracked as copies: pi's `/skill:<name>` syntax, `dev` as the review base,
+  the quality gate read from `AGENTS.md` rather than a `.agent/quality.yaml` this
+  repo does not have, commits deferred to the `commit` skill, worktrees to the
+  `worktree` skill, and the handoff written under the persistent agent dir
+  because `/tmp` here dies with the container. The MIT notices for the two
+  upstream projects they adapt (mattpocock/skills and cursor/plugins `pstack`)
+  are in `licenses/`, with per-skill provenance in `licenses/NOTICE.md`.
+
+- **One review pipeline instead of three overlapping ones.** `prove-it-works`
+  closes every change as the author's own proof and diff check and never starts a
+  reviewer; its "review the final diff" step is now explicitly a hygiene check,
+  not a review. `implement` ends at proof for the same reason. A change gets one
+  independent review, only when the user asks, through exactly one door —
+  `/review` for an interactive review, or `triage_change`/`/triage` and one
+  approved sub-agent — never both and never a second reviewer. The adapted
+  `review-change` skill is gone; its Spec / Correctness / Standards method, the
+  rule that correctness findings need proof, and the smell baseline now live in
+  `REVIEW_GUIDELINES.md`, which `/review` already appends and a triage-launched
+  reviewer follows, so there is one rubric rather than two. `show-me-your-work`
+  is narrowed to a big task left unsupervised for a long time (not an ordinary
+  session), and its separate independent-review step is gone: it self-audits, and
+  a commissioned reviewer gets the trail alongside the diff.
+
+  Two upstream defects were fixed on the way in:
+  `diagnosing-bugs/scripts/hitl-loop.template.sh` and
+  `show-me-your-work/scripts/log.sh` are committed mode 644 upstream while its
+  own `validate.py` requires the executable bit, so the upstream quality gate
+  fails on a fresh clone; both are `+x` here. A new `coding-skills.test.ts` pins
+  what editing the skills can silently break: name matching its folder, unique
+  names, `disable-model-invocation` on the four entry points, executable scripts,
+  and relative links that resolve.
+
+- **Brave is a first-choice provider of the existing native web search.** When a Brave key is configured (`BRAVE_API_KEY`, else a `brave`/`brave-search` entry in `auth.json`), `search.mjs` queries Brave's Web Search API and renders a compact result frame; otherwise, and on any Brave failure — missing key, usage/rate limit, invalid subscription token, network, zero results — the existing native chain runs unchanged and the result's first line says why. It is the same script the `web_search` tool and the `/web-search` command already wrap, so all three share one provider and one credential path, and it adds no npm dependency. There is deliberately no local quota, counter, lock file or audit log that could drift from the account's real usage: Brave's own account settings are the limit.
+
+- **A `worktree` skill, so the agent can manage git worktrees for independent tasks.** Covers creating a worktree for a new branch, an existing local branch, or a remote-tracking branch, off a chosen base, listing, opening (one-off commands, persistent tmux sessions, or a subagent rooted in the tree), reviewing (status, diff, tests), and removing (with safety rules for dirty trees and branch deletion). Worktrees live under a gitignored `.worktrees/` directory at the repository root.
+
+- **An `add-model` skill, and `beam-free` in the curated `opencode-go` model list.** The skill documents how to add or fix a model from the live API's own metadata — id, api and baseUrl, reasoning, thinking levels, input, cost, context and compat — and the four-way merge order that makes editing `models.json` the reliable fix (embedded beats live, live beats cached). It also states the rule the provider now follows: an advertised `effort` list maps to pi's thinking levels, while a toggle- or budget-only model omits `thinkingLevelMap`. `beam-free` is curated with its `low`–`max` effort map and `requiresReasoningContentOnAssistantMessages`.
+
+Fixed:
+
+- **`devc` no longer leaves an interactive session holding the project lock.** `ensure_up` took the per-project lock on fd 9 and then `exec`'d into `devcontainer`/`tmux`, and descriptors survive `exec`, so the lock stayed held for as long as the session lived: the next `devc` run for that project waited on `flock -w 900` and died with "another devc run is still working on it". The lock is now released (`flock -u 9`) before the caller execs. Release rather than close, because the obvious `exec 9>&- 2>/dev/null` also applies the redirection to the shell itself, which would send the stderr of every later command — including the container command's — to `/dev/null`.
+
+- **A subagent rooted in a worktree no longer dies at start on an extension
+  flag conflict.** The launcher passed its own absolute
+  `.pi/extensions/subagent/index.ts` as `--extension`, and pi also discovers the
+  child's copy as that project's extension, so a worktree cwd — the pattern the
+  `worktree` skill documents — loaded one file under two paths and pi refused to
+  start: `Flag "--attach-subagent" conflicts with
+  <main checkout>/.pi/extensions/subagent/index.ts`. The parent saw only "Child
+  Pi exited before reporting a result" about two seconds later, with the reason
+  left in a dead tmux pane, so the failure read as the subagent machinery being
+  broken rather than as a path being wrong. The launch spec now resolves the
+  child's own copy when its tree has one, which makes the explicit flag and the
+  auto-discovered path the same file, so pi loads it once; the child then runs
+  the tooling of the branch it was rooted in rather than the caller's. That
+  resolution is gated on the child's trust, because an explicit extension path
+  is loaded even for a project pi would refuse to trust and even under
+  `--no-extensions`, while discovery is trust-gated: an untrusted `cwd` keeps
+  the launcher's own copy, which is the only copy it has. The flag stays
+  explicit in every case so a launch does not depend on the child's discovery
+  settings. The `worktree` skill's subagent recipe no longer hardcodes
+  `/workspace`, and names this error with the workaround for a checkout
+  predating the fix.
+
+- **`opencode-go` no longer mis-flags live models as non-reasoning.** The provider read `reasoning` from a top-level API field the Go endpoint does not send, so models that expose it under `capabilities.reasoning` were listed as non-reasoning with no thinking levels. `transformApiModel` now derives both from that block, maps advertised effort levels to themselves, and leaves the map absent for toggle- or budget-only models; a curated entry still wins when it has one. An advertised effort list now also implies reasoning support when the explicit flag is omitted, and four curated entries map `off` to the API's `none` effort instead of `null`.
+
+- **`/voice` shortcuts accept modified function keys.** The validator rejected every modifier on `f1`–`f12` on the theory that pi's matcher refuses them, but pi accepts them via Kitty functional-key sequences; only `escape`/`esc` refuse modifiers. `ctrl+f5` and similar are now valid, and the docs and tests match pi's actual matcher.
+
+- **pi gets truecolor inside tmux.** tmux reported only 256 colours, so pi approximated its palette and the colored tool-call and thinking sections looked different in a panel. `tmux.conf` now advertises `terminal-features ",*:RGB"` and `setenv COLORTERM truecolor` (plus `PI_TRUE_COLOR`), `devc` passes both as `--remote-env`, and `devcontainer.json` sets them in the container; `extended-keys-format csi-u` is enabled on tmux 3.5+. The `devcontainer` skill's symptom table names the check.
+
+Maintenance:
+
+- **Non-interactive shells get a no-op git editor, so a rebase that is waiting stops looking stuck.** Nothing in the image sets `core.editor`, so git falls back to `vi`, and `vi` cannot run without a terminal: on a stdin that is open but silent it blocks, and on `/dev/null` it fails with an editor error the calling script rarely surfaces. Either way `git rebase --continue`, `git commit --amend` without `-m` and `git rebase -i` die with the work already staged and nothing useful to read. `BASH_ENV` now exports `GIT_EDITOR=true` for non-interactive bash only, so an interactive shell keeps its real editor and a bare `git commit` aborts instead of hanging. Two consequences worth knowing: `git rebase -i` no longer stops to edit the todo list, it replays the picks unchanged; and `GIT_EDITOR` outranks `core.editor` and `$EDITOR`, so a script that needs its own editor must `unset GIT_EDITOR` or set it per command. Takes effect on the next rebuild.
+
+## v1.10.0 — 2026-11-01
+
+Added:
+
+- **`bin/devc` opens a project's devcontainer from a terminal.** Built for a
+  headless host: no `code`, no GUI, and the Dev Containers CLI has no `open`
+  subcommand, so "open" is `up` plus an interactive login shell in tmux. It
+  deliberately carries neither a registry (an allowlist of roots plus each
+  repo's `devcontainer.json` is the source of truth), nor a `docker ps`
+  idempotency check, nor a URI handoff. Two behaviours exist because both fail
+  silently otherwise: it recreates a container whose config hash moved, since
+  `devcontainer up` on 0.90 reports success and leaves an existing container
+  alone even after `devcontainer.json` or the compose file changed; and it
+  refuses to attach when the container's uid does not match the host's, because
+  the project's `postCreate` would then chown the bind-mounted host checkout to
+  a uid the host user does not own. `rebuild` recreates the container and never
+  removes named volumes.
 
 - **The `/btw` popup's title bar now says what the panel is answering.** The
   title was `btw <id8>` and the id half is the first characters of a UUIDv7,
@@ -21,6 +2537,60 @@ Added:
   from being promoted into the title, and only the first few kilobytes of the
   file, because the answer after it can still be streaming. `panel.ts` stays
   pure; the suffix is just another input it validates.
+
+- **A `devcontainer` skill, so the agent can drive `devc` without breaking it.**
+  The workflow is easy to get wrong from a tool call: the attaching form
+  (`devc <name>`) execs `tmux new-session -A` and blocks until the human's
+  session ends, and the obvious repair for a stale container (`docker ps`, a
+  volume prune, `sudo`) is what loses sessions or chowns a checkout. The skill
+  states the one rule first (never attach from a tool call; use `devc up` and
+  `devc <name> -- cmd`), then the command table, the detached-build and
+  detached-server recipes, the volume/uid/port rules, a symptom → check → fix
+  table covering the failures this host actually produced (uid mismatch, config
+  drift, the Docker 29 bake entitlement, `postgres` as a service, the voice
+  forward), and the per-project facts worth knowing before touching a build.
+
+Changed:
+
+- **`/voice` reaches the phone over an ssh reverse forward instead of a
+  tailnet.** The container has no `/dev/tun`, so the old chain ran a userspace
+  `tailscaled` and tunnelled ssh through its SOCKS5 proxy, which needed a tailnet
+  identity, a per-volume approval step, two binaries on the pi-config volume and
+  the `netcat-openbsd` package for the `ProxyCommand`. The phone is the side that
+  can dial out, so it now opens an ordinary remote forward to the host —
+  `ssh -N -R 0.0.0.0:8022:localhost:8022 <user>@<host>` — and the container
+  connects to `host.docker.internal:8022`, which `docker-compose.yml` already
+  maps. One host-side line makes it work: `GatewayPorts clientspecified` in
+  `sshd_config.d`, because a `-R` forward binds to the host's loopback by default
+  and the container arrives on the docker bridge gateway. The restore script no
+  longer installs a package or launches a daemon; it restores `~/.ssh/config`,
+  waits up to ten seconds for the forward to accept a connection, and reports
+  the exact phone command when it does not. Liveness is a TCP connect, not a
+  process or socket-file check: the listener belongs to the phone's session, so
+  this container can neither see nor own it.
+
+Removed:
+
+- **The Android SDK install, and the JDK that existed only to build it.**
+  `android-sdk.sh`, its `postCreateCommand` step and the `openjdk-17-jdk-headless`
+  package are gone, along with the `ANDROID_HOME`/`ANDROID_SDK_ROOT`/`PATH`
+  exports from `.zshrc` and `.bashrc` that baked in an SDK path this container
+  no longer installs. The SDK was ~1.5 GB on the volume for one project, and
+  Google publishes no arm64 Linux build-tools, so a host without emulation could
+  not use it anyway. Also removed: `.devcontainer/start-tailscaled.sh`. A volume
+  that still carries `~/.pi/{bin/tailscale*,tailscale,android-sdk}` can be
+  cleaned by hand; nothing reads them any more.
+
+- **The devcontainer image builds again on Docker 29.** `@devcontainers/cli`
+  0.90 leaves the feature install to the base image's auto-mapped defaults when
+  `devcontainer.json` has no `features` key, and that path produces a compose
+  bake definition missing the feature-content source; Docker 29's bake then
+  refuses to read the generated `Dockerfile-with-features` from outside the
+  build context ("additional privileges requested: pass
+  `--allow=fs.read=...`"). Declaring `common-utils` explicitly takes the path
+  that inlines it. The failure is deterministic for this repo and only for this
+  repo: `pupkeep` and `analytics-agent` declare features, so their builds were
+  unaffected. Verified with a `--no-cache` rebuild, then a normal `up`.
 
 Maintenance:
 

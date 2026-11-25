@@ -9,11 +9,12 @@
  * names, or one of the symbol keys. `+` alone is a base key, so it is the one
  * remainder that still contains the separator.
  *
- * Grammar is not enough: pi's matcher refuses modifiers on `escape` and on
- * `f1`–`f12` outright (`if (modifier !== 0) return false`), so `ctrl+f5` is a
- * grammatical id that can never fire. Those are rejected here too, because a
+ * Grammar is not enough: pi's matcher refuses modifiers on `escape`/`esc`
+ * outright (`if (modifier !== 0) return false`), so `ctrl+escape` is a
+ * grammatical id that can never fire. That is rejected here too, because a
  * registered key that silently never matches is the exact failure this module
- * exists to prevent.
+ * exists to prevent. Function keys (f1–f12) DO accept modifiers via the
+ * Kitty functional-key sequences, so they are not in this set.
  *
  * The base keys come from pi's exported `Key` rather than a hand copy: a copied
  * list drifts from the grammar the rest of this module mirrors, and nothing
@@ -43,11 +44,12 @@ const BASE_KEYS = new Set<string>([
 ]);
 
 /**
- * Base keys `matchesKey` matches only without a modifier. It returns false for
- * a modified escape or function key before looking at any protocol form, so
- * these must not be registered with one — they could never fire.
+ * Base keys `matchesKey` matches only without a modifier. In the pi version
+ * this targets, only `escape`/`esc` refuses a modifier outright; function keys
+ * (f1–f12) accept modifiers via the Kitty functional-key sequences, so they
+ * are deliberately NOT in this set. Keep this in step with pi's `matchesKey`.
  */
-const UNMODIFIED_ONLY = new Set<string>(["escape", "esc", ...Array.from({ length: 12 }, (_, i) => `f${i + 1}`)]);
+const UNMODIFIED_ONLY = new Set<string>(["escape", "esc"]);
 
 /** Strip modifiers the way pi does. Returns the remainder and what it found. */
 function stripModifiers(id: string): { key: string; seen: Set<string> } {

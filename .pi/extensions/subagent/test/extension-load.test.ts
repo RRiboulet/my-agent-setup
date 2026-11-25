@@ -26,8 +26,10 @@ const EXTENSIONS = [
 	"../../btw/index.ts",
 	"../../continue.ts",
 	"../../goal.ts",
+	"../../mcp-catalogue.ts",
 	"../../native-web-search.ts",
 	"../../opencode-go-provider/index.ts",
+	"../../orchestrator/index.ts",
 	"../../repo-explorer/index.ts",
 	"../../review-triage/index.ts",
 	"../../review.ts",
@@ -81,16 +83,133 @@ const MODULES: Record<string, string[]> = {
 	"../../repo-explorer/file-browser.ts": ["FileBrowser", "listDirectory", "parentPath"],
 	"../../repo-explorer/file-transcript.ts": ["formatFileTranscript", "numberLines", "fileMessageRenderer"],
 	"../../repo-explorer/sanitize.ts": ["sanitizeDisplay", "sanitizeFileContent"],
+	"../escalation.ts": [
+		"clearEscalationHeartbeat",
+		"consumeEscalationExchange",
+		"escalationDir",
+		"isValidRequestId",
+		"listEscalationRequests",
+		"readEscalationHeartbeat",
+		"readEscalationReply",
+		"readEscalationRequest",
+		"replyPath",
+		"requestPath",
+		"touchEscalationHeartbeat",
+		"validateEscalationReply",
+		"validateEscalationRequest",
+		"waitForEscalationReply",
+		"writeEscalationReply",
+		"writeEscalationRequest",
+	],
 	"../handoff.ts": [
 		"buildChildPiArgs",
 		"countSessionLines",
 		"forkLiveBranch",
 		"getPiInvocationParts",
 		"requireExistingSession",
+		"resolveChildExtensionPath",
 		"seedLineageSession",
 		"usesSessionFile",
 	],
+	"../../orchestrator/compact-snapshot.ts": ["buildCompactSnapshot"],
+	"../../orchestrator/config.ts": ["gateConfigCanAct", "gateConfigPath", "normalizeGateConfig", "readGateConfig"],
+	"../../orchestrator/advisor.ts": [
+		"advisorSkipReason",
+		"buildAdvisorDigest",
+		"consultAdvisor",
+		"detectAdvisorTrigger",
+		"formatAdvisorRecord",
+		"formatAdvisorSection",
+		"gateTriggerKey",
+		"loopTriggerKey",
+		"readAdvisorState",
+		"redactSecrets",
+		"toPiUsage",
+	],
+	"../../orchestrator/events.ts": ["ORCHESTRATOR_CUSTOM_TYPES", "publishOrchestrationEvent", "subscribeOrchestrationEvent"],
+	"../../orchestrator/gate.ts": [
+		"evaluateGate",
+		"formatLoopVerdict",
+		"formatVerdict",
+		"readGateHistory",
+		"reconstructGateState",
+		"scanEditVerification",
+		"scanFailures",
+	],
+	"../../orchestrator/role.ts": ["ORCHESTRATOR_ROLE", "isWorkerRole", "resolveOrchestratorRole"],
+	"../../orchestrator/loop.ts": [
+		"createLoopState",
+		"evaluateLoop",
+		"invocationLabel",
+		"loopBlockReason",
+		"loopSignature",
+		"recordCall",
+		"recordResult",
+		"resetLoopState",
+		"resetLoopTurn",
+		"resultSignature",
+	],
+	"../../orchestrator/todo-state.ts": ["readOpenTodos", "todoDirectory"],
+	"../../orchestrator/verify.ts": [
+		"boundVerificationOutput",
+		"classifyVerification",
+		"runVerification",
+		"verificationFailedOpen",
+		"verificationInvocation",
+	],
+	"../../orchestrator/workspace.ts": [
+		"buildPeerMessage",
+		"buildPresence",
+		"buildReservationPaths",
+		"canonicalPath",
+		"formatPeerMessage",
+		"globToRegExp",
+		"listPresence",
+		"liveReservations",
+		"markMessageDelivered",
+		"presenceHeartbeatMs",
+		"presenceIsLive",
+		"pruneDeliveredMarkers",
+		"readInbox",
+		"readPresence",
+		"readWorkspaceBranch",
+		"readReservations",
+		"releaseReservations",
+		"reservationPathMatches",
+		"reservationPathsOverlap",
+		"reservePaths",
+		"resolveWorkspaceScope",
+		"validatePeerMessage",
+		"validatePresence",
+		"validateReservation",
+		"withWorkspaceLock",
+		"writePeerMessage",
+		"writePresence",
+	],
+	"../../orchestrator/workspace-runtime.ts": ["registerWorkspace"],
 	"../panel.ts": ["buildEscapeBindArgs", "buildAttachCommand", "buildPanelLaunch"],
+	"../plan.ts": [
+		"buildPlan",
+		"cancelPlan",
+		"cancelPlanStep",
+		"failPlanStep",
+		"markStepLaunched",
+		"queuedStopCandidates",
+		"readyStepIds",
+		"reconcilePlan",
+		"resolvePlan",
+		"settlePlanStep",
+	],
+	"../report.ts": [
+		"boundChildReport",
+		"buildChildTaskPrompt",
+		"buildRunReport",
+		"parseChildReportText",
+		"readReportHead",
+		"resolveChildReport",
+		"validateChildReport",
+		"writeReportArtifact",
+	],
 	"../shell.ts": ["shellQuote"],
 	"../../voice/config.ts": ["agentDir", "configPath", "loadConfig", "parseEnvBool", "readConfigFile"],
 	"../../voice/shortcut.ts": ["normalizeKeyId", "parseShortcutIds"],
@@ -115,11 +234,29 @@ for (const relative of EXTENSIONS) {
 	});
 }
 
+// A module may also export a *value* the linker has to resolve, not a function.
+// `ORCHESTRATOR_ROLE` is the process role resolved once at module load; an
+// importer that got `undefined` instead would treat every process as a parent,
+// which is the bug the module exists to fix. Listed separately so every other
+// named export stays pinned to a function.
+const CONSTANT_EXPORTS: Record<string, string[]> = {
+	"../../orchestrator/role.ts": ["ORCHESTRATOR_ROLE"],
+	// The entry-type constant is a table, not a function, and `events.ts` is the
+	// module both the index and `compact-snapshot.ts` import it from; pinning it
+	// here means a dropped export fails at load rather than at send time.
+	"../../orchestrator/events.ts": ["ORCHESTRATOR_CUSTOM_TYPES"],
+	"../../orchestrator/compact-snapshot.ts": ["MAX_COMPACT_SNAPSHOT_BYTES"],
+};
+
 for (const [relative, exports] of Object.entries(MODULES)) {
 	test(`module ${relative} loads under strict ESM`, async () => {
 		const specifier = new URL(relative, import.meta.url).href;
 		const module = (await import(specifier)) as Record<string, unknown>;
 		for (const name of exports) {
+			if (CONSTANT_EXPORTS[relative]?.includes(name)) {
+				assert.ok(module[name] !== undefined, `${relative} must export the constant ${name}`);
+				continue;
+			}
 			assert.equal(typeof module[name], "function", `${relative} must export ${name}`);
 		}
 	});

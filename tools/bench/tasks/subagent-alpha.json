@@ -1,0 +1,11 @@
+{
+  "id": "subagent-alpha",
+  "repo": ".worktrees/bench-fixture",
+  "timeoutMs": 240000,
+  "prompt": "Start one subagent whose entire task is: reply with the single word ALPHA. Wait for it, then reply with the word it returned.",
+  "check": {
+    "expectAnswerContains": [
+      "ALPHA"
+    ]
+  }
+}

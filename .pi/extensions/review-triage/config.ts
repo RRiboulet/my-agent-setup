@@ -18,9 +18,12 @@
  *   2. ~/.pi/agent/review-triage.json
  *   3. environment (PI_REVIEW_TRIAGE_*)
  *
- * The file is optional and every field degrades to the default, so a machine
- * that never writes one still runs. A malformed file is ignored with one warn
- * rather than throwing into a tool call.
+ * The DEFAULTS are the policy this repository ships, not a blank slate: the
+ * judge and the four reviewer candidates below are the same ones in
+ * `review-triage.example.json`, so a fresh install of the package is already
+ * configured and a config file is only needed to *change* something. The file
+ * remains optional and every field still degrades to the default; a malformed
+ * file is ignored with one warn rather than throwing into a tool call.
  */
 
 import { readFileSync } from "node:fs";
@@ -150,6 +153,56 @@ export interface JudgeConfig {
 }
 
 /**
+ * The shipped reviewer policy: three capability bands over one provider,
+ * `opencode-go`, with the judge above it on `opencode` (`jev-1.13-free`, the free
+ * tier of the same System One judge the account already reaches). This is the built-in
+ * policy as well as the template, so installing the package is enough to get
+ * a real Choice — no config file, no copy step. `review-triage.example.json`
+ * carries the same list for a human to copy and edit; a test pins the two
+ * together.
+ *
+ * Every candidate deliberately shares one provider. A tier that silently lost
+ * its model to a second provider's missing credential was the failure that
+ * motivated this list (the provider has to be one the machine authenticates),
+ * and the credential check in `credentials.ts` now reports that gap instead of
+ * dropping a band quietly.
+ */
+export const DEFAULT_CANDIDATES: readonly Candidate[] = [
+	{
+		provider: "opencode-go",
+		model: "beam-free",
+		tier: "low",
+		cost: 0,
+		description: "Free, fast model. A quick second read for obvious mistakes.",
+		notFor: "Anything subtle, or a change with real blast radius.",
+	},
+	{
+		provider: "opencode-go",
+		model: "mimo-v2.6-flash",
+		tier: "low",
+		cost: 0.14,
+		description: "Cheap flash model. A quick second read for obvious mistakes.",
+		notFor: "Anything subtle, or a change with real blast radius.",
+	},
+	{
+		provider: "opencode-go",
+		model: "deepseek-v4.1-flash",
+		tier: "medium",
+		cost: 0.15,
+		description: "Mid-tier coder. A full correctness and edge-case pass.",
+		notFor: "Hostile review of subtle or security-sensitive changes.",
+	},
+	{
+		provider: "opencode-go",
+		model: "glm-5.3-flash",
+		tier: "high",
+		cost: 0.15,
+		description: "Strong reasoner for hostile or high-stakes review.",
+		notFor: "Routine changes a cheaper model already covers well.",
+	},
+];
+
+/**
  * The skip gate. `none` is allowed only when `P(none)` is strictly greater than
  * `skipThreshold` AND every other gate in `policy.ts` passes. A high
  * probability never *forces* skip.
@@ -174,7 +227,11 @@ export interface TriageConfig {
 	 */
 	tool: boolean;
 	judge: JudgeConfig;
-	/** Empty means "synthesise from the models this session can actually use". */
+	/**
+	 * The reviewer policy. Defaults to {@link DEFAULT_CANDIDATES}; an explicit
+	 * empty array means "synthesise from the models this session can actually
+	 * use", which is a coarser price guess rather than a capability judgement.
+	 */
 	candidates: Candidate[];
 	/** Which thinking levels each band may offer, before the runtime prune. */
 	thinkingLadder: ThinkingLadder;
@@ -216,11 +273,11 @@ export const DEFAULT_CONFIG: TriageConfig = {
 	enabled: true,
 	tool: true,
 	judge: {
-		provider: "openrouter",
-		model: "typesafe/jev-1.13",
+		provider: "opencode",
+		model: "jev-1.13-free",
 		timeoutMs: 8_000,
 	},
-	candidates: [],
+	candidates: DEFAULT_CANDIDATES.map((candidate) => ({ ...candidate })),
 	thinkingLadder: DEFAULT_THINKING_LADDER,
 	policy: { skipThreshold: 0.9 },
 	reverseChoice: true,
@@ -538,7 +595,7 @@ export function loadConfig(options: LoadConfigOptions = {}): TriageConfig {
 			high: [...DEFAULT_THINKING_LADDER.high],
 		},
 		policy: { ...DEFAULT_CONFIG.policy },
-		candidates: [],
+		candidates: DEFAULT_CANDIDATES.map((candidate) => ({ ...candidate })),
 		envFile: DEFAULT_CONFIG.envFile,
 	};
 

@@ -1,0 +1,11 @@
+{
+  "id": "head-hash",
+  "repo": ".worktrees/bench-fixture",
+  "timeoutMs": 120000,
+  "prompt": "Run `git log -1 --format=%H` in this repository and reply with only the hash.",
+  "check": {
+    "expectAnswerContains": [
+      "{{gitHead}}"
+    ]
+  }
+}

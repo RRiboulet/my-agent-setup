@@ -1,6 +1,6 @@
 ---
 name: github
-description: "Interact with GitHub using the `gh` CLI. Use `gh issue`, `gh pr`, `gh run`, and `gh api` for issues, PRs, CI runs, and advanced queries. Read this skill before running gh in this repo."
+description: "Work with GitHub through the `gh` CLI. Use when: issues, pull requests, CI runs or releases; or any `gh` command in this repository."
 ---
 
 <!-- VENDORED, NOT OURS.
@@ -12,8 +12,9 @@ description: "Interact with GitHub using the `gh` CLI. Use `gh issue`, `gh pr`, 
      Four LOCAL ADAPTATIONS below, each marked in place:
        A. the auth setup (this repo's token lives in GH_CONFIG_DIR, not
           ~/.gitconfig, and the git credential helper is system-wide)
-       B. the PR workflow (AGENTS.md prescribes --fill, --squash --delete-branch,
-          and dev→main release merges that must not delete dev)
+       B. the PR workflow (AGENTS.md prescribes --fill, --squash --delete-branch
+          for a feature branch into dev, and a dev→main release merge that
+          carries no --delete-branch at all)
        C. the token rule (never in .git/config, the Dockerfile, or a repo file)
        D. the --repo note (pointless inside this repo, and gh is the credential
           helper here rather than a URL-rewriting proxy) -->
@@ -38,18 +39,20 @@ Use the `gh` CLI to interact with GitHub. Always specify `--repo owner/repo` whe
 
      - The devcontainer bakes gh in (`gh` is in the Dockerfile, not installed
        at runtime), so a rebuild does not drop the binary.
-     - The token lives in the `pi-agent-config` volume via
-       `GH_CONFIG_DIR=/home/vscode/.pi/gh`. That is what makes one login last
-       across rebuilds — `/home/vscode` itself is container-local and is
-       discarded.
+     - The token arrives as `GH_TOKEN` from the host environment, so one
+       host-side value serves every container without a shared mount.
+       `GH_CONFIG_DIR=/home/vscode/.pi/gh` holds only gh's non-secret config on
+       this container's private pi volume. `/home/vscode` itself is
+       container-local and is discarded.
      - One-time setup, run by the human (it needs a browser):
          gh auth login --hostname github.com --git-protocol https --web
-     - Check *where* the token lives before trusting a login, because that
-       path decides whether it survives a rebuild:
+     - Check *where* the token comes from before trusting a login:
+         env | grep '^GH_TOKEN='   # never print the value
          gh auth status
-       A login that writes to the container-local overlay (e.g. via
+       A login that writes only to the container-local overlay (e.g. via
        `gh auth setup-git`, which edits `~/.gitconfig`) looks fine and then
-       vanishes. -->
+       vanishes. Prefer the host's `~/.config/devc/env`, which `devc` sources
+       before `devcontainer up`. -->
 
 ## Pull Requests
 
@@ -72,8 +75,12 @@ Use the `gh` CLI to interact with GitHub. Always specify `--repo owner/repo` whe
      (`git checkout dev && git pull --ff-only`).
 
      A dev→main release merge is the one exception that is NOT a squash: use
-     `gh pr merge <n> --merge --delete-branch`, and make sure it does not
-     delete `dev` (re-create it locally if needed: `git branch dev origin/dev`).
+     `gh pr merge <n> --merge` with NO `--delete-branch`. The head of that pull
+     request is `dev`, the long-lived integration branch every feature branch
+     is cut from, so the flag deletes it on the remote - and gh tries to delete
+     the local branch too. This is the one merge whose head branch must
+     survive; tag the merge commit on `main` and fast-forward `dev` to it
+     (AGENTS.md "Releases", steps 4 and 5), and nothing needs re-creating.
      The squash-merge consequence for changelogs: a feature branch's commits
      no longer exist in `dev`, so release notes are written from PR titles and
      bodies, not from `git log`. -->

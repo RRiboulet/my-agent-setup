@@ -64,6 +64,9 @@ export function formatPlan(plan: ReviewPlan): string {
 	lines.push(
 		`Judge ${plan.judge} in ${plan.latencyMs} ms · scope ${scope} · ${plan.evidence.files} file(s), +${plan.evidence.added}/-${plan.evidence.removed}`,
 	);
+	if (plan.judgeFailure) {
+		lines.push(`Judge failed (${plan.judgeFailure.kind}) in ${plan.latencyMs} ms: ${plan.judgeFailure.message}`);
+	}
 	if (plan.evidence.signals.length > 0) lines.push(`Signals: ${plan.evidence.signals.join("; ")}`);
 	if (plan.fingerprint) lines.push(`Dossier ${plan.fingerprint.slice(0, 12)}…`);
 	if (plan.limitations.length > 0) {

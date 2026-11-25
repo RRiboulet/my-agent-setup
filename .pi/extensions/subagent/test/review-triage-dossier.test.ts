@@ -251,6 +251,94 @@ test("dossier: a patch over the per-file cap is truncated and recorded", () => {
 	assert.ok(built.dossier.exclusions.some((entry) => entry.includes("patch truncated for src/a.ts")));
 });
 
+test("dossier: every file with a patch gets a floor before any file gets the remainder", () => {
+	// The bug this pins, found on a real branch: the budget was spent strictly in
+	// priority order, so the first files took everything and the rest were
+	// `omitted` with no patch at all — a judge deciding without having seen them.
+	// A file with 200 characters at least shows what it is for.
+	const built = buildDossier(
+		input({
+			items: [
+				artifact("src/a.ts", { patch: "a".repeat(1_000) }),
+				artifact("src/auth/session.ts", { patch: "s".repeat(1_000) }),
+				artifact("src/b.ts", { patch: "b".repeat(1_000) }),
+			],
+			budgetChars: 100_000,
+			patchBudgetChars: 600,
+		}),
+	);
+	const lengths = built.dossier.artifactEvidence.map((entry) => entry.patch.length);
+	assert.deepEqual(lengths, [200, 200, 200], "three files share the floor, security first in order, none invisible");
+	assert.ok(
+		built.dossier.artifactEvidence.every((entry) => entry.omitted),
+		"every file is marked truncated, because every file was",
+	);
+});
+
+test("dossier: the remainder still goes to the priority path once every file has its floor", () => {
+	const built = buildDossier(
+		input({
+			items: [
+				artifact("src/a.ts", { patch: "a".repeat(1_000) }),
+				artifact("src/auth/session.ts", { patch: "s".repeat(1_000) }),
+				artifact("src/b.ts", { patch: "b".repeat(1_000) }),
+			],
+			budgetChars: 100_000,
+			patchBudgetChars: 900,
+		}),
+	);
+	// 600 reserved as floors; the remaining 300 is spent in priority order, so the
+	// security path gets 500 and the ordinary ones keep their 200.
+	assert.deepEqual(
+		built.dossier.artifactEvidence.map((entry) => [entry.path, entry.patch.length]),
+		[
+			["src/auth/session.ts", 500],
+			["src/a.ts", 200],
+			["src/b.ts", 200],
+		],
+	);
+});
+
+test("dossier: an unused floor is released back to the later files", () => {
+	const built = buildDossier(
+		input({
+			items: [
+				artifact("src/auth/session.ts", { patch: "s".repeat(50) }),
+				artifact("src/a.ts", { patch: "a".repeat(1_000) }),
+			],
+			budgetChars: 100_000,
+			patchBudgetChars: 400,
+		}),
+	);
+	// 400 reserved (200 each); the security patch needs only 50, so its 150 comes
+	// back and the ordinary file gets 200 of floor plus 150 of released budget.
+	assert.deepEqual(
+		built.dossier.artifactEvidence.map((entry) => [entry.path, entry.patch.length]),
+		[
+			["src/auth/session.ts", 50],
+			["src/a.ts", 350],
+		],
+	);
+});
+
+test("dossier: a truncated patch is cut at a line boundary, not mid-line", () => {
+	const lines = Array.from({ length: 40 }, (_, index) => `+line ${index}`);
+	const built = buildDossier(
+		input({
+			items: [artifact("src/a.ts", { patch: lines.join("\n") })],
+			budgetChars: 100_000,
+			patchChars: 40,
+		}),
+	);
+	const kept = built.dossier.artifactEvidence[0]?.patch ?? "";
+	assert.ok(kept.length <= 40, "the per-file cap still bounds the slice");
+	assert.equal(kept, "+line 0\n+line 1\n+line 2\n+line 3\n+line 4", "a whole number of diff lines, dropped at a newline");
+	assert.ok(
+		built.dossier.exclusions.some((entry) => entry.includes("cut at a line boundary")),
+		"the cut says how it cut",
+	);
+});
+
 test("dossier: an over-budget document shrinks then drops, least dense first, and says so", () => {
 	const built = buildDossier(
 		input({

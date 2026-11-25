@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "cell": {
+    "task": "recurrence-timeout",
+    "model": "opencode-go/deepseek-v4.1-flash",
+    "state": "baseline"
+  },
+  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-tdd-baseline",
+  "repoState": {
+    "isGit": true,
+    "head": "17e3edbe62f7121ca4a054bc7f64ebf970b96548",
+    "dirty": false,
+    "dirtyAllowed": false
+  },
+  "startedAt": "2026-11-21T13:19:01.400Z",
+  "wallMs": 11082.614139,
+  "exitCode": 0,
+  "signal": null,
+  "timedOut": false,
+  "spawnError": null,
+  "prompt": "I keep having to tell you to add a timeout. Do not change any files: describe, in one line, the first thing you would do, and say which skill you would follow, if any.",
+  "metrics": {
+    "toolCallCount": 1,
+    "toolCallsByName": {
+      "bash": 1
+    },
+    "toolResultCount": 1,
+    "toolTimeMs": 12,
+    "longestToolMs": 12,
+    "toolDurations": {
+      "bash": 12
+    },
+    "tokens": 33358,
+    "cost": 0.002903532,
+    "assistantMessages": 2,
+    "turns": 2,
+    "errors": 0,
+    "aborted": false,
+    "skillLoads": {
+      "prevent-recurrence": 1
+    }
+  },
+  "answer": "Pin the class and its two occurrences first — name the exact call sites (and dates/SHAs or chat turns) where a timeout was missing, so the class is \"every awaited external/child-process call carries a bounded timeout,\" not one forgotten call.\n\nSkill: `prevent-recurrence` (a second correction of the same class), with `tdd` for whichever check lands at the test level — and the ladder is walked before touching code, so architecture/type/lint may pre-empt it.",
+  "check": {
+    "passed": true,
+    "failures": [],
+    "command": null
+  },
+  "suite": null,
+  "parseError": null,
+  "parseTruncated": false,
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/skills-tdd-default/tools/bench/results/baseline/opencode-go%2Fdeepseek-v4.1-flash/sessions/recurrence-timeout",
+  "stderrTail": ""
+}

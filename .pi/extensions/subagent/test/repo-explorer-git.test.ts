@@ -362,6 +362,294 @@ test("listFiles reuses the cache while the branch tip holds", async () => {
 	assert.notEqual(second, first, "callers get a copy, so nobody can mutate the cached tree");
 });
 
+// ---------------------------------------------------------------------------
+// changedFiles — the paths the browser paints red
+// ---------------------------------------------------------------------------
+
+/**
+ * A fresh scratch repository with one commit on `main` (`keep.txt`), used by
+ * the changed-files tests. Built per test rather than shared because these
+ * tests deliberately move refs, dirty the working tree and unset upstream
+ * config; a shared fixture would make them order-dependent.
+ */
+async function initScratchRepo(name: string): Promise<string> {
+	const root = await mkdtemp(path.join(tmpdir(), `repo-explorer-changed-${name}-`));
+	gitIn(root, "init", "-q", "-b", "main");
+	gitIn(root, "config", "user.name", "Test Harness");
+	gitIn(root, "config", "user.email", "test@harness.invalid");
+	await writeFile(path.join(root, "keep.txt"), "base\n");
+	gitIn(root, "add", "-A");
+	gitIn(root, "commit", "-q", "-m", "base");
+	return root;
+}
+
+/** Every argv the shell-out recorded for a command that ended with `last`. */
+const diffTargets = (calls: string[][], last: string): string[][] =>
+	calls.filter((argv) => argv[0] === "diff" && argv.at(-1) === last);
+
+test("changedFiles diffs against @{upstream} when set, and origin/<branch> when it is not", async () => {
+	// This one names the branch the way the code used to probe for it (short),
+	// and keeps doing so now that the probe converts the full refname first; the
+	// shape production actually passes — `refs/heads/<name>` — is covered by the
+	// "production full-refname call" test below, which is what failed before the
+	// probe was fixed.
+	const root = await initScratchRepo("upstream");
+	try {
+		const base = gitIn(root, "rev-parse", "HEAD").trim();
+		gitIn(root, "checkout", "-q", "-b", "feature");
+		await writeFile(path.join(root, "feature.txt"), "feature\n");
+		// A non-ASCII name: `git diff --name-only` shell-quotes these without
+		// `-z` (`"zz caf\303\251.txt"`), so a reader that dropped `-z` would
+		// return the quoted spelling and fail here rather than only on a
+		// repository that happens to contain one.
+		await writeFile(path.join(root, "zz café.txt"), "accented\n");
+		gitIn(root, "add", "-A");
+		gitIn(root, "commit", "-q", "-m", "feature");
+		const featureTip = gitIn(root, "rev-parse", "HEAD").trim();
+		// origin/feature carries a commit the branch does not: the two candidate
+		// answers are therefore disjoint sets, so an implementation that diffed
+		// both refs and unioned the results would return two paths where the
+		// preferred answer has one. (With origin/feature at the branch tip, the
+		// union is identical to the upstream-only diff and the test could not
+		// tell the two apart.)
+		gitIn(root, "checkout", "-q", "--detach", featureTip);
+		await writeFile(path.join(root, "only-on-origin.txt"), "remote\n");
+		gitIn(root, "add", "-A");
+		gitIn(root, "commit", "-q", "-m", "remote only");
+		const originFeatureTip = gitIn(root, "rev-parse", "HEAD").trim();
+		gitIn(root, "checkout", "-q", "main");
+		// The configured upstream (origin/main, at the base commit) is the one
+		// that has the branch's delta.
+		gitIn(root, "update-ref", "refs/remotes/origin/feature", originFeatureTip);
+		gitIn(root, "update-ref", "refs/remotes/origin/main", base);
+		gitIn(root, "remote", "add", "origin", "https://example.invalid/repo.git");
+		gitIn(root, "config", "branch.feature.remote", "origin");
+		gitIn(root, "config", "branch.feature.merge", "refs/heads/main");
+
+		const { run, calls } = makeRunner();
+		const repo = await openGit(run, root);
+		assert.deepEqual(
+			await repo.changedFiles("feature"),
+			["feature.txt", "zz café.txt"],
+			"the configured upstream (origin/main) wins over the conventional origin/<branch> ref",
+		);
+		assert.ok(diffTargets(calls, "refs/remotes/origin/main").length > 0, "the diff names the configured upstream");
+
+		gitIn(root, "config", "--unset", "branch.feature.remote");
+		gitIn(root, "config", "--unset", "branch.feature.merge");
+		assert.deepEqual(
+			await repo.changedFiles("feature"),
+			["only-on-origin.txt"],
+			"with no upstream configured, origin/<branch> is the diff target, so only its extra commit shows",
+		);
+		assert.ok(diffTargets(calls, "refs/remotes/origin/feature").length > 0, "the fallback names origin/<branch>");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("the production full-refname call still resolves @{upstream}, which git only accepts by short name", async () => {
+	// The browser passes `choice.refname` ("refs/heads/feature"), and git accepts
+	// only `<branchname>@{upstream}` — `refs/heads/feature@{upstream}` exits 128
+	// with "no such branch". This is the shape that reaches `changedFiles` in
+	// production; the test above exercises the short name the code happened to
+	// probe with, which is why the gap survived it.
+	//
+	// The fixture makes the two possible answers differ, so a resolver that
+	// misses the probe and falls through to the merge base cannot pass by luck:
+	// origin/main carries a commit the branch does not, so diffing the tips (the
+	// @{upstream} answer) names both paths, while diffing from the merge base
+	// names only the branch's own. origin/feature does not exist, so the
+	// conventional fallback cannot rescue the probe either.
+	const root = await initScratchRepo("prod-refname");
+	try {
+		gitIn(root, "remote", "add", "origin", "https://example.invalid/repo.git");
+		gitIn(root, "checkout", "-q", "-b", "feature");
+		await writeFile(path.join(root, "feature.txt"), "feature\n");
+		gitIn(root, "add", "-A");
+		gitIn(root, "commit", "-q", "-m", "feature only");
+		// The configured upstream, one commit ahead of the merge base.
+		gitIn(root, "checkout", "-q", "main");
+		await writeFile(path.join(root, "on-main.txt"), "upstream moved\n");
+		gitIn(root, "add", "-A");
+		gitIn(root, "commit", "-q", "-m", "upstream only");
+		gitIn(root, "update-ref", "refs/remotes/origin/main", gitIn(root, "rev-parse", "HEAD").trim());
+		gitIn(root, "config", "branch.feature.remote", "origin");
+		gitIn(root, "config", "branch.feature.merge", "refs/heads/main");
+
+		const { run, calls } = makeRunner();
+		const repo = await openGit(run, root);
+		assert.deepEqual(
+			await repo.changedFiles("refs/heads/feature"),
+			["feature.txt", "on-main.txt"],
+			"the configured upstream is diffed, so the upstream's own commit shows too",
+		);
+
+		// The probe itself: git must be asked with the short name, because it
+		// rejects the full refname. Asserted on argv, since a resolver that
+		// probes wrongly and falls back can still produce paths in other shapes.
+		const probes = calls.filter((argv) => argv.includes("--symbolic-full-name"));
+		assert.equal(probes.length, 1, "exactly one upstream probe");
+		assert.equal(probes[0]?.at(-1), "feature@{upstream}");
+		assert.equal(diffTargets(calls, "refs/remotes/origin/main").length, 1, "the diff names the configured upstream");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("a remote-tracking branch is never diffed, so browsing it cannot paint the whole tree red", async () => {
+	const root = await initScratchRepo("remote");
+	try {
+		// A commit that exists only on the remote side: local main is behind
+		// origin/main, so a diff of origin/main against the integration branch
+		// would be non-empty if the guard ever let it through.
+		gitIn(root, "checkout", "-q", "-b", "remote-state");
+		await writeFile(path.join(root, "remote-only.txt"), "remote\n");
+		gitIn(root, "add", "-A");
+		gitIn(root, "commit", "-q", "-m", "remote only");
+		const remoteTip = gitIn(root, "rev-parse", "HEAD").trim();
+		gitIn(root, "checkout", "-q", "main");
+		gitIn(root, "update-ref", "refs/remotes/origin/main", remoteTip);
+
+		const { run, calls, count } = makeRunner();
+		const repo = await openGit(run, root);
+		// Positive control: the local branch behind its own origin reports the
+		// path it is missing. Without this, the [] below could pass for the
+		// wrong reason (an empty diff rather than the guard).
+		assert.deepEqual(await repo.changedFiles("refs/heads/main"), ["remote-only.txt"]);
+
+		const diffs = count("diff");
+		const mergeBases = count("merge-base");
+		assert.deepEqual(await repo.changedFiles("refs/remotes/origin/main"), [], "a remote-tracking ref reports no changes");
+		assert.equal(count("diff"), diffs, "it is not diffed at all");
+		assert.equal(count("merge-base"), mergeBases, "nor merge-based against the integration branches");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("a remote-tracking ref gets no working-tree changes even when HEAD points at it", async () => {
+	const root = await initScratchRepo("remote-head");
+	try {
+		const tip = gitIn(root, "rev-parse", "HEAD").trim();
+		gitIn(root, "update-ref", "refs/remotes/origin/main", tip);
+		// A symref to a remote-tracking ref is unusual but legal (git accepts it,
+		// and listBranches marks that row current). It is the one shape where the
+		// early remote-tracking return is load-bearing on its own: without it,
+		// headBranch equals branch and the working tree leaks in, painting a
+		// ref that is not a working copy.
+		gitIn(root, "symbolic-ref", "HEAD", "refs/remotes/origin/main");
+		await writeFile(path.join(root, "keep.txt"), "dirty\n");
+
+		const { run, calls } = makeRunner();
+		const repo = await openGit(run, root);
+		assert.deepEqual(
+			await repo.changedFiles("refs/remotes/origin/main"),
+			[],
+			"a remote-tracking ref is never given the local working tree's changes",
+		);
+		assert.equal(diffTargets(calls, "HEAD").length, 0, "no HEAD diff is run for it");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("with no remote counterpart, changedFiles diffs from the merge base with origin/dev, dev, origin/main, then main", async () => {
+	const root = await initScratchRepo("merge-base");
+	try {
+		const base = gitIn(root, "rev-parse", "HEAD").trim();
+		gitIn(root, "checkout", "-q", "-b", "topic");
+		await writeFile(path.join(root, "topic.txt"), "topic\n");
+		gitIn(root, "add", "-A");
+		gitIn(root, "commit", "-q", "-m", "topic");
+		const topicTip = gitIn(root, "rev-parse", "HEAD").trim();
+		gitIn(root, "checkout", "-q", "main");
+
+		const { run, calls } = makeRunner();
+		const repo = await openGit(run, root);
+		/** The ref the last merge-base call resolved the base to. */
+		const lastBase = (): string | undefined => [...calls].reverse().find((argv) => argv[0] === "merge-base")?.at(-1);
+
+		// origin/dev exists and contains the topic tip, so the merge base is the
+		// tip itself and the branch shows nothing. A local dev exists too, and
+		// would give a different answer (the topic commit), so [] proves the
+		// remote ref was preferred.
+		gitIn(root, "update-ref", "refs/remotes/origin/dev", topicTip);
+		gitIn(root, "branch", "dev", base);
+		assert.deepEqual(await repo.changedFiles("refs/heads/topic"), [], "origin/dev is consulted before a local dev");
+		assert.equal(lastBase(), "refs/remotes/origin/dev");
+
+		gitIn(root, "update-ref", "-d", "refs/remotes/origin/dev");
+		assert.deepEqual(await repo.changedFiles("refs/heads/topic"), ["topic.txt"], "without origin/dev, the local dev is the base");
+		assert.equal(lastBase(), "refs/heads/dev");
+
+		gitIn(root, "branch", "-D", "dev");
+		gitIn(root, "update-ref", "refs/remotes/origin/main", base);
+		assert.deepEqual(await repo.changedFiles("refs/heads/topic"), ["topic.txt"], "then origin/main");
+		assert.equal(lastBase(), "refs/remotes/origin/main");
+
+		gitIn(root, "update-ref", "-d", "refs/remotes/origin/main");
+		assert.deepEqual(await repo.changedFiles("refs/heads/topic"), ["topic.txt"], "and finally the local main");
+		assert.equal(lastBase(), "refs/heads/main");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("uncommitted changes are added only for the checked-out branch", async () => {
+	const root = await initScratchRepo("dirty");
+	try {
+		const base = gitIn(root, "rev-parse", "HEAD").trim();
+		gitIn(root, "checkout", "-q", "-b", "feature");
+		await writeFile(path.join(root, "feature.txt"), "feature\n");
+		gitIn(root, "add", "-A");
+		gitIn(root, "commit", "-q", "-m", "feature");
+		const featureTip = gitIn(root, "rev-parse", "HEAD").trim();
+		// Committed branches are both level with their tracking refs, so every
+		// path below comes from the working tree, not from a commit.
+		gitIn(root, "update-ref", "refs/remotes/origin/feature", featureTip);
+		gitIn(root, "update-ref", "refs/remotes/origin/main", base);
+		await writeFile(path.join(root, "keep.txt"), "dirty\n");
+		await writeFile(path.join(root, "untracked.txt"), "new\n");
+
+		const { run, calls } = makeRunner();
+		const repo = await openGit(run, root);
+		const headDiffs = (): number => diffTargets(calls, "HEAD").length;
+
+		const feature = await repo.changedFiles("refs/heads/feature");
+		assert.deepEqual(feature, ["keep.txt"], "the checked-out branch gets its working-tree change");
+		assert.ok(!feature.includes("untracked.txt"), "untracked files are not in `git diff HEAD`");
+		assert.equal(headDiffs(), 1, "through git diff --name-only -z HEAD");
+
+		assert.deepEqual(
+			await repo.changedFiles("refs/heads/main"),
+			[],
+			"another branch must not be painted with the checked-out tree's changes",
+		);
+		assert.equal(headDiffs(), 1, "and no HEAD diff is run for it");
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("changedFiles reports a failed diff as git-failed rather than swallowing it", async () => {
+	// The notify policy lives in the command handler, which turns this kind into
+	// one warning and an empty set; what git.ts owes it is the typed rejection,
+	// not a silent [].
+	const ok = (stdout = ""): GitRunResult => ({ stdout, stderr: "", code: 0, killed: false });
+	const run: GitRunner = async (args) => {
+		if (args[0] === "rev-parse" && args[1] === "--show-toplevel") return ok("/repo\n");
+		if (args[0] === "rev-parse" && args.includes("--symbolic-full-name")) return ok("refs/remotes/origin/main\n");
+		if (args[0] === "diff") return { stdout: "", stderr: "fatal: unable to read tree", code: 1, killed: false };
+		throw new Error(`unexpected argv: ${args.join(" ")}`);
+	};
+	const repo = await openGit(run, "/repo");
+	await assert.rejects(
+		repo.changedFiles("refs/heads/main"),
+		(err: unknown) => err instanceof RepoGitError && err.kind === "git-failed" && err.message.includes('git diff failed for "refs/heads/main"'),
+	);
+});
+
 test("listFiles invalidates the cache when the branch tip moves", async () => {
 	const { run, count } = makeRunner();
 	const repo = await openGit(run, baseRoot);

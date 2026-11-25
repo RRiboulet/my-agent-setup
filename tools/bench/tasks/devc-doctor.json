@@ -1,0 +1,12 @@
+{
+  "id": "devc-doctor",
+  "repo": ".",
+  "timeoutMs": 120000,
+  "prompt": "Run `devc doctor pupkeep` and say whether it reports anything blocking. Do not change the container.",
+  "check": {
+    "expectAnswerContains": [
+      "pupkeep"
+    ]
+  },
+  "allowDirty": true
+}
