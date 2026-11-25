@@ -66,7 +66,7 @@ export const DEFAULT_LADDER = deepFreeze({
 	tiers: [
 		{ tier: 1, provider: "opencode-go", model: "hy4-flash-free", thinking: "max" },
 		{ tier: 2, provider: "opencode-go", model: "deepseek-v4.1-flash", thinking: "medium" },
-		{ tier: 3, provider: "mistral", model: "zai-glm-5-3", thinking: "high" },
+		{ tier: 3, provider: "mistral", model: "zai-glm-5-3-flash", thinking: "high" },
 	],
 	pins: {
 		triage: { kind: "model", provider: "opencode", model: "jev-1.13-free" },

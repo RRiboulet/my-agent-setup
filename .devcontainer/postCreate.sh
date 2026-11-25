@@ -53,9 +53,10 @@ sudo chown -R vscode:vscode /home/vscode/.pi "$REPO"
 
 # --- pi configuration ---
 # The volume is private, so there is no shared agent dir to seed from any more.
-# A committed template carries the provider/model/tool defaults this container
-# starts with; it is written only when settings.json is missing, so a rebuild
-# never overwrites a setting made in here. The template deliberately has no
+# A committed template carries the enabled-model set and tool defaults this
+# container starts with; it is written only when settings.json is missing, so a
+# rebuild never overwrites a setting made in here. Provider/model selection stays
+# with the harness's current session. The template deliberately has no
 # `.packages`: this repo's checkout's `.pi/` is the single source of extensions
 # and skills (README, "One copy of the extensions, never two").
 mkdir -p "$PROJECT_AGENT_DIR"

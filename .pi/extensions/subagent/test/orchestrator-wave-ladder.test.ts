@@ -56,7 +56,7 @@ test("the shipped wave-ladder.json normalizes with no warnings when no overrides
 	});
 });
 
-test("the shipped ladder carries the clean upstream tier and pin policy", async (t) => {
+test("the shipped ladder carries the configured tier and pin policy", async (t) => {
 	const fakeHome = tempDir(t);
 	await withEnv({ HOME: fakeHome, PI_ORCHESTRATE_LADDER: undefined, PI_CODING_AGENT_DIR: undefined }, () => {
 		const { ladder } = readLadder();
@@ -75,7 +75,7 @@ test("the shipped ladder carries the clean upstream tier and pin policy", async 
 		);
 		assert.deepEqual(
 			{ provider: byTier.get(3).provider, model: byTier.get(3).model, thinking: byTier.get(3).thinking },
-			{ provider: "mistral", model: "zai-glm-5-3", thinking: "high" },
+			{ provider: "mistral", model: "zai-glm-5-3-flash", thinking: "high" },
 		);
 
 		assert.deepEqual(ladder.pins.triage, {
@@ -209,7 +209,7 @@ test("resolvePin resolves model pins, tier pins with/without thinking override, 
 	});
 	assert.deepEqual(resolvePin(customLadder, "verifier"), {
 		provider: "mistral",
-		model: "zai-glm-5-3",
+		model: "zai-glm-5-3-flash",
 		thinking: "high",
 	});
 });

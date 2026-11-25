@@ -199,8 +199,8 @@ Credentials for every container come from one host-side file,
 `~/.config/devc/env` (mode 600, never committed): `devc` sources it before
 `devcontainer up`, and each `devcontainer.json` passes the variables in with
 `${localEnv:...}`. `OPENCODE_API_KEY`, `OPENROUTER_API_KEY`, `BRAVE_API_KEY`,
-`TYPESAFE_API_KEY` and `GH_TOKEN` are the current set; `PI_VOICE_API_KEY` reuses
-the OpenRouter key. Values therefore appear in `docker inspect` and in child
+`TYPESAFE_API_KEY`, `MISTRAL_API_KEY` and `GH_TOKEN` are the current set;
+`PI_VOICE_API_KEY` reuses the OpenRouter key. Values therefore appear in `docker inspect` and in child
 process environments. That is the accepted trade-off: it keeps credentials
 shared without any cross-container mount or coupling.
 

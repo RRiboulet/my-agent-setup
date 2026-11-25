@@ -435,8 +435,13 @@ test("failure ladder: first crash retries same tier, second crash escalates, top
 	assert.equal(state.tickets["01"]?.tier, 3);
 	assert.equal(state.tickets["01"]?.crashesAtTier, 0);
 
+	// Tier 3 dispatches the Mistral GLM Flash escalation model.
+	const tier3Start = applyWaveAction(state, { type: "start_implement", ticketId: "01" }, { graph }, LADDER, 100);
+	assert.equal(tier3Start.ok, true);
+	assert.deepEqual(tier3Start.dispatch, { provider: "mistral", model: "zai-glm-5-3-flash", thinking: "high" });
+	state = tier3Start.state!;
+
 	// Crash twice at T3 -> blocked with explicit reason & side effect
-	state = applyWaveAction(state, { type: "start_implement", ticketId: "01" }, { graph }, LADDER, 100).state!;
 	state = applyWaveAction(state, { type: "implement_result", ticketId: "01", outcome: "crashed" }, { graph }, LADDER, 110).state!;
 	assert.equal(state.tickets["01"]?.tier, 3);
 	assert.equal(state.tickets["01"]?.crashesAtTier, 1);

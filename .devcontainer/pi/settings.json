@@ -1,13 +1,13 @@
 {
   "theme": "kokomi-theme",
-  "defaultProvider": "opencode-go",
-  "defaultModel": "deepseek-v4.1-flash",
   "enabledModels": [
     "opencode-go/beam-free",
     "opencode-go/deepseek-v4.1-flash",
     "opencode-go/mimo-v2.6-flash",
     "opencode-go/glm-5.3-flash",
-    "opencode-go/longcat-2.5-free"
+    "opencode-go/longcat-2.5-free",
+    "opencode-go/hy4-flash-free",
+    "mistral/zai-glm-5-3-flash"
   ],
   "defaultThinkingLevel": "high",
   "defaultTools": [
