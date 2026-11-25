@@ -4,6 +4,39 @@ Versions are git tags. This repository is not published to npm.
 
 ## Unreleased
 
+Removed:
+
+- **`/voice` (`.pi/extensions/voice/`), and everything that existed only to
+  keep it running.** The dictation extension recorded audio on a phone over
+  ssh, fetched the m4a back, and transcribed it through an OpenAI-compatible
+  endpoint; it was the repo's only consumer of the phone, of the private-volume
+  ssh key pair and `voice.json` that `.devcontainer/restore-post-rebuild.sh`
+  re-created after every container rebuild, and of the `PI_VOICE_API_KEY`
+  remap in `devcontainer.json`. Gone with it: the extension tree, its
+  `voice.test.ts`, `.devcontainer/voice-container.md`, the restore script and
+  its step in `postCreateCommand`, the `PI_VOICE_API_KEY` line, the `voice.json`
+  entry in `bin/pi-agent-dir`'s copy list, the phone row and fact in the
+  `devcontainer` skill, and the README's Voice section, manifest entry and
+  Termux requirement. Nothing else references the chain; the last thing that
+  ever pointed at it is this entry.
+
+- **`/session-breakdown` (`.pi/extensions/session-breakdown.ts`), with its
+  tests.** The vendored analytics extension is out of the `pi` manifest, the
+  strict-ESM load guard and the test README. `tools/measure-session-usage.mjs`
+  stays: it is an independent, read-only aggregator over the session trees,
+  not part of the extension — its header now says so instead of naming a
+  removed CHANGELOG entry — because the subagent fixture-trees gap it measures
+  is a property of the transcript layout, not of the extension that once
+  displayed it. The four LOCAL PATCH hunks and their reasoning stay reachable
+  through git history and the entries below.
+
+- **Docs swept for both removals.** Every stale reference in the living docs is
+  gone: the manifest example, the duplicate-load silent list, the contents
+  table, the advisor's accounting sentence and the requirements in the
+  README; the dated research and ticket docs keep their history but carry a
+  status note where they still asked for session-breakdown work, so no open
+  ticket points at an extension that no longer exists.
+
 ## v1.17.1 — 2026-11-24
 
 Added:

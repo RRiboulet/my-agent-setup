@@ -54,8 +54,7 @@
 #     package bookkeeping in `.extensionChangelogVersions` removed. Written only
 #     when missing: from then on the file belongs to this project, like the
 #     container's does (postCreate.sh makes the same promise).
-#   * auth.json, models-store.json, models.json, voice.json,
-#     review-triage.json — copied when absent, never overwritten.
+#   * auth.json, models-store.json, models.json, review-triage.json — copied when absent, never overwritten.
 #   * trust.json — the main checkout added, other entries preserved. Project
 #     trust is what makes pi read `<checkout>/.pi/` at all; without it the
 #     package-free dir is a *silent empty* agent rather than a working one.
@@ -226,7 +225,7 @@ else
 fi
 
 # --- credentials and per-machine extension config: copied once --------------
-for name in auth.json models.json models-store.json voice.json review-triage.json; do
+for name in auth.json models.json models-store.json review-triage.json; do
 	if [ -f "$DIR/$name" ]; then
 		continue
 	fi

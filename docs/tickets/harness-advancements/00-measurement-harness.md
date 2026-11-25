@@ -1,9 +1,11 @@
 # 00: A measurement harness the five changes can be judged by
 
 **Blocked by:** None (can start immediately)
-**Status:** **in progress** — the harness half landed in #162; the open slice is
-the `/session-breakdown` table described in Scope. The body already reflects
-that split.
+**Status:** superseded — the harness half landed in #162; the rest of the
+ticket (the `/session-breakdown` table view) died with the
+`/session-breakdown` extension itself, removed from the repo on 2026-11-25 —
+see `CHANGELOG.md`, `## Unreleased`). The session-breakdown scope below is
+kept as history, not as open work.
 Evidence: `docs/research/2026-11-harness-advancements.md#measurement-plan`
 
 ## What to build

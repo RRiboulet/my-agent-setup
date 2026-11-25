@@ -13,7 +13,7 @@ pi install --local git:github.com/RRiboulet/my-agent-setup  # pin for one projec
 Verified on a clean agent dir and an empty project: both install every
 extension and skill the `pi` manifest below lists. That check predates
 `review.ts`, `continue.ts`, `opencode-go-provider/`, `repo-explorer/`,
-`review-triage/`, `btw/` and `voice/`; the manifest is kept honest by
+`review-triage/` and `btw/`; the manifest is kept honest by
 `.pi/extensions/subagent/test/package-manifest.test.ts`, and every entry point by the strict-ESM load
 test under Tests.
 
@@ -39,10 +39,8 @@ each entry point explicitly:
     ".pi/extensions/repo-explorer/index.ts",
     ".pi/extensions/review-triage/index.ts",
     ".pi/extensions/review.ts",
-    ".pi/extensions/session-breakdown.ts",
     ".pi/extensions/todos.ts",
     ".pi/extensions/subagent/index.ts",  // the rest of that dir is its internals
-    ".pi/extensions/voice/index.ts"
   ],
   "skills": [
     ".pi/skills/add-model",
@@ -84,7 +82,7 @@ Pinning works the usual way — append a tag or a commit:
 `v1.0.0` is not empty, but it is the old layout — the resources sit in
 conventional root `extensions/` and `skills/`, which pi discovers without any
 manifest, so pinning to it installs four extensions and one skill (no
-`/session-breakdown`, no `commit` or `update-changelog`). What installs
+`commit` or `update-changelog`). What installs
 *nothing* is the stretch between the move to `.pi/` and the manifest commit
 `e4e072f`: dot-prefixed directories are not found by a glob, so the install
 succeeds, clones, and quietly loads zero resources. Pin a ref at or after
@@ -112,7 +110,7 @@ Hint: Start without extensions using "pi -ne".
 The TUI then exits 1 instead of starting. `pi --version` and `pi --list-models`
 print the same lines and carry on, so a quick check looks healthy; and the
 extensions that register no tool or flag (`/answer`, `/btw`, `/continue`,
-`/review`, `/session-breakdown`, repo-explorer, `/voice`) load twice in silence.
+`/review`, repo-explorer) load twice in silence.
 Skills collide the same way, but as a first-one-wins collision diagnostic, so
 they never raise the error by themselves.
 
@@ -199,8 +197,8 @@ Credentials for every container come from one host-side file,
 `~/.config/devc/env` (mode 600, never committed): `devc` sources it before
 `devcontainer up`, and each `devcontainer.json` passes the variables in with
 `${localEnv:...}`. `OPENCODE_API_KEY`, `OPENROUTER_API_KEY`, `BRAVE_API_KEY`,
-`TYPESAFE_API_KEY`, `MISTRAL_API_KEY` and `GH_TOKEN` are the current set;
-`PI_VOICE_API_KEY` reuses the OpenRouter key. Values therefore appear in `docker inspect` and in child
+`TYPESAFE_API_KEY`, `MISTRAL_API_KEY` and `GH_TOKEN` are the current set.
+Values therefore appear in `docker inspect` and in child
 process environments. That is the accepted trade-off: it keeps credentials
 shared without any cross-container mount or coupling.
 
@@ -355,11 +353,9 @@ reason, rather than writing an entry pi would skip with one line in a log.
 | `.pi/extensions/review.ts` | `/review` and `/end-review`: PR, branch, commit, folder and uncommitted review modes, loop-fixing, custom instructions, project-level `REVIEW_GUIDELINES.md`. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with two local changes — see below |
 | `.pi/extensions/mcp-catalogue.ts` | `/mcp-catalogue`: install this package's MCP server catalogue into the agent dir, every server disabled — see [MCP servers](#mcp-servers-installed-once-enabled-per-project). **Ours** |
 | `.pi/extensions/goal.ts` | `/goal` and the `get_goal`/`create_goal`/`update_goal` tools: a long-running objective that auto-continues across turns with an optional token budget, its state appended to the session log and reconstructed on reload/tree navigation. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with four local changes — see below |
-| `.pi/extensions/session-breakdown.ts` | `/session-breakdown`: sessions, messages, tokens and cost per day over 7/30/90, model breakdown, contributions-style calendar. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) (Apache-2.0), with four local patches — see below |
 | `.pi/extensions/native-web-search.ts` | Native web search tool — **ours**, not upstream: it registers the `web_search` tool. Ships with `.pi/skills/native-web-search/`, which *is* vendored |
 | `.pi/extensions/repo-explorer/` | `/explore`: browse a branch's file tree with a directory-by-directory fuzzy filter and print a file into the transcript, or quick-open `/explore <path> [branch]` / `<branch>:<path>` to skip the menus. Read-only git resolved against the session cwd; the process runner, branch menu, browser, transcript renderer, display sanitizer and argument grammar are separate internals. **Ours** |
 | `.pi/extensions/review-triage/` | `triage_change` tool and `/triage`: measure a finished change from its git diff, ask a calibrated decision model (Jev, via `ctx.modelRegistry.classify()`) whether it needs an adversarial and/or complexity review, how hard each should push and which allowed model should run it, and return a depth-runged, fallback-chained plan for the `subagent` tool. Policy (judge model, candidates, thresholds, chains) lives in `~/.pi/agent/review-triage.json` — this repo ships it as `review-triage.example.json` beside the extension, with every candidate on `opencode-go` and only the judge on another provider; the verdict is appended to the session for audit. **Ours** |
-| `.pi/extensions/voice/` | `/voice`: dictation with the phone as microphone — start `termux-microphone-record` over ssh, fetch the m4a, transcribe it through an OpenAI-compatible `/audio/transcriptions` endpoint, and paste the transcript at the cursor (or submit it with `autoSubmit`). `/voice cancel` aborts; `alt+r` (and `ctrl+shift+r` on a Kitty terminal) toggle the same cycle. **Ours** |
 | `.pi/extensions/btw/` | `/btw`: opens a panel and asks for the question (submit it empty to reopen a running panel), then answers in-process from the exact conversation prefix, so the provider prompt cache is reused; the streaming answer is shown in its own tmux popup, rendered by pi-tui's own `Markdown` component in pi's own theme — the panel draws the answer with the renderer and the colours the transcript draws an assistant message with. Neither the question nor the answer enters the transcript. Escape returns to pi while the answer keeps running; a new question replaces the panel. **Ours** |
 | `.pi/extensions/opencode-go-provider/` | An `opencode-go` provider for `/model`: fast GLM, Kimi, MiniMax, Qwen, DeepSeek and Grok models via opencode.ai's Go API, with the correct wire protocol per model (Anthropic, OpenAI Completions, Responses) and a per-account usage-budget widget below the editor. **Vendored** from [monotykamary/pi-opencode-go-provider](https://github.com/monotykamary/pi-opencode-go-provider) (MIT), byte-identical to upstream — see below |
 | `.pi/skills/native-web-search/` | Script + docs for the above. **Vendored** from [mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff) `skills/native-web-search/`, with local provider patches: OpenRouter support, unknown-provider rejection, and a test seam (`__test__` + direct-invocation guard). The two must travel together |
@@ -519,7 +515,6 @@ list cannot drift the way a hand-written one does.
 - `@earendil-works/pi-coding-agent` **`@latest`**
 - **Node 24+** — the tests execute TypeScript directly, with no build step
 - **tmux** — the subagent extension creates one tmux session per run, and the `tmux` skill drives interactive CLIs on a separate private socket
-- **A phone with Termux + Termux:API** for `/voice` — setup is in `.pi/extensions/voice/README.md`
 - An OpenRouter key for web search — in `~/.pi/agent/auth.json` under `openrouter`. The `web_search` tool and the native-web-search skill default to it (Brave when a Brave key is configured). The same key is used by `pi-session.sh`, which launches a model through OpenRouter. An `opencode-go` key is for the `/model` provider only; the Go plan's Anthropic models do not carry native web search (an explicit `--provider opencode-go` or `PI_WEB_SEARCH_PROVIDER=opencode-go` errors rather than falling back).
 
 The `.devcontainer/` provides all of these.
@@ -816,8 +811,8 @@ last one; the section is attached to the run being prepared, so a reload does no
 re-inject a stale verdict. Like the rest of the gate it acts only in a trusted
 project (an untrusted clone's advisor key is ignored entirely), and a delegated
 child consults nothing. The attempt's usage is appended to the session's own
-accounting, so `/session-breakdown` bills it once alongside the messages it was
-asked about.
+accounting — the session's own usage record bills it once alongside
+the messages it was asked about.
 
 **Compaction is pi's; the model is what forgets.** Gate and advisor state are
 rebuilt from the session branch, so a compaction cannot lose them — but the
@@ -875,61 +870,6 @@ of a settlement verdict and a loop block). They are local to one parent session:
 no cross-process or cross-worktree delivery is promised, and a subscriber that
 throws is reported and ignored.
 
-## `/session-breakdown`
-
-Read-only analytics over the session transcripts in pi's agent dir
-(`PI_CODING_AGENT_DIR` when set, else `~/.pi/agent`):
-sessions, messages, tokens and cost per day over the last 7/30/90 days, a model
-/ directory / weekday / time-of-day breakdown, and a GitHub-contributions-style
-calendar. Nothing is written and no network call is made.
-
-It is **vendored, not ours**: `session-breakdown.ts` comes from
-[mitsuhiko/agent-stuff](https://github.com/mitsuhiko/agent-stuff)
-(`extensions/session-breakdown.ts`, Apache-2.0 — Copyright (c) mitsuhiko and
-contributors). Upstream ships it with no tests; the file is kept close to
-upstream on purpose, so a later refresh is a readable diff. Our changes are four
-`LOCAL PATCH` hunks, marked in place and listed in the file header:
-
-1. **Roots.** Upstream hardcodes `<homedir>/.pi/agent/sessions`. We read the
-   agent dir from pi (`getAgentDir()`, so `PI_CODING_AGENT_DIR` works — upstream
-   PR #24 asked for this and was closed unmerged) and sweep three trees:
-   `sessions/`, plus `tmux-subagents/` and the legacy `subagents/`, which is
-   where the subagent extension writes child transcripts. Those are siblings of
-   `sessions/`, so the stock scanner never saw them.
-2. **Inherited entries are not this session's spend.** A forked session file
-   starts with a verbatim copy of its parent's tail, entry ids included. pi's own
-   `/fork`, `/clone` and `--fork` do this, and so does a subagent run launched
-   with `handoff: "fork"`. Those copies are records of requests some other
-   process made, so they are excluded from messages, tokens and cost — resolved
-   through the `parentSession` path in the v3 header, which every producer writes
-   and nothing read before. The file still counts as one session, and a file
-   whose parent can no longer be read is counted in full rather than guessed at.
-3. **A footer line** saying how many inherited entries were excluded and how
-   many files had an unreadable parent, because a total that silently drops
-   context is indistinguishable from one that is simply wrong.
-4. **A `__test__` export**, so the aggregation is testable over fixtures instead
-   of a developer's real transcripts.
-
-Measured on this machine on 2026-10-04, with
-`node tools/measure-session-usage.mjs` (read-only, independent of the extension
-so a bug in it cannot hide on both sides of the comparison): child transcripts
-that were invisible — **$0.067741 of $1.708118, 4.0% of the cost** — are now
-counted, and **3,003,013 duplicated tokens across 6 forked files** are no longer
-counted twice (that figure comes from the extension's own lineage walk, which the
-harness does not reproduce; the harness reports the dollar gap and, per fork run,
-the prefix measured against the extension's recorded `usageFromLine`).
-
-Those counts are of a machine that was being used while they were taken, so they
-move; the dollar figures are stable only because every duplicated entry on this
-box reports `cost.total = 0`. One file carries a `parentSession` that cannot be
-resolved — its source transcript is gone — so its lineage is incomplete and the
-footer says that instead of leaving it to be discovered.
-
-A forked child's *own* turns still cost real money: its re-send of the parent's
-prefix is billed, mostly as cache reads. This is about counting each request
-once, not about pretending delegation is free. The footer line is the honest
-version of that, and it only appears when there is something to report.
-
 ## opencode-go provider
 
 `/model` gains an `opencode-go` provider serving fast GLM, Kimi, MiniMax, Qwen,
@@ -952,22 +892,6 @@ local changes** — the files above are byte-identical to upstream commit
 `286c467` (main, 2026-10-07, package.json v1.1.18). The extension is
 side-effect-free at load (the strict-ESM guard covers it) and only depends on
 pi's host packages.
-
-## Voice
-
-`/voice` turns a phone into the microphone: it starts
-`termux-microphone-record` over ssh, stops it on the second `/voice`, fetches
-the recording, and POSTs it to an OpenAI-compatible `/audio/transcriptions`
-endpoint. The transcript is pasted at the cursor by default (a long paste
-collapses to pi's `[paste #n]` marker and expands on submit), or submitted as a
-prompt with `autoSubmit` — queued as a follow-up while the agent streams.
-`/voice cancel` aborts any phase; `alt+r` toggles the same cycle on every
-terminal, `ctrl+shift+r` on a Kitty one, so the recording can be finished
-without retyping the command.
-
-Setup, the configuration table, the key routing (the ambient OpenAI key is
-never sent to a custom endpoint), the single `response_format` retry and the
-phone prerequisites are in `.pi/extensions/voice/README.md`.
 
 ## Configuration
 

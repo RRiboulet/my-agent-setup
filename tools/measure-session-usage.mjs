@@ -1,13 +1,17 @@
-// Read-only measurement harness behind the /session-breakdown CHANGELOG entry.
+// Read-only measurement harness for session transcript usage. It was
+// originally written to measure the /session-breakdown fix (the extension has
+// since been removed from this repo); it is kept as a general, independent
+// aggregator.
 //
 //   node tools/measure-session-usage.mjs
 //
 // Three questions, one pass:
 //   1. What does a scanner that only reads `sessions/` see?
 //   2. What does one that also sweeps the subagent extension's child-session
-//      trees see? (The gap is why LOCAL PATCH 1 exists.)
+//      trees see? (This gap — transcripts invisible to a plain `sessions/`
+//      sweep — is what motivated the fixture trees the tests use.)
 //   3. How much of a forked child's transcript is a verbatim copy of its parent's
-//      tail, i.e. what LOCAL PATCH 2 stops counting twice?
+//      tail — the inherited prefix that must not be counted twice?
 //
 // It writes nothing and honours no arguments on purpose: every number it prints
 // is about the machine it runs on, which is why the CHANGELOG dates its figures
