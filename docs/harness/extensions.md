@@ -18,6 +18,7 @@ When configured:
 ## Tiered wave orchestration (`/orchestrate` and `orchestrator_wave`)
 
 - `/orchestrate <folder>` starts a wave in non-worker parent sessions: resolves `<folder>` against `cwd`, loads the dispatch ladder via `readLadder()`, rejects ticket graphs with cycles or dangling blockers (`blockingIssues(graph)`), soft-checks `ctx.model` against the ladder's highest tier, records an `orchestrator-wave` custom entry, and sends the kickoff turn. `/orchestrate status` (or `/orchestrate` while active) reports the wave state and live disk frontier; `/orchestrate abort` aborts an active wave.
+- The parent/orchestrator always stays on the harness's current session model (`ctx.model`). The ladder pins only delegated roles; its top-tier comparison is advisory and never switches the parent model.
 - `orchestrator_wave` (`exposure: "codemode"` when `codemode` or `tool_search` is active) drives the pure state machine (`pending -> triaged -> implementing -> reviewing (throughTier) -> verifying -> ready_to_commit -> done | blocked`), syncs ticket frontmatter via `setTicketStatus`, and verifies commit SHAs with `git rev-parse --verify` on `record_commit`.
 - Ladder overrides resolve in order: `PI_ORCHESTRATE_LADDER`, `<PI_CODING_AGENT_DIR>/orchestrate-ladder.json`, then the bundled `wave-ladder.json` (falling back to `DEFAULT_LADDER`).
 - Enforcement: while a wave is active, `tool_call` blocks `git commit` unless at least one ticket is `ready_to_commit`, and `agent_before_settle` blocks premature settlement (`block.wave`, default `true`) even without `.pi/orchestrator.json`—parking when delegated subagent runs are live and clearing once the wave completes or aborts.
@@ -25,7 +26,7 @@ When configured:
 ## Settings and codemode policy
 
 - `.pi/settings.json` (tracked in git) configures project defaults: `defaultTools: ["+tool_search", "+codemode"]` and `codemode.mode: "on"`.
-- `.devcontainer/pi/settings.json` carries container defaults (including model selection and the same `defaultTools` / `codemode` settings, with no `packages` entry).
+- `.devcontainer/pi/settings.json` carries the enabled-model set and the same `defaultTools` / `codemode` settings, with no `packages` entry. It deliberately omits `defaultProvider` / `defaultModel`, leaving provider/model selection to the harness's current session.
 - Prefer `codemode` to batch independent/parallel tool calls and filter large output before it hits context; use direct tools (`read`, `edit`, `write`, `bash`) for single-step edits or commands.
 
 ## Package installation and container isolation

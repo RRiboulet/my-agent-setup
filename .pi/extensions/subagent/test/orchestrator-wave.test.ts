@@ -442,8 +442,7 @@ test("failure ladder: first crash retries same tier, second crash escalates, top
 	state = tier3Start.state!;
 
 	// Crash twice at T3 -> blocked with explicit reason & side effect
-	state = applyWaveAction(state, { type: "start_implement", ticketId: "01" }, { graph }, LADDER, 110).state!;
-	state = applyWaveAction(state, { type: "implement_result", ticketId: "01", outcome: "crashed" }, { graph }, LADDER, 115).state!;
+	state = applyWaveAction(state, { type: "implement_result", ticketId: "01", outcome: "crashed" }, { graph }, LADDER, 110).state!;
 	assert.equal(state.tickets["01"]?.tier, 3);
 	assert.equal(state.tickets["01"]?.crashesAtTier, 1);
 
