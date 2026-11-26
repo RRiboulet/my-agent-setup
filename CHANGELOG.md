@@ -39,6 +39,22 @@ Removed:
   status note where they still asked for session-breakdown work, so no open
   ticket points at an extension that no longer exists.
 
+Fixed:
+
+- **The devcontainer recovers Pi state left dangling by the retired shared-state
+  layout.** A private volume from that experiment still had `auth.json`,
+  `models-store.json` and `models.json` symlinks pointing at `/shared-pi-state`,
+  a mount that no longer exists. Pi followed those links and failed with `ENOENT`
+  when even a model listing tried to read credentials; model-catalog refresh
+  failed for the same reason. `postCreate.sh` now removes only dangling links to
+  that exact retired location, creates mode-`600` local JSON stores when absent,
+  and leaves existing credential contents untouched. Live user-managed store
+  symlinks are preserved with a warning rather than making the rest of container
+  setup fail. Provider credentials still come from the host environment rather
+  than being copied into the volume. The container forwarding allowlist now
+  includes Gemini alongside Mistral, so a
+  provider key present only in the host environment is not silently omitted.
+
 Maintenance:
 
 - **CHANGELOG.md keeps only `## Unreleased` and the newest major's
