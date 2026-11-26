@@ -39,6 +39,41 @@ Removed:
   status note where they still asked for session-breakdown work, so no open
   ticket points at an extension that no longer exists.
 
+Added:
+
+- **`/orchestrate <folder>`, and the `orchestrator_wave` tool, inside the
+  orchestrator extension.** A to-tickets folder runs through tiered
+  subagent waves: every ticket is triaged by a decision model into a
+  complexity tier, dispatched at a `(model, thinking)` pair read from
+  `wave-ladder.json`, reviewed by a Tier-1 gate before it may commit,
+  escalated on repeated failure or a crashed run, and committed serially by
+  the orchestrator only after verification (with `record_commit` verifying
+  the commit SHA before it is recorded). The ladder reader fails open — a
+  malformed ladder falls back to the built-in reviewer gate rather than
+  killing the wave — and the ticket-graph parser refuses cycles and dangling
+  blockers, computes the frontier by tier precedence, and writes each
+  ticket's status back byte-exactly so a status update cannot create
+  spurious diffs. An active wave now blocks settlement: a `wave` gate
+  condition reports unfinished tickets at settle time, blocking by default
+  (`gate.block.wave` defaults to `true`, so an in-flight wave can be
+  overridden with `orchestrator_override` but never silently orphaned). The
+  advisory orchestrate skill that started as `.pi/skills/orchestrate` (#237)
+  was folded into the extension, so the ladder, the parser, and the gates
+  live where they are enforced, and four new wave test suites (ladder,
+  tickets, wave, runtime) pin the state machine.
+
+- **The wave's tier roster is live, and the orchestrator inherits the
+  session's model (#238).** Tier 3 dispatches `mistral/zai-glm-5-3-flash`;
+  tiers 1 and 2 stay `opencode-go/hy4-flash-free` and
+  `opencode-go/deepseek-v4.1-flash`, and triage stays pinned to
+  `opencode/jev-1.13-free` through the classifier channel. `MISTRAL_API_KEY`
+  is forwarded to the container so tier 3 can actually run — a live probe
+  of the tier-3 model returned `OK`. The parent or orchestrator inherits the
+  harness's current session model, and the container settings no longer
+  hardcode `defaultProvider` or `defaultModel`: the model-selection contract
+  is documented in the extension instead, and a mutation proof pins the
+  no-hardcoded-default guard.
+
 Fixed:
 
 - **The devcontainer recovers Pi state left dangling by the retired shared-state
@@ -54,6 +89,39 @@ Fixed:
   than being copied into the volume. The container forwarding allowlist now
   includes Gemini alongside Mistral, so a
   provider key present only in the host environment is not silently omitted.
+
+- **Subagent launches validate explicit model overrides before the child
+  exists.** `--provider`, `--model` and `PI_SUBAGENT_*` overrides are checked
+  against `modelRegistry` — the model must exist and its provider must have
+  credentials configured — so a misspelled override fails the launch locally
+  with a nameable cause instead of spawning a child that dies on its first
+  model call. `tmux` subprocess calls are bounded by a 5-second
+  `TMUX_EXEC_TIMEOUT_MS`, handoff transcript ownership is guarded by
+  `runDirOwnsLiveTranscript` so a run directory that no longer owns the live
+  transcript is not trusted, and an interrupt's teardown skips re-updating a
+  run that is already cancelled. New coverage:
+  `subagent-model-validation.test.ts` and
+  `subagent-clean-cross-session.test.ts`.
+
+- **Loop blocks no longer spend the settlement gate's budget.**
+  `loopAttemptCap` is now separate from the settlement `attemptCap`, so a
+  mid-run loop-breaker trigger cannot consume the retries a settlement gate
+  needs; loop-breaker call/result records are paired by `toolCallId` and
+  unresolved calls are ignored rather than miscounted.
+  `scanEditVerification` recognizes `cd <dir> &&`-prefixed verification
+  commands and safe reporter/verbosity flags, so a real verification is not
+  undercounted as never-run; `verify.ts` truncates head/tail UTF-8-safely with
+  a wider capture buffer; an untrusted project's orchestrator config warns
+  instead of silently applying; and a peer message carries a `triggerTurn`.
+  `orchestrator_override` and `orchestrator_wave` are exposed under
+  `codemode`/`tool_search` sessions, pruning retargeted active tool names.
+
+- **A late `/btw` stream delta can no longer resurrect `answer.md` after
+  teardown.** The viewer's `appendExistingAnswer` opens `O_WRONLY | O_APPEND`
+  instead of `appendFile`, so a delta or footer arriving after the file was
+  deleted fails to recreate it instead of leaving a stray file behind; an
+  `AbortSignal` is threaded through `startViewer`, `runTmux` and
+  `openBtwPopup` so a stale launch aborts cleanly.
 
 Maintenance:
 
@@ -76,6 +144,18 @@ Maintenance:
   test that asserts both the file text and the effective attribute. Built
   as a three-ticket wave with pinned implementer/reviewer/verifier gates;
   the tickets live in `docs/tickets/changelog-trim/`.
+
+- **The applied change-bundle directory is gone, and the dangling docs it left
+  behind landed.** `my-agent-setup-harness-changes/` — the 1.9 MB apply bundle
+  (`APPLY.md`, `changes.patch`, and full `files/` copies of the tree) that
+  rode in with the hardening merge under "to add" subjects — is dropped
+  from the tree: it was already applied to the live files, referenced by
+  nothing, and its copies had drifted from the tree they duplicated; git
+  history keeps it, so nothing is lost. `docs/harness/workflow-schema.md` —
+  the routing guide from trivial edit to ticket wave, which the README's
+  file table points at — and `docs/tickets/changelog-trim/` — the three
+  tickets the changelog-trim entry names — are committed, so no published
+  pointer resolves to an untracked path.
 
 ## v1.17.1 — 2026-11-24
 

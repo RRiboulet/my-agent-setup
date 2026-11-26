@@ -345,6 +345,7 @@ reason, rather than writing an entry pi would skip with one line in a log.
 | Path | What it is |
 |---|---|
 | `package.json` | the `pi` manifest that makes this repo installable as a package (see above) |
+| `docs/harness/workflow-schema.md` | route tasks from trivial edits to ticket waves: skills, extensions, artifacts, gates, and delivery boundaries |
 | `.pi/extensions/subagent/` | Non-blocking tmux-backed delegation: `subagent` (one run, or a `tasks` fan-out with per-step overrides and optional `dependsOn` dependency edges), `subagent_status`, `subagent_wait`, `subagent_resume`, `subagent_interrupt`, `subagent_cancel`, `subagent_clean`, `subagent_answer` (a child's blocking question, answered only after `ctx.ui.confirm`; `subagent_ask` inside the child is the one deliberate blocking wait, and a progress update needs no answer), a live child-activity phase and a status widget above the editor; fan-out steps share the one concurrency queue and their plan is persisted in `plans.json` beside the runs; a plan survives reload (it resumes at the first unfinished step, adopts a run the plan index missed, and reconciles a step whose child is gone rather than re-running it), cancels with its live steps (`subagent_cancel` takes a plan id), and is inspectable as one row — `subagent_status` folds a plan's step runs into it so a ten-step plan costs one detail slot, and `subagent_wait({ plan })` waits for every wave; every run that reports a final answer (completed or failed) leaves a `report.md` artifact with it, plus a bounded copy and a pointer in its run record |
 | `.pi/extensions/todos.ts` | `/todos` TUI and the `todo` tool |
 | `.pi/extensions/orchestrator/` | The settlement gate, the loop breaker, the advisor, workspace coordination, tiered wave orchestration (`/orchestrate` + `orchestrator_wave`), and the typed orchestration event bus: `/gate` shows the last verdict, loop block and consultation, `/orchestrate <folder>` starts a tiered ticket wave gated on review/verify/commit order, and at `agent_before_settle` the gate reports an active goal, open todos, edits without a verification run, a repeated failure signature, any active wave and the remaining gate-block budget as a session `custom` entry. A committed `.pi/orchestrator.json` (example beside the extension) opts a **trusted** project into blocking checks — an open todo, a repeated failure, a project verification command run by the gate, and the tool-call loop breaker — plus the `orchestrator_override` tool every block reason names; its `advisor` key adds one bounded second opinion from a stronger model, injected as a prompt section rather than replacing the prompt. Its absence means report-only (aside from active-wave gates). **Ours** |
@@ -478,6 +479,10 @@ never mistaken for it. The next `/btw` restarts the viewer on the same answer. O
 main request's forced system prompt differs, so the panel may re-bill the
 context and show goal notes; `.pi/extensions/btw/request.ts` documents that
 limitation.
+
+## Workflow schema
+
+Start with [`docs/harness/workflow-schema.md`](docs/harness/workflow-schema.md) when choosing how to approach a task or project. It maps the smallest sufficient route—trivial edit, bounded change, design work, ticket project, or explicit unattended goal—to the available skills, extensions, artifacts, and gates. It is a routing guide, not another orchestration engine.
 
 ## Skills and how they are invoked
 
