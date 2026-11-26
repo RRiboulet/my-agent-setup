@@ -88,12 +88,14 @@ test("the devcontainer keeps a private pi volume and installs no package", () =>
 	assert.ok(Object.keys(template).length > 0);
 });
 
-test("the devcontainer forwards Mistral credentials for the tier-3 provider", () => {
-	assert.match(
-		read(OWNER),
-		/"MISTRAL_API_KEY"\s*:\s*"\$\{localEnv:MISTRAL_API_KEY\}"/u,
-		"a fresh private volume needs the host Mistral key passed through",
-	);
+test("the devcontainer forwards Mistral and Gemini credentials for their providers", () => {
+	for (const name of ["MISTRAL_API_KEY", "GEMINI_API_KEY"]) {
+		assert.match(
+			read(OWNER),
+			new RegExp(String.raw`"${name}"\s*:\s*"\$\{localEnv:${name}\}"`, "u"),
+			`a fresh private volume needs the host ${name} passed through`,
+		);
+	}
 });
 
 test("the files that describe the split point at the README instead of restating it", () => {
