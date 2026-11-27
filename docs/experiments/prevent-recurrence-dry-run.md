@@ -179,7 +179,7 @@ sha256sum tools/rule-table.mjs
 ```text
 contract-version: 1
 sha256: 9ab0994ddab7d256f654791fb6d89a8f315d577b092ceae83a82887d90645822
-source: my-agent-setup .pi/skills/prevent-recurrence/scripts/rule-table.mjs
+source: advanced-harness-engineering .pi/skills/prevent-recurrence/scripts/rule-table.mjs
 ```
 
 Run from the fixture root:

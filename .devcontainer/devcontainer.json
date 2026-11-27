@@ -19,12 +19,13 @@
         // sharing state with another. Empty values are harmless here.
         "OPENCODE_API_KEY": "${localEnv:OPENCODE_API_KEY}",
         "OPENROUTER_API_KEY": "${localEnv:OPENROUTER_API_KEY}",
+        "MISTRAL_API_KEY": "${localEnv:MISTRAL_API_KEY}",
+        "GEMINI_API_KEY": "${localEnv:GEMINI_API_KEY}",
         "BRAVE_API_KEY": "${localEnv:BRAVE_API_KEY}",
         "TYPESAFE_API_KEY": "${localEnv:TYPESAFE_API_KEY}",
-        "PI_VOICE_API_KEY": "${localEnv:OPENROUTER_API_KEY}",
         "GH_TOKEN": "${localEnv:GH_TOKEN}"
     },
-    "postCreateCommand": "bash /workspace/.devcontainer/postCreate.sh && bash /workspace/.devcontainer/restore-post-rebuild.sh",
+    "postCreateCommand": "bash /workspace/.devcontainer/postCreate.sh",
     // Declared explicitly, not left to the base image's auto-mapped defaults.
     // With @devcontainers/cli 0.90 on Docker 29, a build that relies on the
     // auto-mapped features fails in the compose bake step with

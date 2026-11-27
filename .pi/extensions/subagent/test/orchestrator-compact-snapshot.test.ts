@@ -147,7 +147,7 @@ async function writeAdvisorConfig(cwd: string, budget = 2): Promise<void> {
 	);
 }
 
-test("a successful compaction emits exactly one snapshot naming goal, todos, gate, live runs and advisor", async () => {
+test("a successful compaction emits exactly one snapshot naming todos, gate, live runs and advisor", async () => {
 	await withTempDir(async (cwd) => {
 		const todosDir = path.join(cwd, "todos");
 		await mkdir(todosDir, { recursive: true });
@@ -169,7 +169,7 @@ test("a successful compaction emits exactly one snapshot naming goal, todos, gat
 			assert.equal(sent.options?.triggerTurn, false, "the snapshot never starts a turn");
 
 			const content = String(sent.message.content);
-			assert.match(content, /Active goal: ship the gate/);
+			assert.doesNotMatch(content, /Active goal:/);
 			assert.match(content, /aaaaaaaa/);
 			assert.match(content, /finish the gate/);
 			assert.match(content, /2 of 3/, "the attempt budget is carried");
@@ -233,8 +233,7 @@ test("a compaction changes neither the attempt count nor the blocked evidence", 
 		await mkdir(todosDir, { recursive: true });
 		await writeTodo(todosDir, "aaaaaaaa", "finish the gate");
 		await withEnv({ PI_TODO_PATH: todosDir }, async () => {
-			const branch = [goalEntry(), gateEntry(), advisorEntry()];
-			const host = await startHost({ cwd, branch });
+			const host = await startHost({ cwd, branch: [gateEntry(), advisorEntry()] });
 			await host.fire("session_start", {});
 
 			const before = reconstructGateState(host.ctx.sessionManager.getBranch());
@@ -305,7 +304,7 @@ test("a project whose state overflows the bound still sends one bounded message"
 test("a second successful compaction emits its own single message", async () => {
 	await withTempDir(async (cwd) => {
 		await withEnv({ PI_TODO_PATH: path.join(cwd, "todos") }, async () => {
-			const host = await startHost({ cwd, branch: [goalEntry("ship the snapshot")] });
+			const host = await startHost({ cwd, branch: [gateEntry({ reason: "ship the snapshot" })] });
 			await host.fire("session_start", {});
 
 			await host.fire("session_compact", compactionEvent());

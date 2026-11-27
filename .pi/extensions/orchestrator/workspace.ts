@@ -899,7 +899,53 @@ function reservationComparisonPair(
 }
 
 function within(child: string, parent: string): boolean {
+	if (parent === sep) return child.startsWith(sep);
 	return child === parent || child.startsWith(parent + sep);
+}
+
+interface GlobPrefixInfo {
+	/** Containing directory of the first wildcard segment (no trailing `/` unless `/`). */
+	dir: string;
+	/** Literal prefix within the first wildcard segment (`""` when wildcard follows `/`). */
+	segmentPrefix: string;
+	/** True when the wildcard tail can cross path segments (`/` or `**`). */
+	crossesSegments: boolean;
+}
+
+function globPrefixInfo(pattern: string): GlobPrefixInfo {
+	const cut = pattern.search(/[*?]/);
+	if (cut < 0) {
+		const lastSep = pattern.lastIndexOf(sep);
+		return {
+			dir: lastSep <= 0 ? (pattern.startsWith(sep) ? sep : "") : pattern.slice(0, lastSep),
+			segmentPrefix: lastSep < 0 ? pattern : pattern.slice(lastSep + 1),
+			crossesSegments: false,
+		};
+	}
+	const prefix = pattern.slice(0, cut);
+	const rest = pattern.slice(cut);
+	const crossesSegments = rest.includes(sep) || rest.includes("**");
+	if (prefix.endsWith(sep)) {
+		return {
+			dir: prefix === sep ? sep : prefix.slice(0, -1),
+			segmentPrefix: "",
+			crossesSegments,
+		};
+	}
+	const lastSep = prefix.lastIndexOf(sep);
+	return {
+		dir: lastSep <= 0 ? (prefix.startsWith(sep) ? sep : "") : prefix.slice(0, lastSep),
+		segmentPrefix: prefix.slice(lastSep + 1),
+		crossesSegments,
+	};
+}
+
+function globReachesChild(info: GlobPrefixInfo, childDir: string): boolean {
+	if (childDir === info.dir) return true;
+	if (!info.crossesSegments) return false;
+	const rel = info.dir === sep ? childDir.slice(1) : childDir.slice(info.dir.length + 1);
+	const firstSegment = rel.split(sep, 1)[0] ?? "";
+	return firstSegment.startsWith(info.segmentPrefix);
 }
 
 /**
@@ -913,16 +959,27 @@ function within(child: string, parent: string): boolean {
 export function reservationPathsOverlap(a: ReservationPath, b: ReservationPath): boolean {
 	if (a.pattern === b.pattern) return true;
 	if (a.kind === "glob" || b.kind === "glob") {
-		const aStatic = a.pattern.split(/[*?]/)[0]!;
-		const bStatic = b.pattern.split(/[*?]/)[0]!;
 		if (a.kind === "glob" && b.kind === "glob") {
-			return within(aStatic, bStatic) || within(bStatic, aStatic) || within(a.pattern, b.pattern) || within(b.pattern, a.pattern);
+			const aInfo = globPrefixInfo(a.pattern);
+			const bInfo = globPrefixInfo(b.pattern);
+			if (aInfo.dir === bInfo.dir) {
+				return (
+					aInfo.segmentPrefix.startsWith(bInfo.segmentPrefix) ||
+					bInfo.segmentPrefix.startsWith(aInfo.segmentPrefix)
+				);
+			}
+			if (within(bInfo.dir, aInfo.dir)) return globReachesChild(aInfo, bInfo.dir);
+			if (within(aInfo.dir, bInfo.dir)) return globReachesChild(bInfo, aInfo.dir);
+			return false;
 		}
 		const concrete = a.kind === "glob" ? b : a;
 		const glob = a.kind === "glob" ? a : b;
 		if (reservationPathMatches(glob, concrete.pattern)) return true;
-		if (concrete.kind === "dir" && within(glob.pattern.split(/[*?]/)[0]!, concrete.pattern)) return true;
-		return within(concrete.pattern, glob.pattern.split(/[*?]/)[0]!);
+		if (concrete.kind === "file") return false;
+		const info = globPrefixInfo(glob.pattern);
+		if (within(info.dir, concrete.pattern)) return true;
+		if (within(concrete.pattern, info.dir)) return globReachesChild(info, concrete.pattern);
+		return false;
 	}
 	if (a.kind === "dir") return within(b.pattern, a.pattern);
 	if (b.kind === "dir") return within(a.pattern, b.pattern);
@@ -1168,13 +1225,6 @@ export function partitionReservations(
 export async function liveReservations(registryDir: string, now: number): Promise<LiveReservations> {
 	const { reservations, invalid } = await readReservations(registryDir);
 	const { live, expired } = partitionReservations(reservations, now);
-	if (expired.length > 0) {
-		await withWorkspaceLock(registryDir, async () => {
-			for (const record of expired) {
-				await unlink(reservationPath(registryDir, record.id)).catch(() => undefined);
-			}
-		}).catch(() => undefined);
-	}
 	return { live, expired, invalid };
 }
 

@@ -1,0 +1,3 @@
+interface:
+  display_name: "tmux"
+  short_description: "Drive interactive CLIs on an isolated tmux socket"

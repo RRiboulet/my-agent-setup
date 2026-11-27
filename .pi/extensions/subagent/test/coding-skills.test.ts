@@ -1,4 +1,4 @@
-// Guards for the coding skill stack adapted from agent-coding-skills, the
+// Guards for the coding skill stack, the
 // skills ported straight from mattpocock/skills, and this repository's own
 // prevent-recurrence skill.
 //
@@ -23,9 +23,9 @@ import * as path from "node:path";
 import { test } from "node:test";
 
 const REPO_ROOT = path.resolve(new URL("../../../..", import.meta.url).pathname);
-const SKILLS_ROOT = path.join(REPO_ROOT, ".pi/skills");
+const SKILLS_ROOT = path.join(REPO_ROOT, "skills");
 
-// The stack adapted from RRiboulet/agent-coding-skills. Kept as a list so the
+// The adapted coding skill stack. Kept as a list so the
 // per-stack rules below do not silently apply to this repo's own skills.
 const ADAPTED = [
 	"architect",
@@ -35,13 +35,18 @@ const ADAPTED = [
 	"handoff",
 	"idempotent-operations",
 	"implement",
+	"implement-spec",
 	"in-your-own-words",
+	"interrogate",
 	"prove-it-works",
 	"recall",
+	"retro",
+	"review-change",
 	"show-me-your-work",
 	"tdd",
 	"to-spec",
 	"to-tickets",
+	"verify-app",
 ];
 
 // Ported straight from mattpocock/skills rather than through that stack, so they
@@ -55,9 +60,18 @@ const OURS = ["prevent-recurrence"];
 
 const ALL = [...ADAPTED, ...PORTED, ...OURS];
 
-// pi honors `disable-model-invocation`; these five are entry points only the
+// pi honors `disable-model-invocation`; these eight are entry points only the
 // user starts, and AGENTS.md says so.
-const USER_INVOKED = ["handoff", "implement", "recall", "teach", "to-spec", "to-tickets"];
+const USER_INVOKED = [
+	"handoff",
+	"implement",
+	"implement-spec",
+	"recall",
+	"teach",
+	"to-spec",
+	"to-tickets",
+	"verify-app",
+];
 
 function skillDirs(): string[] {
 	return readdirSync(SKILLS_ROOT)
@@ -84,18 +98,18 @@ test("every skill is classified in this test", () => {
 	// escape the frontmatter assertions below.
 	const known = new Set([...ALL, "add-model", "commit", "devcontainer", "github", "librarian", "native-web-search", "prevent-recurrence", "tmux", "update-changelog", "worktree"]);
 	for (const dir of skillDirs()) {
-		assert.ok(known.has(dir), `unclassified skill .pi/skills/${dir}: add it to this test`);
+		assert.ok(known.has(dir), `unclassified skill skills/${dir}: add it to this test`);
 	}
 });
 
 test("every adapted, ported or local skill declares a name equal to its folder", () => {
 	for (const dir of ALL) {
 		const meta = frontmatter(dir);
-		assert.equal(meta.name, dir, `.pi/skills/${dir}/SKILL.md name must equal the folder`);
-		assert.ok(meta.description?.trim(), `.pi/skills/${dir}/SKILL.md needs a description`);
+		assert.equal(meta.name, dir, `skills/${dir}/SKILL.md name must equal the folder`);
+		assert.ok(meta.description?.trim(), `skills/${dir}/SKILL.md needs a description`);
 		assert.ok(
 			(meta.description ?? "").length <= 1024,
-			`.pi/skills/${dir}/SKILL.md description exceeds pi's 1024-character limit`,
+			`skills/${dir}/SKILL.md description exceeds pi's 1024-character limit`,
 		);
 	}
 });
@@ -112,14 +126,14 @@ test("the user-invoked entry points are hidden from model selection", () => {
 		assert.equal(
 			frontmatter(dir)["disable-model-invocation"],
 			"true",
-			`.pi/skills/${dir}/SKILL.md must set disable-model-invocation: true`,
+			`skills/${dir}/SKILL.md must set disable-model-invocation: true`,
 		);
 	}
 	for (const dir of ALL.filter((name) => !USER_INVOKED.includes(name))) {
 		assert.equal(
 			frontmatter(dir)["disable-model-invocation"],
 			undefined,
-			`.pi/skills/${dir}/SKILL.md is model-invoked and must not set disable-model-invocation`,
+			`skills/${dir}/SKILL.md is model-invoked and must not set disable-model-invocation`,
 		);
 	}
 });
@@ -138,7 +152,7 @@ test("adapted scripts stay executable", () => {
 		for (const entry of entries.filter((name) => name.endsWith(".sh"))) {
 			assert.doesNotThrow(
 				() => accessSync(path.join(scripts, entry), constants.X_OK),
-				`.pi/skills/${dir}/scripts/${entry} must be executable`,
+				`skills/${dir}/scripts/${entry} must be executable`,
 			);
 		}
 	}
@@ -241,11 +255,11 @@ test("every description fits the byte cap of its class", () => {
 		const cap = USER_INVOKED.includes(dir) ? USER_INVOKED_CAP : MODEL_INVOKED_CAP;
 		const raw = rawDescriptionLine(dir);
 		if (!/^description: ".*"$/.test(raw) || hasContinuationLine(dir)) {
-			violations.push(`.pi/skills/${dir}: description is not one double-quoted line`);
+			violations.push(`skills/${dir}: description is not one double-quoted line`);
 			continue;
 		}
 		const bytes = Buffer.byteLength(descriptionOf(dir), "utf8");
-		if (bytes > cap) violations.push(`.pi/skills/${dir}: ${bytes} B > ${cap} B`);
+		if (bytes > cap) violations.push(`skills/${dir}: ${bytes} B > ${cap} B`);
 	}
 	assert.deepEqual(violations, [], `descriptions that are over the cap or not one double-quoted line:${report(violations)}`);
 });
@@ -258,7 +272,7 @@ test("every model-invoked description says when to use it", () => {
 	const missing: string[] = [];
 	for (const dir of skillDirs()) {
 		if (USER_INVOKED.includes(dir)) continue;
-		if (!descriptionOf(dir).includes("Use when:")) missing.push(`.pi/skills/${dir}`);
+		if (!descriptionOf(dir).includes("Use when:")) missing.push(`skills/${dir}`);
 	}
 	assert.deepEqual(missing, [], `model-invoked descriptions with no "Use when:":${report(missing)}`);
 });
@@ -293,23 +307,23 @@ test("no description names another skill", () => {
 			if (other === dir) continue;
 			const homograph = !other.includes("-") && HOMOGRAPHS.has(other);
 			const named = homograph
-				? text.includes(`\`${other}\``) || text.includes(`/skill:${other}`)
-				: new RegExp(`(^|[^a-z0-9-])${other}([^a-z0-9-]|$)`, "i").test(text);
-			if (named) violations.push(`.pi/skills/${dir} names ${other}`);
+				? text.includes(`\`${other}\``) || new RegExp(`/skill:${other}(?![A-Za-z0-9-])`).test(text)
+				: new RegExp(`(?<![A-Za-z0-9-])${other}(?![A-Za-z0-9-])`, "i").test(text);
+			if (named) violations.push(`skills/${dir} names ${other}`);
 		}
 	}
 	assert.deepEqual(violations, [], `descriptions naming another skill:${report(violations)}`);
 });
 
 test("every user-invoked description has the entry-point shape", () => {
-	// These five are hidden from model selection, so their description is read by
+	// These eight are hidden from model selection, so their description is read by
 	// the human as a menu line. The shape is what makes the menu consistent, and
 	// without an assertion a rewrite can leave one as a bare label.
 	const wrong: string[] = [];
 	for (const dir of USER_INVOKED) {
-		if (!descriptionOf(dir).startsWith(`User-invoked /skill:${dir}: `)) wrong.push(`.pi/skills/${dir}`);
+		if (!descriptionOf(dir).startsWith(`User-invoked /${dir} (pi: /skill:${dir}): `)) wrong.push(`skills/${dir}`);
 	}
-	assert.deepEqual(wrong, [], `user-invoked descriptions not in "User-invoked /skill:<name>: ..." form:${report(wrong)}`);
+	assert.deepEqual(wrong, [], `user-invoked descriptions not in "User-invoked /<name> (pi: /skill:<name>): ..." form:${report(wrong)}`);
 });
 
 // Relative to `dir`, so a reference in a subdirectory is reported and matched by
@@ -349,7 +363,7 @@ test("every references/*.md is reachable from its SKILL.md", () => {
 			}
 		}
 		for (const entry of markdownFilesUnder(refRoot)) {
-			if (!seen.has(`references/${entry}`)) orphans.push(`.pi/skills/${dir}/references/${entry}`);
+			if (!seen.has(`references/${entry}`)) orphans.push(`skills/${dir}/references/${entry}`);
 		}
 	}
 	assert.deepEqual(orphans, [], `reference files no SKILL.md links to:${report(orphans)}`);
@@ -361,11 +375,11 @@ test("the split skill bodies stay within their line budget", () => {
 	const over: string[] = [];
 	for (const [dir, budget] of Object.entries(BODY_BUDGET)) {
 		if (!statSync(path.join(SKILLS_ROOT, dir), { throwIfNoEntry: false })) {
-			over.push(`.pi/skills/${dir}: in the budget map but no longer exists`);
+			over.push(`skills/${dir}: in the budget map but no longer exists`);
 			continue;
 		}
 		const lines = skillFileLines(dir);
-		if (lines > budget) over.push(`.pi/skills/${dir}/SKILL.md: ${lines} lines > ${budget}`);
+		if (lines > budget) over.push(`skills/${dir}/SKILL.md: ${lines} lines > ${budget}`);
 	}
 	assert.deepEqual(over, [], `split bodies over budget:${report(over)}`);
 });
@@ -394,7 +408,7 @@ function loopBlock(dir: string): string {
 test("the implementation loop is identical in tdd and implement", () => {
 	const inTdd = loopBlock("tdd");
 	const inImplement = loopBlock("implement");
-	assert.equal(inImplement, inTdd, "edit both copies: .pi/skills/tdd/SKILL.md and .pi/skills/implement/SKILL.md");
+	assert.equal(inImplement, inTdd, "edit both copies: skills/tdd/SKILL.md and skills/implement/SKILL.md");
 	// A block that lost its steps would still be "identical".
 	for (const step of ["**Red.**", "**Watch it fail for the right reason.**", "**Green.**", "**Widen.**", "**Tidy.**"]) {
 		assert.ok(inTdd.includes(step), `the loop must keep its ${step} step`);
@@ -406,5 +420,5 @@ test("tdd's own body stays small enough to load on a whim", () => {
 	// and anti-pattern detail into references. The cap keeps a future edit from
 	// growing it back - loading a method is only worth it while it is cheap.
 	const bytes = readFileSync(path.join(SKILLS_ROOT, "tdd", "SKILL.md")).length;
-	assert.ok(bytes <= 3000, `.pi/skills/tdd/SKILL.md is ${bytes} B; the cap is 3000 - move detail to references/`);
+	assert.ok(bytes <= 3000, `skills/tdd/SKILL.md is ${bytes} B; the cap is 3000 - move detail to references/`);
 });

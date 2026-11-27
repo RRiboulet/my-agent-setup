@@ -1,0 +1,3 @@
+interface:
+  display_name: "Librarian"
+  short_description: "Cache and refresh remote git repos locally"

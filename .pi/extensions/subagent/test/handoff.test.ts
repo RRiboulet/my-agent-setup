@@ -465,3 +465,50 @@ test("readSessionUsage tolerates a missing file and an unknown session", async (
 	assert.equal(await readSessionUsage(undefined), undefined);
 	assert.equal(await readSessionUsage("/nonexistent/session.jsonl"), undefined);
 });
+
+function flagValues(args: string[], flag: string): string[] {
+	const values: string[] = [];
+	for (let i = 0; i < args.length; i += 1) {
+		if (args[i] === flag && i + 1 < args.length) {
+			values.push(args[i + 1]!);
+		}
+	}
+	return values;
+}
+
+test("default buildChildPiArgs emits minimal worker startup flags, one --extension, and @prompt last", () => {
+	for (const mode of ["standalone", "lineage", "fork", "resume"] as const) {
+		const args = buildChildPiArgs(specFor({ mode }));
+		for (const flag of ["--no-extensions", "--no-skills", "--no-mcp", "--no-prompt-templates", "--no-themes"]) {
+			assert.equal(args.includes(flag), true, `${mode} must include ${flag}`);
+		}
+		assert.deepEqual(flagValues(args, "--extension"), ["/ext/index.ts"]);
+		assert.equal(args.includes("--skill"), false);
+		assert.equal(args.at(-1), "@/run/task.md");
+	}
+});
+
+test("buildChildPiArgs emits additional deduplicated --extension flags for extraExtensions", () => {
+	const args = buildChildPiArgs({
+		...BASE,
+		extraExtensions: [" /ext/index.ts ", "/ext/provider-a.ts", "", "  ", "/ext/provider-b.ts", "/ext/provider-a.ts"],
+	} as ChildLaunchSpec);
+	assert.deepEqual(flagValues(args, "--extension"), ["/ext/index.ts", "/ext/provider-a.ts", "/ext/provider-b.ts"]);
+	assert.equal(args.at(-1), "@/run/task.md");
+});
+
+test("buildChildPiArgs emits repeatable deduplicated --skill flags and keeps @prompt last", () => {
+	const args = buildChildPiArgs({
+		...BASE,
+		skills: [" skills/tdd/SKILL.md ", "", "  ", "/abs/skills/review/SKILL.md", "skills/tdd/SKILL.md"],
+	} as ChildLaunchSpec);
+	assert.equal(args.includes("--no-skills"), true);
+	assert.deepEqual(flagValues(args, "--skill"), ["skills/tdd/SKILL.md", "/abs/skills/review/SKILL.md"]);
+	assert.equal(args.at(-1), "@/run/task.md");
+
+	const emptySkills = buildChildPiArgs({
+		...BASE,
+		skills: [" ", ""],
+	} as ChildLaunchSpec);
+	assert.equal(emptySkills.includes("--skill"), false);
+});

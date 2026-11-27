@@ -36,6 +36,8 @@
 
 /** The invocation-and-result record for one tool call. */
 export interface LoopRecord {
+	/** Host-assigned call id when available, for exact call/result pairing. */
+	toolCallId?: string;
 	/** Tool plus a canonical hash of the input; equality means "the same call". */
 	signature: string;
 	tool: string;
@@ -55,6 +57,7 @@ export interface LoopState {
 }
 
 export interface LoopCall {
+	toolCallId?: string;
 	tool: string;
 	signature: string;
 	invocation: string;
@@ -98,9 +101,11 @@ export function resetLoopState(state: LoopState): void {
 	state.blocksTheTurn = 0;
 }
 
-/** Called at the start of each turn; the per-turn cap is a turn concept. */
+/** Called at the start of each turn; the per-turn cap is a turn concept, and
+ *  any still-unresolved records from an earlier turn will never finish. */
 export function resetLoopTurn(state: LoopState): void {
 	state.blocksTheTurn = 0;
+	state.records = state.records.filter((record) => record.result !== null);
 }
 
 function collapse(text: string): string {
@@ -163,13 +168,13 @@ function firstLine(text: string): string {
  */
 export function evaluateLoop(state: LoopState, call: LoopCall): LoopEvidence | null {
 	if (!LOOP_TOOLS.has(call.tool)) return null;
-	const matching = state.records.filter((record) => record.signature === call.signature);
+	// Only completed calls are evidence: an unresolved record (still running,
+	// downstream-blocked, or superseded) has no result and must neither count as
+	// evidence nor disable detection over completed calls.
+	const matching = state.records.filter((record) => record.signature === call.signature && record.result !== null);
 	if (matching.length < LOOP_REPEAT_LIMIT - 1) return null;
 
 	const previous = matching.slice(-(LOOP_REPEAT_LIMIT - 1));
-	// A blocked or still-running call has no result, so there is no evidence
-	// yet: the model has been told what it is doing and gets a fresh attempt.
-	if (previous.some((record) => record.result === null)) return null;
 
 	// 1. No-progress: identical successful results, and nothing was attempted in
 	// between. `mutation` records are only file edits/writes, because a shell
@@ -216,6 +221,7 @@ export function evaluateLoop(state: LoopState, call: LoopCall): LoopEvidence | n
 /** Record a call that is about to run. Bounded: the oldest record is dropped. */
 export function recordCall(state: LoopState, call: LoopCall): void {
 	state.records.push({
+		...(call.toolCallId ? { toolCallId: call.toolCallId } : {}),
 		signature: call.signature,
 		tool: call.tool,
 		invocation: call.invocation,
@@ -227,20 +233,34 @@ export function recordCall(state: LoopState, call: LoopCall): void {
 }
 
 /**
- * Attach the finished result to the most recent matching call. A successful
- * `edit`/`write` is also the progress marker the no-progress rule reads.
+ * Attach the finished result to the matching pending call: by `toolCallId` when
+ * provided, falling back to signature only when `toolCallId` is absent. A
+ * successful `edit`/`write` is also the progress marker the no-progress rule
+ * reads.
  */
 export function recordResult(
 	state: LoopState,
 	call: LoopCall,
 	result: { isError: boolean; text: string },
 ): void {
-	for (let index = state.records.length - 1; index >= 0; index -= 1) {
-		const record = state.records[index]!;
-		if (record.signature !== call.signature || record.result !== null) continue;
+	const apply = (record: LoopRecord): void => {
 		record.result = resultSignature(result.text);
 		record.error = result.isError ? firstLine(result.text) : null;
 		record.mutation = !result.isError && (call.tool === "edit" || call.tool === "write");
+	};
+	if (call.toolCallId) {
+		for (let index = state.records.length - 1; index >= 0; index -= 1) {
+			const record = state.records[index]!;
+			if (record.result !== null || record.toolCallId !== call.toolCallId) continue;
+			apply(record);
+			return;
+		}
+		return;
+	}
+	for (let index = state.records.length - 1; index >= 0; index -= 1) {
+		const record = state.records[index]!;
+		if (record.signature !== call.signature || record.result !== null) continue;
+		apply(record);
 		return;
 	}
 }

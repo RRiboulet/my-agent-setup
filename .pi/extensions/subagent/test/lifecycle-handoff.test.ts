@@ -225,3 +225,28 @@ test("subagent_clean counts only transcripts it actually deletes", async () => {
 		assert.ok(existsSync(resumed.sessionFile as string));
 	});
 });
+
+test("subagent_resume clears planId and stepId when resuming a plan step run", async () => {
+	await withHarness({ sessionManager: "liveBranch" }, async (harness) => {
+		const planResult = await harness.call("subagent", {
+			tasks: [{ id: "step-a", task: "plan step task", handoff: "fork" }],
+		});
+		const stepRun = (planResult.details.runs as RunRecord[])[0];
+		assert.ok(stepRun?.planId && stepRun.stepId);
+		await completeRun(harness, stepRun);
+
+		const resumed = (await harness.call("subagent_resume", {
+			id: stepRun.id,
+			message: "continue outside plan",
+		})).details as unknown as RunRecord;
+
+		assert.equal(resumed.planId, undefined, "resumed run must not inherit planId");
+		assert.equal(resumed.stepId, undefined, "resumed run must not inherit stepId");
+
+		const status = await harness.call("subagent_status", {});
+		assert.ok(
+			status.text.includes(resumed.id),
+			`resumed run must appear in subagent_status() list view rather than being hidden as a plan step: ${status.text}`,
+		);
+	});
+});

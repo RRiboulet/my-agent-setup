@@ -1,0 +1,5 @@
+interface:
+  display_name: "Handoff"
+  short_description: "Hand the session over to a fresh agent"
+policy:
+  allow_implicit_invocation: false

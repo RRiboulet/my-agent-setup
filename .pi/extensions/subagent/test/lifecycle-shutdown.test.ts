@@ -12,6 +12,7 @@ import { existsSync } from "node:fs";
 import { test } from "node:test";
 
 import { type RunRecord } from "../index.ts";
+import { escalationDir, readEscalationHeartbeat, touchEscalationHeartbeat } from "../escalation.ts";
 import { waitFor, withEnv, withTempAgentDir } from "./helpers.ts";
 import { createHarness, withHarness, writeChildSession } from "./lifecycle-harness.ts";
 
@@ -216,5 +217,24 @@ test("session_shutdown clears the widget and stops its ticker", async () => {
 		const afterShutdown = h.renderRequests();
 		await new Promise((resolve) => setTimeout(resolve, 2_500));
 		assert.equal(h.renderRequests(), afterShutdown, "no render can happen after shutdown: no ticker, no watcher, no live run");
+	});
+});
+
+test("session_shutdown clears escalation heartbeat even when pendingRequest is unset", async () => {
+	await withHarness(undefined, async (h) => {
+		const run = (await h.call("subagent", { task: "escalation before pendingRequest" })).details as unknown as RunRecord;
+		assert.equal(run.escalation, true);
+		assert.equal(run.pendingRequest, undefined);
+
+		const dir = escalationDir(run.runDir);
+		await touchEscalationHeartbeat(dir);
+		assert.ok(await readEscalationHeartbeat(dir), "heartbeat exists before shutdown");
+
+		await h.shutdown();
+		assert.equal(
+			await readEscalationHeartbeat(dir),
+			undefined,
+			"shutdown must clear escalation heartbeat even if pendingRequest was not yet set",
+		);
 	});
 });

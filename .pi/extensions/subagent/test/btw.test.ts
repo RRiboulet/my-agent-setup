@@ -13,7 +13,7 @@
 
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, statSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, unlink, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { test } from "node:test";
 
@@ -821,7 +821,12 @@ test("a second /btw while one is starting is refused", async () => {
 				}
 				return { code: 0, stdout: "", stderr: "", killed: false };
 			};
-			const handler = await loadFactory(exec);
+			const events = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>();
+			const handler = await loadFactory(exec, (name, fn) => {
+				events.set(name, fn as (event: unknown, ctx: unknown) => Promise<void>);
+			});
+			const shutdown = events.get("session_shutdown");
+			assert.ok(shutdown);
 			const notifications: string[] = [];
 			const ctx = {
 				...fakeContext(streamingRegistry("x").modelRegistry),
@@ -839,6 +844,92 @@ test("a second /btw while one is starting is refused", async () => {
 			assert.match(notifications.join("\n"), /still starting/);
 			release();
 			await first;
+			await shutdown({ reason: "quit" }, ctx as never);
+		});
+	});
+});
+
+test("a removed answer file is never recreated by streaming deltas or the footer", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withNoTmux(async () => {
+			const { notifications, deps } = fakeDeps(agentDir);
+			const { streams, modelRegistry } = controllableRegistry();
+			const launch = await launchBtwPanel(deps, fakeContext(modelRegistry), "why?");
+			assert.ok(launch);
+			await waitFor(() => streams.length === 1);
+
+			const paths = buildBtwPaths(agentDir, SID);
+			await unlink(paths.answer);
+
+			streams[0]?.push({ type: "text_delta", contentIndex: 0, delta: "late", partial: assistant() });
+			streams[0]?.push({
+				type: "done",
+				reason: "stop",
+				message: assistant({ content: [{ type: "text", text: "late" }], usage: ZERO_USAGE }),
+			});
+			await launch.completion;
+
+			assert.equal(existsSync(paths.answer), false, "appending must not recreate a deleted answer file");
+			assert.equal(notifications.some((entry) => entry.type === "warning" || entry.type === "error"), false);
+		});
+	});
+});
+
+test("session_shutdown during an in-flight /btw start aborts it and removes the scratch dir", async () => {
+	await withTempAgentDir(async (agentDir) => {
+		await withNoTmux(async () => {
+			let reached!: () => void;
+			const gateReached = new Promise<void>((resolve) => {
+				reached = resolve;
+			});
+			let release!: () => void;
+			const gate = new Promise<void>((resolve) => {
+				release = resolve;
+			});
+			const tmux = tmuxModel();
+			const exec = async (command: string, args: string[]) => {
+				if (args.includes("new-session")) {
+					reached();
+					await gate;
+				}
+				return tmux.exec(command, args);
+			};
+			const events = new Map<string, (event: unknown, ctx: unknown) => Promise<void>>();
+			const handler = await loadFactory(exec, (name, fn) => {
+				events.set(name, fn as (event: unknown, ctx: unknown) => Promise<void>);
+			});
+			const shutdown = events.get("session_shutdown");
+			assert.ok(shutdown);
+			const registry = streamingRegistry("x");
+			const notifications: { message: string; type: string }[] = [];
+			const ctx = {
+				...fakeContext(registry.modelRegistry),
+				ui: {
+					input: async () => "q",
+					notify: (message: string, type = "info") => notifications.push({ message, type }),
+				},
+			};
+
+			const first = handler("", ctx as never);
+			await gateReached;
+			const closing = shutdown({ reason: "quit" }, ctx as never);
+			release();
+			await Promise.all([first, closing]);
+
+			const paths = buildBtwPaths(agentDir, SID);
+			assert.equal(existsSync(paths.runDir), false, "scratch dir must be removed after shutdown");
+			assert.equal(existsSync(paths.socket), false, "socket must be removed after shutdown");
+			assert.equal(registry.calls.length, 0, "the aborted start never sends the LLM request");
+			assert.equal(
+				(await tmux.exec("tmux", ["-S", paths.socket, "has-session", "-t", paths.session])).code !== 0,
+				true,
+				"no tmux server survives shutdown",
+			);
+			assert.equal(
+				notifications.some((entry) => entry.type === "error"),
+				false,
+				"aborted startup does not notify an error",
+			);
 		});
 	});
 });

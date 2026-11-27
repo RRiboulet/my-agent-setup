@@ -36,7 +36,7 @@ export interface Harness {
 	 *  the last non-undefined result (the boundary proposal). */
 	fire: (event: string, payload?: Record<string, unknown>) => Promise<unknown>;
 	tools: Map<string, Record<string, unknown>>;
-	execCalls: { command: string; args: string[] }[];
+	execCalls: { command: string; args: string[]; options?: Record<string, unknown> }[];
 	messages: CompletionMessage[];
 	/** Every `pi.events.emit` call, in order (patch 22's orchestration events). */
 	events: { channel: string; data: unknown }[];
@@ -148,7 +148,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const tools = new Map<string, Record<string, unknown>>();
 	const commands = new Map<string, unknown>();
 	const handlers = new Map<string, ((...args: unknown[]) => unknown)[]>();
-	const execCalls: { command: string; args: string[] }[] = [];
+	const execCalls: { command: string; args: string[]; options?: Record<string, unknown> }[] = [];
 	const messages: CompletionMessage[] = [];
 	const orchestrationEvents: { channel: string; data: unknown }[] = [];
 	const eventHandlers = new Map<string, ((data: unknown) => void)[]>();
@@ -244,8 +244,8 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 				};
 			},
 		},
-		exec: async (command: string, args: string[]) => {
-			execCalls.push({ command, args });
+		exec: async (command: string, args: string[], execOptions?: Record<string, unknown>) => {
+			execCalls.push({ command, args, ...(execOptions ? { options: { ...execOptions } } : {}) });
 			if (options.execDelayMs) await new Promise((resolve) => setTimeout(resolve, options.execDelayMs));
 			const joined = args.join(" ");
 			if (options.afterEscapeSent && joined.includes("send-keys") && args.includes("Escape")) {

@@ -38,7 +38,7 @@
     "aborted": false,
     "skillLoads": {}
   },
-  "answer": "Project names from `devc ls`:\n\n1. `analytics-agent`\n2. `lol-dataset`\n3. `my-agent-setup`\n4. `pupkeep`",
+  "answer": "Project names from `devc ls`:\n\n1. `analytics-agent`\n2. `lol-dataset`\n3. `advanced-harness-engineering`\n4. `pupkeep`",
   "check": {
     "passed": true,
     "failures": [],
@@ -46,6 +46,6 @@
   },
   "parseError": null,
   "parseTruncated": false,
-  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go%2Fdeepseek-v4.1-flash/sessions/devc-ls",
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/advanced-harness-engineering/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go%2Fdeepseek-v4.1-flash/sessions/devc-ls",
   "stderrTail": ""
 }

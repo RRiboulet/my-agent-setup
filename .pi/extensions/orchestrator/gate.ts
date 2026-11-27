@@ -20,13 +20,15 @@
  *     settlement instead of becoming decorative. A passed verification is
  *     informational once, because there is nothing to fix. New evidence (a new
  *     edit, todo or failure) re-arms any condition.
- *   * `attemptCap` bounds every gate block on the branch, settlement and loop
- *     alike; it is the hard stop that keeps repeated blocks from trapping a run.
- *     `attempts` counts blocks, not evaluations: ticket 08's counter counted
- *     settles, so an active goal reached the cap on its third continuation with
- *     nothing having failed. The field is renamed for what it bounds and nothing
- *     else. `attemptCap: 0` therefore disables blocking without disabling
- *     reporting.
+ *   * `attemptCap` bounds settlement gate blocks on the branch, while
+ *     `loopAttemptCap` separately bounds mid-run loop-breaker blocks so loop
+ *     blocks never exhaust the settlement budget; each is the hard stop that
+ *     keeps repeated blocks from trapping a run. `attempts` counts blocks, not
+ *     evaluations: ticket 08's counter counted settles, so a run could
+ *     reach the cap on its third continuation with nothing having failed. The
+ *     field is renamed for what it bounds and nothing else. Setting
+ *     `attemptCap: 0` or `loopAttemptCap: 0` disables blocking for that gate
+ *     without disabling reporting.
  *   * An override — the `orchestrator_override` tool — is consumed by the next
  *     block it prevents, including a repeated block on unchanged evidence. It
  *     spends no attempt and is named in every block reason.
@@ -51,12 +53,14 @@
 
 import type { OpenTodo } from "./todo-state.ts";
 import {
+	classifyVerificationEvidence,
 	detectWeakCommand,
 	detectZeroTests,
 	successPatternMatches,
 	verificationFailedOpen,
 	type VerificationOutcome,
 } from "./verify.ts";
+import { evaluateWaveGate, type WaveState } from "./wave.ts";
 
 export const GATE_ENTRY_TYPE = "orchestrator-gate";
 export const GATE_LOOP_ENTRY_TYPE = "orchestrator-gate-loop";
@@ -69,7 +73,7 @@ const EDIT_TOOLS = new Set(["edit", "write"]);
 const SHELL_TOOLS = new Set(["bash", "powershell"]);
 const FAILURE_WINDOW = 200;
 
-export type GateConditionKind = "goal" | "todos" | "verification" | "failure" | "attempt" | "unevaluated";
+export type GateConditionKind = "goal" | "todos" | "verification" | "failure" | "wave" | "attempt" | "unevaluated";
 export type GateConditionStatus = "clear" | "attention" | "unknown";
 export type GateDecision = "report" | "continue";
 
@@ -124,7 +128,7 @@ export interface GateVerdict {
 	/** True when a would-be block was parked instead: no continuation, no attempt,
 	 *  because a delegated run is still live. `decision` stays `report`. A park
 	 *  yields the continuation field rather than claiming it, so another boundary
-	 *  handler (the goal extension) may still request a turn; the park saves the
+	 *  handler may still request a turn; the park saves the
 	 *  gate's attempt, not necessarily the turn. */
 	parked: boolean;
 	/** The live run ids that kept this settlement parked; empty when it did not
@@ -228,6 +232,8 @@ export interface GateBlockPolicy {
 	alreadyBlocked: GateConditionKind[];
 	/** Evidence each already-blocked kind reported, from `state.blockedEvidence`. */
 	alreadyBlockedEvidence?: Partial<Record<GateConditionKind, string>>;
+	/** Optional flag overrides; `wave` defaults to `true`. */
+	block?: { wave?: boolean };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -253,7 +259,7 @@ function firstLine(text: string): string {
 
 function describeInvocation(tool: string, args: Record<string, unknown> | undefined): string {
 	if (!args) return "";
-	if (tool === "bash" && typeof args.command === "string") return collapse(args.command);
+	if ((tool === "bash" || tool === "powershell") && typeof args.command === "string") return collapse(args.command);
 	if ((tool === "edit" || tool === "write") && typeof args.path === "string") return collapse(args.path);
 	try {
 		return collapse(JSON.stringify(args));
@@ -269,8 +275,10 @@ function unique<T>(values: readonly T[]): T[] {
 // --- Session-backed state ---------------------------------------------------
 
 export interface GateState {
-	/** Gate blocks recorded on this branch, settlement and loop alike. */
+	/** Settlement gate blocks recorded on this branch. */
 	attempts: number;
+	/** Mid-run loop-breaker blocks recorded on this branch. */
+	loopAttempts: number;
 	lastVerdict: GateVerdict | null;
 	lastLoopVerdict: LoopVerdict | null;
 	/** Union of every condition kind that has blocked on this branch. */
@@ -279,7 +287,7 @@ export interface GateState {
 	blockedEvidence: Partial<Record<GateConditionKind, string>>;
 }
 
-const CONDITION_KINDS: readonly GateConditionKind[] = ["goal", "todos", "verification", "failure", "attempt", "unevaluated"];
+const CONDITION_KINDS: readonly GateConditionKind[] = ["goal", "todos", "verification", "failure", "wave", "attempt", "unevaluated"];
 
 function conditionKinds(value: unknown): GateConditionKind[] {
 	if (!Array.isArray(value)) return [];
@@ -287,11 +295,11 @@ function conditionKinds(value: unknown): GateConditionKind[] {
 }
 
 /**
- * Reconstruct the attempt budget, the last verdicts and the set of conditions
- * that already blocked, from the active branch.
+ * Reconstruct the settlement and loop attempt budgets, the last verdicts and
+ * the set of conditions that already blocked, from the active branch.
  *
- * The LAST entry of either gate type wins the attempt count, exactly like
- * `goal.ts`'s reconstruction; the blocked-condition set is a union, because it is
+ * The LAST entry of each gate type wins its own attempt count;
+ * the blocked-condition set is a union, because it is
  * monotone and a navigation to a branch before any block legitimately reports
  * none. A gate entry whose `attempts` cannot be read is skipped rather than
  * trusted, so a malformed entry cannot raise or reset a cap.
@@ -300,6 +308,7 @@ export function reconstructGateState(branch: readonly unknown[]): GateState {
 	let lastVerdict: GateVerdict | null = null;
 	let lastLoopVerdict: LoopVerdict | null = null;
 	let attempts = 0;
+	let loopAttempts = 0;
 	const blocked = new Set<GateConditionKind>();
 	const blockedEvidence: Partial<Record<GateConditionKind, string>> = {};
 
@@ -309,7 +318,7 @@ export function reconstructGateState(branch: readonly unknown[]): GateState {
 			const loop = normalizePersistedLoop(item.data);
 			if (!loop) continue;
 			lastLoopVerdict = loop;
-			attempts = loop.attempts;
+			loopAttempts = loop.attempts;
 			continue;
 		}
 		if (item.customType !== GATE_ENTRY_TYPE) continue;
@@ -329,6 +338,7 @@ export function reconstructGateState(branch: readonly unknown[]): GateState {
 
 	return {
 		attempts,
+		loopAttempts,
 		lastVerdict,
 		lastLoopVerdict,
 		blockedConditions: [...blocked].sort() as GateConditionKind[],
@@ -470,6 +480,52 @@ function evidenceIsRealPass(input: {
 	return successPatternMatches(input.successPattern, output) !== false;
 }
 
+const SAFE_VERIFICATION_FLAGS = new Set([
+	"-q",
+	"--quiet",
+	"-v",
+	"--verbose",
+	"-vv",
+	"--tb=short",
+	"--tb=line",
+	"--no-header",
+	"--color=no",
+]);
+const SAFE_REPORTER_VALUE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const LEADING_CD_PREFIX = /^cd\s+(?:"([^"$`\\;|&]+)"|'([^';|&]+)'|([^\s;|&<>`"$()]+))\s+&&\s+([\s\S]+)$/;
+
+function hasOnlySafeVerificationFlags(tail: string): boolean {
+	if (!tail) return true;
+	const tokens = tail.split(/\s+/).filter(Boolean);
+	for (let i = 0; i < tokens.length; i += 1) {
+		const token = tokens[i]!;
+		if (SAFE_VERIFICATION_FLAGS.has(token)) continue;
+		if (token.startsWith("--reporter=")) {
+			if (!SAFE_REPORTER_VALUE.test(token.slice("--reporter=".length))) return false;
+			continue;
+		}
+		if (token === "--reporter") {
+			const next = tokens[i + 1];
+			if (!next || !SAFE_REPORTER_VALUE.test(next)) return false;
+			i += 1;
+			continue;
+		}
+		return false;
+	}
+	return true;
+}
+
+function matchesVerificationCommand(command: string, wantedFull: string): boolean {
+	let rest = command.trim();
+	const cdMatch = LEADING_CD_PREFIX.exec(rest);
+	if (cdMatch) rest = cdMatch[4]!.trim();
+	const normalizedRest = rest.replace(/\s+/g, " ").trim();
+	if (normalizedRest === wantedFull) return true;
+	if (!normalizedRest.startsWith(`${wantedFull} `)) return false;
+	const tail = normalizedRest.slice(wantedFull.length).trim();
+	return hasOnlySafeVerificationFlags(tail);
+}
+
 /**
  * Files edited since the last verification.
  *
@@ -495,8 +551,46 @@ export function scanEditVerification(branch: readonly unknown[], options: EditSc
 	const edited = new Set<string>();
 	let verificationRuns = 0;
 	let editResults = 0;
-	const wanted = options.verificationCommand?.trim() ? collapse(options.verificationCommand) : null;
+	const wantedRaw = options.verificationCommand?.trim() ?? "";
+	const wantedFull = wantedRaw ? wantedRaw.replace(/\s+/g, " ").trim() : null;
 	const successPattern = options.successPattern ?? null;
+
+	const recordToolOutcome = (
+		tool: string,
+		args: Record<string, unknown> | undefined,
+		outcome: { isError: boolean; exitCode: number | null; output: string; requireOutputForVerification?: boolean },
+	): void => {
+		if (EDIT_TOOLS.has(tool)) {
+			if (outcome.isError) return;
+			const path = args?.path;
+			edited.add(typeof path === "string" && path.trim() ? path : "(unknown file)");
+			editResults += 1;
+			return;
+		}
+		if (!SHELL_TOOLS.has(tool)) return;
+		if (outcome.isError) return;
+		if (outcome.exitCode !== null && outcome.exitCode !== 0) return;
+		const command = args?.command;
+		if (typeof command !== "string") return;
+		if (wantedFull && outcome.requireOutputForVerification && !outcome.output.trim()) return;
+		const ranVerification = wantedFull ? matchesVerificationCommand(command, wantedFull) : true;
+		if (!ranVerification) return;
+		const evidence = classifyVerificationEvidence({
+			result: {
+				code: outcome.exitCode ?? 0,
+				stdout: outcome.output,
+				stderr: "",
+				killed: false,
+				truncated: false,
+			},
+			command,
+			output: outcome.output,
+			successPattern: wantedFull ? successPattern : null,
+		});
+		if (evidence.status !== "passed") return;
+		edited.clear();
+		verificationRuns += 1;
+	};
 
 	for (const item of branch) {
 		if (!isRecord(item)) continue;
@@ -526,38 +620,31 @@ export function scanEditVerification(branch: readonly unknown[], options: EditSc
 			continue;
 		}
 		if (message.role !== "toolResult") continue;
+		if (isRecord(message.nestedCalls) && Array.isArray(message.nestedCalls.calls)) {
+			for (const nested of message.nestedCalls.calls) {
+				if (!isRecord(nested) || typeof nested.name !== "string") continue;
+				const nestedOutput =
+					typeof nested.output === "string"
+						? nested.output
+						: typeof nested.stdout === "string"
+							? nested.stdout
+							: "";
+				recordToolOutcome(nested.name, isRecord(nested.arguments) ? nested.arguments : undefined, {
+					isError: nested.status !== "ok",
+					exitCode: null,
+					output: nestedOutput,
+					requireOutputForVerification: true,
+				});
+			}
+		}
 		const call = typeof message.toolCallId === "string" ? calls.get(message.toolCallId) : undefined;
 		const tool = typeof message.toolName === "string" ? message.toolName : call?.name;
 		if (!tool) continue;
-		if (EDIT_TOOLS.has(tool)) {
-			if (message.isError === true) continue;
-			const path = call?.arguments.path;
-			edited.add(typeof path === "string" && path.trim() ? path : "(unknown file)");
-			editResults += 1;
-			continue;
-		}
-		if (!SHELL_TOOLS.has(tool)) continue;
-		// A failed shell call is not a pass, and a host that reports the exit code
-		// in `details` is believed even when `isError` disagrees.
-		if (message.isError === true) continue;
-		const reportedExit = exitCodeFromDetails(message.details);
-		if (reportedExit !== null && reportedExit !== 0) continue;
-		const command = call?.arguments.command;
-		if (typeof command !== "string") continue;
-		const ranVerification = wanted ? collapse(command) === wanted : true;
-		if (!ranVerification) continue;
-		if (
-			!evidenceIsRealPass({
-				status: "passed",
-				command,
-				output: textFromContent(message.content),
-				successPattern: wanted ? successPattern : null,
-			})
-		) {
-			continue;
-		}
-		edited.clear();
-		verificationRuns += 1;
+		recordToolOutcome(tool, call?.arguments, {
+			isError: message.isError === true,
+			exitCode: exitCodeFromDetails(message.details),
+			output: textFromContent(message.content),
+		});
 	}
 
 	return { editedFiles: [...edited].sort(), verificationRuns, editResults };
@@ -577,6 +664,15 @@ export function scanFailures(branch: readonly unknown[], window = FAILURE_WINDOW
 	const messages = branch.filter((item) => isRecord(item) && item.type === "message").slice(-window);
 	const counts = new Map<string, FailureSignature>();
 
+	const recordFailure = (tool: string, args: Record<string, unknown> | undefined, errorText: string): void => {
+		const invocation = describeInvocation(tool, args);
+		const detail = firstLine(errorText);
+		const signature = `${tool}|${invocation}|${detail}`;
+		const current = counts.get(signature);
+		if (current) current.count += 1;
+		else counts.set(signature, { signature, count: 1, tool, detail });
+	};
+
 	for (const item of messages) {
 		if (!isRecord(item) || !isRecord(item.message)) continue;
 		const message = item.message;
@@ -587,15 +683,21 @@ export function scanFailures(branch: readonly unknown[], window = FAILURE_WINDOW
 			}
 			continue;
 		}
-		if (message.role !== "toolResult" || message.isError !== true) continue;
+		if (message.role !== "toolResult") continue;
+		if (isRecord(message.nestedCalls) && Array.isArray(message.nestedCalls.calls)) {
+			for (const nested of message.nestedCalls.calls) {
+				if (!isRecord(nested) || nested.status !== "error" || typeof nested.name !== "string") continue;
+				recordFailure(
+					nested.name,
+					isRecord(nested.arguments) ? nested.arguments : undefined,
+					typeof nested.error === "string" ? nested.error : "",
+				);
+			}
+		}
+		if (message.isError !== true) continue;
 		const call = typeof message.toolCallId === "string" ? calls.get(message.toolCallId) : undefined;
 		const tool = typeof message.toolName === "string" ? message.toolName : call?.name ?? "tool";
-		const invocation = describeInvocation(tool, call?.arguments);
-		const detail = firstLine(textFromContent(message.content));
-		const signature = `${tool}|${invocation}|${detail}`;
-		const current = counts.get(signature);
-		if (current) current.count += 1;
-		else counts.set(signature, { signature, count: 1, tool, detail });
+		recordFailure(tool, call?.arguments, textFromContent(message.content));
 	}
 
 	let repeated: FailureSignature | null = null;
@@ -633,6 +735,8 @@ export interface GateEvaluationInput {
 	waitForSubagents?: boolean;
 	/** Conditions the project allows to block, and those already spent. */
 	policy?: GateBlockPolicy;
+	/** Active or terminal wave state from the branch, if any. */
+	wave?: WaveState | null;
 	/** Why blocking was not attempted at all (a child session, an outcome pi will
 	 *  not continue after, a missing continuation). Reported, never silent. */
 	suppressed?: string | null;
@@ -640,6 +744,8 @@ export interface GateEvaluationInput {
 	unevaluated?: string[];
 	now?: number;
 }
+
+export type EvaluateGateInput = GateEvaluationInput;
 
 /** The pure decision function. No I/O, no clock, no pi API. */
 export function evaluateGate(input: GateEvaluationInput): GateVerdict {
@@ -722,6 +828,18 @@ export function evaluateGate(input: GateEvaluationInput): GateVerdict {
 		conditions.push({ kind: "failure", status: "clear", summary: "no repeated failure signature" });
 	}
 
+	const waveGate = evaluateWaveGate(input.wave ?? null);
+	if (waveGate) {
+		conditions.push({ kind: "wave", status: "attention", summary: waveGate.summary });
+		reasons.push({
+			code: "wave-active",
+			summary: waveGate.summary,
+			details: { folder: input.wave!.folder, unfinishedIds: waveGate.unfinishedIds },
+		});
+	} else {
+		conditions.push({ kind: "wave", status: "clear", summary: "no active wave with unfinished tickets" });
+	}
+
 	const policy: GateBlockPolicy = input.policy ?? { kinds: [], alreadyBlocked: [] };
 	const alreadyBlocked = unique(policy.alreadyBlocked);
 	const alreadyBlockedEvidence = policy.alreadyBlockedEvidence ?? {};
@@ -732,6 +850,7 @@ export function evaluateGate(input: GateEvaluationInput): GateVerdict {
 		// evidence and must re-run the command, while an unchanged state must not.
 		if (kind === "verification") return `${[...editedFiles].sort().join(",")}#${editResults}`;
 		if (kind === "failure") return failure?.signature ?? "";
+		if (kind === "wave") return waveGate?.evidence ?? "";
 		return "";
 	};
 	/**
@@ -742,10 +861,11 @@ export function evaluateGate(input: GateEvaluationInput): GateVerdict {
 	 * condition never has anything to "fix".
 	 */
 	const informationalOnce = (kind: GateConditionKind): boolean => kind === "verification" && verification?.status === "passed";
+	const waveBlockingEnabled = policy.block?.wave !== false;
 	const candidates = conditions.filter(
 		(condition) =>
 			condition.status === "attention" &&
-			policy.kinds.includes(condition.kind) &&
+			(condition.kind === "wave" ? waveBlockingEnabled : policy.kinds.includes(condition.kind)) &&
 			// Same evidence blocks again for a condition that must be resolved —
 			// that is what makes `orchestrator_override` necessary rather than
 			// decorative. A new edit, todo or failure also re-arms it via evidence.

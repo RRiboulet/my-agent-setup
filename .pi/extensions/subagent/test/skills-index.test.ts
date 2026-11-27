@@ -33,15 +33,25 @@ test("the index has both markers, in order, once each", () => {
 test("every skill on disk is listed exactly once", () => {
 	const block = renderBlock();
 	for (const skill of SKILLS) {
-		const link = `[\`${skill.name}\`](.pi/skills/${skill.dir}/SKILL.md)`;
+		const label = skill.userInvoked ? `/${skill.name}` : skill.name;
+		const link = `[\`${label}\`](skills/${skill.dir}/SKILL.md)`;
 		const count = block.split(link).length - 1;
 		assert.equal(count, 1, `${skill.name} must appear once, found ${count}`);
 	}
 });
 
-test("the two invocation classes match the frontmatter, and the six are pinned", () => {
+test("the two invocation classes match the frontmatter, and the eight are pinned", () => {
 	const userInvoked = SKILLS.filter((skill) => skill.userInvoked).map((skill) => skill.name);
-	assert.deepEqual(userInvoked, ["handoff", "implement", "recall", "teach", "to-spec", "to-tickets"]);
+	assert.deepEqual(userInvoked, [
+		"handoff",
+		"implement",
+		"implement-spec",
+		"recall",
+		"teach",
+		"to-spec",
+		"to-tickets",
+		"verify-app",
+	]);
 	const block = renderBlock();
 	assert.ok(
 		block.includes(`### User-invoked — ${userInvoked.length}:`),
@@ -56,8 +66,8 @@ test("the two invocation classes match the frontmatter, and the six are pinned",
 test("every user-invoked description carries the entry-point shape the README shows", () => {
 	for (const skill of SKILLS.filter((s) => s.userInvoked)) {
 		assert.ok(
-			skill.description.startsWith(`User-invoked /skill:${skill.name}: `),
-			`${skill.name}: ${skill.description.slice(0, 40)}`,
+			skill.description.startsWith(`User-invoked /${skill.name} (pi: /skill:${skill.name}): `),
+			`${skill.name}: ${skill.description.slice(0, 50)}`,
 		);
 	}
 });

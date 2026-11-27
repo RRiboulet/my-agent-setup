@@ -30,7 +30,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 
 export const REPO_ROOT = path.resolve(new URL("../../../..", import.meta.url).pathname);
-export const SKILL_DIR = path.join(REPO_ROOT, ".pi/skills/worktree");
+export const SKILL_DIR = path.join(REPO_ROOT, "skills/worktree");
 export const SKILL_PATH = path.join(SKILL_DIR, "SKILL.md");
 
 /**

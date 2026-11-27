@@ -1,0 +1,5 @@
+interface:
+  display_name: "Verify App"
+  short_description: "Create or audit a real-app E2E verification skill"
+policy:
+  allow_implicit_invocation: false

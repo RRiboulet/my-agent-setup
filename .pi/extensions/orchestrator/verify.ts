@@ -116,6 +116,24 @@ export function verificationInvocation(
 	return { command: "bash", args: ["-lc", commandLine] };
 }
 
+function sliceUtf8Head(buf: Buffer, maxBytes: number): string {
+	if (maxBytes <= 0) return "";
+	if (maxBytes >= buf.length) return buf.toString("utf8");
+	let end = maxBytes;
+	// Back up over any UTF-8 continuation bytes (10xxxxxx) or incomplete multi-byte start
+	// so we never split a codepoint and emit U+FFFD.
+	while (end > 0 && (buf[end]! & 0xc0) === 0x80) end -= 1;
+	return buf.subarray(0, end).toString("utf8");
+}
+
+function sliceUtf8Tail(buf: Buffer, maxBytes: number): string {
+	if (maxBytes <= 0) return "";
+	if (maxBytes >= buf.length) return buf.toString("utf8");
+	let start = buf.length - maxBytes;
+	while (start < buf.length && (buf[start]! & 0xc0) === 0x80) start += 1;
+	return buf.subarray(start).toString("utf8");
+}
+
 /**
  * Bound combined output for a message while keeping both ends: a test summary
  * lives in the tail, the first error in the head. Bytes, not characters, because
@@ -130,16 +148,26 @@ export function boundVerificationOutput(
 	const head = String(stdout ?? "").trim();
 	const tail = String(stderr ?? "").trim();
 	const text = head && tail ? `${head}${separator}${tail}` : head || tail;
-	const limit = Math.max(0, Math.floor(maxBytes));
-	const bytes = Buffer.byteLength(text, "utf8");
+	const limit = Number.isFinite(maxBytes) ? Math.max(0, Math.floor(maxBytes)) : 0;
+	if (limit <= 0) return "";
+	const buf = Buffer.from(text, "utf8");
+	const bytes = buf.length;
 	if (bytes <= limit) return text;
+	const makeMarker = (omitted: number) => `\n… (${omitted} bytes omitted) …\n`;
+	const maxMarkerBytes = Buffer.byteLength(makeMarker(bytes), "utf8");
+	if (limit < maxMarkerBytes) {
+		return sliceUtf8Head(buf, limit);
+	}
+	const contentBudget = limit - maxMarkerBytes;
 	// Split the budget unevenly on purpose: the tail of a failing command is
 	// where the failing assertion is, so it gets the larger share.
-	const headBudget = Math.floor(limit / 3);
-	const tailBudget = limit - headBudget;
-	const headPart = Buffer.from(text, "utf8").subarray(0, headBudget).toString("utf8");
-	const tailPart = Buffer.from(text, "utf8").subarray(bytes - tailBudget).toString("utf8");
-	return `${headPart}\n… (${bytes - limit} bytes omitted) …\n${tailPart}`;
+	const headBudget = Math.floor(contentBudget / 3);
+	const tailBudget = contentBudget - headBudget;
+	const headPart = sliceUtf8Head(buf, headBudget);
+	const tailPart = sliceUtf8Tail(buf, tailBudget);
+	const keptBytes = Buffer.byteLength(headPart, "utf8") + Buffer.byteLength(tailPart, "utf8");
+	const marker = makeMarker(Math.max(1, bytes - keptBytes));
+	return `${headPart}${marker}${tailPart}`;
 }
 
 function isExecResult(value: unknown): value is ExecResult {
@@ -369,11 +397,12 @@ export async function runVerification(
 	};
 
 	let result: ExecResult;
+	const captureBuffer = Math.max(2 * 1024 * 1024, Math.max(0, spec.maxOutputBytes) * 4);
 	try {
 		result = await options.exec(invocation.command, invocation.args, {
 			cwd: options.cwd,
 			timeout: spec.timeoutMs,
-			maxBuffer: spec.maxOutputBytes,
+			maxBuffer: captureBuffer,
 			signal: options.signal,
 		});
 	} catch (error) {

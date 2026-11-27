@@ -1,0 +1,3 @@
+interface:
+  display_name: "Benchmark Checklist"
+  short_description: "Vet a performance number before reporting"

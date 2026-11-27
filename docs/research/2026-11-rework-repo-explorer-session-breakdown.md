@@ -1,5 +1,10 @@
 # repo-explorer and session-breakdown: why they are hard to use
 
+> **Status note 2026-11-25:** the `/session-breakdown` half of this document is
+> history — the extension was removed from the repo outright (see
+> `CHANGELOG.md`, `## Unreleased`). The repo-explorer findings remain the
+> evidence for the open tickets under `docs/tickets/harness-advancements/`.
+
 Observed 2026-11-17 on branch `new-tools-investigation` (196 tracked files, 15 branch
 menu rows), pi 1.5.2, in the tmux pane this VM gives an agent: **80x24**. Both suites
 are green (`repo-explorer-*` 131 tests, `session-breakdown` 34), so nothing below is a

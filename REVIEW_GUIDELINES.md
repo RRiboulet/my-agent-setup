@@ -7,13 +7,11 @@ project guidelines take precedence.
 
 - **`prove-it-works` is not a review.** It is how the author proves a change and
   reports evidence. It never starts a reviewer.
-- A change gets **one independent review, and only when the user asks for one**.
-  Two forms exist; use exactly one of them:
-  - `/review` when the user wants to drive it interactively;
-  - `triage_change` (or `/triage`) and, after the user approves, **one**
-    sub-agent with the profile it names.
-- Never run both for the same change, and never start a second reviewer because
-  the first found little. The reviewer must not spawn further reviewers.
+- A change gets **one independent review, and only when the user asks for one**
+  (via `/review` or one requested `reviewer` subagent).
+- Never run multiple reviews for the same change, and never start a second
+  reviewer because the first found little. The reviewer must not spawn further
+  reviewers.
 - Do not repeat what the author already proved. Re-run a check only when you
   doubt it.
 
@@ -42,8 +40,7 @@ Cover three axes and keep their findings apart — one kind must not mask anothe
   The smell baseline below is judgement calls, and a documented rule overrides
   them.
 
-Report findings; fix them only when the user asked (or `/review`'s loop-fixing
-mode is on). Report in whatever format the review mechanism requires — `/review`
+Report findings; fix them only when the user asked. Report in whatever format the review mechanism requires — `/review`
 has its own priority tags, verdict, and human-reviewer callouts — but keep the
 three axes distinguishable inside it.
 

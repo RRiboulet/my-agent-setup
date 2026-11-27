@@ -87,6 +87,9 @@ export interface PlanStepSpec {
 	/** `standalone` | `lineage` | `fork`; kept as a string so this module stays free of launch types. */
 	handoff: string;
 	trusted: boolean;
+	role?: string;
+	tools?: string[];
+	skills?: string[];
 	dependsOn?: string[];
 	/** Retries allowed AFTER the first attempt. `0` means one attempt total. */
 	retries?: number;
@@ -108,6 +111,9 @@ export interface PlanStepState {
 	thinking: string;
 	handoff: string;
 	trusted: boolean;
+	role?: string;
+	tools?: string[];
+	skills?: string[];
 	dependsOn: string[];
 	/** Effective retry cap, always recorded so the plan shows the limit it used. */
 	retries: number;
@@ -215,6 +221,16 @@ export function buildPlan(id: string, specs: PlanStepSpec[], options: PlanOption
 
 	const steps: PlanStepState[] = specs.map((spec, index) => {
 		const id = spec.id?.trim() || `step-${index + 1}`;
+		const role = spec.role?.trim() || undefined;
+		const tools = spec.tools
+			?.filter((tool): tool is string => typeof tool === "string")
+			.map((tool) => tool.trim())
+			.filter((tool) => tool.length > 0);
+		const rawSkills = spec.skills
+			?.filter((skill): skill is string => typeof skill === "string")
+			.map((skill) => skill.trim())
+			.filter((skill) => skill.length > 0);
+		const skills = rawSkills && rawSkills.length > 0 ? [...new Set(rawSkills)] : undefined;
 		return {
 			id,
 			task: spec.task,
@@ -224,6 +240,9 @@ export function buildPlan(id: string, specs: PlanStepSpec[], options: PlanOption
 			thinking: spec.thinking,
 			handoff: spec.handoff,
 			trusted: spec.trusted,
+			...(role ? { role } : {}),
+			...(tools && tools.length > 0 ? { tools } : {}),
+			...(skills ? { skills } : {}),
 			dependsOn: [...new Set((spec.dependsOn ?? []).map((dep) => dep.trim()))],
 			retries: spec.retries ?? retryLimit,
 			attempts: 0,

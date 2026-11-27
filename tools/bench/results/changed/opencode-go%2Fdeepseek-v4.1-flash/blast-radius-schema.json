@@ -5,7 +5,7 @@
     "model": "opencode-go/deepseek-v4.1-flash",
     "state": "changed"
   },
-  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-tdd-baseline",
+  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/advanced-harness-engineering/.worktrees/bench-tdd-baseline",
   "repoState": {
     "isGit": true,
     "head": "9edd0b6da18d5a294252a5313c18755bff68a0f4",
@@ -47,6 +47,6 @@
   "suite": null,
   "parseError": null,
   "parseTruncated": false,
-  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/skills-tdd-default/tools/bench/results/changed/opencode-go%2Fdeepseek-v4.1-flash/sessions/blast-radius-schema",
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/advanced-harness-engineering/.worktrees/skills-tdd-default/tools/bench/results/changed/opencode-go%2Fdeepseek-v4.1-flash/sessions/blast-radius-schema",
   "stderrTail": ""
 }

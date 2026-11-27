@@ -892,7 +892,7 @@ test("with no advisor configured, no consultation is made and no section is inje
 		const event = promptEvent();
 		await host.fire("before_agent_start", event);
 		assert.equal(calls.length, 0);
-		assert.deepEqual(Object.keys(event.systemPromptOptions.sections), ["base"]);
+		assert.equal(event.systemPromptOptions.sections[ADVISOR_SECTION], undefined);
 		assert.deepEqual(host.appended, []);
 	});
 });
@@ -969,7 +969,7 @@ test("the same trigger is not consulted twice: the answered key is reconstructed
 		const event = promptEvent();
 		await resumed.fire("before_agent_start", event);
 		assert.equal(calls.length, 0, "an answered trigger does not buy a second opinion");
-		assert.deepEqual(Object.keys(event.systemPromptOptions.sections), ["base"]);
+		assert.equal(event.systemPromptOptions.sections[ADVISOR_SECTION], undefined);
 	});
 });
 
@@ -1015,7 +1015,7 @@ test("a missing credential makes no call, and the reason is surfaced naming the 
 			await host.fire("before_agent_start", event);
 
 			assert.equal(calls.length, 0);
-			assert.deepEqual(Object.keys(event.systemPromptOptions.sections), ["base"], "no verdict to inject");
+			assert.equal(event.systemPromptOptions.sections[ADVISOR_SECTION], undefined, "no verdict to inject");
 			const notice = host.messages.find((message) => message.message.customType === "orchestrator-advisor-notice");
 			assert.ok(notice, "a refusal is not a silent skip");
 			assert.match(String(notice.message.content), /no credentials for provider "nowhere"/);
@@ -1036,7 +1036,7 @@ test("an untrusted project ignores the advisor key: no call, no entry, no sectio
 		await host.fire("before_agent_start", event);
 		assert.equal(calls.length, 0, "a committed file cannot spend the user's tokens in an untrusted clone");
 		assert.deepEqual(host.appended, []);
-		assert.deepEqual(Object.keys(event.systemPromptOptions.sections), ["base"]);
+		assert.equal(event.systemPromptOptions.sections[ADVISOR_SECTION], undefined);
 	});
 });
 

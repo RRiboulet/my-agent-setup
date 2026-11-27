@@ -69,7 +69,13 @@ export interface ChildLaunchSpec {
 	tmuxSession: string;
 	trusted: boolean;
 	extensionPath: string;
+	/** Optional extra worker extensions loaded alongside `extensionPath`. */
+	extraExtensions?: readonly string[];
+	/** Optional explicit skills loaded via repeatable `--skill <path>` flags. */
+	skills?: readonly string[];
 	promptPath: string;
+	/** Optional explicit tool allowlist passed to the child via `--tools`. */
+	tools?: string[];
 }
 
 /**
@@ -117,8 +123,38 @@ export function buildChildPiArgs(spec: ChildLaunchSpec): string[] {
 		? ["--session", spec.sessionFile as string]
 		: ["--session-dir", spec.sessionDir as string, "--session-id", spec.sessionId as string];
 
+	const cleanedTools = (spec.tools ?? [])
+		.filter((tool): tool is string => typeof tool === "string")
+		.map((tool) => tool.trim())
+		.filter((tool) => tool.length > 0);
+
+	const cleanedExtraExtensions: string[] = [];
+	const seenExtensions = new Set<string>([spec.extensionPath]);
+	for (const ext of spec.extraExtensions ?? []) {
+		if (typeof ext !== "string") continue;
+		const trimmed = ext.trim();
+		if (!trimmed || seenExtensions.has(trimmed)) continue;
+		seenExtensions.add(trimmed);
+		cleanedExtraExtensions.push(trimmed);
+	}
+
+	const cleanedSkills: string[] = [];
+	const seenSkills = new Set<string>();
+	for (const skill of spec.skills ?? []) {
+		if (typeof skill !== "string") continue;
+		const trimmed = skill.trim();
+		if (!trimmed || seenSkills.has(trimmed)) continue;
+		seenSkills.add(trimmed);
+		cleanedSkills.push(trimmed);
+	}
+
 	return [
 		...spec.invocation,
+		"--no-extensions",
+		"--no-skills",
+		"--no-mcp",
+		"--no-prompt-templates",
+		"--no-themes",
 		"--provider",
 		spec.provider,
 		"--model",
@@ -131,6 +167,9 @@ export function buildChildPiArgs(spec: ChildLaunchSpec): string[] {
 		spec.trusted ? "--approve" : "--no-approve",
 		"--extension",
 		spec.extensionPath,
+		...cleanedExtraExtensions.flatMap((ext) => ["--extension", ext]),
+		...cleanedSkills.flatMap((skill) => ["--skill", skill]),
+		...(cleanedTools.length > 0 ? ["--tools", cleanedTools.join(",")] : []),
 		`@${spec.promptPath}`,
 	];
 }
@@ -229,7 +268,7 @@ function excludesOwnExtensionTree(root: string): boolean {
  *
  * 1. **The project carries this extension in its own tree** — this repository, and a
  *    linked worktree under `.worktrees/`, which is the documented way to work a
- *    branch (see `.pi/skills/worktree/SKILL.md`). Pi discovers
+ *    branch (see `skills/worktree/SKILL.md`). Pi discovers
  *    `<cwd>/.pi/extensions/subagent/index.ts` there without being asked, so naming
  *    it explicitly makes the two one path and it loads once.
  *

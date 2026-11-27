@@ -1,0 +1,5 @@
+interface:
+  display_name: "Implement Spec"
+  short_description: "Execute a ticket DAG in parallel worktrees"
+policy:
+  allow_implicit_invocation: false

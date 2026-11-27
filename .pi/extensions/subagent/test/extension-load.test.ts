@@ -25,18 +25,14 @@ const EXTENSIONS = [
 	"../../answer.ts",
 	"../../btw/index.ts",
 	"../../continue.ts",
-	"../../goal.ts",
 	"../../mcp-catalogue.ts",
 	"../../native-web-search.ts",
 	"../../opencode-go-provider/index.ts",
 	"../../orchestrator/index.ts",
 	"../../repo-explorer/index.ts",
-	"../../review-triage/index.ts",
 	"../../review.ts",
-	"../../session-breakdown.ts",
 	"../../todos.ts",
 	"../index.ts",
-	"../../voice/index.ts",
 ] as const;
 
 // Extension tree files that are not entry points themselves but get imported
@@ -113,6 +109,43 @@ const MODULES: Record<string, string[]> = {
 	],
 	"../../orchestrator/compact-snapshot.ts": ["buildCompactSnapshot"],
 	"../../orchestrator/config.ts": ["gateConfigCanAct", "gateConfigPath", "normalizeGateConfig", "readGateConfig"],
+	"../../orchestrator/credentials.ts": ["authSourceFromRegistry", "credentialFix", "providerEnvVar"],
+	"../../orchestrator/delegation.ts": [
+		"DELEGATION_MODES",
+		"DELEGATION_SECTION",
+		"DELEGATION_CONFIG_BASENAME",
+		"DELEGATION_ENV",
+		"DELEGATION_CONFIG_ENV",
+		"DEFAULT_ROLES",
+		"DEFAULT_DELEGATION_CONFIG",
+		"RECORD_REVIEW_TOOL",
+		"MAIN_REVIEW_VERDICTS",
+		"readDelegationConfig",
+		"classifyTurn",
+		"createDelegationState",
+		"resetTurnState",
+		"countChangedLines",
+		"extractEditInfo",
+		"evaluateDiscovery",
+		"evaluateParentWrite",
+		"isReadOnlyBashAllowed",
+		"isReviewFile",
+		"isReviewInspectionBashCommand",
+		"isCommitOrPrCommand",
+		"isVerifyCommand",
+		"evaluateSubagentCall",
+		"recordSteer",
+		"recordFileMutation",
+		"recordPassedCommand",
+		"recordReviewInspection",
+		"recordMainModelReview",
+		"recordChildSettled",
+		"clearDirtyState",
+		"evaluateCompletionGate",
+		"formatDelegationSection",
+		"formatDelegationStatus",
+	],
+	"../../orchestrator/delegation-runtime.ts": ["registerDelegationRuntime"],
 	"../../orchestrator/advisor.ts": [
 		"advisorSkipReason",
 		"buildAdvisorDigest",
@@ -211,19 +244,6 @@ const MODULES: Record<string, string[]> = {
 		"writeReportArtifact",
 	],
 	"../shell.ts": ["shellQuote"],
-	"../../voice/config.ts": ["agentDir", "configPath", "loadConfig", "parseEnvBool", "readConfigFile"],
-	"../../voice/shortcut.ts": ["normalizeKeyId", "parseShortcutIds"],
-	"../../voice/recorder.ts": [
-		"Recorder",
-		"buildCleanupCommand",
-		"buildFetchCommand",
-		"buildStartCommand",
-		"buildStopCommand",
-		"localRecordingPath",
-		"newRecordingId",
-		"remoteRecordingPath",
-	],
-	"../../voice/transcribe.ts": ["TranscribeError", "assertUploadSize", "resolveApiKey", "transcribeAudio"],
 };
 
 for (const relative of EXTENSIONS) {
@@ -241,11 +261,23 @@ for (const relative of EXTENSIONS) {
 // named export stays pinned to a function.
 const CONSTANT_EXPORTS: Record<string, string[]> = {
 	"../../orchestrator/role.ts": ["ORCHESTRATOR_ROLE"],
+	"../../orchestrator/credentials.ts": ["PROVIDER_ENV_VARS"],
 	// The entry-type constant is a table, not a function, and `events.ts` is the
 	// module both the index and `compact-snapshot.ts` import it from; pinning it
 	// here means a dropped export fails at load rather than at send time.
 	"../../orchestrator/events.ts": ["ORCHESTRATOR_CUSTOM_TYPES"],
 	"../../orchestrator/compact-snapshot.ts": ["MAX_COMPACT_SNAPSHOT_BYTES"],
+	"../../orchestrator/delegation.ts": [
+		"DELEGATION_MODES",
+		"DELEGATION_SECTION",
+		"DELEGATION_CONFIG_BASENAME",
+		"DELEGATION_ENV",
+		"DELEGATION_CONFIG_ENV",
+		"DEFAULT_ROLES",
+		"DEFAULT_DELEGATION_CONFIG",
+		"RECORD_REVIEW_TOOL",
+		"MAIN_REVIEW_VERDICTS",
+	],
 };
 
 for (const [relative, exports] of Object.entries(MODULES)) {

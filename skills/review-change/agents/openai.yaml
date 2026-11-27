@@ -1,0 +1,3 @@
+interface:
+  display_name: "Review Change"
+  short_description: "Review a diff on spec, correctness, standards"

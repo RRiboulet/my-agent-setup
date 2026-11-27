@@ -46,7 +46,7 @@
  *     write an entry on every prompt. `budget` (default 2) bounds recorded
  *     attempts per branch, calls and refusals alike; `0` disables the advisor.
  *   * **Credentials.** The provider is checked before the call through pi's own
- *     auth status (the same adapter review-triage uses). "Unknown" — no status
+ *     auth status (`./credentials.ts`). "Unknown" — no status
  *     method, a status that throws, or a provider that authenticates in a way pi
  *     cannot see — is treated as **usable**: a false "no credentials" must not
  *     disable a working setup, and a genuine failure is caught and reported.
@@ -79,7 +79,7 @@
 import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { AssistantMessage, Context, Usage } from "@earendil-works/pi-ai";
 
-import { authSourceFromRegistry, credentialFix } from "../review-triage/credentials.ts";
+import { authSourceFromRegistry, credentialFix } from "./credentials.ts";
 import type { AdvisorConfig } from "./config.ts";
 import { readGateHistory, type EditState, type GateVerdict, type LoopVerdict } from "./gate.ts";
 

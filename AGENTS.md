@@ -2,490 +2,124 @@
 
 ## Branches
 
-Two long-lived branches, and everything else hangs off them:
+Two long-lived branches:
 
-| Branch | What lands on it |
+| Branch | Purpose |
 |---|---|
-| `dev` | all work in flight. Every feature branch starts here. |
-| `main` | releases only. Nothing is built here; it is what a tag points at. |
+| `dev` | Integration branch. Every feature branch starts and merges here. |
+| `main` | Releases only. Tags cut here; never branch work off `main`. |
 
-**Start a feature branch from `dev`, never from `main` and never from another
-feature branch.** Branch names name the change, not the session:
-`attribute-native-web-search`, `fix-changelog-unreleased-structure`.
-
-A branch merges into `dev` through a pull request. `dev` merges into `main` at
-release time (see "Releases"). `main` is therefore always releasable, and a
-half-finished change is never one merge away from a tag.
-
-### Check your base before you commit
-
-This is not ceremony. Branching off the wrong parent has happened three times in
-one session, and each time it shipped a pull request carrying another branch's
-commit — caught by a reviewer, not by the author. Two checks, and **both are
-needed**, because the two ways of getting this wrong look different:
+Start every feature branch from `dev` (never `main` or another feature branch), named for the change (`fix-changelog-unreleased-structure`). Before committing, verify the base:
 
 ```bash
-git fetch origin
-git merge-base --is-ancestor dev HEAD    # 0 = base is right, 1 = it is not
-git log --oneline dev..HEAD              # should list ONLY this change's commits
+node tools/branch-base.mjs
 ```
 
-The ancestor check is the one that catches the mistake that actually happened:
-branching off `main`, or off a `dev` that had fallen behind. In that case
-`git log dev..HEAD` prints **nothing** — HEAD simply has nothing `dev` lacks — so
-a check based only on that log reports a clean branch that is quietly based on
-the wrong commit. The log is the second half: once the ancestor check fails, it
-tells you *what* is in the way.
+Manual fallback when needed: `git fetch origin`, then check both `git merge-base --is-ancestor dev HEAD` (catches branching off `main` or stale `dev`) and `git log --oneline dev..HEAD` (lists foreign commits). Rationale, verification matrix, stacked branches, and one-branch-per-change details: `docs/harness/branches.md`.
 
-Verified both directions on a scratch branch:
+## Pull requests and releases
 
-| Situation | `git log dev..HEAD` | `merge-base --is-ancestor` |
-|---|---|---|
-| branched off `main`, which is behind `dev` | empty — **misses it** | **fails** — catches it |
-| foreign commits stacked on `dev` | lists them | passes — correct, base is right |
-| correct branch off `dev` | only my commits | passes |
+Authentication uses `GH_TOKEN` from the host (`~/.config/devc/env`) and system-wide `gh` git credentials (`docs/harness/github-auth.md`). Never put a token in `.git/config`, the Dockerfile, or any repo file; if auth breaks mid-session, stop and ask.
 
-`git fetch` first is not a detail. The check is only as good as the ref it
-compares against, and a local `dev` left over from before three PRs merged will
-happily list their commits as yours — the same false alarm as the bug it is meant
-to catch, and just as likely to be ignored.
+Feature workflow:
 
-Those two commands are the manual fallback. `node tools/branch-base.mjs` runs the
-same checks plus the stacked-branch case, against a freshly fetched `origin/dev`,
-and prints one line naming the classification and the fix; it is what
-`prove-it-works` and CI run. Its row is the first in "Rules and enforcement"
-below.
-
-A branch legitimately based on **another unmerged feature branch** still shows
-foreign commits, and neither check can tell that apart from a mistake. Subtract
-the base branch explicitly (`git log dev..feature-a`) or rebase onto `dev` first.
-
-### Why a branch per change
-
-`CHANGELOG.md`'s `Unreleased` section is shared ground. Two changes in flight
-both add a `Maintenance` bullet there, so parallel branches conflict on merge
-even when their code does not. A branch keeps one change's tests, files and
-changelog entry together, and makes each one independently verifiable: check it
-out in a worktree and run the suite before assuming it stands alone.
-
-When two branches are ready at once, merge or rebase in an order you choose
-yourself — `dev` is not a priority queue.
-
-## Pull requests
-
-Branches reach GitHub through `gh`, which is baked into the devcontainer image
-(`.devcontainer/Dockerfile`) rather than installed at runtime, so a rebuild does
-not silently drop it. The token is **not** on a shared volume any more: it arrives
-as `GH_TOKEN` from the host environment, alongside the provider keys, and gh's
-non-secret config sits at `GH_CONFIG_DIR=/home/vscode/.pi/gh` on this container's
-private volume. That is what lets every container use the same credential without
-any cross-container mount.
-
-The host-side source is `~/.config/devc/env`, which `devc` sources (with
-allexport) before `devcontainer up`; each `devcontainer.json` forwards the values
-with `${localEnv:...}`. One-time setup, run by the human:
-
-```bash
-mkdir -p ~/.config/devc && chmod 700 ~/.config/devc
-printf 'GH_TOKEN=%s\n' "$(gh auth token)" >> ~/.config/devc/env
-chmod 600 ~/.config/devc/env
-```
-
-A `gh auth login` *inside* a container still works, but it writes only that
-container's private volume, so the next container starts unauthenticated. Prefer
-the host env file. `git push` then works with no credential in `.git/config`,
-because the Dockerfile registers gh as git's credential helper system-wide —
-deliberately, not via `gh auth setup-git`, which writes to `~/.gitconfig` on the
-container-local overlay and is discarded on rebuild. The token would survive
-that; the helper would not, and push would break silently.
-
-Check *where* the token lives before trusting a login: `env | grep '^GH_TOKEN='`
-(never print the value) and `gh auth status`'s config path.
-
-## The workflow
-
-Once authenticated:
-
-1. Work on a branch (see "Branches"), committing as the `.pi/skills/commit/`
-   skill directs where it is present.
+1. Work on a feature branch off `dev`; commit per `skills/commit/`.
 2. `git push -u origin <branch>`
-3. `gh pr create --base dev --fill` — the explicit `--base dev` is not
-   decoration. This repository's **default branch is `main`**, and `gh pr create`
-   with no `--base` opens the pull request against that default, so the
-   unqualified command silently targets `main` — which takes releases only. A
-   branch cut from `dev` then drags every change merged since the last release
-   into `main` with it, because the squash replays the whole branch. `--fill`
-   uses the commits for title and body, which this repo's long commit subjects
-   suit; check the title it produced, since `--fill` falls back to the branch
-   name when it cannot read a single commit. Always say in the body what a
-   reviewer should check and what you verified.
-4. `gh pr merge --squash --delete-branch`. `--delete-branch` is not optional
-   politeness: a squash merge does not put the branch tip in `dev`'s history, so
-   a later `git branch -d <branch>` fails with "not fully merged" and needs `-D`.
-   Letting gh delete both the local and the remote branch avoids both.
-5. Bring `dev` up to date: `git checkout dev && git pull --ff-only`.
+3. `gh pr create --base dev --fill` — `--base dev` is required because the default branch is `main`; inspect the generated title and summarize verification in the body.
+4. `gh pr merge --squash --delete-branch` — squash tips are not in `dev` history, so let `gh` delete both local and remote branches.
+5. `git checkout dev && git pull --ff-only`
 
-Tags are cut from `main`, never from a feature branch.
+Release workflow (`dev` → `main`; tags cut from `main` only):
 
-Never put a token in `.git/config`, in the Dockerfile, or in a file in the repo.
-If authentication is needed mid-session, stop and ask rather than improvising.
+1. On `dev`, update `CHANGELOG.md` (`## Unreleased` → `## vX.Y.Z — <today>`, fresh `## Unreleased` above; per `skills/update-changelog/`, checked by `.pi/extensions/subagent/test/changelog-structure.test.ts`). A release that starts a new major also deletes the older major's sections in that same commit: the file holds `## Unreleased` and the newest major only, and every older release stays reachable through its tag (`git show vX.Y.Z:CHANGELOG.md`).
+2. Commit, push `dev`, and open PR `dev` → `main`. Never squash a release.
+3. `gh pr merge <n> --merge` — do not pass `--delete-branch` because `dev` is the head branch and must survive.
+4. Tag the merge commit on `main` and push: `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
+5. Fast-forward `dev` to `main` so `git describe --tags` sees the new tag: `git checkout dev && git merge --ff-only main && git push origin dev`.
 
-Note the consequence for step 1 of any changelog work: after a squash merge the
-branch's individual commits no longer exist in `main`, so release notes are
-written from PR titles and bodies, not from `git log`.
+Versions are git tags. The `pi` manifest in `package.json` makes this repo installable as `pi install git:github.com/RRiboulet/my-agent-setup`.
 
-## Releases
+## Harness layout, extensions, and settings
 
-A release is the only thing that moves `main`. Everything since the last tag
-accumulates on `dev`; `main` is brought forward and tagged.
+This repository ships one shared skill stack for the **`pi`** coding agent (full matrix: `docs/harnesses.md`):
 
-1. On `dev`, update `CHANGELOG.md`: retitle `## Unreleased` to
-   `## vX.Y.Z — <today's date>`, and add a fresh empty `## Unreleased` above it.
-   Nothing else in the file moves. `.pi/skills/update-changelog/` has the detail,
-   and `changelog-structure.test.ts` enforces the shape.
-2. Commit that, push `dev`, and open a pull request **`dev` → `main`**. This is
-   the one merge that is not a squash: a release wants its history, and `main`'s
-   commits should be the real ones. Use "Rebase and merge" or "Merge commit",
-   never "Squash".
-3. `gh pr merge <n> --merge` — **do not pass `--delete-branch`.** The head of
-   this pull request is `dev`, so that flag would delete the long-lived
-   integration branch. This is the one merge where the head branch must
-   survive.
-4. Tag the merge commit on `main` and push the tag:
-   `git tag -a vX.Y.Z -m "vX.Y.Z" && git push origin vX.Y.Z`.
-5. Fast-forward `dev` to the release merge, so the new tag is reachable from
-   `dev`:
+- `skills/` — **32 canonical Agent Skills** (8 user-invoked, 24 model-invoked), listed in `package.json`'s `pi.skills` and symlinked/copied for other harnesses via `scripts/install.sh` (with `instructions/AGENTS.md` as the routing snippet).
+- `.pi/extensions/` — **11 `pi` extensions**, listed explicitly in `package.json`'s `pi.extensions` manifest (checked by `.pi/extensions/subagent/test/package-manifest.test.ts`). Cross-extension imports have one home per extension (`.pi/extensions/orchestrator/events.ts`).
 
-   ```bash
-   git checkout dev && git merge --ff-only main && git push origin dev
-   ```
+`pi` settings: `.pi/settings.json` (tracked in git) sets `defaultTools: ["+tool_search", "+codemode"]` and `codemode.mode: "on"`; `.devcontainer/pi/settings.json` holds container defaults. Prefer `codemode` to batch independent/parallel calls and filter large output; use direct tools (`read`, `edit`, `write`, `bash`) for single-step work.
 
-   Skipping this leaves the tag on `main` only, and `git describe --tags` on
-   `dev` then reports the *previous* release — which is the baseline
-   `.pi/skills/update-changelog/` reads, so the next release re-reads work that
-   already shipped. It never stops being necessary on its own: every release
-   mints a fresh merge commit that `dev` does not otherwise contain. (This step
-   was missing through v1.2.0; v1.1.1 and v1.2.0 each needed a manual
-   catch-up.)
+On a host running `pi` from this checkout, install by local path (`pi install /path/to/my-agent-setup`), never `git:`, to avoid duplicate tool registration errors (`README.md`, "Isolated checkouts and linked worktrees"). Linked worktrees live under gitignored `.worktrees/` (`skills/worktree/`). Consult pi's API docs at `/usr/lib/node_modules/@earendil-works/pi-coding-agent/docs/`; do not modify pi itself.
 
-Versions are git tags. This repository is not published to npm — it is
-`private` and consumes no npm packages, but it IS consumable as a pi package:
-`package.json` carries a `pi` manifest listing the extension entry points and
-skills, which is what makes `pi install git:github.com/RRiboulet/my-agent-setup`
-work in another project.
-
-## Extensions
-
-Pi extensions live in `./.pi/extensions` and skills in `./.pi/skills`. When
-working in this repo, add or update them there.
-
-Codemode is enabled for this repo (see `.pi/settings.json`: `defaultTools`
-includes `+codemode`, `codemode.mode` is `on`). Prefer codemode to batch
-independent tool calls, run several calls in parallel, and filter large
-output before it reaches the model; use the direct tools (`read`, `edit`,
-`write`, `bash`) for one-off, single-step work where a script adds no value.
-(`.pi/settings.json` is gitignored on `dev` by design; committed updates
-require `git add -f`.)
-
-Adding a new extension or skill means adding it to the `pi` manifest in
-`package.json` as well: it lives in a dot-prefixed directory, which package
-discovery will not glob, so an unlisted extension installs nowhere.
-`test/package-manifest.test.ts` fails if the manifest and the tree disagree.
-
-Cross-extension imports have one home per extension. The settlement gate's
-typed event bus lives in `.pi/extensions/orchestrator/events.ts` and is imported
-by `todos.ts`, `review-triage/index.ts` and `subagent/index.ts`, because the
-publisher must not own the bus and a directory without an entry point fails the
-manifest test. The gate itself (`.pi/extensions/orchestrator/`) records a verdict
-as a session `custom` entry at `agent_before_settle`, publishes
-`orchestrator:gate-decided`, and **acts only where a project opted in** by
-committing `.pi/orchestrator.json`: an open todo, a repeated failure, a project
-verification command the gate runs, or the tool-call loop breaker can then commit
-one more turn instead of settling. An unresolved condition keeps blocking while
-its evidence is unchanged (a new edit, todo or failure re-arms it), every block
-spends one of the branch's `attemptCap`, and `orchestrator_override` is consumed
-by the next block it prevents without spending an attempt; `attemptCap` is the
-hard stop that keeps the gate from trapping a run. It yields `continue`
-when a goal owns it and never returns `continue: false`, so the goal extension
-keeps ownership of continuation. A check that cannot be evaluated fails open, and
-a delegated child records `scope: child` and blocks nothing. The same config's
-`advisor` key asks one configured stronger model for a second opinion when a
-branch holds an unanswered loop block or a repeated settlement failure, inside a
-cooldown and a per-branch budget, and injects the verdict as an extra prompt
-section at `before_agent_start` — never as a replacement system prompt and never
-by switching the model, so the cached prefix survives; it acts only in a trusted
-project, refuses loudly when the provider has no credentials, and its digest
-excludes tool output bodies. This repository deliberately has no config, so its
-own gate reports and nothing more.
-
-Install this repo where you run `pi` from it **as a local path**
-(`pi install /path/to/my-agent-setup`), never as
-`git:github.com/RRiboulet/my-agent-setup`: project discovery and an installed
-package both find `.pi/extensions`, so the git form loads every extension twice
-and pi aborts startup on the duplicate tools. The devcontainer already runs its
-own package-free agent dir on a private volume for this reason. Details and the
-symptom are in the README section "One copy of the extensions, never two".
-
-Other projects on this host do the opposite, deliberately: their images bake
-this repo at a pinned tag under `/opt/pi-packages/my-agent-setup`, and their
-`postCreate` points the container's own agent settings at that path. The tag is
-recorded in that project's `.devcontainer/pi-agent-setup.version`, mirrored by
-the Dockerfile's `PI_AGENT_SETUP_TAG`, and exposed to the running container as
-`PI_AGENT_SETUP_TAG`, the image label `org.rriboulet.pi-package`, and
-`/opt/pi-packages/my-agent-setup/.pi-agent-setup-tag`. Each project owns the
-check that fails when its pin drifts; `my-agent-setup` itself never carries a
-package in its container.
-
-Linked worktrees for independent tasks live under `.worktrees/` at the repo root (see `.pi/skills/worktree/`); that directory is gitignored and shared refs mean branch names must be unique across worktrees.
-
-You can consult pi for reference — the installed `@earendil-works/pi-coding-agent`
-docs at `/usr/lib/node_modules/@earendil-works/pi-coding-agent/docs/` are the
-source of truth for the API this code targets — but do not modify pi itself.
+Orchestrator settlement gate, advisor, workspace lockScope, Pragmatic Orchestrator delegation (`/delegation`, `!direct`, role→model routing, parent guardrails), and pinned-container setup: `docs/harness/extensions.md` (this repo commits no `.pi/orchestrator.json`, so its settlement gate is report-only while Pragmatic Orchestrator delegation defaults to `enforce`). `/orchestrate <folder>` and `orchestrator_wave` enforce tiered wave dispatch and gates inside `.pi/extensions/orchestrator/`.
 
 ## Coding skills
 
-Fourteen skills adapted from
-[RRiboulet/agent-coding-skills](https://github.com/RRiboulet/agent-coding-skills)
-cover the coding loop and now live here as ours: they carry this repo's rules in
-their bodies, and `licenses/NOTICE.md` records the MIT provenance. They are
-advertised by their descriptions, so load one when its trigger applies rather
-than waiting to be told:
+Load a skill when its trigger applies rather than waiting to be asked (provenance, mechanics, and repo overrides: `docs/harness/skills.md`):
 
-- Trivial, unambiguous edit — no behavior observable at a seam (typo, comment,
-  private rename, dependency bump, release note): make it, then check it. No
-  ceremony. Where that boundary falls is a judgement, not a rule: no check can
-  decide it, so it is prose and not a row in the table below.
-- Non-trivial or ambiguous request: `in-your-own-words` before building.
-- The shape of a change is still open — a new module or feature, a boundary
-  being reshaped, a workaround that keeps coming back, or two abstractions
-  competing: `architect` before any code, because a wrong shape is cheap to redo
-  on paper and expensive to redo once it is built.
-- The user asks to be grilled, stress-tested or interviewed, or a request's
-  shape is undecided and a ten-line playback cannot carry its assumptions:
-  `grilling`. It is the full design-tree interview in rounds; the cheap playback
-  stays the default.
-- A change crossing a module, service, API, schema or config boundary:
-  `blast-radius`.
-- A bug, failing test, CI failure, crash, flake or regression: `diagnosing-bugs`.
-- Any new or changed behavior — the default implementation style: `tdd`. For a
-  bug, `diagnosing-bugs` first. A rename, comment, typo or release note is not
-  behavior: skip `tdd` there, as `tdd`'s own description says.
-- Retries, queues, webhooks, jobs, migrations or setup scripts:
-  `idempotent-operations`.
-- Producing or acting on a performance number: `benchmark-checklist`.
-- A **big task left unsupervised for a long time** — hours of work the user did
-  not watch and will judge afterwards: `show-me-your-work`. Not for ordinary
-  sessions.
-- Before saying work is done: `prove-it-works`. It asks for one thing no gate
-  can: **name the test that fails when this change is reverted.** Revert the
-  behavior in one edit, watch that test fail, restore, re-run. If no test can
-  fail, the change is `not_run`, never `passed`.
-- The same mistake class corrected a second time, or a review that calls a fix a
-  repeat: `prevent-recurrence`. It chooses the highest level that can carry the
-  rule, proves it at the bad and good revision, and records the row; it does not
-  commission another review.
-- Writing or editing a skill, or changing a rule or pointer in `AGENTS.md`:
-  `writing-for-agents`.
+- **Trivial, unambiguous edit** (no observable behavior at a seam — typo, comment, private rename, dependency bump, release note): make it, check it, skip ceremony (judgment call).
+- **Non-trivial or ambiguous request**: `in-your-own-words` before building.
+- **Open design shape** (new module, boundary reshape, recurring workaround, competing abstractions): `architect` before code.
+- **User asks to be grilled/stress-tested**, or design tree outruns a playback: `grilling`.
+- **Crosses a module, service, API, schema, or config boundary**: `blast-radius`.
+- **Bug, failing test, CI failure, crash, flake, or regression**: `diagnosing-bugs` first.
+- **New or changed behavior** (default implementation style; skip for non-behavior edits): `tdd`.
+- **Retries, queues, webhooks, jobs, migrations, or setup scripts**: `idempotent-operations`.
+- **Producing or acting on a performance number**: `benchmark-checklist`.
+- **Big unsupervised task spanning hours**: `show-me-your-work`.
+- **Reviewing a diff or finishing a non-trivial change**: `review-change`.
+- **High-risk auth, security, concurrency, redaction, or data-migration change, or user asks to stress-test a diff**: `interrogate`.
+- **Before claiming done**: `prove-it-works` — revert the behavior change in one edit, watch its covering test go red, restore, re-run, and report the test (otherwise status is `not_run`, never `passed`).
+- **Same mistake class corrected twice**: `prevent-recurrence`.
+- **Repeated corrections or tooling/doc drift**: `retro`.
+- **Writing/editing a skill, `AGENTS.md`, or pointer doc**: `writing-for-agents`.
 
-Only the user starts the six user-invoked entry points, which pi spells
-`/skill:<name>`: `/skill:to-spec`, `/skill:to-tickets`, `/skill:implement`,
-`/skill:handoff`, `/skill:recall` (rebuild where the work actually stands from
-recent sessions and live repository state), `/skill:teach`. Suggest them when
-they fit; never start them yourself.
+Only the user starts the **8** user-invoked entry points (suggest when fitting; never start them yourself — `/skill:<name>` on `pi`): `/skill:handoff`, `/skill:implement`, `/skill:implement-spec`, `/skill:recall`, `/skill:teach`, `/skill:to-spec`, `/skill:to-tickets`, `/skill:verify-app`.
 
-`grilling`, `teach` and `writing-for-agents` are ported straight from
-[mattpocock/skills](https://github.com/mattpocock/skills) rather than through that
-stack, and `licenses/NOTICE.md` records them separately. `grilling` therefore
-sits in the trigger list above although it is not one of the fourteen adapted
-skills. It is model-invoked (so it is advertised by its description, and
-`/skill:grilling` still works). `teach` is user-invoked and stateful: it builds a
-teaching workspace outside any project checkout — never in this one — and the
-course is continued by starting a session in that directory and asking for the
-next lesson, or by `/skill:handoff` out of the session you are in.
-
-`writing-for-agents` is model-invoked too, and it is the rulebook for the prose
-this repository and its projects hand to an agent: skill bodies and
-descriptions, `AGENTS.md` bullets, and the pointers that reach a `references/`
-file. Load it before writing or reshaping any of those, and before adding a
-rule here. `references/skill-mechanics.md` covers the skill-specific part —
-frontmatter, the model-invoked vs user-invoked choice, and router skills.
-
-`prevent-recurrence` is ours: the correction-to-check loop, the ordered ladder,
-the rule table, the ratchet and "the diagnostic names the fix" come from pstack's
-`/correct`; the judgment boundary — when a lesson cannot be encoded, make the
-instruction more prominent and show the failure mode — comes from
-`principle-encode-lessons-in-structure`. The static checker for the table and
-the lint-locality test are added here. It is model-invoked because a repeated
-correction is something the agent can notice, and `/skill:prevent-recurrence`
-still works. Its Python recipes are in `references/python.md`. It ends at the
-check, the proof and the row; committing and reviewing stay with the existing
-skills and the review policy below.
-
-Three repo rules win over those skill bodies, and the skills say so in place:
-
-- **Commits** follow the `commit` skill (branch and base checks), not
-  `implement`'s looser "commit on the current branch".
-- **Worktrees** live under `.worktrees/` per the `worktree` skill.
-- **Reviews** follow the next section: one per change, only when asked, and
-  `prove-it-works` never starts one. `implement` therefore ends at proof, not at
-  a review.
+Repo overrides over adapted skill bodies: commits follow `commit` (branch and base checks); worktrees use `.worktrees/` (`worktree`); reviews follow `## Reviews` below (`implement` and `prove-it-works` end at proof, never start a review); delegation in `enforce` mode overrides inline edit/test steps in adapted skills via `coder` / `/orchestrate` (`docs/harness/skills.md`).
 
 ## Subagent tools
 
-**A child may run inside a worktree, and on this host it must be told which agent
-dir to use.** `bin/pi-agent-dir` has given this checkout a package-free agent dir of its own,
-a sibling of the shared one (`bin/pi-agent-dir --print` names it). A child rooted in
-`.worktrees/<slug>` inherits `PI_CODING_AGENT_DIR` from you, which is the *shared*
-dir with this repo installed as a package — so pi loads both that package and the
-worktree's own `.pi/`, and exits 1 on duplicate tool registration before any model
-call:
-
-```
-Tool "update_goal" conflicts with .../.worktrees/<slug>/.pi/extensions/goal.ts
-```
-
-Pass the per-project dir instead, and the worktree's copy is the only one loaded —
-which also means the child runs the branch's code and the branch's skills:
+For a `pi` child rooted in `.worktrees/<slug>`, inherit the per-checkout agent dir or pi fails on duplicate tools (`bin/pi-wrapped` handles non-login launchers):
 
 ```bash
 cd .worktrees/<slug> && PI_CODING_AGENT_DIR="$(bin/pi-agent-dir --print)" pi -p "<task>"
 ```
 
-A launcher that bypasses a login shell gets no `~/.bashrc`, so the `--shell` hook
-cannot pick the dir for it: run `bin/pi-wrapped` instead of `pi` there. It
-resolves the same dir `bin/pi-agent-dir --print` names, forwards every argument
-to `pi` unchanged and has no flags of its own, keeps a `PI_CODING_AGENT_DIR`
-already set in the environment, and falls back to a plain `pi` with a note on
-stderr outside a checkout or when the dir was never created. It does not create
-the dir — `bin/pi-agent-dir` is the one-time step.
+The seven management tools (`subagent_wait`, `subagent_status`, `subagent_answer`, `subagent_cancel`, `subagent_interrupt`, `subagent_resume`, `subagent_clean`) are hidden behind `tool_search` / `codemode` while `subagent` stays declared: call `tool_search` then invoke, or call `tools.subagent_*` in codemode. Pass `role` (`explore`, `research`, `coder`, `reviewer`, `security-reviewer`) and optional `tools` (`--tools` CLI allowlist) on `subagent`; Pragmatic Orchestrator routing and `subagent_ask` / `subagent_answer` details: `docs/harness/subagents.md`.
 
-The `subagent` tool has no env argument, so for a child that must live in a
-worktree, run it this way (or `pi --attach-subagent` into an existing session)
-rather than through `subagent({ cwd })`. Launching with `cwd` = the main checkout
-and `cd`-ing inside each command is the fallback: it starts, but it runs the main
-checkout's extensions and skills, not the branch's — which is enough for file
-edits and wrong for anything that tests the branch itself.
+## Reviews
 
-The seven management tools — `subagent_wait`, `subagent_status`,
-`subagent_answer`, `subagent_cancel`, `subagent_interrupt`, `subagent_resume`,
-`subagent_clean` —
-are **not declared** in this repo's sessions: `defaultTools: ["+tool_search"]` in
-`~/.pi/agent/settings.json` puts them behind `tool_search` so their descriptions
-and schemas stop riding along on every request (measured: ~890 tokens a
-request). `subagent` itself stays declared.
-
-So reach them in two steps:
-
-1. `tool_search` for the tool you want.
-2. Then call it, e.g. `subagent_status({ id })`.
-
-Start, then wait once: `subagent_wait({ id })` blocks until the run settles and
-returns its record — `subagent_wait({ ids })` waits for a whole fan-out, and a
-timed-out wait returns the current state rather than an error. Keep
-`subagent_status` for the live "what is it doing right now" question
-(`subagent_status({ compact: true })` is the cheap one-line-per-run form, and
-the single-run path is the one that returns output), not for collecting a result
-you could have waited on.
-
-A delegated child that is blocked can ask, and one blocking wait is deliberate.
-It registers `subagent_ask` only when the parent gave it a channel, so a parent
-pays nothing for a tool it can never call and a child of an older parent simply
-cannot ask. The parent's existing watcher tick reads the request (no second
-timer), `subagent_status` shows the run as `? waiting on a question` rather than
-active, stalled or interrupted, and `subagent_answer({ id, answer })` writes the
-reply after `ctx.ui.confirm`. A decision is confirmed by a human or refused:
-with no UI the tool says why and the child times out and reports the blocker.
-The gate is the tool, not the filesystem: the channel is same-uid, so a model with
-`write` or `bash` on this host could forge a reply (or a child could forge its
-own). The honest path is human-confirmed and says so; it does not claim a file
-can authenticate its writer, and in RPC mode the client is what puts the confirm
-to a person. A
-child with no parent left — shut-down watcher, expired request, aborted turn —
-is told the same thing, so it never hangs. That is the only exception to "a
-child is non-blocking"; a progress update (`kind: "progress"`) is fire-and-forget
-and needs no answer.
-
-## Reviews: one per change, and only when asked
-
-There is **one** review pipeline, and it starts only on request. `prove-it-works`
-is how the author proves and reports a change; it is not a review and it never
-commissions one. Do not run a review because a change feels non-trivial, because
-a skill suggested it, or because `/review` and `/triage` both exist.
-
-When the user asks for a review, pick exactly one door:
-
-- **`/review`** when they want to drive it interactively (PR, branch, commit,
-  folder, uncommitted). `/review` appends `REVIEW_GUIDELINES.md`, which carries
-  the Spec / Correctness / Standards method and this repo's rules.
-- **`triage_change` (or `/triage`) and one sub-agent** when they want an
-  independent read without staying in the loop. Triage is
-  **recommendation-only**: it measures the diff, asks the judge, and returns a
-  plan; it never launches anything.
-
-Never do both for the same change, and never start a second reviewer because the
-first found little. The sub-agent must not spawn further reviewers.
-
-**Always ask the user before launching a review subagent**, even when triage
-recommends one. A recommendation is not an instruction, and a question that
-merely *sounds* like it invites a review is not approval either: starting a
-reviewer spends real tokens and runs an independent process, so it is the user's
-call every time. Propose the lens and model, then wait for a yes.
-
-When the user does approve one, the reviewer's `provider`, `model` and
-`thinking` come from the `candidates` in the effective review-triage policy —
-the built-in defaults, or `~/.pi/agent/review-triage.json` when that file
-exists. Never hand-pick a model outside that list: if a lens needs a model the
-config lacks, add it to the config first. Which model sits in which capability
-band is a human judgement, not the agent's.
-
-Every candidate must name `opencode-go`, the provider this machine actually
-authenticates; the judge is the only model on another provider (`opencode`,
-OpenCode Zen, for the free `jev-1.13-free` classifier — same `OPENCODE_API_KEY`).
-The policy is built into `.pi/extensions/review-triage/config.ts`, so installing
-the package is enough, and the same policy is written out for editing as
-`.pi/extensions/review-triage/review-triage.example.json`; a test fails if a
-candidate's provider or stated cost drifts, and another fails if the example and
-the built-in defaults diverge. Whether a machine has a provider's credential is
-checked at run time (`credentials.ts`), not assumed: a missing reviewer provider
-drops its bands and names the provider, models and fix in the plan, and a missing
-judge provider short-circuits the call as `judgeFailure: unavailable`. The plan
-therefore never names a model this machine cannot run without saying why.
-
-A `show-me-your-work` trail does not get its own reviewer. If a review is
-commissioned, hand the trail to that one reviewer alongside the diff.
+Reviews follow one unified frontier pipeline: ad-hoc reviews run only when requested (`prove-it-works` never commissions a review)—`/review` dispatches an isolated `subagent({ role: "reviewer" })` (frontier inherited model, read-only tools) on `pi`. During waves, `orchestrator_wave` defaults `reviewer` to frontier inheritance + high thinking; in Pragmatic Orchestrator mode, multi-file/large edits (`>= 2` files or `>= 50` lines) arm an automatic `reviewer` gate. Details: `docs/harness/reviews.md`.
 
 ## Rules and enforcement
 
 | Rule | Level | Enforced by | Proof |
 |---|---|---|---|
 | A branch descends from origin/dev and carries only its own commits | test | `node tools/branch-base.mjs` | `tools/branch-base.test.mjs` |
+| CI checks match AGENTS.md Tests in order | test | `node --test .pi/extensions/subagent/test/checks-parity.test.ts` | `.pi/extensions/subagent/test/checks-parity.test.ts` |
+| Release merge never passes --delete-branch | test | `node --test .pi/extensions/subagent/test/github-skill.test.ts` | `.pi/extensions/subagent/test/github-skill.test.ts` |
+| Every extension in .pi/extensions and skill in skills/ is listed in package.json manifest | test | `node --test .pi/extensions/subagent/test/package-manifest.test.ts` | `.pi/extensions/subagent/test/package-manifest.test.ts` |
+| Every extension loads under strict ESM without side effects | test | `node --test .pi/extensions/subagent/test/extension-load.test.ts` | `.pi/extensions/subagent/test/extension-load.test.ts` |
+| Per-container agent dir is declared in devcontainer.json only | test | `node --test .pi/extensions/subagent/test/devcontainer-agent-dir.test.ts` | `.pi/extensions/subagent/test/devcontainer-agent-dir.test.ts` |
+| CHANGELOG.md keeps ## Unreleased at H2 above descending versions | test | `node --test .pi/extensions/subagent/test/changelog-structure.test.ts` | `.pi/extensions/subagent/test/changelog-structure.test.ts` |
+| CHANGELOG.md holds ## Unreleased plus the newest major's releases only, older ones via git show | test | `node --test .pi/extensions/subagent/test/changelog-structure.test.ts` | `.pi/extensions/subagent/test/changelog-structure.test.ts` |
+| CHANGELOG.md merges with the union driver so concurrent Unreleased appends merge | test | `node --test .pi/extensions/subagent/test/changelog-union-attribute.test.ts` | `.pi/extensions/subagent/test/changelog-union-attribute.test.ts` |
+| Skills follow naming, invocation, byte-cap, and reference-link contracts | test | `node --test .pi/extensions/subagent/test/coding-skills.test.ts` | `.pi/extensions/subagent/test/coding-skills.test.ts` |
+| README skill index matches skills/ frontmatter | test | `node tools/skills-index.mjs --check` | `.pi/extensions/subagent/test/skills-index.test.ts` |
+| Pragmatic Orchestrator delegation enforces role routing, parent budgets/edit caps, and post-edit test/reviewer gates | test | `node --test .pi/extensions/subagent/test/orchestrator-delegation.test.ts` | `.pi/extensions/subagent/test/orchestrator-delegation.test.ts` |
 
-One row per rule, and the row names what fails when the rule is broken. This
-table is the single source of truth: no separate registry, and prose in this file
-is a rule only once a row here enforces it. The checker validates the shape —
-the four columns, an allowed level, a non-empty enforcer, a proof that exists,
-no duplicate rule, no prose row without `judgment: <reason>`:
-
-```bash
-node .pi/skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md
-```
-
-The branch row is the dogfood rule earned by the three recorded misses under
-"Branches" above: `tools/branch-base.mjs` fetches `origin/dev` and classifies the
-branch, `tools/branch-base.test.mjs` builds the fixture repositories, and both
-run in `prove-it-works` and in CI. Its five classifications (`correct`,
-`superseded`, `behind-dev`, `foreign-commits`, `wrong-base`) are documented in
-the script's header. The table format and the checker's `--json` contract are in
-`.pi/skills/prevent-recurrence/references/rule-table.md`.
+Table format and checker contract: `skills/prevent-recurrence/references/rule-table.md`.
 
 ## Tests
 
 ```bash
+python3 scripts/validate.py                               # skill portability, links, and manifests
+bash scripts/test.sh                                      # installer + validator self-tests
 bash .pi/extensions/subagent/test/setup-deps.sh              # once: link pi's packages
 node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts
 (cd .pi/extensions/opencode-go-provider && node --test)  # provider package tests (separate tree)
-node --test .pi/skills/prevent-recurrence/scripts/test/*.test.mjs  # rule-table checker
-node .pi/skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md  # the rule table; must exit 0
+node --test skills/prevent-recurrence/scripts/test/*.test.mjs  # rule-table checker
+node skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md  # the rule table; must exit 0
 node tools/skills-index.mjs --check                     # the README's skill index; must exit 0
 node --test tools/bench/run.test.mjs                     # bench runner tests
 node --test tools/mcp-catalogue.test.mjs                 # catalogue install tests
@@ -493,91 +127,13 @@ node --test tools/branch-base.test.mjs                   # branch-base check tes
 node tools/branch-base.mjs                               # the branch-base rule; must exit 0
 ```
 
-Green is necessary, not sufficient: a gate proves the suite passes, not that it
-covers what you changed. Before reporting a behavior change as done, revert it in
-one edit and confirm the test that covers it goes red; restore and re-run. Report
-the test that failed. Measured on one task: the check appeared only in runs that
-had read `prove-it-works`, and a model that never opens a skill body never
-performed it. So it is written here, in context every turn, as well as in that
-skill.
-
-Run it with `bash` (or `sh`), not as `./setup-deps.sh` — see "Line endings"
-below. Node runs the TypeScript directly; there is no build step. See
-`.pi/extensions/subagent/test/README.md` for what is and is not covered.
-
-**`--test-concurrency=8` is not optional.** Node defaults the file concurrency to
-`availableParallelism() - 1`, which is **1** on this 2-core host, so the
-"parallel" runner was running one file at a time: 184 s of wall clock for 67 s of
-CPU (36 %), which says the suite is wait-bound, not CPU-bound. Measured
-2026-11-16: 119-132 s with the flag at 8, and no further gain at 16 (132 s), so
-the number is fixed rather than derived from `nproc`.
-
-Raising it also exposed two tests that had only ever passed because nothing ran
-beside them, both fixed here: a `btw` viewer test that waited 8 s for a spawned
-`node` process to render (now 30 s), and a widget ticker that needed two 20 ms
-ticks inside 120 ms (now 500 ms). Both now assert the behaviour rather than the
-machine, which is the rule `helpers.ts` already states for its own poll bound. If
-you raise the concurrency and see a red run, suspect a missing or tight wait
-before you suspect the code.
-
-#### One heavy thing at a time on this host
-
-`cat /proc/loadavg` and `ps` before you time anything, and record the load average
-beside every number you keep. This host has 2 vCPUs and more than one agent
-session runs on it, so a benchmark grid, another session's suite or a `devc` call
-will take the load from 0.4 to 33 — and a measurement taken in that window is a
-measurement of someone else's work. It cuts both ways: a grid started while
-another session is timing makes *its* numbers meaningless, which is worse than
-being slow, because each side then spends an hour triaging a "flake" that was
-contention.
-
-Two rules follow. **Never compare two timings taken at different loads** — re-run
-the pair, or say the comparison cannot be made. And when the suite goes red under
-load, **run the failing file alone before calling it a bug**: every red we have had
-under contention was a wall-clock bound in a test rather than the code it tests —
-a viewer waiting on a spawned `node` process, a 20 ms ticker needing two ticks, a
-widget row read one ticker before it refreshed itself. Those bounds are widened
-now, but the lesson is general: suspect a missing or too-tight wait first, and
-check the load average before you suspect the product.
-
-#### Typechecking: deliberately none
-
-There is no `tsconfig.json` and no `tsc` in the tree, and this is on purpose.
-`node --test` strips types without checking them, so a type error can survive
-the suite — a known, accepted cost. Adding a typechecker would mean pulling in
-the repo's first npm compiler dependency (it consumes no npm packages) and
-reconciling a documented asymmetry: `todos.ts` uses TypeScript parameter
-properties that node's strip-only loader rejects while pi's jiti loader
-accepts, and the `erasableSyntaxOnly` setting that would resolve that is one
-the files do not currently satisfy. The bug class a typechecker catches — a
-bare identifier used as if it existed, a `HarnessOptions` field the factory
-reads but no caller sets — is exactly what the P1/P2 audit fixed and pinned
-with tests, so the residual risk is covered by the suite's load guards.
-Decision recorded 2026-10-05 (TODO-914d99f8): not adopting a typecheck step.
+Run `setup-deps.sh` with `bash` (never `./setup-deps.sh`). Node executes `.ts` directly with no build or typecheck step (`tsconfig.json`/`tsc` intentionally absent). Keep `--test-concurrency=8` fixed; check `cat /proc/loadavg` and `ps` before timing anything, and re-run a failing file alone under host contention (`docs/harness/testing.md`, `.pi/extensions/subagent/test/README.md`).
 
 ## Line endings
 
-`.gitattributes` sets `* text=auto eol=lf`, so git *normalizes* CRLF away on
-comparison. Two consequences that `git status` cannot surface:
-
-- A file whose blob is LF may still be **CRLF in your working tree** if it was
-  checked out before `.gitattributes` existed. It shows as clean, yet bash
-  fails on it (`$'\r': command not found`, `set: pipefail: invalid option`).
-- `git add` does not fix an already-CRLF blob retroactively for files the
-  attribute did not apply to when they were first committed.
-
-If a shell script fails inexplicably, check it before trusting `git status`:
-
-```bash
-grep -qU $'\r' <file> && echo "CRLF in working tree"
-```
-
-Repair the whole tree with:
+`.gitattributes` sets `* text=auto eol=lf`, which can hide pre-existing CRLF files in the working tree from `git status`. Keep shell scripts LF; if one fails inexplicably (`$'\r'`), check `grep -qU $'\r' <file>` and repair the tree with:
 
 ```bash
 git add --renormalize .
-git ls-files -z | xargs -0 rm -f && git checkout-index -a -f   # re-checkout applies eol=lf
+git ls-files -z | xargs -0 rm -f && git checkout-index -a -f
 ```
-
-Keep shell files LF. The devcontainer bakes them in verbatim, and a trailing
-`\r` ends up inside sourced paths (`~/.aliases.zsh^M`).

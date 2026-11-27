@@ -1,0 +1,3 @@
+interface:
+  display_name: "Blast Radius"
+  short_description: "Find and prove what a change could break"
