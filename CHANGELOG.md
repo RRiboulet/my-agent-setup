@@ -6,6 +6,16 @@ Older releases are read from their tags with `git show vX.Y.Z:CHANGELOG.md` and 
 
 ## Unreleased
 
+Fixed:
+
+- **CI and the devcontainer install the pinned pi release the `btw` mirror
+  targets instead of `@latest` (`.github/workflows/checks.yml`,
+  `.devcontainer/Dockerfile`).** pi 1.7.0 changed `client-identity.js`
+  (attribution became unconditional and `isInstallTelemetryEnabled` is gone),
+  so the "mirrored pi internals have not drifted" gate went red on `@latest`
+  while the mirror still matches 1.6.1. `@earendil-works/pi-coding-agent@1.6.1`
+  pins its sibling packages exactly, so the pin cannot produce the mixed
+  family of issue #52; moving the pin and refreshing the mirror is one change.
 ## v2.1.1 — 2026-11-27
 
 Changed:

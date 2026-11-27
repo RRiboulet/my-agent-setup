@@ -58,13 +58,17 @@ RUN curl -fsSL -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
     && gh --version \
     && test "${GH_CONFIG_DIR#/home/vscode/.pi}" = "/gh"
 
-# Install the newest @earendil-works/pi-coding-agent on every rebuild. Pinning a
-# single version while leaving the sibling ranges (pi-ai, pi-tui, pi-codemode,
-# ...) unpinned is what produced the mixed family in issue #52; tracking
-# `@latest` keeps pi-coding-agent and its siblings from npm's own resolution
-# on the same release. See issue #52.
+# Install the pi release the `btw` mirror targets ("the mirrored pi internals
+# have not drifted" in `.pi/extensions/subagent/test/btw-request.test.ts`),
+# pinned instead of tracking `@latest`: a new pi release changes the internals
+# the mirror is cut against, and the drift gate goes red until the mirror is
+# refreshed. Pinning a single version is safe now because 1.6.1 pins its
+# sibling packages (pi-ai, pi-tui, pi-codemode, ...) exactly, so npm's own
+# resolution cannot produce the mixed family of issue #52. Move this pin and
+# refresh the mirror in the same change. Same command as
+# `.github/workflows/checks.yml`, so CI and the container track one release.
 RUN npm cache clean --force \
-    && npm install -g --no-audit --no-fund @earendil-works/pi-coding-agent@latest \
+    && npm install -g --no-audit --no-fund @earendil-works/pi-coding-agent@1.6.1 \
     && pi --version
 
 # Powerlevel10k (standalone; no Oh My Zsh required)

@@ -55,7 +55,7 @@ const AGENTS_PREP = new Map([
 /** Prep, on the CI side: runnable setup whose exit status is not a verdict on the change. */
 const CI_PREP = new Map([
 	[
-		"npm install -g --no-audit --no-fund @earendil-works/pi-coding-agent@latest",
+		"npm install -g --no-audit --no-fund @earendil-works/pi-coding-agent@1.6.1",
 		"install pi, because setup-deps.sh links the globally installed packages",
 	],
 	["git fetch origin dev", "the branch-base gate compares against origin/dev"],
