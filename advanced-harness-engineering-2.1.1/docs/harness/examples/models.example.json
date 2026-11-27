@@ -1,0 +1,75 @@
+{
+  "$schema": "https://pi.dev/schemas/models.schema.json",
+  "providers": {
+    "gateway-chat": {
+      "api": "openai-completions",
+      "baseUrl": "https://gateway.example.invalid/v1",
+      "apiKey": "$GATEWAY_API_KEY",
+      "models": [
+        {
+          "id": "frontier-chat-model",
+          "name": "Frontier Chat Model",
+          "reasoning": true,
+          "contextWindow": 1048576,
+          "maxTokens": 65536
+        },
+        {
+          "id": "coder-model",
+          "name": "Mid-Tier Coder Model",
+          "reasoning": true,
+          "contextWindow": 1048576,
+          "maxTokens": 65536
+        },
+        {
+          "id": "fast-search-model",
+          "name": "Fast Search Model",
+          "reasoning": true,
+          "contextWindow": 1000000,
+          "maxTokens": 128000
+        }
+      ]
+    },
+    "gateway-responses": {
+      "api": "openai-responses",
+      "baseUrl": "https://gateway.example.invalid/v1",
+      "apiKey": "$GATEWAY_API_KEY",
+      "models": [
+        {
+          "id": "responses-model",
+          "name": "Responses API Model",
+          "reasoning": true,
+          "contextWindow": 1000000,
+          "maxTokens": 128000
+        }
+      ]
+    },
+    "gateway-anthropic": {
+      "api": "anthropic-messages",
+      "baseUrl": "https://gateway.example.invalid/anthropic",
+      "apiKey": "$GATEWAY_API_KEY",
+      "models": [
+        {
+          "id": "claude-frontier-model",
+          "name": "Anthropic Frontier Model",
+          "reasoning": true,
+          "contextWindow": 1000000,
+          "maxTokens": 128000
+        },
+        {
+          "id": "claude-balanced-model",
+          "name": "Anthropic Balanced Model",
+          "reasoning": true,
+          "contextWindow": 1000000,
+          "maxTokens": 128000
+        },
+        {
+          "id": "claude-fast-model",
+          "name": "Anthropic Fast Model",
+          "reasoning": true,
+          "contextWindow": 1000000,
+          "maxTokens": 128000
+        }
+      ]
+    }
+  }
+}

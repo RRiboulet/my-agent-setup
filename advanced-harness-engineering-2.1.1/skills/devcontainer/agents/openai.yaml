@@ -1,0 +1,3 @@
+interface:
+  display_name: "Devcontainer"
+  short_description: "Run and manage project devcontainers with devc"

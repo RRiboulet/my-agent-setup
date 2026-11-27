@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "cell": {
+    "task": "head-hash",
+    "model": "opencode-go/glm-5.3-flash",
+    "state": "baseline"
+  },
+  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/advanced-harness-engineering/.worktrees/bench-fixture",
+  "repoState": {
+    "isGit": true,
+    "head": "5946170701a6d57e4dacc11c27ef76a85f49814e",
+    "dirty": false,
+    "dirtyAllowed": false
+  },
+  "startedAt": "2026-11-17T21:16:25.569Z",
+  "wallMs": 2792.576614,
+  "exitCode": 0,
+  "signal": null,
+  "timedOut": false,
+  "spawnError": null,
+  "prompt": "Run `git log -1 --format=%H` in this repository and reply with only the hash.",
+  "metrics": {
+    "toolCallCount": 1,
+    "toolCallsByName": {
+      "bash": 1
+    },
+    "toolResultCount": 1,
+    "toolTimeMs": 15,
+    "longestToolMs": 15,
+    "toolDurations": {
+      "bash": 15
+    },
+    "tokens": 25827,
+    "cost": 0.0024543399999999997,
+    "assistantMessages": 2,
+    "turns": 2,
+    "errors": 0,
+    "aborted": false,
+    "skillLoads": {}
+  },
+  "answer": "5946170701a6d57e4dacc11c27ef76a85f49814e",
+  "check": {
+    "passed": true,
+    "failures": [],
+    "command": null
+  },
+  "parseError": null,
+  "parseTruncated": false,
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/advanced-harness-engineering/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go%2Fglm-5.3-flash/sessions/head-hash",
+  "stderrTail": ""
+}

@@ -1,0 +1,39 @@
+[
+  {
+    "id": "ls",
+    "args": ["ls"],
+    "runs": 100,
+    "cwd": "/home/ubuntu",
+    "timeoutMs": 30000
+  },
+  {
+    "id": "doctor",
+    "args": ["doctor"],
+    "runs": 100,
+    "cwd": "/home/ubuntu",
+    "timeoutMs": 60000
+  },
+  {
+    "id": "exec-pupkeep-true",
+    "args": ["pupkeep", "--", "true"],
+    "runs": 30,
+    "cwd": "/home/ubuntu",
+    "timeoutMs": 120000
+  },
+  {
+    "id": "rebuild-pupkeep",
+    "args": ["rebuild", "pupkeep"],
+    "runs": 3,
+    "cwd": "/home/ubuntu",
+    "timeoutMs": 600000,
+    "mutating": true
+  },
+  {
+    "id": "up-pupkeep",
+    "args": ["up", "pupkeep"],
+    "runs": 3,
+    "cwd": "/home/ubuntu",
+    "timeoutMs": 300000,
+    "mutating": true
+  }
+]

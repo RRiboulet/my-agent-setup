@@ -1,0 +1,3 @@
+interface:
+  display_name: "Idempotent Operations"
+  short_description: "Make operations safe to re-run"

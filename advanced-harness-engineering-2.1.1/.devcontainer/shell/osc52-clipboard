@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# OSC 52 clipboard shim for a headless container.
+#
+# The host (VS Code on Windows) injects WAYLAND_DISPLAY and DISPLAY into the
+# container, but neither socket exists here, so pi's clipboard helper finds no
+# wl-copy/xclip and reports the clipboard as unavailable. A container has no
+# compositor to talk to, so instead of pretending, write the text as an OSC 52
+# escape sequence: the outer terminal puts it on the real clipboard.
+#
+# Reads the text on stdin (like wl-copy/xclip -selection clipboard), writes it
+# to stdout, and exits 0 so the caller's success path is taken.
+
+set -uo pipefail
+
+data=$(base64 -w0)
+# Terminals typically cap OSC 52 payloads; stay under the common limit rather
+# than emitting something the client silently drops.
+if [ "${#data}" -gt 100000 ]; then
+	echo "osc52-clipboard: text too large for OSC 52 (${#data} base64 chars)" >&2
+	exit 1
+fi
+printf '\033]52;c;%s\007' "$data"
+exit 0

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://pi.dev/schemas/settings.schema.json",
+  "packages": [
+    "/path/to/advanced-harness-engineering"
+  ],
+  "defaultProvider": "gateway-chat",
+  "defaultModel": "frontier-chat-model",
+  "defaultThinkingLevel": "medium",
+  "defaultTools": [
+    "+tool_search",
+    "+codemode"
+  ],
+  "codemode": {
+    "mode": "only"
+  }
+}

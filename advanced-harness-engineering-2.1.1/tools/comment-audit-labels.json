@@ -1,0 +1,314 @@
+{
+  "version": 1,
+  "tool": "tools/comment-audit.mjs",
+  "report": "docs/experiments/comment-audit.md",
+  "classes": {
+    "I": "invariant — a rule, contract, shape, ordering or boundary that must hold",
+    "E": "external quirk — the stated cause is outside this code's design (runtime, OS, library, checker, protocol, model)",
+    "WJ": "workaround justification — the unit justifies a code shape that exists because of a constraint, failure mode or hazard, and names what it avoids",
+    "N": "narration — restates what the code does, or is a section banner"
+  },
+  "decisionRule": "see docs/experiments/comment-audit.md §2; one class per unit, primary assertion",
+  "units": {
+    "AA-0836fb1e": {
+      "class": "E",
+      "textSha": "2a03030f231e837f26d90ebfbd8b665856d0a0fe7ccf1010a19b1aeb59d2aa91",
+      "why": "bare `# type: ignore[attr-defined]` — a checker directive with no reason stated"
+    },
+    "AA-09804fe9": {
+      "class": "I",
+      "textSha": "aa32edf41617d459e6282eb19c9bea12cec17c4f9123f9e6b2bdcc9873972413",
+      "why": "states the contract the test pins: .env resolves from the project root"
+    },
+    "AA-1016b5b2": {
+      "class": "N",
+      "textSha": "8d8f7d6e031d4a210cc68dc466386fc65d402a0fc2768225caac52ce284440d7",
+      "why": "restates what the two state fields hold"
+    },
+    "AA-119e1f7b": {
+      "class": "N",
+      "textSha": "9dfabb9e35280622dbb2a22b5cfd4a0232fefdfc44196071061f19c0e97bc48b",
+      "why": "one-line restatement of the class name"
+    },
+    "AA-170a75f7": {
+      "class": "E",
+      "textSha": "2bc4b483c3b5d7ae5842960244161a9fabd2a5dbd801b8bac2495ca6eed8cea6",
+      "why": "the option exists because of external model families and gateway billing; the \"keeps its exact previous request shape\" clause is rationale, not the subject"
+    },
+    "AA-267147b5": {
+      "class": "E",
+      "textSha": "3bf2b03dbac52b9b4e970630449febe70f44d772f5202a35077a65fa6f67ba58",
+      "why": "justifies the assertion by the external llama.cpp launch flag (--reasoning on)"
+    },
+    "AA-27e22087": {
+      "class": "WJ",
+      "textSha": "6b6d138eab4a28f7d339f5b11c952619da40e56ec56557609ad30daaa05f0c4e",
+      "why": "justifies degrading instead of failing the run (\"instead of failing the run — the report stays achievable\")"
+    },
+    "AA-37066582": {
+      "class": "I",
+      "textSha": "f88d0bc49481abda78c2a2497f42162a1e7f7a0e94831ab4b0607ae7b32a54c9",
+      "why": "API contract: additive, keyword-only, fail-open, identical with no sink"
+    },
+    "AA-45bf5851": {
+      "class": "I",
+      "textSha": "3930d3d1fe5ab88ed63a06e76fa1cc72e0f81f196f80f58f71cdd16ec6f6c11a",
+      "why": "states the property under test: a search-only failure completes schema-only"
+    },
+    "AA-4bfe6d80": {
+      "class": "I",
+      "textSha": "43c9e81aba7c51d6fc41bbaad5180f1133cda49da4924c79a76259ed74056770",
+      "why": "states the property under test: non-SQL failures keep the generic message"
+    },
+    "AA-4e45e6f1": {
+      "class": "I",
+      "textSha": "46d500713d62e93a17e0d34d10faf71173bac685cc68c3f3b774c6aedd0a6b33",
+      "why": "states the retry accounting the assertion pins (discovery once, retry to SQL)"
+    },
+    "AA-52a0e270": {
+      "class": "I",
+      "textSha": "c50a23e2b09b55d2f5269e061d2d92d89bb529093f7e9bdedc2453228fe5a40b",
+      "why": "states the rule behind the assertion: the local path is unauthenticated by design"
+    },
+    "AA-58a9ac2b": {
+      "class": "N",
+      "textSha": "e44c756e13b2c9a62b7c88155553d5cbf026c1740c492c80b87da060ecaa3a43",
+      "why": "module docstring describing the file and how it skips"
+    },
+    "AA-71dd9538": {
+      "class": "E",
+      "textSha": "2a64a5ea23cdd4deb2a86a930793f76836ad803793f6120dc7fede5f6646c6e1",
+      "why": "bare `# type: ignore[no-untyped-def]` on a stub method"
+    },
+    "AA-74d929df": {
+      "class": "I",
+      "textSha": "3b1cdc85f02b761e1a605b462a9a6dad9d61bcabacacf34bc6706269a3bbc470",
+      "why": "names the property: every call is attributed, zero unattributed"
+    },
+    "AA-7ce54b2f": {
+      "class": "I",
+      "textSha": "122eacdceaac635d338447154872ce05714cd98d4f7347f3ddb0611d01d57411",
+      "why": "scope boundary: what the suite pins and what it does not prove"
+    },
+    "AA-a2bbe955": {
+      "class": "N",
+      "textSha": "654449cd7808c64e16e795b71d80c75c8a5be7a779bcf0ac606b3093258fa8a2",
+      "why": "describes what the module holds"
+    },
+    "AA-a5f79d2e": {
+      "class": "I",
+      "textSha": "bb1f9e7172375d03f6f1f0b35cdf7242f61ab78e6a3960ab9cf5f21379bbe839",
+      "why": "routing rules: transient failure retries; a completed or violating report ends the run"
+    },
+    "AA-af6c81f7": {
+      "class": "E",
+      "textSha": "2a64a5ea23cdd4deb2a86a930793f76836ad803793f6120dc7fede5f6646c6e1",
+      "why": "bare `# type: ignore[no-untyped-def]` on a stub function"
+    },
+    "AA-b0ac9938": {
+      "class": "E",
+      "textSha": "b678648488a204b76cc2025719ef04cac452e9fcd708a9e051c833ed16337757",
+      "why": "the stub blocks on purpose to mimic external ONNX inference cost"
+    },
+    "AA-c27338ce": {
+      "class": "E",
+      "textSha": "7fc3a969065900d055cb85b63d120b42d4ee28837634166902111be498ce4781",
+      "why": "bare `# type: ignore[assignment]` on a monkeypatched private function"
+    },
+    "AA-ca4ae95c": {
+      "class": "I",
+      "textSha": "f33f72d59cb334342fc8b155c577132e6923d22da5dfd2f3181aab0ef36c6c37",
+      "why": "states the sequence-number invariant the assertion pins"
+    },
+    "AA-d2c217a8": {
+      "class": "I",
+      "textSha": "86c3bd7f7372f5492c50fc0207c924ae6c5e3fd6441f8d8ff444d4335b85cf62",
+      "why": "states what the config must contain when tracing is enabled"
+    },
+    "AA-db6408c4": {
+      "class": "E",
+      "textSha": "2a64a5ea23cdd4deb2a86a930793f76836ad803793f6120dc7fede5f6646c6e1",
+      "why": "bare `# type: ignore[no-untyped-def]` on a stub method"
+    },
+    "AA-decf0e2b": {
+      "class": "I",
+      "textSha": "fa075e269da529f68384dd3a30b9967ca2475abd9298089f37c5ac5fff23b048",
+      "why": "states the property under test: the seeding client honours DB_POOL_MAX_SIZE"
+    },
+    "AA-e15a794e": {
+      "class": "N",
+      "textSha": "1fe7fbf6009de824f4ed1e21c224db78ec5c1e2c57758940d222461edc15a7ab",
+      "why": "one-line restatement of the protocol's name"
+    },
+    "AA-e6736fb5": {
+      "class": "I",
+      "textSha": "2725bed915f78030cb50b19212b98f3f56384b352fd398dced7998ac13d25329",
+      "why": "states the rule the test pins: a nested producer cannot relabel its own event"
+    },
+    "AA-e7a055ae": {
+      "class": "I",
+      "textSha": "47f510ed829f17e3a4690f6966b2c002d6e143e7c2f289cb286415494a41ada1",
+      "why": "states the property at the public seam: status, answer and error unaffected"
+    },
+    "AA-ed590d74": {
+      "class": "E",
+      "textSha": "014154c6b2d302317e4eff0e286c1211136b4ab4ec24dbff175e2ea567e3b952",
+      "why": "bare `# noqa: RUF001` on a non-ASCII literal"
+    },
+    "AA-ef86bd6c": {
+      "class": "N",
+      "textSha": "6fc542240e2d20626f54e423246f7acbbc1fb3d3282f797202846cca0fdd3c6b",
+      "why": "section banner"
+    },
+    "PU-03c9dfbc": {
+      "class": "I",
+      "textSha": "75b284747f95ecd4be44dd92bb39402f90cf0d2f24aca9ddfcd1d625303d3930",
+      "why": "defines the return shape and the rule that `today` is derived locally, not taken from the response"
+    },
+    "PU-088ae9e6": {
+      "class": "I",
+      "textSha": "c071c7205fa72283f2ab4bd118436842768805727eb85671d8f159136db8b683",
+      "why": "module header enumerating the atomicity and \"never stored\" rules; one paragraph inside it justifies best-effort retirement, but the primary assertion is the rule set"
+    },
+    "PU-1075ede1": {
+      "class": "I",
+      "textSha": "7629cfd7c995b0576c1733c252d0d56cc9980a44f1f9db73d8e2ae6a544381ba",
+      "why": "defines the no-op condition a refusal checks"
+    },
+    "PU-10c8f894": {
+      "class": "I",
+      "textSha": "c435e3f1998ac8598d243d47f0692f763033ae5d9fc33f1685e7739894f4c0fc",
+      "why": "defines the retry schedule the constant encodes (first delay, doubling, cap)"
+    },
+    "PU-11ebe87d": {
+      "class": "WJ",
+      "textSha": "e9aab956e3ebe54832240637f9a8dc132f2ac32a914598e7cbe1caceca76a27a",
+      "why": "justifies swallowing the archive failure (\"a failure is not fatal ... the next boot retries\"); the shape is an error path, not the feature"
+    },
+    "PU-120b4a65": {
+      "class": "I",
+      "textSha": "3523d7c0e3068bb63b660631fe770973982a9a46d0d09c86ff9dd06d5affbf71",
+      "why": "states the id-stability contract and who depends on it"
+    },
+    "PU-2350ecce": {
+      "class": "WJ",
+      "textSha": "9885042adcde61f9c884a9df22892f06dab27ea16296d260cf5767c1b2b2baa1",
+      "why": "justifies the narrow catch (\"must repeat, not retry blindly; anything else ... surfaces\")"
+    },
+    "PU-23ee5b94": {
+      "class": "WJ",
+      "textSha": "05fcf8222ce608f3a7f77281989f259ea501cf91deebf70e8e618a672f82539f",
+      "why": "the double exists so stop() does not wait out a 3 s escalation — a test workaround for real behaviour"
+    },
+    "PU-2632e0da": {
+      "class": "I",
+      "textSha": "8576335122e64452a44d010b023d59ba47a2c29651d2173029c20c9999b8481b",
+      "why": "states the precondition the guard encodes (a cloudflare start already started the tunnel)"
+    },
+    "PU-2acc1a74": {
+      "class": "I",
+      "textSha": "89fcd19808e613ba2d8a0e62b8335f863d5187f2c98eaa0edbb10b556e586f67",
+      "why": "states the module's architectural constraints: no framework, no build step, no offline writes"
+    },
+    "PU-304acc39": {
+      "class": "I",
+      "textSha": "8546cd3ad9b9a65f552e88a2f95f49460329df84bab09dac7883261b6a666052",
+      "why": "documents the error's meaning and the caller's remedy"
+    },
+    "PU-3fc1ed4e": {
+      "class": "WJ",
+      "textSha": "343c5ea5235d3240b66c09784fb97629cf75ee29bb4b9134f86712d1de57a581",
+      "why": "justifies the redundant validation (\"backstop, not the primary check ... fails boot\")"
+    },
+    "PU-4110ca09": {
+      "class": "I",
+      "textSha": "e9fbf96df910d81fd562975a2b691477c6650fdb8872311412c3e645938cffb6",
+      "why": "states the condition under which a same-revision update is still applied"
+    },
+    "PU-6ff40e07": {
+      "class": "N",
+      "textSha": "a63757538bd1f34ad06573669f5d7ee6333447af30fa816491de75050d122a54",
+      "why": "narrates the test scenario (a clock correction) rather than stating a product rule"
+    },
+    "PU-843aca7d": {
+      "class": "WJ",
+      "textSha": "c05ad25a84e8c1bd91de76719823aae9aa90b304a6a490d218ac073cc0dcd3a0",
+      "why": "justifies macrotask-over-microtask by the queueing hazard it avoids"
+    },
+    "PU-954c7a2a": {
+      "class": "N",
+      "textSha": "09a79677acd82cc63fdea66d1b85b2560eb0d24d51b9bd2565fbdd277d02351d",
+      "why": "restates what the fixture literal means"
+    },
+    "PU-9805b3e7": {
+      "class": "I",
+      "textSha": "141fe21502fe0584aaee80132370e484917a5a19a4811b4d2d23ff98f02da76c",
+      "why": "states the no-colour-only rule the CSS implements"
+    },
+    "PU-9ca87f27": {
+      "class": "I",
+      "textSha": "5c3f9a0e7c261b939e2cf9ac0bc5c6d5e379bf5004e7660131dc5048d9c6ac92",
+      "why": "contract of a union variant: what the \"stale\" answer carries and why the record travels with it"
+    },
+    "PU-9eb5abe0": {
+      "class": "I",
+      "textSha": "bba6d104e47dbf86144c9dbe0f94ec2a072068b7a25d2389fd685442fe8f0e41",
+      "why": "states the wire contract: one 200 for both terminal kinds, `replayed` as the flag"
+    },
+    "PU-b38f59fd": {
+      "class": "I",
+      "textSha": "665de33835512da3ee3ce1111fbe87cc82e7bfb1d872b0ba95088a09bbbed4d2",
+      "why": "states a non-invariant that must hold: append order is not chronological"
+    },
+    "PU-b95bedf9": {
+      "class": "I",
+      "textSha": "7b2b78e4ebc3d890584763b69742abff4d221051fff7cc199c16ad73a9651b06",
+      "why": "states the archive contracts: one commit, nothing dropped, idempotent, retry-safe"
+    },
+    "PU-cb876781": {
+      "class": "N",
+      "textSha": "4895e18fdf727e0e3ddb7bcd9a6bd179f7e73b250cfe069ef8d24b0370e2dc4f",
+      "why": "restates what the exported helper does"
+    },
+    "PU-cef2958e": {
+      "class": "WJ",
+      "textSha": "5078b41c86a805ce202d34386b17642f3c05abf987ffdd05c6b499892759fba0",
+      "why": "justifies the pending-key design by the failure it survives (the request may have committed)"
+    },
+    "PU-dc30b534": {
+      "class": "I",
+      "textSha": "6b8e0c2af36a8b26e862febcf6b08d624608a57cfe7307fd41d5e7a5a8a83125",
+      "why": "rule about the actionId namespace and what it prevents"
+    },
+    "PU-de1fa789": {
+      "class": "I",
+      "textSha": "5f8616e6f74b29371d81fb54b89714c39ad65abea1eba8b59e05569b23b7c7cc",
+      "why": "field contract: which kinds carry it and what it names"
+    },
+    "PU-e410e60c": {
+      "class": "I",
+      "textSha": "88c4b6fa72f91043e1e94978e004c96897796e2b5410bd0bc7dc925ce7857a87",
+      "why": "field contract: present exactly when the status is confirmed"
+    },
+    "PU-e652686c": {
+      "class": "WJ",
+      "textSha": "a98ae008f1c9e30187365c7270ecc6e3f845d4cdd70f983bcc8abfdbcd5be8ca",
+      "why": "justifies the single text rendering by the copy/headline drift a second one causes"
+    },
+    "PU-eff963ad": {
+      "class": "N",
+      "textSha": "a3e1d061de1ff009101c5b6853962db9290b7ce01acd22782b157c2efd3169a1",
+      "why": "states the premise of the assertion rather than a product rule"
+    },
+    "PU-f7fb2a8f": {
+      "class": "N",
+      "textSha": "df20aa8b12ee5de94546bb0448ac0e3fc90daae1b7aaf1a7cd2af7fcb84797ff",
+      "why": "section banner plus a description of how the test harness works"
+    },
+    "PU-fad94a3c": {
+      "class": "E",
+      "textSha": "4ed9938f638302e5bb4a0de2ead63c1a46776b935a3af2f5ec31f112e8d25860",
+      "why": "the code's shape follows from dpkg prompting with nobody at the phone — an environment/tool constraint"
+    }
+  }
+}

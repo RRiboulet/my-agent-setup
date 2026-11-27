@@ -1,0 +1,3 @@
+interface:
+  display_name: "GitHub"
+  short_description: "Work with GitHub issues, PRs, and CI via gh"

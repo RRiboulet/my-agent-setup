@@ -1,0 +1,5 @@
+interface:
+  display_name: "Recall"
+  short_description: "Rebuild context from recent sessions, git, and PRs"
+policy:
+  allow_implicit_invocation: false

@@ -1,0 +1,7 @@
+{
+  "id": "idempotent-retry",
+  "repo": ".worktrees/bench-tdd-baseline",
+  "timeoutMs": 300000,
+  "prompt": "the webhook consumer double-charges on retry. Do not change any files: describe, in one line, the first thing you would do, and say which skill you would follow, if any.",
+  "expectedSkill": "idempotent-operations"
+}

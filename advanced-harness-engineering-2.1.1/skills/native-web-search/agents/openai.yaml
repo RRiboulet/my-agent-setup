@@ -1,0 +1,3 @@
+interface:
+  display_name: "Native Web Search"
+  short_description: "Run quick web search with cited source URLs"

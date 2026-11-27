@@ -1,0 +1,51 @@
+{
+  "schemaVersion": 1,
+  "cell": {
+    "task": "devc-ls",
+    "model": "opencode-go/deepseek-v4.1-flash",
+    "state": "baseline"
+  },
+  "repo": "/home/ubuntu",
+  "repoState": {
+    "isGit": false,
+    "head": "",
+    "dirty": false,
+    "dirtyAllowed": false
+  },
+  "startedAt": "2026-11-17T21:15:44.500Z",
+  "wallMs": 7611.52853,
+  "exitCode": 0,
+  "signal": null,
+  "timedOut": false,
+  "spawnError": null,
+  "prompt": "Run `devc ls` once and list the project names it prints.",
+  "metrics": {
+    "toolCallCount": 1,
+    "toolCallsByName": {
+      "bash": 1
+    },
+    "toolResultCount": 1,
+    "toolTimeMs": 661,
+    "longestToolMs": 661,
+    "toolDurations": {
+      "bash": 661
+    },
+    "tokens": 16891,
+    "cost": 0.0013493099999999998,
+    "assistantMessages": 2,
+    "turns": 2,
+    "errors": 0,
+    "aborted": false,
+    "skillLoads": {}
+  },
+  "answer": "Project names from `devc ls`:\n\n1. `analytics-agent`\n2. `lol-dataset`\n3. `advanced-harness-engineering`\n4. `pupkeep`",
+  "check": {
+    "passed": true,
+    "failures": [],
+    "command": null
+  },
+  "parseError": null,
+  "parseTruncated": false,
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/advanced-harness-engineering/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go%2Fdeepseek-v4.1-flash/sessions/devc-ls",
+  "stderrTail": ""
+}

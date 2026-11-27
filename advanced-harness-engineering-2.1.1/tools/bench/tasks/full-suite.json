@@ -1,0 +1,13 @@
+{
+  "id": "full-suite",
+  "repo": ".worktrees/bench-fixture",
+  "timeoutMs": 900000,
+  "prompt": "Run the full test suite with `node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts` and report the pass and fail counts. If a test fails, report the counts and stop; do not investigate the failure or rerun the suite.",
+  "check": {
+    "expectAnswerContains": [
+      "pass"
+    ]
+  },
+  "allowDirty": true,
+  "parseSuite": true
+}

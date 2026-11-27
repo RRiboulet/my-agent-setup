@@ -1,0 +1,12 @@
+{
+  "defaultTools": [
+    "+tool_search",
+    "+codemode"
+  ],
+  "codemode": {
+    "mode": "on"
+  },
+  "skills": [
+    "../skills"
+  ]
+}
