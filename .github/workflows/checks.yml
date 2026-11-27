@@ -54,8 +54,15 @@ jobs:
       # The subagent suite imports pi's packages, and setup-deps.sh links the
       # globally installed ones (`npm root -g`). Without this the link step
       # fails on a clean runner, which is why it is not a local-only concern.
+      # Pinned to the pi release the `btw` mirror targets (the
+      # "mirrored pi internals have not drifted" gate in
+      # `btw-request.test.ts`): `@latest` moved to a release whose internals
+      # the mirror does not match. 1.6.1 pins its sibling packages exactly,
+      # so this cannot produce the mixed family of issue #52. Move the pin
+      # and refresh the mirror in the same change. Same command as
+      # `.devcontainer/Dockerfile`, so CI and the container track one release.
       - name: Install pi globally
-        run: npm install -g --no-audit --no-fund @earendil-works/pi-coding-agent@latest
+        run: npm install -g --no-audit --no-fund @earendil-works/pi-coding-agent@1.6.1
 
       - name: Fetch the integration branch
         if: github.base_ref == 'dev' || github.ref == 'refs/heads/dev'
