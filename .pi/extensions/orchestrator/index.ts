@@ -59,7 +59,8 @@
  * boundary, and the subagent factory had already deleted it.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { existsSync } from "node:fs";
+import type { ExtensionAPI, ExtensionContext, ToolExposure } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import { activeGoalFromBranch } from "../goal.ts";
@@ -77,7 +78,7 @@ import {
 	toPiUsage,
 	type AdvisorRecord,
 } from "./advisor.ts";
-import { gateConfigCanAct, readGateConfig, type GateConfig, type GateConfigRead } from "./config.ts";
+import { DEFAULT_GATE_CONFIG, GATE_CONFIG_BASENAME, gateConfigCanAct, gateConfigPath, readGateConfig, type GateConfig, type GateConfigRead } from "./config.ts";
 import {
 	evaluateGate,
 	formatLoopVerdict,
@@ -98,7 +99,9 @@ import {
 import { ORCHESTRATION_EVENTS, ORCHESTRATOR_CUSTOM_TYPES, publishOrchestrationEvent, subscribeOrchestrationEvent, type LiveRunStatus } from "./events.ts";
 import { buildCompactSnapshot } from "./compact-snapshot.ts";
 import { isWorkerRole, ORCHESTRATOR_ROLE, type OrchestratorRole } from "./role.ts";
-import { registerWorkspace } from "./workspace-runtime.ts";
+import { registerWorkspace, resolveWorkspaceToolExposure } from "./workspace-runtime.ts";
+import { registerWaveRuntime } from "./wave-runtime.ts";
+import { reconstructWaveState, type WaveState } from "./wave.ts";
 import { readOpenTodos } from "./todo-state.ts";
 import { runVerification, type VerificationExec, type VerificationOutcome } from "./verify.ts";
 import {
@@ -159,6 +162,23 @@ export default function orchestratorExtension(
 	// that blocks, so a reserved path must refuse the call before the loop
 	// breaker starts counting it.
 	registerWorkspace(pi);
+	registerWaveRuntime(pi, {
+		isDelegatedWorker: worker,
+		onWaveActivated: (ctx) => {
+			try {
+				if (!ctx.isProjectTrusted()) {
+					registerOverrideTool(true);
+					return;
+				}
+				const config = cachedConfigAt(ctx.cwd);
+				if (config.block.wave || gateConfigCanAct(config)) {
+					registerOverrideTool(true);
+				}
+			} catch {
+				// An unreadable config is reported at settlement.
+			}
+		},
+	});
 
 	/** The loop breaker's config cache. One read per session, not per call. */
 	let cachedConfig: { cwd: string; read: GateConfigRead } | null = null;
@@ -169,12 +189,19 @@ export default function orchestratorExtension(
 	let lastLoopVerdict: LoopVerdict | null = null;
 	/** The last consultation recorded on this branch, for `/gate`. */
 	let lastAdvisor: AdvisorRecord | null = null;
+	/** The latest wave state reconstructed from the session branch. */
+	let waveState: WaveState | null = null;
 	/**
-	 * Gate blocks recorded on this branch. Authoritative at the settlement
-	 * boundary, which re-derives it from the branch; the copy here exists so the
-	 * loop breaker does not walk the session log on every tool call.
+	 * Settlement gate blocks recorded on this branch. Authoritative at the
+	 * settlement boundary, which re-derives it from the branch.
 	 */
 	let attempts = 0;
+	/**
+	 * Mid-run loop-breaker blocks recorded on this branch, tracked separately
+	 * from settlement gate attempts so loop blocks never exhaust the settlement
+	 * gate budget.
+	 */
+	let loopAttempts = 0;
 	const loop = createLoopState();
 
 	/**
@@ -254,13 +281,26 @@ export default function orchestratorExtension(
 	 * mid-session. Idempotent, so the second path is free.
 	 */
 	let overrideToolRegistered = false;
-	const registerOverrideTool = (trusted: boolean): void => {
+	let appliedOverrideExposure: ToolExposure | undefined;
+	const registerOverrideTool = (canAct: boolean): void => {
 		// A worker never acts, so it must never get the escape hatch from a block.
 		if (worker) return;
-		if (!trusted) return; // never offer an escape hatch in a project the gate will not act in
-		if (overrideToolRegistered) return;
+		if (!canAct) return; // never offer an escape hatch in a project the gate will not act in
+		let exposure: ToolExposure | undefined;
+		try {
+			if (typeof pi.getActiveTools === "function") {
+				exposure = resolveWorkspaceToolExposure(pi.getActiveTools());
+			}
+		} catch (error) {
+			console.error(
+				`[orchestrator] could not resolve override tool exposure: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		if (overrideToolRegistered && appliedOverrideExposure === exposure) return;
+		const wasDirect = overrideToolRegistered && appliedOverrideExposure === undefined;
 		overrideToolRegistered = true;
-		pi.registerTool({
+		appliedOverrideExposure = exposure;
+		const definition = {
 			name: GATE_OVERRIDE_TOOL,
 			label: "Orchestration override",
 			description:
@@ -274,7 +314,7 @@ export default function orchestratorExtension(
 					description: "Why the block is wrong and what you are doing instead. Recorded in the session; it may not be empty.",
 				}),
 			}),
-			async execute(_toolCallId, params) {
+			async execute(_toolCallId: string, params: Record<string, unknown>) {
 				const reason = String(params.reason ?? "").trim();
 				if (!reason) {
 					throw new Error("orchestrator_override needs a non-empty reason; it is recorded so an override is auditable");
@@ -285,14 +325,19 @@ export default function orchestratorExtension(
 				return {
 					content: [
 						{
-							type: "text",
+							type: "text" as const,
 							text: `Override granted for the next orchestration gate block: ${reason}. It is consumed by that block and applies to this session only.`,
 						},
 					],
 					details: { reason, at },
 				};
 			},
-		});
+		};
+		pi.registerTool(exposure ? { ...definition, exposure } : definition);
+		if (wasDirect && exposure === "codemode" && typeof pi.getActiveTools === "function" && typeof pi.setActiveTools === "function") {
+			const retargetedNames = new Set([GATE_OVERRIDE_TOOL]);
+			pi.setActiveTools(pi.getActiveTools().filter((name) => !retargetedNames.has(name)));
+		}
 	};
 
 	const cachedConfigAt = (cwd: string): GateConfig => {
@@ -300,21 +345,58 @@ export default function orchestratorExtension(
 		return cachedConfig.read.config;
 	};
 
+	const warnedUntrustedConfigKeys = new Set<string>();
+	const checkedUntrustedToolCallKeys = new Set<string>();
+	const untrustedWarnKey = (ctx: ExtensionContext): string => {
+		let sessionId = "";
+		try {
+			sessionId = ctx.sessionManager?.getSessionId?.() ?? "";
+		} catch {
+			sessionId = "";
+		}
+		return `${sessionId}\0${ctx.cwd}`;
+	};
+	const warnIfUntrustedConfigIgnored = (ctx: ExtensionContext): void => {
+		if (worker) return;
+		if (ctx.isProjectTrusted()) return;
+		const key = untrustedWarnKey(ctx);
+		if (warnedUntrustedConfigKeys.has(key)) return;
+		if (!existsSync(gateConfigPath(ctx.cwd))) return;
+		warnedUntrustedConfigKeys.add(key);
+		ctx.ui?.notify?.(
+			`.pi/${GATE_CONFIG_BASENAME} is ignored because this project is untrusted.`,
+			"warning",
+		);
+	};
+
 	const reconstructState = (ctx: ExtensionContext): void => {
-		const state = reconstructGateState(ctx.sessionManager.getBranch());
+		warnIfUntrustedConfigIgnored(ctx);
+		const branch = ctx.sessionManager.getBranch();
+		const state = reconstructGateState(branch);
 		lastVerdict = state.lastVerdict;
 		lastLoopVerdict = state.lastLoopVerdict;
 		// Read from the branch, not remembered: a resume must see the consultations
 		// this branch already paid for, and the budget and cooldown are derived
 		// from them.
-		lastAdvisor = readAdvisorState(ctx.sessionManager.getBranch()).last;
+		lastAdvisor = readAdvisorState(branch).last;
+		waveState = reconstructWaveState(branch);
 		attempts = state.attempts;
+		loopAttempts = state.loopAttempts;
 		// One config read per session boundary: the loop breaker and the override
 		// tool both need to know, before the first tool call, whether this project
 		// opted into anything.
-		cachedConfig = { cwd: ctx.cwd, read: readGateConfig(ctx.cwd) };
-		if (gateConfigCanAct(cachedConfig.read.config)) registerOverrideTool(ctx.isProjectTrusted());
+		const trusted = ctx.isProjectTrusted();
+		cachedConfig = trusted
+			? { cwd: ctx.cwd, read: readGateConfig(ctx.cwd) }
+			: { cwd: ctx.cwd, read: { config: DEFAULT_GATE_CONFIG, source: "default" } };
+		const waveGateActive = waveState?.status === "active" && cachedConfig.read.config.block.wave;
+		const canAct = trusted || waveState?.status === "active";
+		if (gateConfigCanAct(cachedConfig.read.config) || waveGateActive) {
+			registerOverrideTool(canAct);
+		}
 		pendingOverride = null;
+		parked = false;
+		finishedWhileParked.clear();
 		resetLoopState(loop);
 	};
 
@@ -353,6 +435,7 @@ export default function orchestratorExtension(
 			const advisorState = readAdvisorState(branch);
 			const goal = activeGoalFromBranch(branch);
 			const todos = await readOpenTodos(ctx.cwd);
+			waveState = reconstructWaveState(branch);
 
 			// The config supplies the advisor budget and, when the branch holds no
 			// verdict yet, the attempt cap. An unreadable config is not an error here:
@@ -373,7 +456,7 @@ export default function orchestratorExtension(
 				openTodos: todos.todos,
 				gate: {
 					attempts: gate.attempts,
-					attemptCap: gate.lastVerdict?.attemptCap ?? gate.lastLoopVerdict?.attemptCap ?? config?.attemptCap ?? 0,
+					attemptCap: gate.lastVerdict?.attemptCap ?? config?.attemptCap ?? 0,
 					blocked: gate.blockedConditions.map((kind) => ({
 						kind,
 						evidence: gate.blockedEvidence[kind] ?? null,
@@ -388,6 +471,7 @@ export default function orchestratorExtension(
 							consumedKeys: advisorState.consumedKeys,
 						}
 					: null,
+				wave: waveState,
 			});
 			// Nothing to report: no empty message, which would only spend context on a
 			// sentence saying there is nothing to say.
@@ -459,7 +543,10 @@ export default function orchestratorExtension(
 		// The advisor is a model call configured by a committed file. In a project
 		// pi has never trusted that file came from whoever wrote the repository, so
 		// its advisor key is ignored entirely: no call, no entry, no section.
-		if (!ctx.isProjectTrusted()) return;
+		if (!ctx.isProjectTrusted()) {
+			warnIfUntrustedConfigIgnored(ctx);
+			return;
+		}
 
 		let config: GateConfig;
 		try {
@@ -552,6 +639,20 @@ export default function orchestratorExtension(
 	};
 
 	pi.on("before_agent_start", async (event, ctx) => {
+		if (!worker) {
+			const trusted = ctx.isProjectTrusted();
+			try {
+				const config = trusted ? cachedConfigAt(ctx.cwd) : DEFAULT_GATE_CONFIG;
+				waveState = reconstructWaveState(ctx.sessionManager.getBranch());
+				const waveGateActive = waveState?.status === "active" && config.block.wave;
+				const canAct = trusted || waveState?.status === "active";
+				if (canAct && (overrideToolRegistered || gateConfigCanAct(config) || waveGateActive)) {
+					registerOverrideTool(true);
+				}
+			} catch {
+				// An unreadable config is reported at settlement.
+			}
+		}
 		try {
 			await advise(event, ctx);
 		} catch (error) {
@@ -570,13 +671,34 @@ export default function orchestratorExtension(
 		event: { entries?: unknown[]; outcome?: unknown },
 		ctx: ExtensionContext,
 	): Promise<{ entries: unknown[]; continue?: boolean }> => {
-		// Fresh per boundary, not cached: a run may last minutes and a project may
-		// correct its config mid-session. One read per run is not a cost.
-		const configRead = readGateConfig(ctx.cwd);
-		cachedConfig = { cwd: ctx.cwd, read: configRead };
-		const config: GateConfig = configRead.config;
-		if (gateConfigCanAct(config)) registerOverrideTool(ctx.isProjectTrusted());
+		const trusted = ctx.isProjectTrusted();
 		const branch = ctx.sessionManager.getBranch();
+		waveState = reconstructWaveState(branch);
+		const untrustedWaveOnly = !trusted && waveState?.status === "active";
+		// Fresh per boundary, not cached when trusted: a run may last minutes and a
+		// project may correct its config mid-session. Untrusted projects ignore
+		// repo config entirely and fall back to the safe wave-only defaults when a
+		// wave is active.
+		const configRead: GateConfigRead = trusted
+			? readGateConfig(ctx.cwd)
+			: { config: DEFAULT_GATE_CONFIG, source: "default" };
+		cachedConfig = { cwd: ctx.cwd, read: configRead };
+		const config: GateConfig = untrustedWaveOnly
+			? {
+					...DEFAULT_GATE_CONFIG,
+					block: {
+						openTodos: false,
+						repeatedFailure: false,
+						loops: false,
+						wave: true,
+						waitForSubagents: true,
+					},
+					verification: null,
+					advisor: null,
+				}
+			: configRead.config;
+		const waveGateActive = waveState?.status === "active" && config.block.wave;
+		if (gateConfigCanAct(config) || waveGateActive) registerOverrideTool(trusted || waveState?.status === "active");
 		const state = reconstructGateState(branch);
 		attempts = state.attempts;
 		lastVerdict = state.lastVerdict ?? lastVerdict;
@@ -600,7 +722,8 @@ export default function orchestratorExtension(
 		if (child) {
 			suppressed =
 				"this is a delegated worker session (PI_ORCHESTRATOR_ROLE=worker, or the legacy PI_TMUX_SUBAGENT_CHILD=1): the gate reports and never blocks, because the parent owns the decision";
-		} else if (!ctx.isProjectTrusted()) {
+		} else if (!trusted && !untrustedWaveOnly) {
+			warnIfUntrustedConfigIgnored(ctx);
 			// The verification command comes from a committed project file. This
 			// extension ships as a user-level package, so it also loads in a checkout
 			// pi has never trusted; running that checkout's command at settlement
@@ -609,6 +732,9 @@ export default function orchestratorExtension(
 				"this project is not trusted, so the gate neither runs the command in its config nor blocks the run";
 		} else if (outcome !== "completed") {
 			suppressed = `the run ended as "${outcome}"; pi suppresses continuations after an error or abort, so the gate reports only`;
+		}
+		if (untrustedWaveOnly) {
+			warnIfUntrustedConfigIgnored(ctx);
 		}
 		// Do NOT consult `event.context.canContinue` here. pi builds that snapshot
 		// from the drafts proposed BEFORE this handler runs, and on a normal
@@ -622,6 +748,7 @@ export default function orchestratorExtension(
 			kinds: [],
 			alreadyBlocked: state.blockedConditions,
 			alreadyBlockedEvidence: state.blockedEvidence,
+			block: { wave: config.block.wave },
 		};
 		if (!suppressed) {
 			if (config.block.openTodos) policy.kinds.push("todos");
@@ -651,7 +778,8 @@ export default function orchestratorExtension(
 		// the model to act on information it does not have yet. Its outcome would be
 		// discarded by the park, so the command is not run: the next settlement,
 		// after the run settles, runs it once and acts on the result.
-		const parkingWhileLive = config.block.waitForSubagents === true && liveRuns.size > 0;
+		const waitForSubagents = config.block.waitForSubagents || waveGateActive;
+		const parkingWhileLive = waitForSubagents && liveRuns.size > 0;
 		const shouldVerify =
 			spec !== null &&
 			policy.kinds.includes("verification") &&
@@ -693,13 +821,21 @@ export default function orchestratorExtension(
 			suppressed,
 			unevaluated,
 			liveRuns: liveRunIds,
-			waitForSubagents: config.block.waitForSubagents,
+			waitForSubagents,
+			wave: waveState,
 		});
 		if (verdict.override) pendingOverride = null;
 		// A parked settlement earns one wake, sent when the live set empties. A
 		// worker never reaches here with `parked` true: `suppressed` empties its
-		// candidate set, so parking needs no special case.
-		if (verdict.parked) parked = true;
+		// candidate set, so parking needs no special case. Any non-parked
+		// settlement clears any earlier park so a late child does not wake a turn
+		// that already settled.
+		if (verdict.parked) {
+			parked = true;
+		} else {
+			parked = false;
+			finishedWhileParked.clear();
+		}
 		attempts = verdict.attempts;
 		lastVerdict = verdict;
 
@@ -744,6 +880,8 @@ export default function orchestratorExtension(
 				unevaluated: [`gate: ${error instanceof Error ? error.message : String(error)}`],
 			});
 			lastVerdict = verdict;
+			parked = false;
+			finishedWhileParked.clear();
 			publishOrchestrationEvent(pi, ORCHESTRATION_EVENTS.gateDecided, { action: "settle", verdict });
 			const prior = Array.isArray(event.entries) ? event.entries : [];
 			return {
@@ -754,7 +892,8 @@ export default function orchestratorExtension(
 
 	// --- The loop breaker --------------------------------------------------
 
-	const loopCallOf = (tool: string, input: unknown) => ({
+	const loopCallOf = (tool: string, input: unknown, toolCallId?: string) => ({
+		...(toolCallId ? { toolCallId } : {}),
 		tool,
 		signature: loopSignature(tool, input),
 		invocation: invocationLabel(tool, input),
@@ -766,7 +905,14 @@ export default function orchestratorExtension(
 		if (worker) return;
 		// Same boundary as the settlement: a project pi does not trust supplies the
 		// config, so its policy is not honoured here either.
-		if (!ctx.isProjectTrusted()) return;
+		if (!ctx.isProjectTrusted()) {
+			const key = untrustedWarnKey(ctx);
+			if (!checkedUntrustedToolCallKeys.has(key)) {
+				checkedUntrustedToolCallKeys.add(key);
+				warnIfUntrustedConfigIgnored(ctx);
+			}
+			return;
+		}
 		let config: GateConfig;
 		try {
 			// Cached: one file read for the session, not one per tool call.
@@ -776,7 +922,8 @@ export default function orchestratorExtension(
 		}
 		if (!config.block.loops) return;
 
-		const call = loopCallOf(tool, isRecord(event.input) ? event.input : {});
+		const toolCallId = typeof event.toolCallId === "string" && event.toolCallId ? event.toolCallId : undefined;
+		const call = loopCallOf(tool, isRecord(event.input) ? event.input : {}, toolCallId);
 		const evidence = evaluateLoop(loop, call);
 		if (!evidence) {
 			recordCall(loop, call);
@@ -798,9 +945,9 @@ export default function orchestratorExtension(
 				count: evidence.count,
 				detail: evidence.detail,
 				reason,
-				attempts,
-				attemptCap: config.attemptCap,
-				remainingAttempts: Math.max(0, config.attemptCap - attempts),
+				attempts: loopAttempts,
+				attemptCap: config.loopAttemptCap,
+				remainingAttempts: Math.max(0, config.loopAttemptCap - loopAttempts),
 				blocksTheTurn: loop.blocksTheTurn,
 			};
 			lastLoopVerdict = record;
@@ -810,10 +957,10 @@ export default function orchestratorExtension(
 		};
 
 		if (pendingOverride) return consumeOverride();
-		// Bounded twice, on purpose: per turn (the cap) and per branch (the same
-		// budget the settlement blocks draw on). Both failures are silent by
-		// design — an exhausted budget must let the call run, never trap it.
-		if (loop.blocksTheTurn >= LOOP_BLOCKS_PER_TURN || attempts >= config.attemptCap) {
+		// Bounded twice, on purpose: per turn (the cap) and per branch (`loopAttemptCap`,
+		// independent of the settlement gate's `attemptCap`). Both failures are silent
+		// by design — an exhausted budget must let the call run, never trap it.
+		if (loop.blocksTheTurn >= LOOP_BLOCKS_PER_TURN || loopAttempts >= config.loopAttemptCap) {
 			recordCall(loop, call);
 			return;
 		}
@@ -822,7 +969,7 @@ export default function orchestratorExtension(
 		// result, and leaving it out lets the next settlement's evidence stay
 		// readable instead of being poisoned by a call that never happened.
 		loop.blocksTheTurn += 1;
-		attempts += 1;
+		loopAttempts += 1;
 		const reason = loopBlockReason(evidence, GATE_OVERRIDE_TOOL);
 		const record: LoopVerdict = {
 			version: GATE_VERSION,
@@ -834,9 +981,9 @@ export default function orchestratorExtension(
 			count: evidence.count,
 			detail: evidence.detail,
 			reason,
-			attempts,
-			attemptCap: config.attemptCap,
-			remainingAttempts: Math.max(0, config.attemptCap - attempts),
+			attempts: loopAttempts,
+			attemptCap: config.loopAttemptCap,
+			remainingAttempts: Math.max(0, config.loopAttemptCap - loopAttempts),
 			blocksTheTurn: loop.blocksTheTurn,
 		};
 		lastLoopVerdict = record;
@@ -852,7 +999,8 @@ export default function orchestratorExtension(
 		if (worker) return;
 		const tool = typeof event.toolName === "string" ? event.toolName : "";
 		if (!tool) return;
-		const call = loopCallOf(tool, isRecord(event.input) ? event.input : {});
+		const toolCallId = typeof event.toolCallId === "string" && event.toolCallId ? event.toolCallId : undefined;
+		const call = loopCallOf(tool, isRecord(event.input) ? event.input : {}, toolCallId);
 		recordResult(loop, call, { isError: event.isError === true, text: toolResultText(event.content) });
 	});
 

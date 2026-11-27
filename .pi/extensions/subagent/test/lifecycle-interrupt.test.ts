@@ -27,6 +27,8 @@ test("subagent_interrupt sends Escape to the child's pane and nothing else", asy
 		assert.ok(!sent[0].args.includes("-l"), "Escape is a key, not a literal string");
 		assert.ok(!sent[0].args.includes("C-c"), "app.clear quits the child on the second press");
 		assert.match(interrupted.text, /did not confirm an interrupt/, "an idle child cannot confirm");
+		assert.ok(interrupted.text.includes(run.attachCommand), `unconfirmed message must interpolate attachCommand: ${interrupted.text}`);
+		assert.ok(!interrupted.text.includes("${run.attachCommand}"), `unconfirmed message must not leak literal placeholder: ${interrupted.text}`);
 
 		// The record says a request is outstanding, so subagent_status can explain
 		// a run whose child never answered.

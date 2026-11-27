@@ -324,8 +324,9 @@ writes JSON; the report is a table.
 - `bg` lands first; it is already built in another worktree. The repeat-breaker
   ladder is withdrawn on measurement, not deferred.
 - Skills: prune + merge + progressive disclosure, all three.
-- Session-breakdown: replace the graph with a compact table and keep
-  `tools/measure-session-usage.mjs`.
+- Session-breakdown: **withdrawn** — the extension was removed from the repo
+  on 2026-11-25 (see `CHANGELOG.md`, `## Unreleased`).
+  `tools/measure-session-usage.mjs` stays; the table work does not happen.
 - repo-explorer: split commands, overlay only, explicit send.
 - Phone: repo-explorer plus a local tmux bell; no push channel.
 - Adopt, do not vendor, where a maintained package exists (`pi-lens`,

@@ -141,6 +141,10 @@ actually here:
   repairs, test-harness churn and refactors, each recorded with the reasoning —
   this is a personal repo where the reasoning is the deliverable. Write them
   up.
+- The file is a window, not the archive: `## Unreleased` plus the newest major's
+  releases (today v1.17.x). Older majors live in their tags, read back with
+  `git show vX.Y.Z:CHANGELOG.md`. See "Where the `Unreleased` section goes" for
+  when sections are pruned and how concurrent appends merge.
 
 So: read the surrounding entries before writing, and match them.
 
@@ -159,7 +163,34 @@ descending order the rest of the file uses.
 
 At release time, that section becomes the release: retitle `## Unreleased` to
 `## vX.Y.Z — <date>`, add a new empty `## Unreleased` above it, and tag the
-commit. Nothing else in the file moves.
+commit. Nothing else in the file moves unless the release starts a new major —
+see the prune below.
+
+**Retention: the file keeps only the newest major.** Every older major is a tag,
+not a section. `git show v0.9.0:CHANGELOG.md` prints that tag's changelog exactly
+as it shipped, including the sections since deleted, so nothing is lost by
+pruning — the tag was cut before the deletion. The structure test
+(`.pi/extensions/subagent/test/changelog-structure.test.ts`) fails on any
+release heading from an older major, which makes the prune part of the release
+rather than tidying for later.
+
+**Pruning is a release step.** After retitling and adding the fresh `Unreleased`:
+if `vX.Y.Z` starts a new major, delete the older major's sections from the file in
+the same commit. A minor or patch release prunes nothing, because the file
+already holds its whole major.
+
+**Union driver: concurrent appends merge by themselves.** `.gitattributes` gives
+`CHANGELOG.md` `merge=union`, so two branches that each append to `## Unreleased`
+merge with both sides kept, in order, and no conflict markers on a local
+`git merge`. (GitHub's server-side squash merge runs no custom driver, so the PR
+view may still show a conflict; resolving it locally is then conflict-free.)
+Keep appending at the bottom of the Unreleased section rather than editing
+existing entries: union keeps both sides of a changed hunk, so an edit and an
+append to the same lines can interleave into text neither branch wrote.
+
+Union does not judge near-duplicates. The same entry appended on two branches
+lands twice, with no conflict marker to draw your eye, so read the merged
+Unreleased section before committing it.
 
 ### Pull requests: cite the PR, not the commit
 

@@ -12,9 +12,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { type RunRecord } from "../index.ts";
+import subagentExtension, { type RunRecord } from "../index.ts";
 import { LIST_DETAIL_BUDGET } from "../listview.ts";
 import { ORCHESTRATION_EVENTS, type RunSettledPayload } from "../../orchestrator/events.ts";
+import { createFakeHost } from "./fake-pi.ts";
 import { waitFor, withEnv, withTempAgentDir } from "./helpers.ts";
 import { createHarness, withHarness } from "./lifecycle-harness.ts";
 
@@ -275,5 +276,89 @@ test("the single-run status path always returns the output, finished or not", as
 		// A list-view flag must never reach the collection path.
 		const compactInspect = await h.call("subagent_status", { id: live.id, compact: true });
 		assert.ok(compactInspect.text.includes("THE-ACTUAL-OUTPUT"), `compact does not apply to an id: ${compactInspect.text}`);
+	});
+});
+
+test("drainQueue launches up to maxConcurrent queued runs concurrently without exceeding cap under re-entry", async () => {
+	await withTempAgentDir(async () => {
+		// Seed 3 queued runs by starting with maxConcurrent=1 (1 running + 3 queued), then shutting down.
+		const seed = await createHarness({ maxConcurrent: "1" });
+		try {
+			await seed.call("subagent", { task: "already running" });
+			await seed.call("subagent", { task: "queued 1" });
+			await seed.call("subagent", { task: "queued 2" });
+			await seed.call("subagent", { task: "queued 3" });
+		} finally {
+			await seed.shutdown();
+		}
+
+		// Reload with maxConcurrent=3: 1 run is already running, so 2 slots are free for queued 1 and 2,
+		// while queued 3 must stay queued. Gate new-session so both concurrent launches overlap in flight.
+		let inFlightNewSessions = 0;
+		let maxConcurrentNewSessions = 0;
+		const releaseNewSessions: (() => void)[] = [];
+		let reentrantTriggered = false;
+		let hostRef: ReturnType<typeof createFakeHost> | undefined;
+
+		await withEnv(
+			{
+				PI_TMUX_SUBAGENT_CHILD: undefined,
+				PI_TMUX_SUBAGENT_RESULT: undefined,
+				PI_TMUX_SUBAGENT_INTERRUPT: undefined,
+				PI_SUBAGENT_MAX_CONCURRENT: "3",
+			},
+			async () => {
+				const host = createFakeHost({
+					sessionId: "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+					model: { provider: "openrouter", id: "parent/model" },
+					exec: async (_cmd, args) => {
+						if (args.length === 1 && args[0] === "-V") return { code: 0, stdout: "tmux 3.3a", stderr: "", killed: false, truncated: false };
+						if (args.includes("new-session")) {
+							inFlightNewSessions += 1;
+							maxConcurrentNewSessions = Math.max(maxConcurrentNewSessions, inFlightNewSessions);
+							if (inFlightNewSessions === 2 && !reentrantTriggered && hostRef) {
+								reentrantTriggered = true;
+								// Re-enter startRun/drainQueue while 2 concurrent launches are in flight; must not exceed maxConcurrent=3.
+								void hostRef.callTool("subagent", { task: "reentrant extra" });
+							}
+							await new Promise<void>((resolve) => {
+								releaseNewSessions.push(resolve);
+								if (releaseNewSessions.length >= 2) {
+									for (const r of releaseNewSessions) r();
+								} else {
+									setTimeout(resolve, 400);
+								}
+							});
+							inFlightNewSessions -= 1;
+						}
+						if (args.includes("display-message")) return { code: 0, stdout: "0", stderr: "", killed: false, truncated: false };
+						return { code: 0, stdout: "", stderr: "", killed: false, truncated: false };
+					},
+				});
+				hostRef = host;
+				Object.assign(host.pi as Record<string, unknown>, {
+					registerMessageRenderer: () => undefined,
+					getActiveTools: () => ["read", "bash", "edit", "write"],
+					getThinkingLevel: () => "medium",
+				});
+				subagentExtension(host.pi);
+				try {
+					await host.fire("session_start");
+					assert.equal(
+						maxConcurrentNewSessions,
+						2,
+						`expected 2 queued runs to launch concurrently, observed maxConcurrentNewSessions=${maxConcurrentNewSessions}`,
+					);
+					// Give any re-entrant call a moment to settle.
+					await new Promise((resolve) => setTimeout(resolve, 50));
+					const status = await host.callTool("subagent_status", {});
+					const runs = (status.details as { runs: RunRecord[] }).runs;
+					assert.equal(runs.filter((r) => r.status === "running").length, 3, "exactly maxConcurrent (3) runs may be active");
+					assert.equal(runs.filter((r) => r.status === "queued").length, 2, "remaining 2 runs stay queued");
+				} finally {
+					await host.fire("session_shutdown");
+				}
+			},
+		);
 	});
 });

@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { after, before, beforeEach, test } from "node:test";
 
-import { registerWorkspace } from "../../orchestrator/workspace-runtime.ts";
+import { registerWorkspace, resolveWorkspaceToolExposure } from "../../orchestrator/workspace-runtime.ts";
 import {
 	buildPeerMessage,
 	deliveredDir,
@@ -421,4 +421,133 @@ test("a runtime that is not joined cannot send, and neither side creates a messa
 	await receiver.runtime.tick();
 	assert.equal(sentMessages(receiver).length, 0);
 	await receiver.runtime.shutdown();
+});
+
+test("a throwing pi.sendMessage does not permanently wedge releasedThisTurn", async () => {
+	const sender = await session("throw-sender");
+	const receiver = await session("throw-receiver", { idle: true });
+	await callTool(sender.pi, "orchestrator_message", { to: "throw-receiver", body: "retry after send failure" }, sender.ctx);
+
+	const realSend = receiver.pi.sendMessage;
+	let failOnce = true;
+	receiver.pi.sendMessage = (message, options) => {
+		if (failOnce) {
+			failOnce = false;
+			throw new Error("transient sendMessage failure");
+		}
+		realSend(message, options);
+	};
+
+	await receiver.runtime.tick();
+	assert.equal(sentMessages(receiver).length, 0, "failed sendMessage leaves no delivered message");
+
+	// Without turning `turn_end`, the next tick must retry because releasedThisTurn was reset.
+	await receiver.runtime.tick();
+	assert.equal(sentMessages(receiver).length, 1, "inbox delivery recovers on the next tick without turn_end");
+	await sender.runtime.shutdown();
+	await receiver.runtime.shutdown();
+});
+
+test("workspace tools adopt codemode exposure when codemode or tool_search is active and re-check on before_agent_start", async () => {
+	assert.equal(resolveWorkspaceToolExposure(["read", "bash", "edit", "write"]), undefined);
+	assert.equal(resolveWorkspaceToolExposure(["read", "codemode"]), "codemode");
+	assert.equal(resolveWorkspaceToolExposure(["read", "tool_search"]), "codemode");
+
+	const registrations: { name: string; exposure: string | undefined }[] = [];
+	const tools = new Map<string, Record<string, unknown>>();
+	const handlers = new Map<string, ((...args: unknown[]) => unknown)[]>();
+	let bound = false;
+	let activeTools = ["read", "bash", "edit", "write", "codemode"];
+	const pi = {
+		registerTool: (definition: Record<string, unknown>) => {
+			tools.set(String(definition.name), definition);
+			registrations.push({
+				name: String(definition.name),
+				exposure: definition.exposure as string | undefined,
+			});
+		},
+		appendEntry: () => undefined,
+		sendMessage: () => undefined,
+		getActiveTools: () => {
+			if (!bound) throw new Error("Extension runtime not initialized.");
+			return [...activeTools];
+		},
+		on: (event: string, handler: (...args: unknown[]) => unknown) => {
+			const list = handlers.get(event) ?? [];
+			list.push(handler);
+			handlers.set(event, list);
+		},
+	};
+	const fire = async (event: string) => {
+		for (const handler of handlers.get(event) ?? []) await handler({});
+	};
+
+	const runtime = registerWorkspace(pi as never, { run: makeRunner() });
+	assert.equal(tools.size, 0, "unbound runtime defers registration until session_start");
+
+	bound = true;
+	await fire("session_start");
+	for (const name of ["orchestrator_workspace", "orchestrator_reserve", "orchestrator_message"]) {
+		assert.equal(tools.get(name)?.exposure, "codemode", `${name} starts with codemode exposure`);
+	}
+	assert.equal(registrations.length, 3);
+
+	// Same active tools on before_agent_start must not churn registrations.
+	await fire("before_agent_start");
+	assert.equal(registrations.length, 3);
+
+	// Switching codemode off mid-session re-registers tools as direct.
+	activeTools = ["read", "bash", "edit", "write"];
+	await fire("before_agent_start");
+	for (const name of ["orchestrator_workspace", "orchestrator_reserve", "orchestrator_message"]) {
+		assert.equal(tools.get(name)?.exposure, undefined, `${name} falls back to direct when discovery is turned off`);
+	}
+	assert.equal(registrations.length, 6);
+	await runtime.shutdown();
+});
+
+test("workspace tools transitioning direct to codemode call setActiveTools to remove retargeted tools", async () => {
+	const workspaceNames = ["orchestrator_workspace", "orchestrator_reserve", "orchestrator_message"];
+	const tools = new Map<string, Record<string, unknown>>();
+	const handlers = new Map<string, ((...args: unknown[]) => unknown)[]>();
+	let activeTools = ["read", "bash", "edit", "write", ...workspaceNames];
+	const setActiveCalls: string[][] = [];
+	const pi = {
+		registerTool: (definition: Record<string, unknown>) => {
+			tools.set(String(definition.name), definition);
+		},
+		appendEntry: () => undefined,
+		sendMessage: () => undefined,
+		getActiveTools: () => [...activeTools],
+		setActiveTools: (names: string[]) => {
+			setActiveCalls.push([...names]);
+			activeTools = [...names];
+		},
+		on: (event: string, handler: (...args: unknown[]) => unknown) => {
+			const list = handlers.get(event) ?? [];
+			list.push(handler);
+			handlers.set(event, list);
+		},
+	};
+	const fire = async (event: string) => {
+		for (const handler of handlers.get(event) ?? []) await handler({});
+	};
+
+	const runtime = registerWorkspace(pi as never, { run: makeRunner() });
+	await fire("session_start");
+	for (const name of workspaceNames) {
+		assert.equal(tools.get(name)?.exposure, undefined, `${name} starts as direct`);
+	}
+	assert.equal(setActiveCalls.length, 0);
+
+	// Enabling codemode mid-session re-registers as codemode and removes the retargeted tools from activeTools.
+	activeTools = ["read", "bash", "edit", "write", ...workspaceNames, "codemode"];
+	await fire("before_agent_start");
+	for (const name of workspaceNames) {
+		assert.equal(tools.get(name)?.exposure, "codemode", `${name} transitions to codemode exposure`);
+		assert.equal(activeTools.includes(name), false, `${name} is removed from activeTools`);
+	}
+	assert.equal(setActiveCalls.length, 1);
+	assert.deepEqual(activeTools, ["read", "bash", "edit", "write", "codemode"]);
+	await runtime.shutdown();
 });

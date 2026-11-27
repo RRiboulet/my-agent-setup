@@ -27,7 +27,7 @@
  * allowed to run.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolExposure } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { unlink } from "node:fs/promises";
 import { join as joinPath } from "node:path";
@@ -79,6 +79,10 @@ import {
 export const WORKSPACE_TOOL = "orchestrator_workspace";
 export const RESERVE_TOOL = "orchestrator_reserve";
 export const MESSAGE_TOOL = "orchestrator_message";
+
+export function resolveWorkspaceToolExposure(activeTools: readonly string[]): ToolExposure | undefined {
+	return activeTools.some((name) => name === "codemode" || name === "tool_search") ? "codemode" : undefined;
+}
 
 export const RESERVATION_OVERRIDE_ENTRY_TYPE = "orchestrator-workspace-reservation-override";
 export const PEER_MESSAGE_TYPE = "orchestrator-peer-message";
@@ -590,27 +594,33 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 	};
 
 	const deliver = (message: PeerMessage, state: Joined): void => {
-		pi.sendMessage(
-			{
-				customType: PEER_MESSAGE_TYPE,
-				content: formatPeerMessage(message),
-				display: true,
-				details: {
-					version: WORKSPACE_VERSION,
-					id: message.id,
-					from: message.from,
-					to: message.to,
-					createdAt: message.createdAt,
-					expiresAt: message.expiresAt,
+		releasedThisTurn = true;
+		try {
+			pi.sendMessage(
+				{
+					customType: PEER_MESSAGE_TYPE,
+					content: formatPeerMessage(message),
+					display: true,
+					details: {
+						version: WORKSPACE_VERSION,
+						id: message.id,
+						from: message.from,
+						to: message.to,
+						createdAt: message.createdAt,
+						expiresAt: message.expiresAt,
+					},
 				},
-			},
-			// Always steer *and* allow a turn. `isIdle()` sampled here can flip before
-			// sendMessage runs; a steer without triggerTurn would then sit in an idle
-			// session without waking it, and no turn_end would reset
-			// `releasedThisTurn`. The docs ignore triggerTurn while streaming, so one
-			// option set is correct in both states.
-			{ deliverAs: "steer", triggerTurn: true },
-		);
+				// Always steer *and* allow a turn. `isIdle()` sampled here can flip before
+				// sendMessage runs; a steer without triggerTurn would then sit in an idle
+				// session without waking it, and no turn_end would reset
+				// `releasedThisTurn`. The docs ignore triggerTurn while streaming, so one
+				// option set is correct in both states.
+				{ deliverAs: "steer", triggerTurn: true },
+			);
+		} catch (error) {
+			releasedThisTurn = false;
+			throw error;
+		}
 		deliveredIds.add(message.id);
 	};
 
@@ -667,7 +677,6 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 			if (!next) return;
 			if (state.ctx.signal?.aborted) return;
 			deliver(next, state);
-			releasedThisTurn = true;
 			let marked = false;
 			try {
 				await markMessageDelivered(state.scope.registryDir, state.sessionId, next, now());
@@ -739,98 +748,137 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 
 	// --- tools -------------------------------------------------------------
 
-	pi.registerTool({
-		name: WORKSPACE_TOOL,
-		label: "Workspace presence",
-		description:
-			"See and announce this session in the repository-wide workspace shared by the main checkout and every linked worktree. Actions: join publishes a presence entry (pid, session, working directory, branch) and starts the heartbeat; leave removes it and releases this session's reservations; peers lists live sessions with their directory, branch and last-seen time. Joining is explicit: loading the extension writes nothing. The registry lives in the git common directory, never in the working tree. Outside a git repository the action is a no-op that says why.",
-		promptSnippet: "Join, leave, or list peer sessions in this repository's shared workspace",
-		promptGuidelines: [
-			"Join the workspace before reserving paths or messaging peers; both require it.",
-			"Use `orchestrator_workspace` action \"peers\" to find a peer's session id before messaging it.",
-		],
-		parameters: Type.Object({
-			action: Type.Union([Type.Literal("join"), Type.Literal("leave"), Type.Literal("peers")], {
-				description: "join, leave, or peers",
+	const workspaceToolDefinitions = [
+		{
+			name: WORKSPACE_TOOL,
+			label: "Workspace presence",
+			description:
+				"See and announce this session in the repository-wide workspace shared by the main checkout and every linked worktree. Actions: join publishes a presence entry (pid, session, working directory, branch) and starts the heartbeat; leave removes it and releases this session's reservations; peers lists live sessions with their directory, branch and last-seen time. Joining is explicit: loading the extension writes nothing. The registry lives in the git common directory, never in the working tree. Outside a git repository the action is a no-op that says why.",
+			promptSnippet: "Join, leave, or list peer sessions in this repository's shared workspace",
+			promptGuidelines: [
+				"Join the workspace before reserving paths or messaging peers; both require it.",
+				"Use `orchestrator_workspace` action \"peers\" to find a peer's session id before messaging it.",
+			],
+			parameters: Type.Object({
+				action: Type.Union([Type.Literal("join"), Type.Literal("leave"), Type.Literal("peers")], {
+					description: "join, leave, or peers",
+				}),
+				ttlSeconds: Type.Optional(
+					Type.Number({ description: "Presence TTL for a join, in seconds (default 60, bounded 5–600)." }),
+				),
 			}),
-			ttlSeconds: Type.Optional(
-				Type.Number({ description: "Presence TTL for a join, in seconds (default 60, bounded 5–600)." }),
-			),
-		}),
-		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const action = String(params.action ?? "");
-			if (action === "join") {
-				const ttlMs = typeof params.ttlSeconds === "number" ? clampPresenceTtl(params.ttlSeconds * 1000) : undefined;
-				const text = await join(ctx, { ttlMs });
-				return toolResult(text, { action, joined: joined !== null });
-			}
-			if (action === "leave") {
-				const text = await leave(ctx);
-				return toolResult(text, { action, joined: false });
-			}
-			if (action === "peers") {
-				return toolResult(await peers(ctx), { action });
-			}
-			return toolResult(`Unknown action ${action}; use join, leave or peers.`, { action, ok: false });
+			async execute(_id: string, params: Record<string, unknown>, _signal: unknown, _onUpdate: unknown, ctx: ExtensionContext) {
+				const action = String(params.action ?? "");
+				if (action === "join") {
+					const ttlMs = typeof params.ttlSeconds === "number" ? clampPresenceTtl(params.ttlSeconds * 1000) : undefined;
+					const text = await join(ctx, { ttlMs });
+					return toolResult(text, { action, joined: joined !== null });
+				}
+				if (action === "leave") {
+					const text = await leave(ctx);
+					return toolResult(text, { action, joined: false });
+				}
+				if (action === "peers") {
+					return toolResult(await peers(ctx), { action });
+				}
+				return toolResult(`Unknown action ${action}; use join, leave or peers.`, { action, ok: false });
+			},
 		},
-	});
-
-	pi.registerTool({
-		name: RESERVE_TOOL,
-		label: "Workspace reservations",
-		description:
-			"Reserve a file, directory (trailing slash) or wildcard (`*` within a segment, `**` across) so another session's write or edit to it is refused before it runs, naming the holder and the reason. Advisory, not a security boundary: shell commands and nested tool execution are not prevented. Actions: reserve, release (one id or all of this session's), list, override (grant a one-shot override for the next refusal, recorded in the session). Reservations expire and are released on leave or shutdown. Requires a joined workspace.",
-		promptSnippet: "Reserve workspace paths, release them, list reservations, or override one refusal",
-		promptGuidelines: [
-			"Reserve a path with a reason before a multi-step change another session could collide with.",
-			"Use override only when the collision is expected, and say why: the reason is recorded.",
-		],
-		parameters: Type.Object({
-			action: Type.Union([Type.Literal("reserve"), Type.Literal("release"), Type.Literal("list"), Type.Literal("override")], {
-				description: "reserve, release, list, or override",
+		{
+			name: RESERVE_TOOL,
+			label: "Workspace reservations",
+			description:
+				"Reserve a file, directory (trailing slash) or wildcard (`*` within a segment, `**` across) so another session's write or edit to it is refused before it runs, naming the holder and the reason. Advisory, not a security boundary: shell commands and nested tool execution are not prevented. Actions: reserve, release (one id or all of this session's), list, override (grant a one-shot override for the next refusal, recorded in the session). Reservations expire and are released on leave or shutdown. Requires a joined workspace.",
+			promptSnippet: "Reserve workspace paths, release them, list reservations, or override one refusal",
+			promptGuidelines: [
+				"Reserve a path with a reason before a multi-step change another session could collide with.",
+				"Use override only when the collision is expected, and say why: the reason is recorded.",
+			],
+			parameters: Type.Object({
+				action: Type.Union([Type.Literal("reserve"), Type.Literal("release"), Type.Literal("list"), Type.Literal("override")], {
+					description: "reserve, release, list, or override",
+				}),
+				paths: Type.Optional(Type.Array(Type.String(), { description: "Paths to reserve; a trailing slash means a directory, * and ** are wildcards." })),
+				reason: Type.Optional(Type.String({ description: "Why the paths are reserved, or why an override is justified. Required for reserve and override." })),
+				id: Type.Optional(Type.String({ description: "Reservation id for release; omit to release every reservation this session holds." })),
+				ttlSeconds: Type.Optional(Type.Number({ description: "Reservation TTL in seconds (default 900, bounded 5–86400)." })),
 			}),
-			paths: Type.Optional(Type.Array(Type.String(), { description: "Paths to reserve; a trailing slash means a directory, * and ** are wildcards." })),
-			reason: Type.Optional(Type.String({ description: "Why the paths are reserved, or why an override is justified. Required for reserve and override." })),
-			id: Type.Optional(Type.String({ description: "Reservation id for release; omit to release every reservation this session holds." })),
-			ttlSeconds: Type.Optional(Type.Number({ description: "Reservation TTL in seconds (default 900, bounded 5–86400)." })),
-		}),
-		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const action = String(params.action ?? "");
-			if (action === "reserve") {
-				const paths = Array.isArray(params.paths) ? params.paths.map(String) : [];
-				const reason = String(params.reason ?? "");
-				const ttlMs = typeof params.ttlSeconds === "number" ? clampReservationTtl(params.ttlSeconds * 1000) : undefined;
-				return toolResult(await reserve(ctx, { paths, reason, ttlMs }), { action });
-			}
-			if (action === "release") {
-				return toolResult(await release(ctx, typeof params.id === "string" ? params.id : undefined), { action });
-			}
-			if (action === "list") return toolResult(await listOwnReservations(ctx), { action });
-			if (action === "override") return toolResult(await armOverride(ctx, String(params.reason ?? "")), { action });
-			return toolResult(`Unknown action ${action}; use reserve, release, list or override.`, { action, ok: false });
+			async execute(_id: string, params: Record<string, unknown>, _signal: unknown, _onUpdate: unknown, ctx: ExtensionContext) {
+				const action = String(params.action ?? "");
+				if (action === "reserve") {
+					const paths = Array.isArray(params.paths) ? params.paths.map(String) : [];
+					const reason = String(params.reason ?? "");
+					const ttlMs = typeof params.ttlSeconds === "number" ? clampReservationTtl(params.ttlSeconds * 1000) : undefined;
+					return toolResult(await reserve(ctx, { paths, reason, ttlMs }), { action });
+				}
+				if (action === "release") {
+					return toolResult(await release(ctx, typeof params.id === "string" ? params.id : undefined), { action });
+				}
+				if (action === "list") return toolResult(await listOwnReservations(ctx), { action });
+				if (action === "override") return toolResult(await armOverride(ctx, String(params.reason ?? "")), { action });
+				return toolResult(`Unknown action ${action}; use reserve, release, list or override.`, { action, ok: false });
+			},
 		},
-	});
+		{
+			name: MESSAGE_TOOL,
+			label: "Workspace message",
+			description:
+				"Send one targeted message to another live session in this repository's workspace. The recipient's own poller decides when it lands: an idle session is woken, a busy one is steered at its next safe boundary, and pending human input is never pre-empted. One peer message is released per turn, delivery is once per message id, and an undelivered message expires. A peer that left or expired is reported as gone. Requires a joined workspace; use `orchestrator_workspace` action \"peers\" for the id.",
+			promptSnippet: "Send a targeted message to one peer pi session in this repository",
+			promptGuidelines: [
+				"Message a peer only for coordination another session needs now; the message appears in its session with your id and directory.",
+				"Check live peers with `orchestrator_workspace` before messaging; a gone peer is reported, not queued.",
+			],
+			parameters: Type.Object({
+				to: Type.String({ description: "Recipient session id (an unambiguous prefix is accepted)." }),
+				body: Type.String({ description: `Message body, at most ${MAX_MESSAGE_BODY_BYTES} bytes.` }),
+				ttlSeconds: Type.Optional(Type.Number({ description: "How long an undelivered message stays valid, in seconds (default 600, bounded 5–3600)." })),
+			}),
+			async execute(_id: string, params: Record<string, unknown>, _signal: unknown, _onUpdate: unknown, ctx: ExtensionContext) {
+				const ttlMs = typeof params.ttlSeconds === "number" ? clampMessageTtl(params.ttlSeconds * 1000) : undefined;
+				return toolResult(await send(ctx, { to: String(params.to ?? ""), body: String(params.body ?? ""), ttlMs }), {});
+			},
+		},
+	] as const;
 
-	pi.registerTool({
-		name: MESSAGE_TOOL,
-		label: "Workspace message",
-		description:
-			"Send one targeted message to another live session in this repository's workspace. The recipient's own poller decides when it lands: an idle session is woken, a busy one is steered at its next safe boundary, and pending human input is never pre-empted. One peer message is released per turn, delivery is once per message id, and an undelivered message expires. A peer that left or expired is reported as gone. Requires a joined workspace; use `orchestrator_workspace` action \"peers\" for the id.",
-		promptSnippet: "Send a targeted message to one peer pi session in this repository",
-		promptGuidelines: [
-			"Message a peer only for coordination another session needs now; the message appears in its session with your id and directory.",
-			"Check live peers with `orchestrator_workspace` before messaging; a gone peer is reported, not queued.",
-		],
-		parameters: Type.Object({
-			to: Type.String({ description: "Recipient session id (an unambiguous prefix is accepted)." }),
-			body: Type.String({ description: `Message body, at most ${MAX_MESSAGE_BODY_BYTES} bytes.` }),
-			ttlSeconds: Type.Optional(Type.Number({ description: "How long an undelivered message stays valid, in seconds (default 600, bounded 5–3600)." })),
-		}),
-		async execute(_id, params, _signal, _onUpdate, ctx) {
-			const ttlMs = typeof params.ttlSeconds === "number" ? clampMessageTtl(params.ttlSeconds * 1000) : undefined;
-			return toolResult(await send(ctx, { to: String(params.to ?? ""), body: String(params.body ?? ""), ttlMs }), {});
-		},
-	});
+	let appliedToolExposure: ToolExposure | undefined;
+	let workspaceToolsRegistered = false;
+
+	const registerWorkspaceTools = (): void => {
+		let exposure: ToolExposure | undefined;
+		try {
+			if (typeof pi.getActiveTools === "function") {
+				exposure = resolveWorkspaceToolExposure(pi.getActiveTools());
+			}
+		} catch (error) {
+			console.error(
+				`[orchestrator-workspace] could not resolve tool exposure: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+		if (workspaceToolsRegistered && appliedToolExposure === exposure) return;
+		const wasDirect = workspaceToolsRegistered && appliedToolExposure === undefined;
+		workspaceToolsRegistered = true;
+		appliedToolExposure = exposure;
+		for (const tool of workspaceToolDefinitions) {
+			pi.registerTool(exposure ? { ...tool, exposure } : tool);
+		}
+		if (wasDirect && exposure === "codemode" && typeof pi.getActiveTools === "function" && typeof pi.setActiveTools === "function") {
+			const retargetedNames = new Set(workspaceToolDefinitions.map((tool) => tool.name));
+			pi.setActiveTools(pi.getActiveTools().filter((name) => !retargetedNames.has(name)));
+		}
+	};
+
+	if (typeof pi.getActiveTools !== "function") {
+		registerWorkspaceTools();
+	} else {
+		try {
+			pi.getActiveTools();
+			registerWorkspaceTools();
+		} catch {
+			// pi throws during extension load before the runtime binds; defer to
+			// `session_start` so `exposure: "codemode"` is not pre-activated as direct.
+		}
+	}
 
 	// --- session wiring ----------------------------------------------------
 
@@ -844,6 +892,11 @@ export function registerWorkspace(pi: ExtensionAPI, options: WorkspaceRuntimeOpt
 		releasedThisTurn = false;
 		overrideArmed = null;
 		cachedLockScope = null;
+		registerWorkspaceTools();
+	});
+
+	pi.on("before_agent_start", async () => {
+		registerWorkspaceTools();
 	});
 
 	pi.on("session_shutdown", async () => {

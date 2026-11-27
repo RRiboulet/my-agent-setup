@@ -24,6 +24,7 @@ import {
 	liveReservations,
 	mapToSharedRoot,
 	readReservations,
+	releaseReservations,
 	repoRelative,
 	reservationCandidateFor,
 	reservationPath,
@@ -532,7 +533,70 @@ test("a reservation held by a dead process stops blocking immediately", async ()
 	const live = await liveReservations(registry, Date.now());
 	assert.equal(live.live.length, 0, "a dead holder's claim is not live");
 	assert.equal(live.expired.some((record) => record.sessionId === "dead-reserver"), true);
-	assert.equal(existsSync(reservationPath(registry, reservation.id)), false, "the dead record is swept, not just ignored");
+	assert.equal(existsSync(reservationPath(registry, reservation.id)), true, "read-time filtering does not acquire a lock or sweep on disk");
+
+	// Write operations acquire the lock and sweep the dead record.
+	const released = await releaseReservations(registry, { sessionId: "other-session", now: Date.now() });
+	assert.equal(released.expired.some((record) => record.sessionId === "dead-reserver"), true);
+	assert.equal(existsSync(reservationPath(registry, reservation.id)), false, "the dead record is swept by write operations under the lock");
+});
+
+test("liveReservations and checkToolCall filter expired claims in memory without acquiring the workspace lock", async () => {
+	const registry = await registryDir();
+	const now = Date.now();
+	const expired = await reservePaths(registry, {
+		sessionId: "expired-holder",
+		pid: process.pid,
+		cwd: fixture.root,
+		branch: "main",
+		paths: buildReservationPaths(fixture.root, ["src/a.ts"]),
+		reason: "soon expired",
+		now: now - 20_000,
+		ttlMs: 5_000,
+	});
+	assert.equal(expired.ok, true);
+
+	// Simulate an active workspace lock held by another process.
+	const lockDir = path.join(registry, "lock");
+	await mkdir(lockDir, { recursive: true });
+	await writeFile(path.join(lockDir, "owner.json"), JSON.stringify({ token: "busy-holder", pid: process.pid, at: now }));
+
+	const writer = await joinedRuntime("lock-free-writer");
+	// If liveReservations attempted withWorkspaceLock, it would block/throw on the held lock.
+	const live = await liveReservations(registry, now);
+	assert.equal(live.live.length, 0);
+	assert.equal(live.expired.length, 1);
+	const blocked = await writer.runtime.checkToolCall(
+		{ toolName: "write", input: { path: path.join(fixture.root, "src/a.ts") } },
+		writer.ctx as never,
+	);
+	assert.equal(blocked, undefined, "expired reservation does not block and read path does not stall on the lock");
+	await rm(lockDir, { recursive: true, force: true });
+});
+
+test("reservationPathsOverlap handles glob trailing slashes, mid-segment prefixes, and non-recursive wildcards", () => {
+	const p = (rel: string, kind: ReservationPath["kind"]): ReservationPath => ({
+		pattern: path.join(fixture.root, rel.replace(/\/$/, "")),
+		kind,
+	});
+	// Required test matrix
+	assert.equal(reservationPathsOverlap(p("src/**/*.ts", "glob"), p("src/sub/", "dir")), true);
+	assert.equal(reservationPathsOverlap(p("src/sub/", "dir"), p("src/**/*.ts", "glob")), true);
+	assert.equal(reservationPathsOverlap(p("src/**/*.ts", "glob"), p("src/sub/*.ts", "glob")), true);
+	assert.equal(reservationPathsOverlap(p("src/sub/*.ts", "glob"), p("src/**/*.ts", "glob")), true);
+	assert.equal(reservationPathsOverlap(p("**/*.ts", "glob"), p("src/*.ts", "glob")), true);
+	assert.equal(reservationPathsOverlap(p("src/*.ts", "glob"), p("**/*.ts", "glob")), true);
+	assert.equal(reservationPathsOverlap(p("src/*.ts", "glob"), p("src/a/b.ts", "file")), false);
+	assert.equal(reservationPathsOverlap(p("src/a/b.ts", "file"), p("src/*.ts", "glob")), false);
+	assert.equal(reservationPathsOverlap(p("src/a*.ts", "glob"), p("src/a/foo.ts", "file")), false);
+	assert.equal(reservationPathsOverlap(p("src/a/foo.ts", "file"), p("src/a*.ts", "glob")), false);
+
+	// Additional edge cases
+	assert.equal(reservationPathsOverlap(p("src/a*.ts", "glob"), p("src/a/", "dir")), false);
+	assert.equal(reservationPathsOverlap(p("src/*.ts", "glob"), p("src/sub/", "dir")), false);
+	assert.equal(reservationPathsOverlap(p("src/*.ts", "glob"), p("src/sub/*.ts", "glob")), false);
+	assert.equal(reservationPathsOverlap(p("src/a*.ts", "glob"), p("src/b*.ts", "glob")), false);
+	assert.equal(reservationPathsOverlap(p("src/a*.ts", "glob"), p("src/ab.ts", "file")), true);
 });
 
 test("the lock holds across processes, not just across promises", async () => {

@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "description": "Personal pi extensions and skills: subagent delegation, todos, /answer, /session-breakdown, native web search, a coding skill stack (playback, grilling, blast radius, TDD, diagnosing, review, prove, spec and tickets), a stateful teaching workspace skill, and changelog and commit workflow skills.",
+  "description": "Personal pi extensions and skills: subagent delegation, todos, /answer, native web search, a coding skill stack (playback, grilling, blast radius, TDD, diagnosing, review, prove, spec and tickets), a stateful teaching workspace skill, and changelog and commit workflow skills.",
   "keywords": [
     "pi-package"
   ],
@@ -20,10 +20,8 @@
       ".pi/extensions/repo-explorer/index.ts",
       ".pi/extensions/review-triage/index.ts",
       ".pi/extensions/review.ts",
-      ".pi/extensions/session-breakdown.ts",
       ".pi/extensions/todos.ts",
-      ".pi/extensions/subagent/index.ts",
-      ".pi/extensions/voice/index.ts"
+      ".pi/extensions/subagent/index.ts"
     ],
     "skills": [
       ".pi/skills/add-model",
@@ -41,7 +39,6 @@
       ".pi/skills/in-your-own-words",
       ".pi/skills/librarian",
       ".pi/skills/native-web-search",
-      ".pi/skills/orchestrate",
       ".pi/skills/prevent-recurrence",
       ".pi/skills/prove-it-works",
       ".pi/skills/recall",

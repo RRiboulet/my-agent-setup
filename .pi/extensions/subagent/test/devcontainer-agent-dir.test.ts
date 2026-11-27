@@ -70,12 +70,32 @@ test("the devcontainer keeps a private pi volume and installs no package", () =>
 	assert.match(compose, /name: my-agent-setup-pi-config/u);
 	assert.doesNotMatch(compose, /name: pi-agent-config/u);
 
-	const template = JSON.parse(read(".devcontainer/pi/settings.json")) as { packages?: unknown };
+	const template = JSON.parse(read(".devcontainer/pi/settings.json")) as {
+		packages?: unknown;
+		defaultProvider?: string;
+		defaultModel?: string;
+		enabledModels?: string[];
+	};
 	assert.equal(template.packages, undefined, "the committed settings template must not install a package");
+	assert.equal(template.defaultProvider, undefined, "the orchestrator must inherit the harness current provider");
+	assert.equal(template.defaultModel, undefined, "the orchestrator must inherit the harness current model");
+	for (const model of ["opencode-go/hy4-flash-free", "opencode-go/deepseek-v4.1-flash", "mistral/zai-glm-5-3-flash"]) {
+		assert.ok(template.enabledModels?.includes(model), `the tier settings must enable ${model}`);
+	}
 
 	// The template is what a fresh private volume starts from; it must exist and
 	// be valid JSON, because postCreate now fails rather than writing a 0-byte file.
 	assert.ok(Object.keys(template).length > 0);
+});
+
+test("the devcontainer forwards Mistral and Gemini credentials for their providers", () => {
+	for (const name of ["MISTRAL_API_KEY", "GEMINI_API_KEY"]) {
+		assert.match(
+			read(OWNER),
+			new RegExp(String.raw`"${name}"\s*:\s*"\$\{localEnv:${name}\}"`, "u"),
+			`a fresh private volume needs the host ${name} passed through`,
+		);
+	}
 });
 
 test("the files that describe the split point at the README instead of restating it", () => {

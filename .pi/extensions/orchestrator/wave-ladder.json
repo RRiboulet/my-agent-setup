@@ -1,6 +1,12 @@
 {
   "version": 1,
-  "roster": ["triage", "researcher", "implementer", "reviewer", "verifier"],
+  "roster": [
+    "triage",
+    "researcher",
+    "implementer",
+    "reviewer",
+    "verifier"
+  ],
   "tiers": [
     {
       "tier": 1,
@@ -17,7 +23,7 @@
     {
       "tier": 3,
       "provider": "mistral",
-      "model": "zai-glm-5-3",
+      "model": "zai-glm-5-3-flash",
       "thinking": "high"
     }
   ],
@@ -27,7 +33,8 @@
       "model": "jev-1.13-free"
     },
     "reviewer": {
-      "tier": 2
+      "inheritModel": true,
+      "thinking": "high"
     },
     "verifier": {
       "tier": 2,

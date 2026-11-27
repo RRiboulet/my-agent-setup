@@ -33,10 +33,8 @@ const EXTENSIONS = [
 	"../../repo-explorer/index.ts",
 	"../../review-triage/index.ts",
 	"../../review.ts",
-	"../../session-breakdown.ts",
 	"../../todos.ts",
 	"../index.ts",
-	"../../voice/index.ts",
 ] as const;
 
 // Extension tree files that are not entry points themselves but get imported
@@ -211,19 +209,6 @@ const MODULES: Record<string, string[]> = {
 		"writeReportArtifact",
 	],
 	"../shell.ts": ["shellQuote"],
-	"../../voice/config.ts": ["agentDir", "configPath", "loadConfig", "parseEnvBool", "readConfigFile"],
-	"../../voice/shortcut.ts": ["normalizeKeyId", "parseShortcutIds"],
-	"../../voice/recorder.ts": [
-		"Recorder",
-		"buildCleanupCommand",
-		"buildFetchCommand",
-		"buildStartCommand",
-		"buildStopCommand",
-		"localRecordingPath",
-		"newRecordingId",
-		"remoteRecordingPath",
-	],
-	"../../voice/transcribe.ts": ["TranscribeError", "assertUploadSize", "resolveApiKey", "transcribeAudio"],
 };
 
 for (const relative of EXTENSIONS) {
