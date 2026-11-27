@@ -20,10 +20,9 @@ import {
 	type OrchestrationEventMap,
 	type TodoChangedPayload,
 } from "../../orchestrator/events.ts";
-import reviewTriageExtension from "../../review-triage/index.ts";
 import todosExtension from "../../todos.ts";
 import { withHarness, waitForRunStatus } from "./lifecycle-harness.ts";
-import { waitFor, withEnv, withTempAgentDir } from "./helpers.ts";
+import { waitFor, withEnv } from "./helpers.ts";
 
 function localBus() {
 	const handlers = new Map<string, ((data: unknown) => void)[]>();
@@ -184,34 +183,6 @@ test("a successful todo mutation publishes todo-changed, and a read does not", a
 
 			await tool!.execute!("call", { action: "list" }, undefined, undefined, ctx);
 			assert.equal(pi.emitted.length, 1, "a list mutates nothing");
-		});
-	});
-});
-
-test("a triage plan publishes triage-planned", async () => {
-	await withTempDir(async (dir) => {
-		await withTempAgentDir(async () => {
-			const pi = fakePi();
-			reviewTriageExtension(pi as never);
-			const tool = pi.tools.find((candidate) => candidate.name === "triage_change");
-			assert.ok(tool?.execute, "the extension registered triage_change");
-
-			await withEnv({ PI_REVIEW_TRIAGE_OFF: "1" }, async () => {
-				await tool!.execute!(
-					"call",
-					{ summary: "event test", target: "none" },
-					undefined,
-					undefined,
-					{ cwd: dir, hasUI: false, signal: undefined, modelRegistry: {} },
-				);
-			});
-
-			const event = pi.emitted.find((candidate) => candidate.channel === ORCHESTRATION_EVENTS.triagePlanned);
-			assert.ok(event, "a triage plan must publish its event");
-			const payload = event!.data as OrchestrationEventMap["orchestrator:triage-planned"];
-			assert.equal(payload.target, "none");
-			assert.equal(typeof payload.verdict, "string");
-			assert.equal(typeof payload.status, "string");
 		});
 	});
 });

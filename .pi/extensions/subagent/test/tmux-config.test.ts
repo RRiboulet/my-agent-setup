@@ -16,8 +16,8 @@ const REPO_ROOT = path.resolve(new URL("../../../..", import.meta.url).pathname)
 const read = (...parts: string[]) => readFileSync(path.join(REPO_ROOT, ...parts), "utf8");
 
 const CONF = read(".devcontainer/shell/tmux.conf");
-const DEVC_SKILL = read(".pi/skills/devcontainer/SKILL.md");
-const TMUX_SKILL = read(".pi/skills/tmux/SKILL.md");
+const DEVC_SKILL = read("skills/devcontainer/SKILL.md");
+const TMUX_SKILL = read("skills/tmux/SKILL.md");
 
 test("tmux config: the falsified terminal-features claim does not come back", () => {
 	// The old paragraph: "`terminal-features` is what tmux actually hands to

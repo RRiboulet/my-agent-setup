@@ -1,22 +1,18 @@
-# Review Policy and Triage Candidates
+# Review Policy and Frontier Review Pipeline
 
-## One review pipeline, only on request
+## Single unified frontier review pipeline
 
-`prove-it-works` is author verification (proving the change and reporting the test that fails on revert); it is not a review and never triggers one. Never start a review automatically because a change seems non-trivial or because `/review` and `/triage` exist.
+All code reviews run on one unified frontier pipeline—either an ad-hoc user-requested review or an automatic/wave-gated review—using the parent's frontier model (`inheritModel: true`, `thinking: "high"`, read-only tools `["read", "grep", "find", "ls", "bash"]`) rather than a separate triage extension or lower-tier candidate list:
 
-When the user requests a review, choose one path:
-1. **`/review`** for interactive reviews (PR, branch, commit, folder, uncommitted); appends `REVIEW_GUIDELINES.md`.
-2. **`triage_change` (or `/triage`) + one subagent** for an automated independent read. Triage only measures the diff and returns a plan — it launches nothing.
+- **Ad-hoc user-requested reviews** follow the one-review-on-request policy below (`/review` or one requested `subagent({ role: "reviewer" })` / `security-reviewer` on `pi`). `prove-it-works` is author verification (proving the change and reporting the test that fails on revert); it is not a review and never triggers one.
+- **`/review` isolated dispatch (`pi`)**: `/review` (and `/review pr|branch|commit|uncommitted|folder`) preserves target-selection picking, `REVIEW_GUIDELINES.md` lookup, and rubric assembly, then dispatches an isolated `subagent` with `role: "reviewer"` and read-only tools via `orchestrator:subagent-dispatch` without injecting prompts into the parent session or running an inline code-fixing loop. Completion settles via `orchestrator:run-settled`, automatically marking `reviewVerified`.
+- **Automatic `reviewer` gate in Pragmatic Orchestrator mode**: when delegation is active (`mode: "enforce"` or `"warn"`, see `docs/harness/extensions.md`), non-doc edits reaching `>= 2` review-relevant files or `>= 50` changed lines arm a `code-review` gate before `git commit`, `git push`, `gh pr create`, `gh pr merge`, or settlement. Satisfy it either directly by inspecting the post-edit diff/files (`git diff`/`git show`/`git status`/`git log`/`gh pr diff` or `read`) and calling `orchestrator_record_review` with verdict `"pass"` or `"accepted_with_notes"`, or by running an isolated `subagent({ role: "reviewer", ... })`, `security-reviewer`, or `/review`. Any subsequent review-eligible edit after `reviewVerified` was set resets `reviewVerified` unconditionally, even if the follow-up edit is below the initial file/line threshold.
+- **Wave orchestration (`orchestrator_wave`)**: `wave-ladder.json` defaults `reviewer` to frontier inheritance (`inheritModel: true`, `thinking: "high"`) unless overridden by local ladder config, propagates canonical `role` tags, and integrates wave `reviewer` settlement with delegation's `reviewVerified`.
 
-Never run both for the same change, never launch a second reviewer if the first finds little, and never let a review subagent spawn additional reviewers. If a `show-me-your-work` trail exists, pass it alongside the diff to that single reviewer.
+## One ad-hoc review, only on request
 
-**Always ask the user before launching a review subagent**, even when triage recommends one. Propose the lens and model, then wait for explicit confirmation.
+Never start an ad-hoc `/review` automatically because a change seems non-trivial. When the user requests a review, run one isolated review:
+1. **`/review`** on `pi` for interactive or targeted reviews (PR, branch, commit, folder, uncommitted); appends `REVIEW_GUIDELINES.md` and dispatches `subagent({ role: "reviewer", ... })`.
+2. **A single `reviewer` / `security-reviewer` subagent** on `pi` when invoked directly by task.
 
-## Candidate policy and provider bands
-
-Approved review subagent `provider`, `model`, and `thinking` values must come strictly from `candidates` in the active review-triage policy (built-in defaults in `.pi/extensions/review-triage/config.ts`, or `~/.pi/agent/review-triage.json` when present; editable example at `.pi/extensions/review-triage/review-triage.example.json`). Do not invent models outside that list — edit the config if a capability band needs another model.
-
-- All review candidates use `opencode-go`.
-- The triage judge uses `opencode` (`jev-1.13-free`, sharing `OPENCODE_API_KEY`).
-- Tests fail if candidate providers/costs drift or if the example config diverges from built-in defaults.
-- Credentials are checked at runtime (`.pi/extensions/review-triage/credentials.ts`): a missing reviewer provider drops those bands and names the fix in the plan; a missing judge credential short-circuits with `judgeFailure: unavailable`.
+Never run multiple reviews for the same change, never launch a second reviewer if the first finds little, and never let a review subagent spawn additional reviewers. If a `show-me-your-work` trail exists, pass it alongside the diff to that single reviewer.

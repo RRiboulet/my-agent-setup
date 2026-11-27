@@ -24,8 +24,8 @@
  *     `loopAttemptCap` separately bounds mid-run loop-breaker blocks so loop
  *     blocks never exhaust the settlement budget; each is the hard stop that
  *     keeps repeated blocks from trapping a run. `attempts` counts blocks, not
- *     evaluations: ticket 08's counter counted settles, so an active goal
- *     reached the cap on its third continuation with nothing having failed. The
+ *     evaluations: ticket 08's counter counted settles, so a run could
+ *     reach the cap on its third continuation with nothing having failed. The
  *     field is renamed for what it bounds and nothing else. Setting
  *     `attemptCap: 0` or `loopAttemptCap: 0` disables blocking for that gate
  *     without disabling reporting.
@@ -128,7 +128,7 @@ export interface GateVerdict {
 	/** True when a would-be block was parked instead: no continuation, no attempt,
 	 *  because a delegated run is still live. `decision` stays `report`. A park
 	 *  yields the continuation field rather than claiming it, so another boundary
-	 *  handler (the goal extension) may still request a turn; the park saves the
+	 *  handler may still request a turn; the park saves the
 	 *  gate's attempt, not necessarily the turn. */
 	parked: boolean;
 	/** The live run ids that kept this settlement parked; empty when it did not
@@ -298,8 +298,8 @@ function conditionKinds(value: unknown): GateConditionKind[] {
  * Reconstruct the settlement and loop attempt budgets, the last verdicts and
  * the set of conditions that already blocked, from the active branch.
  *
- * The LAST entry of each gate type wins its own attempt count, exactly like
- * `goal.ts`'s reconstruction; the blocked-condition set is a union, because it is
+ * The LAST entry of each gate type wins its own attempt count;
+ * the blocked-condition set is a union, because it is
  * monotone and a navigation to a branch before any block legitimately reports
  * none. A gate entry whose `attempts` cannot be read is skipped rather than
  * trusted, so a malformed entry cannot raise or reset a cap.

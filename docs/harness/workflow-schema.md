@@ -10,7 +10,7 @@ and extensions. It answers four questions:
 
 It is **descriptive**, not a new engine. The user request, `AGENTS.md`, skill
 bodies, and extension implementation remain authoritative. This schema helps
-choose among them; it does not replace them or add automatic reviews, goals, or
+choose among them; it does not replace them or add automatic reviews or
 subagents.
 
 ## 1. The mental model
@@ -20,7 +20,7 @@ Use three layers:
 | Layer | Question it answers | Examples |
 |---|---|---|
 | **Skills** | How should the agent reason about this step? | `in-your-own-words`, `architect`, `tdd`, `prove-it-works` |
-| **Extensions** | What state, capability, coordination, or gate is available? | `todo`, `/goal`, `subagent`, `/orchestrate`, `/triage` |
+| **Extensions** | What state, capability, coordination, or gate is available? | `todo`, `subagent`, `/orchestrate`, `/review` |
 | **Delivery** | Where does verified work land? | feature branch, PR into `dev`, release PR into `main`, tag |
 
 A skill is a reusable procedure. An extension is a runtime capability. A Git
@@ -99,7 +99,7 @@ stop_conditions:
 ```
 
 The repository's machine-readable task contracts are the existing ones: todo
-files, ticket frontmatter, goal session state, subagent run records, and wave
+files, ticket frontmatter, subagent run records, and wave
 journal entries. Do not invent a parallel task database.
 
 ## 3. Choose the smallest sufficient route
@@ -119,7 +119,7 @@ can be low risk. Route by both, not by line count alone.
 | **Bounded** | One clear behavior or fix in one context | `in-your-own-words` when needed → `tdd` or `diagnosing-bugs` → `prove-it-works` | Add `architect`/`blast-radius` if a boundary is involved |
 | **Design** | Ambiguous requirements, competing abstractions, public contract, schema, concurrency, or cross-module change | Playback → `architect` → `blast-radius` → `/skill:to-spec` if the contract is large → `/skill:implement` | Resolve risky decisions before code |
 | **Project** | Three or more units, real dependency edges, parallel work, or more than one context window | `/skill:to-spec` → `/skill:to-tickets` → `/skill:implement` **or** `/orchestrate <folder>` | Ticket graph, frontier execution, isolated writes, per-ticket proof |
-| **Unattended** | The user explicitly wants one objective pursued across turns, possibly for hours | `/goal <objective>` → todos → `show-me-your-work` when a decision trail is warranted | Explicit stop conditions, usage budget if requested, periodic proof |
+| **Unattended** | The user explicitly wants one objective pursued across turns, possibly for hours | `todo` → `show-me-your-work` when a decision trail is warranted | Explicit stop conditions, usage budget if requested, periodic proof |
 
 ### Specialist overlays
 
@@ -153,7 +153,7 @@ artifact exists and is checkable, not because work "feels done."
 | **Contract** | `/skill:to-spec`; `/skill:to-tickets` for several units | Spec or ticket graph | Acceptance criteria and validation are observable |
 | **Execute** | `/skill:implement`, or `/orchestrate` for a wave; `tdd`; focused checks | Verified diff and test evidence | Current unit is green; no unit starts on red |
 | **Prove** | `prove-it-works`; real-artifact exercise; repository quality gate; revert check | Verification report | Every acceptance criterion has evidence or an honest `not_run` |
-| **Review** | Only on request: `/review`, or triage plus one approved reviewer | One review result | Requested findings are addressed and re-proven |
+| **Review** | Only on request (or auto-gated at `>= 2` files / `>= 50` lines): `/review` or `subagent({ role: "reviewer" })` | One review result | Requested findings are addressed and re-proven |
 | **Land** | `commit`; `github`; branch-base check; CI | Commit and/or PR | Requested delivery action is complete and checks are known |
 | **Release** | `update-changelog`; release PR; merge; tag; fast-forward `dev` | Release PR, tag, synchronized branches | `main` and `dev` agree and the tag points at the release merge |
 
@@ -246,22 +246,20 @@ commit. Ticket frontmatter is the graph contract; prose is for humans. The
 bundled dispatch ladder is the model/tier policy, not a measure of workflow size.
 
 A wave's reviewer/verifier gates are part of the wave the user explicitly
-started. Do not add `/review` or a triage reviewer for the same change on top of
+started. Do not add `/review` for the same change on top of
 that pipeline.
 
 ### F. Long-running unattended objective
 
-1. Start `/goal` only when the user explicitly asks for a long-running goal.
-   Never infer one from an ordinary task.
-2. Create todos for remaining work; a goal says where to go, todos say what is
-   left.
-3. Use `show-me-your-work` when hours of unattended decisions need an audit
+1. Create todos for remaining work (`todo` / `/todos`) and keep explicit stop
+   conditions agreed with the user.
+2. Use `show-me-your-work` when hours of unattended decisions need an audit
    trail. Do not duplicate the todo list in the trail.
-4. Recover after compaction from the goal, todos, live runs, and artifacts—not
+3. Recover after compaction from todos, live runs, and artifacts—not
    from memory alone.
-5. Mark the goal complete only when the objective is actually achieved. Mark it
-   blocked only after the strict repeated-blocker audit.
-6. If the work becomes a ticket graph, use `/orchestrate`; if it becomes a
+4. Close remaining todos only when the objective is actually achieved, or record
+   explicit blockers.
+5. If the work becomes a ticket graph, use `/orchestrate`; if it becomes a
    cross-session teaching project, use `/skill:teach` in its separate workspace.
 
 ### G. Research, explanation, and environment work
@@ -285,11 +283,9 @@ Extensions supply capabilities; they do not decide that a capability is needed.
 | Extension | Surface | Workflow role | Boundary |
 |---|---|---|---|
 | **Todos** | `todo`, `/todos` | Track remaining work, ownership, and closure | Not a spec or decision history |
-| **Goal** | `/goal`, `get_goal`, `create_goal`, `update_goal` | Explicit multi-turn objective and budget state | Create only on explicit request; completion requires the real objective |
-| **Subagent** | `subagent`, management tools, `--attach-subagent` | Isolated research, implementation, fan-out, dependency plans | Ask before parallel implementation; parent verifies results |
-| **Orchestrator** | `/gate`, `/orchestrate`, `orchestrator_wave`, workspace tools, override | Settlement evidence, loop control, wave state, write coordination | This repo's ordinary gate is report-only; active waves still gate settlement |
-| **Review triage** | `triage_change`, `/triage` | Classify review need and choose an approved profile | Recommendation only; launches no review |
-| **Review** | `/review`, `/end-review` | One interactive independent review | Only when requested; never combine with triage review for the same change |
+| **Subagent** | `subagent`, management tools, `--attach-subagent` | Isolated research, implementation, fan-out, dependency plans | Pass canonical `role`; parent verifies results |
+| **Orchestrator** | `/gate`, `/delegation`, `/orchestrate`, `orchestrator_wave`, workspace tools, override | Settlement evidence, delegation guardrails, loop control, wave state, write coordination | This repo's ordinary gate is report-only; delegation defaults to `enforce`, and active waves gate settlement |
+| **Review** | `/review` | Isolated `reviewer` subagent dispatch (`REVIEW_GUIDELINES.md`) | Only when requested; never run multiple reviews for the same change |
 | **Repo explorer** | `/explore` | Read-only branch/file exploration | Not a checkout or edit mechanism |
 | **Answer** | `/answer`, `ctrl+.` | Focused answers to extracted questions | Interaction aid, not task state |
 | **BTW** | `/btw` | Cached-prefix side question in a separate panel | Question/answer stay out of the transcript |
@@ -307,7 +303,6 @@ output; use direct tools for one-step work.
 | State | Owner |
 |---|---|
 | Remaining actionable work | `todo` files |
-| One long-running objective | Goal session state |
 | Requirements and acceptance criteria | Spec |
 | Dependency graph and per-ticket status | Ticket frontmatter plus wave state when orchestrated |
 | Child execution and results | Subagent run/plan records |
@@ -390,7 +385,7 @@ completion polling. A child's blocking decision question goes through
 | Wave review | Wave ticket at configured tier | Recorded pass, or escalation | `/orchestrate` policy |
 | Wave verification | Wave implementation complete | Ticket validation passes with evidence | `/orchestrate` policy |
 | Settlement | Session attempts to finish | Gate verdict allows settlement | `.pi/orchestrator.json` when trusted; active-wave gate otherwise |
-| Independent review | User requests one | One reviewer's findings addressed | `/review` or triage + one approved subagent |
+| Independent review | User requests one (or auto-gated) | One `reviewer` result | `/review` or `subagent({ role: "reviewer" })` |
 | CI | PR pushed | Required checks pass | GitHub |
 | Release | `dev` to `main` | Release PR merged, tag pushed, `dev` fast-forwarded | `AGENTS.md` release workflow |
 
@@ -408,14 +403,14 @@ limitation, never fabricated success.
 ### One review, only on request
 
 `prove-it-works` is the author's verification, not a review. When the user asks
-for a review, choose exactly one door:
+for a review, run one isolated frontier review:
 
-1. `/review` for an interactive review; or
-2. `triage_change` / `/triage`, then—after explicit approval—one subagent using
-   the returned profile.
+1. `/review` to pick a target and dispatch `subagent({ role: "reviewer" })`; or
+2. one `subagent({ role: "reviewer" })` (or `security-reviewer`) directly.
 
-Never run both. Never commission a second reviewer because the first found
-little. Pass any `show-me-your-work` trail to that same reviewer.
+Never run multiple reviews for the same change. Never commission a second
+reviewer because the first found little. Pass any `show-me-your-work` trail to
+that same reviewer.
 
 ### Feature delivery
 
@@ -480,8 +475,7 @@ merge commit, then fast-forward `dev` to `main`.
   parent verification.
 - **Silent scope change:** implementing a different contract when the spec proves
   wrong instead of stopping and surfacing the conflict.
-- **Review by habit:** treating non-triviality as permission to start a reviewer.
-- **Goal by inference:** creating a persistent goal for an ordinary request.
+- **Review by habit:** treating non-triviality as permission to start an ad-hoc reviewer.
 - **Green-by-proxy:** reporting success from timestamps, summaries, or exit code
   zero without checking the real artifact and meaningful test output.
 - **Tier confusion:** treating wave Tier 1/2/3 as the workflow route or as a
@@ -497,7 +491,7 @@ its authoritative source. Keep these checks true:
 - every `package.json` skill and extension entry has a role in this document;
 - every command/tool name matches the implementation or README;
 - the six user-invoked skills remain distinct from model-invoked disciplines;
-- review, goal, branch, and release boundaries match `AGENTS.md`;
+- review, branch, and release boundaries match `AGENTS.md`;
 - no table becomes a second copy of model lists, provider prices, or test timing;
 - links resolve and the generated README skill index remains current.
 
@@ -508,6 +502,6 @@ Authoritative references:
 - `docs/harness/skills.md` — skill provenance and repository overrides
 - `docs/harness/extensions.md` — extension architecture and orchestration gates
 - `docs/harness/subagents.md` — delegation access and worktree isolation
-- `docs/harness/reviews.md` — single-review policy and approved candidates
+- `docs/harness/reviews.md` — single unified frontier review pipeline
 - `docs/harness/branches.md` — branch-base verification
 - `docs/harness/testing.md` — test concurrency, host load, and typecheck policy

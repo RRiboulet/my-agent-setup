@@ -19,16 +19,15 @@
  *      carried optimistically across a dropped proposal: the branch is the
  *      authority, and a boundary proposal that a later handler invalidates is
  *      simply not there next time.
- *   2. Evaluates the conditions: an active goal, open todos, edits with no
- *      verification, a repeated failure signature, the remaining block budget.
+ *   2. Evaluates the conditions: open todos, edits with no
+ *      verification, a repeated failure signature, active waves, and the remaining block budget.
  *   3. Runs the project's verification command when — and only when — it could
  *      change the decision.
  *   4. Records one `custom` entry with the verdict and, if it decided to block,
  *      one `custom_message` carrying the reason and the verification output,
  *      then returns `continue: true`. It never returns `continue: false`, and it
  *      always carries forward the entries an earlier handler proposed: `entries`
- *      compose, `continue` is last-writer-wins, and the goal extension owns the
- *      continuation when a goal is active.
+ *      compose and `continue` is last-writer-wins.
  *
  * `orchestrator:gate-decided` is published from the boundary, before the entry
  * is committed — pi offers no post-commit hook there. It is therefore an
@@ -63,7 +62,6 @@ import { existsSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext, ToolExposure } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { activeGoalFromBranch } from "../goal.ts";
 import {
 	ADVISOR_ENTRY_TYPE,
 	ADVISOR_SECTION,
@@ -101,6 +99,7 @@ import { buildCompactSnapshot } from "./compact-snapshot.ts";
 import { isWorkerRole, ORCHESTRATOR_ROLE, type OrchestratorRole } from "./role.ts";
 import { registerWorkspace, resolveWorkspaceToolExposure } from "./workspace-runtime.ts";
 import { registerWaveRuntime } from "./wave-runtime.ts";
+import { registerDelegationRuntime } from "./delegation-runtime.ts";
 import { reconstructWaveState, type WaveState } from "./wave.ts";
 import { readOpenTodos } from "./todo-state.ts";
 import { runVerification, type VerificationExec, type VerificationOutcome } from "./verify.ts";
@@ -158,33 +157,15 @@ export default function orchestratorExtension(
 	/** A delegated worker reports and never acts; see the header. */
 	const worker = isWorkerRole(deps.role ?? ORCHESTRATOR_ROLE);
 
-	// Registered first on purpose: pi stops at the first `tool_call` handler
-	// that blocks, so a reserved path must refuse the call before the loop
-	// breaker starts counting it.
-	registerWorkspace(pi);
-	registerWaveRuntime(pi, {
-		isDelegatedWorker: worker,
-		onWaveActivated: (ctx) => {
-			try {
-				if (!ctx.isProjectTrusted()) {
-					registerOverrideTool(true);
-					return;
-				}
-				const config = cachedConfigAt(ctx.cwd);
-				if (config.block.wave || gateConfigCanAct(config)) {
-					registerOverrideTool(true);
-				}
-			} catch {
-				// An unreadable config is reported at settlement.
-			}
-		},
-	});
-
 	/** The loop breaker's config cache. One read per session, not per call. */
 	let cachedConfig: { cwd: string; read: GateConfigRead } | null = null;
 	/** A granted override, waiting for the next block. In-memory and one-shot: a
 	 *  resume deliberately does not inherit it. */
 	let pendingOverride: GateOverrideUse | null = null;
+	/** True when `settle()` consumed `pendingOverride` during the current
+	 *  `agent_before_settle` boundary so the delegation settle handler honors the
+	 *  same override without sharing it with mid-run `tool_call` gates. */
+	let overrideConsumedInSettle = false;
 	let lastVerdict: GateVerdict | null = null;
 	let lastLoopVerdict: LoopVerdict | null = null;
 	/** The last consultation recorded on this branch, for `/gate`. */
@@ -214,6 +195,59 @@ export default function orchestratorExtension(
 	 * parking only asks whether the map is empty.
 	 */
 	const liveRuns = new Map<string, LiveRunStatus>();
+
+	const consumePendingOverride = (): boolean => {
+		if (!pendingOverride) return false;
+		pendingOverride = null;
+		return true;
+	};
+
+	// Registered first on purpose: pi stops at the first `tool_call` handler
+	// that blocks, so a reserved path must refuse the call before the loop
+	// breaker starts counting it.
+	registerWorkspace(pi);
+	const wave = registerWaveRuntime(pi, {
+		isDelegatedWorker: worker,
+		onWaveActivated: (ctx) => {
+			try {
+				const trusted = ctx.isProjectTrusted();
+				const config = trusted ? cachedConfigAt(ctx.cwd) : DEFAULT_GATE_CONFIG;
+				const waveGateActive = config.block.wave;
+				if (
+					(trusted && (gateConfigCanAct(config) || delegation.isEnforcing())) ||
+					waveGateActive ||
+					delegation.hasPendingGate()
+				) {
+					registerOverrideTool(true);
+				}
+			} catch {
+				// An unreadable config is reported at settlement.
+			}
+		},
+	});
+	const delegation = registerDelegationRuntime(pi, {
+		isDelegatedWorker: worker,
+		getProjectVerificationCommand: () => cachedConfig?.read.config.verification?.command ?? null,
+		hasLiveRuns: () => liveRuns.size > 0,
+		getLiveRunIds: () => [...liveRuns.keys()],
+		isParked: () => parked,
+		shouldParkOnLiveRuns: (ctx) => {
+			const trusted = ctx.isProjectTrusted();
+			const cfg = trusted ? cachedConfigAt(ctx.cwd) : DEFAULT_GATE_CONFIG;
+			return cfg.block.waitForSubagents || (cfg.block.wave && wave.isActive(ctx));
+		},
+		parkForLiveRuns: () => {
+			if (liveRuns.size > 0) parked = true;
+		},
+		consumeOverride: consumePendingOverride,
+		consumeSettleOverride: () => {
+			if (overrideConsumedInSettle) return true;
+			return consumePendingOverride();
+		},
+		isWaveActive: wave.isActive,
+		isWaveReadyToCommit: wave.isReadyToCommit,
+		waveReadyToCommitAt: wave.readyToCommitAt,
+	});
 	/** True from a parked settlement until the wake it earns. In-memory only: a
 	 *  reload rebuilds the live set, not the fact that a particular turn parked, so
 	 *  a child that finished during the reload produces no wake. The next
@@ -265,6 +299,7 @@ export default function orchestratorExtension(
 	// a child that finishes later does not pull the user back into a run they chose
 	// to stop.
 	pi.on("agent_settled", (event) => {
+		overrideConsumedInSettle = false;
 		if (!event.aborted) return;
 		parked = false;
 		finishedWhileParked.clear();
@@ -390,11 +425,15 @@ export default function orchestratorExtension(
 			? { cwd: ctx.cwd, read: readGateConfig(ctx.cwd) }
 			: { cwd: ctx.cwd, read: { config: DEFAULT_GATE_CONFIG, source: "default" } };
 		const waveGateActive = waveState?.status === "active" && cachedConfig.read.config.block.wave;
-		const canAct = trusted || waveState?.status === "active";
-		if (gateConfigCanAct(cachedConfig.read.config) || waveGateActive) {
-			registerOverrideTool(canAct);
+		const shouldRegisterOverride =
+			(trusted && (gateConfigCanAct(cachedConfig.read.config) || delegation.isEnforcing())) ||
+			waveGateActive ||
+			delegation.hasPendingGate();
+		if (shouldRegisterOverride) {
+			registerOverrideTool(true);
 		}
 		pendingOverride = null;
+		overrideConsumedInSettle = false;
 		parked = false;
 		finishedWhileParked.clear();
 		resetLoopState(loop);
@@ -433,7 +472,6 @@ export default function orchestratorExtension(
 			const branch = ctx.sessionManager.getBranch();
 			const gate = reconstructGateState(branch);
 			const advisorState = readAdvisorState(branch);
-			const goal = activeGoalFromBranch(branch);
 			const todos = await readOpenTodos(ctx.cwd);
 			waveState = reconstructWaveState(branch);
 
@@ -452,7 +490,7 @@ export default function orchestratorExtension(
 			const advisorConfig = ctx.isProjectTrusted() ? config?.advisor ?? null : null;
 
 			const snapshot = buildCompactSnapshot({
-				goal: goal ? { objective: goal.objective } : null,
+				goal: null,
 				openTodos: todos.todos,
 				gate: {
 					attempts: gate.attempts,
@@ -569,7 +607,7 @@ export default function orchestratorExtension(
 			trigger: match.trigger,
 			gate: match.gate,
 			loop: match.loop,
-			goal: activeGoalFromBranch(branch),
+			goal: null,
 			openTodos: todos.todos,
 			edits: scanEditVerification(branch, {
 				verificationCommand: config.verification?.command ?? null,
@@ -645,8 +683,14 @@ export default function orchestratorExtension(
 				const config = trusted ? cachedConfigAt(ctx.cwd) : DEFAULT_GATE_CONFIG;
 				waveState = reconstructWaveState(ctx.sessionManager.getBranch());
 				const waveGateActive = waveState?.status === "active" && config.block.wave;
-				const canAct = trusted || waveState?.status === "active";
-				if (canAct && (overrideToolRegistered || gateConfigCanAct(config) || waveGateActive)) {
+				const shouldRegisterOverride =
+					(trusted && (gateConfigCanAct(config) || delegation.isEnforcing())) ||
+					waveGateActive ||
+					delegation.hasPendingGate();
+				if (
+					shouldRegisterOverride ||
+					(overrideToolRegistered && (trusted || waveState?.status === "active" || delegation.hasPendingGate()))
+				) {
 					registerOverrideTool(true);
 				}
 			} catch {
@@ -671,6 +715,7 @@ export default function orchestratorExtension(
 		event: { entries?: unknown[]; outcome?: unknown },
 		ctx: ExtensionContext,
 	): Promise<{ entries: unknown[]; continue?: boolean }> => {
+		overrideConsumedInSettle = false;
 		const trusted = ctx.isProjectTrusted();
 		const branch = ctx.sessionManager.getBranch();
 		waveState = reconstructWaveState(branch);
@@ -698,7 +743,11 @@ export default function orchestratorExtension(
 				}
 			: configRead.config;
 		const waveGateActive = waveState?.status === "active" && config.block.wave;
-		if (gateConfigCanAct(config) || waveGateActive) registerOverrideTool(trusted || waveState?.status === "active");
+		const shouldRegisterOverride =
+			(trusted && (gateConfigCanAct(config) || delegation.isEnforcing())) ||
+			waveGateActive ||
+			delegation.hasPendingGate();
+		if (shouldRegisterOverride) registerOverrideTool(true);
 		const state = reconstructGateState(branch);
 		attempts = state.attempts;
 		lastVerdict = state.lastVerdict ?? lastVerdict;
@@ -810,7 +859,7 @@ export default function orchestratorExtension(
 			attempts: state.attempts,
 			attemptCap: config.attemptCap,
 			scope: child ? "child" : "parent",
-			activeGoal: activeGoalFromBranch(branch),
+			activeGoal: null,
 			openTodos: todos.todos,
 			edits,
 			failure,
@@ -825,6 +874,7 @@ export default function orchestratorExtension(
 			wave: waveState,
 		});
 		if (verdict.override) pendingOverride = null;
+		overrideConsumedInSettle = Boolean(verdict.override);
 		// A parked settlement earns one wake, sent when the live set empties. A
 		// worker never reaches here with `parked` true: `suppressed` empties its
 		// candidate set, so parking needs no special case. Any non-parked
@@ -860,7 +910,7 @@ export default function orchestratorExtension(
 		}
 		publishOrchestrationEvent(pi, ORCHESTRATION_EVENTS.gateDecided, { action: "settle", verdict });
 		// `continue` is returned only when the gate blocked: yielding means leaving
-		// the field alone, so a goal continuation that was already requested stands.
+		// the field alone so any earlier handler's continuation request stands.
 		return verdict.decision === "continue" ? { entries, continue: true } : { entries };
 	};
 
@@ -868,6 +918,7 @@ export default function orchestratorExtension(
 		try {
 			return await settle(event, ctx);
 		} catch (error) {
+			overrideConsumedInSettle = false;
 			// A gate that cannot evaluate must not trap the session: record what
 			// failed, with every condition reported as unknown rather than guessed,
 			// and keep settling (R33).
@@ -889,6 +940,8 @@ export default function orchestratorExtension(
 			};
 		}
 	});
+
+	delegation.registerSettleGate();
 
 	// --- The loop breaker --------------------------------------------------
 

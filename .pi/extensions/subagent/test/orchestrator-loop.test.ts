@@ -40,6 +40,7 @@ import {
 import orchestratorExtension from "../../orchestrator/index.ts";
 import type { OrchestratorRole } from "../../orchestrator/role.ts";
 import { createFakeHost, type FakeHost } from "./fake-pi.ts";
+import { withEnv } from "./helpers.ts";
 
 type Entry = Record<string, unknown>;
 
@@ -184,11 +185,14 @@ test("the record window is bounded", () => {
 
 // --- Factory wiring ---------------------------------------------------------
 
-async function withTempProject<T>(config: unknown, fn: (cwd: string) => Promise<T>): Promise<T> {
+async function withTempProject<T>(config: Record<string, unknown>, fn: (cwd: string) => Promise<T>): Promise<T> {
 	const dir = await mkdtemp(path.join(tmpdir(), "orchestrator-loop-test-"));
 	try {
 		await mkdir(path.join(dir, ".pi"), { recursive: true });
-		await writeFile(gateConfigPath(dir), JSON.stringify(config, null, 2));
+		// These isolated loop-breaker unit tests call `edit` directly on unread paths,
+		// so disable delegation guardrails inside the temp project config.
+		const merged = "delegation" in config ? config : { delegation: { mode: "off" }, ...config };
+		await writeFile(gateConfigPath(dir), JSON.stringify(merged, null, 2));
 		return await fn(dir);
 	} finally {
 		await rm(dir, { recursive: true, force: true });
@@ -357,7 +361,7 @@ test("3 mid-run loop blocks exhaust loopAttemptCap while leaving settlement atte
 		);
 		await writeFile(
 			gateConfigPath(dir),
-			JSON.stringify({ version: 1, attemptCap: 2, block: { loops: true, openTodos: true } }),
+			JSON.stringify({ version: 1, attemptCap: 2, block: { loops: true, openTodos: true }, delegation: { mode: "off" } }),
 		);
 
 		const host = await startHost(dir);
@@ -437,13 +441,15 @@ test("a delegated child session never blocks a tool call", async () => {
 test("an untrusted project never blocks a tool call", async () => {
 	// The guard honours the same trust boundary as the settlement: the config that
 	// turns it on comes from the project.
-	await withTempProject({ version: 1, block: { loops: true } }, async (cwd) => {
-		const host = createFakeHost({ sessionId: "untrusted-loop", cwd, trusted: false });
-		orchestratorExtension(host.pi);
-		for (let index = 0; index < 4; index += 1) {
-			assert.equal(await runCall(host, "edit", { path: "src/a.ts", oldText: "a", newText: "b" }), undefined);
-		}
-		assert.equal(loopEntries(host).length, 0);
+	await withEnv({ PI_ORCHESTRATOR_DELEGATION: "off" }, async () => {
+		await withTempProject({ version: 1, block: { loops: true } }, async (cwd) => {
+			const host = createFakeHost({ sessionId: "untrusted-loop", cwd, trusted: false });
+			orchestratorExtension(host.pi);
+			for (let index = 0; index < 4; index += 1) {
+				assert.equal(await runCall(host, "edit", { path: "src/a.ts", oldText: "a", newText: "b" }), undefined);
+			}
+			assert.equal(loopEntries(host).length, 0);
+		});
 	});
 });
 

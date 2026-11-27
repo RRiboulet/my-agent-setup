@@ -296,3 +296,113 @@ test("textFromAssistant extracts text blocks and tolerates other shapes", () => 
 	assert.equal(textFromAssistant({ content: undefined }), "");
 	assert.equal(textFromAssistant({}), "");
 });
+
+test("runSummary renders role, activitySummary, and parsed subagent-report digest for settled runs without dead pane or raw output", () => {
+	const bigBody = `${"raw reasoning line\n".repeat(400)}TAIL-MARKER`;
+	const run = makeRun({
+		status: "completed",
+		role: "coder",
+		startedAt: 1_000,
+		finishedAt: 6_000,
+		pane: "DEAD-TMUX-PANE-SNAPSHOT",
+		sessionFile: "/tmp/run/session/child.jsonl",
+		output: `${bigBody}\n\n\`\`\`subagent-report\n{"version":1,"status":"ok","summary":"Implemented feature X."}\n\`\`\``,
+		usage: { input: 100, output: 50, cacheRead: 0, cacheWrite: 0, totalTokens: 150, cost: 0.01, turns: 2 },
+		activitySummary: {
+			editedFiles: [{ path: "src/foo.ts", changedLines: 14 }],
+			passedCommands: [{ command: "node --test src/foo.test.ts", at: 5_500 }],
+			lastEditAt: 5_000,
+		},
+		report: {
+			artifactPath: "/tmp/run/report.md",
+			artifactBytes: 8_200,
+			head: bigBody.slice(0, 500),
+			truncated: true,
+			version: 1,
+			status: "ok",
+			summary: "Implemented feature X.\nVerified all cases.",
+			files: ["src/foo.ts", "test/foo.test.ts"],
+			commands: ["node --test src/foo.test.ts"],
+			unresolved: ["Confirm rollout window"],
+		},
+	});
+
+	const summary = runSummary(run);
+	assert.match(summary, /completed · 5s · 150 tok · 2 turns · \$0\.010000/);
+	assert.ok(summary.includes("role: coder"));
+	assert.ok(summary.includes("model: openrouter/deepseek/deepseek-v4 (medium)"));
+	assert.ok(summary.includes("activity summary: edited src/foo.ts (14L) · passed node --test src/foo.test.ts"));
+	assert.ok(summary.includes("report: /tmp/run/report.md (8200 bytes, bounded copy in this record)"));
+	assert.ok(summary.includes("reported: ok — Implemented feature X. Verified all cases."));
+	assert.ok(summary.includes("report files: src/foo.ts, test/foo.test.ts"));
+	assert.ok(summary.includes("report commands: node --test src/foo.test.ts"));
+	assert.ok(summary.includes("report unresolved: Confirm rollout window"));
+	assert.ok(summary.includes("child session: /tmp/run/session/child.jsonl"));
+	assert.ok(!summary.includes("DEAD-TMUX-PANE-SNAPSHOT"), "dead pane omitted by default");
+	assert.ok(!summary.includes("raw reasoning line"), "raw output omitted when report digest exists");
+	assert.ok(!summary.includes("TAIL-MARKER"), "tail omitted when report digest exists");
+
+	const withPaneAndOutput = runSummary(run, { pane: true, output: true });
+	assert.ok(withPaneAndOutput.includes("DEAD-TMUX-PANE-SNAPSHOT"));
+	assert.ok(withPaneAndOutput.includes("raw reasoning line"));
+	assert.ok(withPaneAndOutput.includes("TAIL-MARKER"));
+});
+
+test("runSummary uses a bounded compact tail fallback for settled runs without a structured report", () => {
+	const lines = Array.from({ length: 250 }, (_, index) => `line-${String(index).padStart(3, "0")}: ${"x".repeat(40)}`);
+	const rawOutput = lines.join("\n");
+	const run = makeRun({
+		status: "completed",
+		startedAt: 1_000,
+		finishedAt: 3_000,
+		pane: "DEAD-TMUX-PANE",
+		output: rawOutput,
+		report: {
+			artifactPath: "/tmp/run/report.md",
+			artifactBytes: Buffer.byteLength(rawOutput),
+			head: rawOutput,
+			truncated: false,
+			degradation: "the child's final text carries no subagent-report block",
+		},
+	});
+
+	const defaultSummary = runSummary(run);
+	assert.ok(!defaultSummary.includes("DEAD-TMUX-PANE"), "dead pane omitted by default");
+	assert.ok(!defaultSummary.includes("line-000:"), "early multi-KB lines omitted in compact tail fallback");
+	assert.ok(defaultSummary.includes("line-249:"), "tail line is present in compact fallback");
+	assert.ok(Buffer.byteLength(defaultSummary, "utf8") < 3_000, `summary must stay compact, got ${Buffer.byteLength(defaultSummary, "utf8")} bytes`);
+	assert.ok(defaultSummary.includes("includeOutput: true"), "tells caller how to get full output");
+
+	const expanded = runSummary(run, { output: true });
+	assert.ok(expanded.includes("line-000:"), "output: true restores full raw output");
+	assert.ok(expanded.includes("line-249:"));
+});
+
+test("runSummary renders parsed report digest alongside report degradation when both are present", () => {
+	const run = makeRun({
+		status: "completed",
+		startedAt: 1_000,
+		finishedAt: 4_000,
+		output: "raw output",
+		report: {
+			artifactPath: "/tmp/run/report.md",
+			artifactBytes: 4_096,
+			head: "raw output",
+			truncated: true,
+			degradation: "report.md copy was bounded before digest extraction",
+			version: 1,
+			status: "ok",
+			summary: "Applied fix and verified tests.",
+			files: ["src/fix.ts"],
+			commands: ["node --test"],
+			unresolved: ["Monitor rollout"],
+		},
+	});
+
+	const summary = runSummary(run);
+	assert.ok(summary.includes("report degraded: report.md copy was bounded before digest extraction"));
+	assert.ok(summary.includes("reported: ok — Applied fix and verified tests."));
+	assert.ok(summary.includes("report files: src/fix.ts"));
+	assert.ok(summary.includes("report commands: node --test"));
+	assert.ok(summary.includes("report unresolved: Monitor rollout"));
+});

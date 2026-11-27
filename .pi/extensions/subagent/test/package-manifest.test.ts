@@ -7,8 +7,10 @@
 // listed path exists, and every extension/skill in the tree is listed. Adding an
 // extension and forgetting the manifest is the failure that actually happens.
 
+import { DefaultResourceLoader } from "@earendil-works/pi-coding-agent";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
 
@@ -52,11 +54,67 @@ test("every extension in .pi/extensions is listed in the manifest", () => {
 	assert.deepEqual(listed, expected.sort());
 });
 
-test("every skill in .pi/skills is listed in the manifest", () => {
-	const skillsRoot = path.join(REPO_ROOT, ".pi/skills");
+test("every skill in skills/ is listed in the manifest", () => {
+	const skillsRoot = path.join(REPO_ROOT, "skills");
 	const expected = readdirSync(skillsRoot)
 		.filter((name) => statSync(path.join(skillsRoot, name)).isDirectory())
-		.map((name) => `.pi/skills/${name}`)
+		.map((name) => `skills/${name}`)
 		.sort();
 	assert.deepEqual([...(manifest.pi?.skills ?? [])].sort(), expected);
+});
+
+test("DefaultResourceLoader discovers all 32 skills in package-free mode with no collisions", async (t) => {
+	const tmpRoot = mkdtempSync(path.join(tmpdir(), "pi-package-free-skills-"));
+	const agentDir = path.join(tmpRoot, "agent");
+	const homeDir = path.join(tmpRoot, "home");
+	mkdirSync(agentDir, { recursive: true });
+	mkdirSync(homeDir, { recursive: true });
+
+	const prevHome = process.env.HOME;
+	const prevUserProfile = process.env.USERPROFILE;
+	const restoreEnv = () => {
+		if (prevHome === undefined) {
+			delete process.env.HOME;
+		} else {
+			process.env.HOME = prevHome;
+		}
+		if (prevUserProfile === undefined) {
+			delete process.env.USERPROFILE;
+		} else {
+			process.env.USERPROFILE = prevUserProfile;
+		}
+	};
+	t.after(() => {
+		restoreEnv();
+		rmSync(tmpRoot, { recursive: true, force: true });
+	});
+
+	process.env.HOME = homeDir;
+	process.env.USERPROFILE = homeDir;
+
+	try {
+		const loader = new DefaultResourceLoader({
+			cwd: REPO_ROOT,
+			agentDir,
+			noExtensions: true,
+			noPromptTemplates: true,
+			noThemes: true,
+			noContextFiles: true,
+		});
+		await loader.reload();
+
+		const { skills, diagnostics } = loader.getSkills();
+		const collisions = diagnostics.filter((d) => d.type === "collision");
+		assert.deepEqual(collisions, []);
+
+		const expectedNames = (manifest.pi?.skills ?? []).map((rel) => path.basename(rel)).sort();
+		assert.equal(expectedNames.length, 32);
+		assert.equal(skills.length, 32);
+		assert.deepEqual(
+			skills.map((skill) => skill.name).sort(),
+			expectedNames,
+		);
+	} finally {
+		restoreEnv();
+	}
 });

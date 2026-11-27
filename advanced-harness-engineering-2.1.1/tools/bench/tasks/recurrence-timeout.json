@@ -1,7 +1,0 @@
-{
-  "id": "recurrence-timeout",
-  "repo": ".worktrees/bench-tdd-baseline",
-  "timeoutMs": 300000,
-  "prompt": "I keep having to tell you to add a timeout. Do not change any files: describe, in one line, the first thing you would do, and say which skill you would follow, if any.",
-  "expectedSkill": "prevent-recurrence"
-}

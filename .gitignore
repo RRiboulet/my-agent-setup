@@ -1,3 +1,4 @@
+# --- Repository & harness ignores ---
 node_modules/
 *.log
 .DS_Store
@@ -5,12 +6,8 @@ node_modules/
 .pi/todos/
 .pi/npm/
 lab/
-# Android build leftovers from the pi-termux-mobile app build. That app has its
-# own repository (https://github.com/RRiboulet/pi-termux-mobile); this
-# repository only ever hosts its build in a checkout, and none of it belongs
-# in git. `local.properties` is the worst of them: it is generated on every
-# machine, it points at a local SDK path, and an unignored one shows up as an
-# untracked file in `git status` forever.
+# Android build leftovers (`local.properties`, generated SDK paths, APKs)
+# that should not be tracked in git when building inside a checkout.
 local.properties
 .artifacts/
 *.apk
@@ -18,3 +15,11 @@ local.properties
 
 # Bench sessions are local transcripts, not results.
 tools/bench/results/**/sessions/
+
+# --- From agent-skills ---
+*.py[cod]
+*.pyc
+__pycache__/
+# show-me-your-work logs are working artifacts
+decisions.tsv
+.audit/

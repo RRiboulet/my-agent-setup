@@ -618,3 +618,143 @@ test("kill-on-shutdown still reports ended, never settled", async () => {
 		assert.equal(waited.details.timedOut, false);
 	});
 });
+
+test("settled subagent_wait({ id }) and subagent_status({ id }) default to compact report-first summary and support includeOutput/includePane", async () => {
+	await withWaitHarness({ paneText: "DEAD-PANE-NOISE" }, async (h) => {
+		const run = (await h.call("subagent", { task: "produce report", role: "coder" })).details as unknown as RunRecord;
+		await waitForPanes(h, [run.id]);
+
+		const bigProse = `${"verbose child log line\n".repeat(300)}RAW-BODY-END`;
+		const output = `${bigProse}\n\n\`\`\`subagent-report\n${JSON.stringify({
+			version: 1,
+			status: "ok",
+			summary: "Finished report-first task.",
+			files: ["src/a.ts"],
+			commands: ["node --test"],
+			unresolved: [],
+		})}\n\`\`\`\n`;
+
+		await h.writeResult(run, {
+			...completedResult(output),
+			report: {
+				version: 1,
+				status: "ok",
+				summary: "Finished report-first task.",
+				files: ["src/a.ts"],
+				commands: ["node --test"],
+				unresolved: [],
+			},
+			activitySummary: {
+				editedFiles: [{ path: "src/a.ts", changedLines: 10 }],
+				passedCommands: [{ command: "node --test", at: Date.now() }],
+			},
+		});
+
+		const waited = await h.call("subagent_wait", { id: run.id, timeoutMs: 30_000 });
+		const status = await h.call("subagent_status", { id: run.id });
+
+		assert.equal(waited.text, status.text, "settled single-ID wait and status match verbatim");
+		assert.match(waited.text, /role: coder/);
+		assert.match(waited.text, /reported: ok — Finished report-first task\./);
+		assert.match(waited.text, /report files: src\/a\.ts/);
+		assert.match(waited.text, /report commands: node --test/);
+		assert.match(waited.text, /report: .*report\.md/);
+		assert.match(waited.text, /child session: \/tmp\/child\.jsonl/);
+		assert.doesNotMatch(waited.text, /DEAD-PANE-NOISE/, "dead pane omitted by default");
+		assert.doesNotMatch(waited.text, /verbose child log line/, "raw multi-KB output omitted by default");
+
+		const waitWithOutput = await h.call("subagent_wait", { id: run.id, includeOutput: true });
+		const statusWithOutput = await h.call("subagent_status", { id: run.id, includeOutput: true });
+		assert.equal(waitWithOutput.text, statusWithOutput.text);
+		assert.match(waitWithOutput.text, /verbose child log line/);
+		assert.match(waitWithOutput.text, /RAW-BODY-END/);
+		assert.doesNotMatch(waitWithOutput.text, /DEAD-PANE-NOISE/);
+
+		const waitWithPane = await h.call("subagent_wait", { id: run.id, includePane: true });
+		const statusWithPane = await h.call("subagent_status", { id: run.id, includePane: true });
+		assert.equal(waitWithPane.text, statusWithPane.text);
+		assert.match(waitWithPane.text, /DEAD-PANE-NOISE/);
+		assert.doesNotMatch(waitWithPane.text, /verbose child log line/);
+	});
+});
+
+test("settled unstructured runs across wait({id}), wait({ids}), wait({plan}), and status use bounded tail fallback unless includeOutput is set", async () => {
+	await withWaitHarness({ paneText: "DEAD-PANE-UNSTRUCTURED" }, async (h) => {
+		const bigUnstructured = Array.from(
+			{ length: 200 },
+			(_, index) => `unstructured-line-${String(index).padStart(3, "0")}: ${"y".repeat(45)}`,
+		).join("\n");
+
+		const single = (await h.call("subagent", { task: "unstructured single" })).details as unknown as RunRecord;
+		const planResult = await h.call("subagent", {
+			tasks: [{ id: "step-a", task: "unstructured step" }],
+		});
+		const plan = planResult.details.plan as { id: string };
+		const planRun = (planResult.details.runs as RunRecord[])[0];
+
+		await waitForPanes(h, [single.id, planRun.id]);
+		await h.writeResult(single, completedResult(bigUnstructured));
+		await h.writeResult(planRun, completedResult(bigUnstructured));
+
+		const singleWait = await h.call("subagent_wait", { id: single.id, timeoutMs: 30_000 });
+		const singleStatus = await h.call("subagent_status", { id: single.id });
+		const multiWait = await h.call("subagent_wait", { ids: [single.id], timeoutMs: 30_000 });
+		const planWait = await h.call("subagent_wait", { plan: plan.id, timeoutMs: 30_000 });
+		const listStatus = await h.call("subagent_status", {});
+
+		for (const [label, text] of [
+			["wait({id})", singleWait.text],
+			["status({id})", singleStatus.text],
+			["wait({ids})", multiWait.text],
+			["wait({plan})", planWait.text],
+			["status({})", listStatus.text],
+		] as const) {
+			assert.doesNotMatch(text, /DEAD-PANE-UNSTRUCTURED/, `${label} must omit dead pane by default`);
+			assert.doesNotMatch(text, /unstructured-line-000:/, `${label} must not dump early multi-KB stdout by default`);
+		}
+		assert.match(singleWait.text, /unstructured-line-199:/, "compact tail preserves end of unstructured output");
+		assert.match(planWait.text, /unstructured-line-199:/, "plan wait includes compact tail for settled step");
+
+		const expandedPlan = await h.call("subagent_wait", { plan: plan.id, includeOutput: true, includePane: true });
+		assert.match(expandedPlan.text, /unstructured-line-000:/);
+		assert.match(expandedPlan.text, /DEAD-PANE-UNSTRUCTURED/);
+
+		const expandedIds = await h.call("subagent_wait", { ids: [single.id], includeOutput: true, includePane: true });
+		assert.match(expandedIds.text, /unstructured-line-000:/);
+		assert.match(expandedIds.text, /DEAD-PANE-UNSTRUCTURED/);
+	});
+});
+
+test("subagent_status({ id: planId, includePane: false }) stays compact without expanding step runs", async () => {
+	await withWaitHarness({ paneText: "DEAD-PANE-PLAN" }, async (h) => {
+		const bigUnstructured = Array.from(
+			{ length: 200 },
+			(_, index) => `plan-line-${String(index).padStart(3, "0")}: ${"z".repeat(45)}`,
+		).join("\n");
+
+		const planResult = await h.call("subagent", {
+			tasks: [{ id: "step-a", task: "plan compact status check" }],
+		});
+		const plan = planResult.details.plan as { id: string };
+		const planRun = (planResult.details.runs as RunRecord[])[0];
+
+		await waitForPanes(h, [planRun.id]);
+		await h.writeResult(planRun, completedResult(bigUnstructured));
+		await waitForRunStatus(h, planRun.id, "completed");
+
+		const defaultStatus = await h.call("subagent_status", { id: plan.id });
+		const paneFalseStatus = await h.call("subagent_status", { id: plan.id, includePane: false });
+		assert.equal(paneFalseStatus.text, defaultStatus.text, "includePane: false matches compact default plan status");
+		assert.match(paneFalseStatus.text, new RegExp(`plan ${plan.id}`));
+		assert.match(paneFalseStatus.text, /step-a/);
+		assert.doesNotMatch(paneFalseStatus.text, /DEAD-PANE-PLAN/);
+		assert.doesNotMatch(paneFalseStatus.text, /plan-line-000:/);
+		assert.doesNotMatch(paneFalseStatus.text, /plan-line-199:/);
+		assert.doesNotMatch(paneFalseStatus.text, /\n\s*tmux:/, "compact plan status omits expanded step run blocks");
+
+		const paneTrueStatus = await h.call("subagent_status", { id: plan.id, includePane: true });
+		assert.match(paneTrueStatus.text, /DEAD-PANE-PLAN/);
+		assert.match(paneTrueStatus.text, /plan-line-199:/);
+	});
+});
+

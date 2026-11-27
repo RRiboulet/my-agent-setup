@@ -17,7 +17,22 @@
 // pi actually loads the extension.
 
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
 import { test } from "node:test";
+
+import {
+	ORCHESTRATION_EVENTS,
+	publishOrchestrationEvent,
+	subscribeOrchestrationEvent,
+	type SubagentDispatchPayload,
+	type SubagentDispatchResult,
+} from "../../orchestrator/events.ts";
+import orchestratorExtension from "../../orchestrator/index.ts";
+import { createFakeHost } from "./fake-pi.ts";
+import { waitFor } from "./helpers.ts";
+import { waitForRunStatus, withHarness } from "./lifecycle-harness.ts";
 
 const SPECIFIER = new URL("../../review.ts", import.meta.url).href;
 
@@ -199,4 +214,398 @@ test("extractAssistantTextContent pulls text parts from a message", async () => 
 		"line one\n  line two", // parts join verbatim; only the outer edges trim
 	);
 	assert.equal(extractAssistantTextContent({ not: "content" }), "");
+});
+
+async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
+	const dir = await mkdtemp(path.join(tmpdir(), "review-ext-test-"));
+	try {
+		return await fn(dir);
+	} finally {
+		await rm(dir, { recursive: true, force: true });
+	}
+}
+
+async function loadReviewExtension() {
+	const module = (await import(SPECIFIER)) as {
+		default: (pi: unknown) => void;
+		__test__: ReviewHelpers;
+	};
+	return module.default;
+}
+
+test("ORCHESTRATION_EVENTS exposes subagentDispatch channel", () => {
+	assert.equal(
+		(ORCHESTRATION_EVENTS as Record<string, string>).subagentDispatch,
+		"orchestrator:subagent-dispatch",
+	);
+});
+
+test("/review dispatches an isolated reviewer subagent with rubric, guidelines, and inherited model", async () => {
+	const reviewExtension = await loadReviewExtension();
+	await withTempDir(async (cwd) => {
+		await mkdir(path.join(cwd, ".pi"), { recursive: true });
+		await writeFile(path.join(cwd, "REVIEW_GUIDELINES.md"), "Always check fail-fast error propagation.\n", "utf8");
+
+		const host = createFakeHost({
+			cwd,
+			hasUI: true,
+			model: { provider: "anthropic", id: "claude-opus-4-6" },
+			exec: async (command, args) => {
+				if (command === "git" && args[0] === "rev-parse" && args[1] === "--git-dir") {
+					return { stdout: ".git\n", stderr: "", code: 0, killed: false, truncated: false };
+				}
+				return { stdout: "", stderr: "", code: 0, killed: false, truncated: false };
+			},
+		});
+
+		const sendUserMessageCalls: unknown[] = [];
+		(host.pi as unknown as Record<string, unknown>).sendUserMessage = (...args: unknown[]) => {
+			sendUserMessageCalls.push(args);
+		};
+
+		const dispatched: SubagentDispatchPayload[] = [];
+		const channel = (ORCHESTRATION_EVENTS as Record<string, string>).subagentDispatch;
+		assert.ok(channel, "subagentDispatch channel must exist");
+		subscribeOrchestrationEvent(host.pi, channel as never, (rawPayload) => {
+			const payload = rawPayload as unknown as SubagentDispatchPayload;
+			dispatched.push(payload);
+			payload.onAccepted?.();
+			payload.onDispatched?.({
+				ok: true,
+				runId: "rev-run-1",
+				provider: "anthropic",
+				model: "claude-opus-4-6",
+				thinking: "high",
+			});
+		});
+
+		reviewExtension(host.pi);
+		await host.fire("session_start", {});
+		await host.runCommand("review", 'uncommitted --extra "focus on auth checks"');
+
+		assert.equal(sendUserMessageCalls.length, 0, "review must never call pi.sendUserMessage");
+		assert.equal(host.messages.length, 0, "review must never send session messages directly");
+		assert.equal(dispatched.length, 1);
+
+		const req = dispatched[0]!;
+		assert.equal(req.role, "reviewer");
+		assert.deepEqual(req.tools, ["read", "grep", "find", "ls", "bash"]);
+		assert.equal(req.thinking, "high");
+		assert.equal(req.handoff, false);
+		assert.equal(req.provider, undefined, "provider must be omitted for frontier inheritance");
+		assert.equal(req.model, undefined, "model must be omitted for frontier inheritance");
+		assert.equal(req.cwd, cwd);
+		assert.match(req.task, /# Review Guidelines/);
+		assert.match(req.task, /Review the current code changes/);
+		assert.match(req.task, /focus on auth checks/);
+		assert.match(req.task, /Always check fail-fast error propagation\./);
+		assert.ok(
+			host.notifications.some((n) => n.message.includes("rev-run-1")),
+			"user should be notified with the dispatched runId",
+		);
+
+		host.pi.events.emit(ORCHESTRATION_EVENTS.runSettled, {
+			runId: "rev-run-1",
+			status: "completed",
+			role: "reviewer",
+			finishedAt: Date.now(),
+		});
+		assert.ok(
+			host.notifications.some((n) => n.message.includes("rev-run-1") && /completed/i.test(n.message)),
+			"user should be notified when the review run settles",
+		);
+		assert.equal(sendUserMessageCalls.length, 0);
+	});
+});
+
+test("/review drops /end-review, loop-fixing, and parent-session branch prompts", async () => {
+	const reviewExtension = await loadReviewExtension();
+	await withTempDir(async (cwd) => {
+		const selectPrompts: string[] = [];
+		const host = createFakeHost({
+			cwd,
+			hasUI: true,
+			branch: [{ type: "message", id: "m1", message: { role: "user", content: "existing turn" } }],
+			exec: async (command, args) => {
+				if (command === "git" && args[0] === "rev-parse" && args[1] === "--git-dir") {
+					return { stdout: ".git\n", stderr: "", code: 0, killed: false, truncated: false };
+				}
+				return { stdout: "", stderr: "", code: 0, killed: false, truncated: false };
+			},
+		});
+		host.ctx.ui.select = async (title: string) => {
+			selectPrompts.push(title);
+			return undefined;
+		};
+
+		const sendUserMessageCalls: unknown[] = [];
+		(host.pi as unknown as Record<string, unknown>).sendUserMessage = (...args: unknown[]) => {
+			sendUserMessageCalls.push(args);
+		};
+
+		const channel = (ORCHESTRATION_EVENTS as Record<string, string>).subagentDispatch;
+		assert.ok(channel, "subagentDispatch channel must exist");
+		subscribeOrchestrationEvent(host.pi, channel as never, (rawPayload) => {
+			const payload = rawPayload as unknown as SubagentDispatchPayload;
+			payload.onAccepted?.();
+			payload.onDispatched?.({ ok: true, runId: "rev-run-2" });
+		});
+
+		reviewExtension(host.pi);
+		await host.fire("session_start", {});
+		assert.equal(host.commands.has("end-review"), false, "/end-review command must be removed");
+
+		await host.runCommand("review", "uncommitted");
+		assert.deepEqual(selectPrompts, [], "should not prompt for Empty branch vs Current session");
+		assert.equal(sendUserMessageCalls.length, 0);
+	});
+});
+
+test("/review notifies with an error when no subagent dispatcher is registered", async () => {
+	const reviewExtension = await loadReviewExtension();
+	await withTempDir(async (cwd) => {
+		const host = createFakeHost({
+			cwd,
+			hasUI: true,
+			exec: async (command, args) => {
+				if (command === "git" && args[0] === "rev-parse" && args[1] === "--git-dir") {
+					return { stdout: ".git\n", stderr: "", code: 0, killed: false, truncated: false };
+				}
+				return { stdout: "", stderr: "", code: 0, killed: false, truncated: false };
+			},
+		});
+		const sendUserMessageCalls: unknown[] = [];
+		(host.pi as unknown as Record<string, unknown>).sendUserMessage = (...args: unknown[]) => {
+			sendUserMessageCalls.push(args);
+		};
+
+		reviewExtension(host.pi);
+		await host.fire("session_start", {});
+		await host.runCommand("review", "uncommitted");
+
+		assert.equal(sendUserMessageCalls.length, 0);
+		assert.ok(
+			host.notifications.some((n) => n.type === "error" && /subagent|dispatcher/i.test(n.message)),
+			"should notify an error when no subagent dispatcher handles the event",
+		);
+	});
+});
+
+test("reviewExtension + orchestrator delegation marks reviewVerified when dispatched reviewer run settles", async () => {
+	const reviewExtension = await loadReviewExtension();
+	await withTempDir(async (cwd) => {
+		await mkdir(path.join(cwd, ".pi"), { recursive: true });
+		const host = createFakeHost({
+			cwd,
+			hasUI: true,
+			trusted: true,
+			model: { provider: "anthropic", id: "claude-opus-4-6" },
+			exec: async (command, args) => {
+				if (command === "git" && args[0] === "rev-parse" && args[1] === "--git-dir") {
+					return { stdout: ".git\n", stderr: "", code: 0, killed: false, truncated: false };
+				}
+				return { stdout: "", stderr: "", code: 0, killed: false, truncated: false };
+			},
+		});
+
+		orchestratorExtension(host.pi, { role: "parent" });
+		reviewExtension(host.pi);
+
+		const channel = (ORCHESTRATION_EVENTS as Record<string, string>).subagentDispatch;
+		assert.ok(channel, "subagentDispatch channel must exist");
+		let dispatchedRunId = "";
+		let dispatchedStartedAt = 0;
+		subscribeOrchestrationEvent(host.pi, channel as never, (rawPayload) => {
+			const payload = rawPayload as unknown as SubagentDispatchPayload;
+			dispatchedRunId = "rev-int-1";
+			dispatchedStartedAt = Date.now();
+			payload.onAccepted?.();
+			publishOrchestrationEvent(host.pi, ORCHESTRATION_EVENTS.runStarted, {
+				runId: dispatchedRunId,
+				status: "running",
+				role: payload.role,
+				provider: "anthropic",
+				model: "claude-opus-4-6",
+				startedAt: dispatchedStartedAt,
+				at: dispatchedStartedAt,
+			});
+			payload.onDispatched?.({
+				ok: true,
+				runId: dispatchedRunId,
+				provider: "anthropic",
+				model: "claude-opus-4-6",
+				thinking: payload.thinking,
+			});
+		});
+
+		await host.fire("session_start", {});
+		await host.fire("before_agent_start", {
+			type: "before_agent_start",
+			messageType: "user",
+			prompt: "Implement multi-file change",
+			systemPrompt: "base",
+			systemPromptOptions: { sections: {} },
+		});
+
+		const editTime = Date.now() - 100;
+		host.pi.events.emit(ORCHESTRATION_EVENTS.runSettled, {
+			runId: "coder-1",
+			status: "completed",
+			role: "coder",
+			startedAt: editTime,
+			finishedAt: editTime + 20,
+			activitySummary: {
+				editedFiles: [
+					{ path: "src/a.ts", changedLines: 10 },
+					{ path: "src/b.ts", changedLines: 10 },
+				],
+				passedCommands: [{ command: "node --test", at: editTime + 15 }],
+				lastEditAt: editTime + 10,
+			},
+		});
+
+		const blocked = (await host.fire("tool_call", {
+			toolName: "bash",
+			input: { command: "git commit -m 'wip'" },
+		})) as { block?: boolean; reason?: string } | undefined;
+		assert.equal(blocked?.block, true);
+		assert.match(blocked?.reason ?? "", /code-review/);
+
+		await host.runCommand("review", "uncommitted");
+		assert.equal(dispatchedRunId, "rev-int-1");
+
+		host.pi.events.emit(ORCHESTRATION_EVENTS.runSettled, {
+			runId: dispatchedRunId,
+			status: "completed",
+			role: "reviewer",
+			startedAt: dispatchedStartedAt,
+			finishedAt: dispatchedStartedAt + 50,
+		});
+
+		const allowed = await host.fire("tool_call", {
+			toolName: "bash",
+			input: { command: "git commit -m 'feat'" },
+		});
+		assert.equal(allowed, undefined, "git commit should succeed once reviewer run settles");
+
+		// Small follow-up edit re-arms the review gate and /review satisfies it again
+		await host.fire("tool_call", { toolName: "read", input: { path: "src/a.ts" } });
+		await host.fire("tool_result", { toolName: "read", input: { path: "src/a.ts" }, isError: false, content: [] });
+		await host.fire("tool_call", { toolName: "edit", input: { path: "src/a.ts", oldText: "x", newText: "y" } });
+		await host.fire("tool_result", {
+			toolName: "edit",
+			input: { path: "src/a.ts", oldText: "x", newText: "y" },
+			isError: false,
+			content: [],
+		});
+		await host.fire("tool_result", { toolName: "bash", input: { command: "node --test" }, isError: false, content: [] });
+
+		const reblocked = (await host.fire("tool_call", {
+			toolName: "bash",
+			input: { command: "git commit -m 'follow-up'" },
+		})) as { block?: boolean; reason?: string } | undefined;
+		assert.equal(reblocked?.block, true);
+		assert.match(reblocked?.reason ?? "", /code-review/);
+
+		await host.runCommand("review", "uncommitted");
+		host.pi.events.emit(ORCHESTRATION_EVENTS.runSettled, {
+			runId: dispatchedRunId,
+			status: "completed",
+			role: "reviewer",
+			startedAt: dispatchedStartedAt,
+			finishedAt: dispatchedStartedAt + 50,
+		});
+		assert.equal(
+			await host.fire("tool_call", { toolName: "bash", input: { command: "git commit -m 'follow-up'" } }),
+			undefined,
+		);
+	});
+});
+
+test("subagent extension handles ORCHESTRATION_EVENTS.subagentDispatch and emits runStarted/runSettled", async () => {
+	await withHarness({}, async (h) => {
+		const channel = (ORCHESTRATION_EVENTS as Record<string, string>).subagentDispatch;
+		assert.ok(channel, "subagentDispatch channel must exist");
+
+		let dispatchResult: SubagentDispatchResult | undefined;
+		publishOrchestrationEvent(h.pi as never, channel as never, {
+			task: "Review uncommitted changes",
+			cwd: h.ctx.cwd as string,
+			role: "reviewer",
+			tools: ["read", "grep", "find", "ls", "bash"],
+			thinking: "high",
+			handoff: false,
+			source: "review-command",
+			onDispatched: (res) => {
+				dispatchResult = res;
+			},
+		} as never);
+
+		await waitFor(() => dispatchResult !== undefined);
+		assert.equal(dispatchResult?.ok, true);
+		assert.ok(dispatchResult?.runId);
+		assert.equal(dispatchResult?.provider, "openrouter");
+		assert.equal(dispatchResult?.model, "parent/model");
+		assert.equal(dispatchResult?.thinking, "high");
+
+		const runs = await h.readRuns();
+		const run = runs.find((r) => r.id === dispatchResult?.runId);
+		assert.ok(run);
+		assert.equal(run.role, "reviewer");
+		assert.deepEqual(run.tools, ["read", "grep", "find", "ls", "bash"]);
+		assert.equal(run.thinking, "high");
+		assert.equal(run.mode, "standalone");
+
+		await h.writeResult(run, {
+			version: 1,
+			status: "completed",
+			output: "## Verdict\ncorrect\n",
+			finishedAt: Date.now(),
+		});
+		await waitForRunStatus(h, "completed");
+
+		await waitFor(() =>
+			h.events.some(
+				(e) =>
+					e.channel === ORCHESTRATION_EVENTS.runSettled &&
+					(e.data as { runId?: string }).runId === run.id,
+			),
+		);
+		const settled = h.events.find(
+			(e) =>
+				e.channel === ORCHESTRATION_EVENTS.runSettled &&
+				(e.data as { runId?: string }).runId === run.id,
+		);
+		assert.equal((settled?.data as { role?: string; status?: string }).role, "reviewer");
+		assert.equal((settled?.data as { role?: string; status?: string }).status, "completed");
+	});
+});
+
+test("subagent extension reports validation errors via onDispatched on invalid subagentDispatch", async () => {
+	await withHarness({}, async (h) => {
+		let emptyResult: SubagentDispatchResult | undefined;
+		publishOrchestrationEvent(h.pi as never, ORCHESTRATION_EVENTS.subagentDispatch, {
+			task: "   ",
+			role: "reviewer",
+			onDispatched: (res) => {
+				emptyResult = res;
+			},
+		});
+		await waitFor(() => emptyResult !== undefined);
+		assert.equal(emptyResult?.ok, false);
+		assert.match(emptyResult?.error ?? "", /empty/i);
+
+		let badHandoffResult: SubagentDispatchResult | undefined;
+		publishOrchestrationEvent(h.pi as never, ORCHESTRATION_EVENTS.subagentDispatch, {
+			task: "Review changes",
+			role: "reviewer",
+			handoff: "invalid-mode" as never,
+			onDispatched: (res) => {
+				badHandoffResult = res;
+			},
+		});
+		await waitFor(() => badHandoffResult !== undefined);
+		assert.equal(badHandoffResult?.ok, false);
+		assert.match(badHandoffResult?.error ?? "", /handoff/i);
+	});
 });

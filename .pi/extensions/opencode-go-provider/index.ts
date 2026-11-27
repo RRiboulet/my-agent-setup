@@ -305,7 +305,7 @@ function isOpenEndedContextBand(context: unknown): context is { gt: unknown } {
  * recorded payload uses `gte` at all (the 2026-11-10 fixture is `gt` only), so
  * an unobserved second band shape is not worth that arithmetic: a `gte`-only
  * override keeps the base rate. The user-facing wording lives in
- * `.pi/skills/add-model/`, which the `add-model-skill-rewrite` branch owns; it
+ * `skills/add-model/`, which the `add-model-skill-rewrite` branch owns; it
  * is not edited here to keep the two changes from colliding, and it states which
  * of the two band shapes is mapped today and which waits for this one.
  *

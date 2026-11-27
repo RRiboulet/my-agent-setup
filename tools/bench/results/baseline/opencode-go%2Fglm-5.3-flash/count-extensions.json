@@ -5,7 +5,7 @@
     "model": "opencode-go/glm-5.3-flash",
     "state": "baseline"
   },
-  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-fixture",
+  "repo": "/home/ubuntu/.pi/agent-host/git/github.com/advanced-harness-engineering/.worktrees/bench-fixture",
   "repoState": {
     "isGit": true,
     "head": "5946170701a6d57e4dacc11c27ef76a85f49814e",
@@ -46,6 +46,6 @@
   },
   "parseError": null,
   "parseTruncated": false,
-  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go%2Fglm-5.3-flash/sessions/count-extensions",
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/advanced-harness-engineering/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go%2Fglm-5.3-flash/sessions/count-extensions",
   "stderrTail": ""
 }

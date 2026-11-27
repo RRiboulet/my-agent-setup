@@ -9,7 +9,7 @@
 # `--attach-subagent` flag) as a load error, so a child rooted in
 # `.worktrees/<slug>` exits 1 before any model call:
 #
-#   Tool "get_goal" conflicts with .../.worktrees/<slug>/.pi/extensions/goal.ts
+#   Tool "todo" conflicts with .../.worktrees/<slug>/.pi/extensions/todos.ts
 #
 # There is no flag or env var that suppresses only the package copy, so the fix
 # is the one the devcontainer already uses (README, "One copy of the extensions,
@@ -54,7 +54,7 @@
 #     package bookkeeping in `.extensionChangelogVersions` removed. Written only
 #     when missing: from then on the file belongs to this project, like the
 #     container's does (postCreate.sh makes the same promise).
-#   * auth.json, models-store.json, models.json, review-triage.json — copied when absent, never overwritten.
+#   * auth.json, models-store.json, models.json — copied when absent, never overwritten.
 #   * trust.json — the main checkout added, other entries preserved. Project
 #     trust is what makes pi read `<checkout>/.pi/` at all; without it the
 #     package-free dir is a *silent empty* agent rather than a working one.
@@ -225,7 +225,7 @@ else
 fi
 
 # --- credentials and per-machine extension config: copied once --------------
-for name in auth.json models.json models-store.json review-triage.json; do
+for name in auth.json models.json models-store.json; do
 	if [ -f "$DIR/$name" ]; then
 		continue
 	fi

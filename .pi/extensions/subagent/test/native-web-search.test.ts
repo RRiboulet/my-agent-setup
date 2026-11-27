@@ -1,13 +1,10 @@
-// Pins native-web-search's script lookup, and guards the bug in it.
-//
-// Before this test, resolveScriptPath probed `here/../../skills/...` — `here`
-// is the extensions dir (`.pi/extensions`), so that resolved to `<repo>/skills`,
-// but the script actually lives at `<repo>/.pi/skills`, so the candidate could
-// never exist and the failure message advertised a path that cannot. The `.pi`
-// is the whole reason a git-sourced pi package is discoverable at all.
+// Pins native-web-search's script lookup: `skills/native-web-search/search.mjs`
+// is checked first (both relative to `.pi/extensions` and relative to `cwd`),
+// before falling back to `.pi/skills/native-web-search/search.mjs` for
+// legacy/installed package layouts.
 //
 // The candidate list is derived by `scriptCandidates(here, cwd)`, so the test
-// can pin it (and the `.pi` fix) against fixture paths without depending on
+// can pin the precedence order against fixture paths without depending on
 // where this file happens to live on disk.
 //
 // It also covers the vendored script itself (`search.mjs`): provider resolution,
@@ -23,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 
 import { __test__ } from "../../native-web-search.ts";
-import { __test__ as script } from "../../../skills/native-web-search/search.mjs";
+import { __test__ as script } from "../../../../skills/native-web-search/search.mjs";
 
 const { resolveScriptPath, scriptCandidates, resolveProvider, resolveModel, buildSearchArgs } = __test__;
 const {
@@ -407,7 +404,7 @@ test("the script still runs when invoked through a symlink", () => {
 	const root = mkdtempSync(join(tmpdir(), "nws-link-"));
 	try {
 		const link = join(root, "search.mjs");
-		symlinkSync(new URL("../../../skills/native-web-search/search.mjs", import.meta.url), link);
+		symlinkSync(new URL("../../../../skills/native-web-search/search.mjs", import.meta.url), link);
 		const result = spawnSync(process.execPath, [link, "--help"], { encoding: "utf8" });
 		// The guard compares both the literal and the realpath entry, so a symlinked
 		// install still reaches main() instead of importing silently and exiting 0
@@ -422,37 +419,38 @@ test("the script still runs when invoked through a symlink", () => {
 test("the candidate list pins the repo and installed-package layouts", () => {
 	const here = join("proj", ".pi", "extensions");
 	const cwd = join("proj");
-	// Candidates 2 and 3 coincide here because cwd === the repo root: candidate
-	// 2 is the repo/package-root `.pi/skills` and candidate 3 reaches the same
-	// path via cwd. That collision is deliberate and pinned, not something to
-	// dedupe away — candidate 3 is load-bearing for agent-dir installs.
+	// Canonical `skills/` paths come first (repo root then cwd), followed by
+	// `.pi/skills/` fallbacks for legacy/installed-package layouts.
 	assert.deepEqual(scriptCandidates(here, cwd), [
 		join("proj", ".pi", "extensions", "search.mjs"),
+		join("proj", "skills", "native-web-search", "search.mjs"),
+		join("proj", "skills", "native-web-search", "search.mjs"),
 		join("proj", ".pi", "skills", "native-web-search", "search.mjs"),
 		join("proj", ".pi", "skills", "native-web-search", "search.mjs"),
 	]);
-	// The whole point of the fix: every skills candidate carries `.pi`. A
-	// regression back to `<root>/skills/...` (which can never exist, because
-	// dot-prefixed dirs are the pi package layout) fails this assertion.
-	for (const candidate of scriptCandidates(here, cwd)) {
-		if (candidate.includes(`${sep}skills${sep}`)) {
-			assert.ok(candidate.includes(`${sep}.pi${sep}skills${sep}`),
-				`candidate must reference .pi/skills, not bare skills: ${candidate}`);
-		}
-	}
+	const candidates = scriptCandidates(here, cwd);
+	const canonicalIdx = candidates.findIndex(
+		(candidate) => candidate.includes(`${sep}skills${sep}`) && !candidate.includes(`${sep}.pi${sep}skills${sep}`),
+	);
+	const fallbackIdx = candidates.findIndex((candidate) => candidate.includes(`${sep}.pi${sep}skills${sep}`));
+	assert.ok(canonicalIdx !== -1 && fallbackIdx !== -1 && canonicalIdx < fallbackIdx,
+		"canonical skills/ candidates must precede .pi/skills/ fallbacks");
 });
 
 test("the skill resolves from the repo layout on a fixture tree", () => {
 	const root = mkdtempSync(join(tmpdir(), "nws-test-"));
 	try {
-		// A real tree: the extension dir has no co-located script; the skill lives
-		// in `.pi/skills/native-web-search/` at the repo root.
+		// A real tree: the extension dir has no co-located script; the canonical
+		// skill lives in `skills/native-web-search/` at the repo root, and takes
+		// precedence over any `.pi/skills/` fallback.
+		mkdirSync(join(root, "skills", "native-web-search"), { recursive: true });
+		writeFileSync(join(root, "skills", "native-web-search", "search.mjs"), "// canonical\n");
 		mkdirSync(join(root, ".pi", "skills", "native-web-search"), { recursive: true });
-		writeFileSync(join(root, ".pi", "skills", "native-web-search", "search.mjs"), "// fixture\n");
+		writeFileSync(join(root, ".pi", "skills", "native-web-search", "search.mjs"), "// fallback\n");
 
 		const here = join(root, ".pi", "extensions");
 		const found = scriptCandidates(here, root).find((candidate) => existsSync(candidate));
-		assert.equal(found, join(root, ".pi", "skills", "native-web-search", "search.mjs"));
+		assert.equal(found, join(root, "skills", "native-web-search", "search.mjs"));
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

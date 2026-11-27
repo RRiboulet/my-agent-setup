@@ -1093,7 +1093,6 @@ test("the settlement boundary records a verdict with every open condition and pu
 		await withEnv({ PI_TODO_PATH: todosDir }, async () => {
 			const host = await startHost({
 				branch: [
-					goalEntry(),
 					assistantCall("e1", "edit", { path: "src/a.ts" }),
 					toolResult("e1", "edit"),
 					assistantCall("b1", "bash", { command: "npm test" }),
@@ -1115,7 +1114,7 @@ test("the settlement boundary records a verdict with every open condition and pu
 			assert.equal(verdict.attempts, 0, "a report is not an attempt");
 			assert.deepEqual(
 				verdict.reasons.map((reason) => reason.code),
-				["goal-active", "open-todos", "edits-without-verification", "repeated-failure"],
+				["open-todos", "edits-without-verification", "repeated-failure"],
 			);
 			assert.equal(host.emitted.length, 1);
 			assert.equal(host.emitted[0]?.channel, ORCHESTRATION_EVENTS.gateDecided);
@@ -1180,13 +1179,14 @@ test("a completed run's pre-draft canContinue=false does not suppress a real blo
 	});
 });
 
-test("when a goal already owns the continuation the gate does not request another", async () => {
+test("a legacy goal entry is ignored and a yielding gate preserves an earlier continuation", async () => {
 	const host = await startHost({ branch: [goalEntry()] });
 	await host.fire("session_start", {});
 	const result = (await host.fire("agent_before_settle", boundaryEvent([], { continue: true }))) as BoundaryProposal;
 	const verdict = gateVerdictOf(result);
 
-	assert.equal(verdict.reasons[0]?.code, "goal-active");
+	assert.equal(verdict.kind, "clear");
+	assert.deepEqual(verdict.reasons, []);
 	assert.equal(result.continue, undefined, "yield by leaving the field alone; never return continue: false");
 });
 
@@ -1283,10 +1283,12 @@ test("the override tool refuses an empty reason", async () => {
 });
 
 test("a report-only project pays nothing for the override: the tool is not registered", async () => {
-	await withTempDir(async (cwd) => {
-		const host = await startHost({ cwd });
-		await host.fire("session_start", {});
-		assert.equal(host.tools.has(GATE_OVERRIDE_TOOL), false, "no block is possible, so no escape hatch is advertised");
+	await withEnv({ PI_ORCHESTRATOR_DELEGATION: "off" }, async () => {
+		await withTempDir(async (cwd) => {
+			const host = await startHost({ cwd });
+			await host.fire("session_start", {});
+			assert.equal(host.tools.has(GATE_OVERRIDE_TOOL), false, "no block is possible, so no escape hatch is advertised");
+		});
 	});
 });
 
@@ -1460,14 +1462,20 @@ test("orchestrator_override transitioning direct to codemode calls setActiveTool
 
 			await host.fire("session_start", {});
 			assert.equal(host.tools.get(GATE_OVERRIDE_TOOL)?.exposure, undefined);
-			assert.equal(setActiveCalls.length, 0);
+			assert.equal(setActiveCalls.length, 1, "enforce mode hides parent write on session_start");
+			assert.deepEqual(activeTools, ["read", "bash", "edit", GATE_OVERRIDE_TOOL]);
 
-			activeTools = ["read", "bash", "edit", "write", GATE_OVERRIDE_TOOL, activeTool];
+			activeTools = [...activeTools, activeTool];
 			await host.fire("before_agent_start", { systemPromptOptions: { sections: {} } });
 			assert.equal(host.tools.get(GATE_OVERRIDE_TOOL)?.exposure, "codemode");
-			assert.equal(setActiveCalls.length, 2, "workspace and override transitions each update activeTools");
+			assert.equal(
+				setActiveCalls.length,
+				3,
+				"session_start write-hide plus workspace and override transitions update activeTools without redundant write calls",
+			);
 			assert.equal(activeTools.includes(GATE_OVERRIDE_TOOL), false);
-			assert.deepEqual(activeTools, ["read", "bash", "edit", "write", activeTool]);
+			assert.equal(activeTools.includes("write"), false);
+			assert.deepEqual(activeTools, ["read", "bash", "edit", activeTool]);
 		});
 	}
 });

@@ -1,8 +1,0 @@
-{
-  "name": "advanced-harness-engineering",
-  "version": "0.1.0",
-  "description": "Dual-harness skills, agents, hooks, and extensions for Copilot CLI and pi",
-  "skills": "./skills",
-  "agents": "./agents",
-  "hooks": "./hooks/orchestrator-guard.json"
-}

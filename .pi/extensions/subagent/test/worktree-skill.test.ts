@@ -293,7 +293,7 @@ test("worktree skill: names the package copy as the case the launcher cannot ded
 		SKILL.includes("The package copy is the one case that fix cannot cover."),
 		"must name the package copy as a second, unfixable conflict",
 	);
-	assert.ok(SKILL.includes('Tool "get_goal" conflicts with'), "must quote the per-extension conflict a reader sees");
+	assert.ok(SKILL.includes('Tool "todo" conflicts with'), "must quote the per-extension conflict a reader sees");
 	assert.ok(
 		SKILL.includes("bin/pi-agent-dir"),
 		"must give the remedy a host can act on: the package-free agent dir, not only the package removal",

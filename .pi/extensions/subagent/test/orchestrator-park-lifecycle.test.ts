@@ -101,11 +101,14 @@ test("parking then settling cleanly without parking does not wake when the live 
 			);
 			assert.equal(parked.parked, true);
 
-			// Close the open todo so the next settlement settles cleanly without parking.
+			// Close the open todo and bypass delegation for this turn (!direct) so the
+			// next settlement settles cleanly without parking (under default enforce
+			// mode, live workers otherwise keep parking while waitForSubagents is true).
 			await writeFile(
 				path.join(cwd, ".pi", "todos", "aaaaaaaa.md"),
 				`${JSON.stringify({ id: "aaaaaaaa", title: "finish", status: "closed" })}\n`,
 			);
+			await h.fire("before_agent_start", { prompt: "!direct settle cleanly without waiting" });
 			const clean = verdictOf(
 				await h.fire("agent_before_settle", {
 					entries: [],
