@@ -280,6 +280,7 @@ import {
 	DEFAULT_MAX_LINES,
 	getAgentDir,
 	truncateHead,
+	truncateTail,
 	type ExtensionAPI,
 	type ExtensionContext,
 	type ToolDefinition,
@@ -369,7 +370,13 @@ import {
 } from "./plan.ts";
 import { currentTmuxPointer, currentTmuxSocket, defaultPanelLauncher, resolvePaneClient, type PanelLauncher } from "./popup.ts";
 import { shellQuote } from "./shell.ts";
-import { ORCHESTRATION_EVENTS, publishOrchestrationEvent } from "../orchestrator/events.ts";
+import {
+	ORCHESTRATION_EVENTS,
+	publishOrchestrationEvent,
+	subscribeOrchestrationEvent,
+	type ChildActivitySummary,
+	type SubagentDispatchPayload,
+} from "../orchestrator/events.ts";
 
 const ATTACH_FLAG = "attach-subagent";
 const CHILD_ENV = "PI_TMUX_SUBAGENT_CHILD";
@@ -393,6 +400,10 @@ const RUNS_DIR = "tmux-subagents";
 const POLL_INTERVAL_MS = 500;
 const TMUX_EXEC_TIMEOUT_MS = 5_000;
 const PANE_PREVIEW_LINES = 18;
+const FALLBACK_TAIL_LINES = 12;
+const FALLBACK_TAIL_BYTES = 1_200;
+const REPORT_SUMMARY_DIGEST_CHARS = 500;
+const DIGEST_LIST_MAX_ITEMS = 8;
 const DEFAULT_PROVIDER = "openrouter";
 const DEFAULT_MAX_CONCURRENT = 4;
 const GC_DAYS = 7;
@@ -466,7 +477,7 @@ type RunStatus = "queued" | "running" | "completed" | "failed" | "cancelled" | "
  * to it when — and only when — the management tools are hidden from the model.
  */
 const SUBAGENT_DESCRIPTION =
-	"Start a delegated task in a separate interactive Pi process inside a detached tmux session and return immediately. The main agent is not blocked and may start more subagents or keep working. Runs execute concurrently (bounded by PI_SUBAGENT_MAX_CONCURRENT, default 4); extra runs are queued. Children inherit the current provider/model/thinking, defaulting the provider to OpenRouter. Start the run, then wait once: subagent_wait({ id }) blocks until that run settles and returns its record (subagent_wait({ ids }) waits for a fan-out together, and subagent_wait({ plan }) waits for a whole dependency plan). Keep subagent_status for the live 'what is it doing right now' question, subagent_interrupt to abort a run's current turn while keeping its child alive, and subagent_cancel to stop a run outright — or a whole plan when given a plan id. For a fan-out or a dependency plan, pass `tasks` with per-step overrides (task, cwd, provider, model, thinking, handoff, dependsOn, retries), an optional failurePolicy (continue by default, or stop) and retryLimit; the runs share the same concurrency budget and come back in the requested order. A plan is persisted: reload the session and it resumes at the first unfinished step without re-running a completed one. Output is capped at 50KB or 2000 lines; the complete child session is preserved on disk.";
+	"Start a non-blocking delegated task in tmux (max 4, OpenRouter default). Pass task or tasks[] plan (dependsOn, failurePolicy: continue/stop, retryLimit), handoff (standalone|lineage|fork), role (explore|research|coder|reviewer|security-reviewer). Wait once via subagent_wait.";
 
 interface RunActivity {
 	phase: SubagentActivityPhase;
@@ -537,6 +548,14 @@ interface RunRecord {
 	planId?: string;
 	/** The step inside that plan this run is one attempt of. */
 	stepId?: string;
+	/** Optional declarative role tag for orchestration consumers. */
+	role?: string;
+	/** Optional explicit tool allowlist passed to child `pi --tools`. */
+	tools?: string[];
+	/** Optional explicit skill paths/directories passed to child `pi --skill`. */
+	skills?: string[];
+	/** Structured summary of child file edits and passing commands, when reported. */
+	activitySummary?: ChildActivitySummary;
 	/**
 	 * Whether this run's child was given an escalation channel (local patch 23).
 	 *
@@ -590,7 +609,7 @@ function readNonNegativeIntEnv(name: string, fallback: number): number {
 
 // This extension owns its own tmux server: one socket in the agent dir, and the
 // reserved `pi-agent-*` session-name space. The vendored tmux skill
-// (.pi/skills/tmux/) drives interactive CLIs on a SEPARATE socket under
+// (skills/tmux/) drives interactive CLIs on a SEPARATE socket under
 // PI_TMUX_SOCKET_DIR (default ${TMPDIR:-/tmp}/pi-tmux-sockets) with `pi-<slug>`
 // names, and documents this socket and name space as off-limits. Keep the two
 // sockets distinct: sharing one would let the skill's `kill-server` take down
@@ -780,12 +799,181 @@ async function writeJsonAtomic(filePath: string, value: unknown): Promise<void> 
 	await rename(temporaryPath, filePath);
 }
 
+const MAX_PASSED_COMMANDS = 50;
+const MAX_COMMAND_LENGTH = 512;
+
+function sanitizeRole(role: string | undefined): string | undefined {
+	if (typeof role !== "string") return undefined;
+	const trimmed = role.trim();
+	return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function sanitizeTools(tools: readonly string[] | undefined): string[] | undefined {
+	if (!Array.isArray(tools)) return undefined;
+	const cleaned = tools
+		.filter((tool): tool is string => typeof tool === "string")
+		.map((tool) => tool.trim())
+		.filter((tool) => tool.length > 0);
+	return cleaned.length > 0 ? cleaned : undefined;
+}
+
+function sanitizeSkills(skills: readonly string[] | undefined): string[] | undefined {
+	if (!Array.isArray(skills)) return undefined;
+	const cleaned = skills
+		.filter((skill): skill is string => typeof skill === "string")
+		.map((skill) => skill.trim())
+		.filter((skill) => skill.length > 0);
+	return cleaned.length > 0 ? [...new Set(cleaned)] : undefined;
+}
+
+const WORKER_EXTENSION_SCHEME_RE = /^(?:builtin|npm|git|https?|file)$/i;
+
+function splitColonDelimitedWorkerExtensions(chunk: string): string[] {
+	const entries: string[] = [];
+	let entryStart = 0;
+	for (let i = 0; i < chunk.length; i += 1) {
+		if (chunk[i] !== ":") continue;
+		const before = chunk.slice(entryStart, i).trim();
+		const after = chunk.slice(i + 1);
+		if (WORKER_EXTENSION_SCHEME_RE.test(before)) continue;
+		if (after.startsWith("//") || (/:\/\/[^/:?#]+$/.test(before) && /^\d+(?:[/:?#]|$)/.test(after))) continue;
+		if (/^git:[^/:]+@[^/:]+$/i.test(before)) continue;
+		entries.push(chunk.slice(entryStart, i));
+		entryStart = i + 1;
+	}
+	entries.push(chunk.slice(entryStart));
+	return entries;
+}
+
+function parseWorkerExtensionsEnv(raw: string | undefined): string[] {
+	if (!raw) return [];
+	const chunks = raw.split(path.delimiter === ";" ? /[,;]/ : /,/);
+	const entries = path.delimiter === ";" ? chunks : chunks.flatMap(splitColonDelimitedWorkerExtensions);
+	return entries.map((entry) => entry.trim()).filter((entry) => entry.length > 0);
+}
+
+function resolveOpenCodeGoExtensionPath(cwd: string, trusted: boolean): string | undefined {
+	if (trusted) {
+		const localCandidate = path.join(path.resolve(cwd), ".pi", "extensions", "opencode-go-provider", "index.ts");
+		if (existsSync(localCandidate)) return localCandidate;
+	}
+	const siblingCandidate = path.resolve(path.dirname(EXTENSION_PATH), "..", "opencode-go-provider", "index.ts");
+	return existsSync(siblingCandidate) ? siblingCandidate : undefined;
+}
+
+function resolveWorkerExtensions(
+	run: Pick<RunRecord, "provider" | "cwd" | "trusted">,
+	childExtensionPath: string,
+): string[] {
+	const seen = new Set<string>([childExtensionPath]);
+	const extras: string[] = [];
+	const add = (candidate: string | undefined): void => {
+		if (!candidate) return;
+		const trimmed = candidate.trim();
+		if (!trimmed || seen.has(trimmed)) return;
+		seen.add(trimmed);
+		extras.push(trimmed);
+	};
+
+	for (const configured of parseWorkerExtensionsEnv(process.env.PI_SUBAGENT_WORKER_EXTENSIONS)) {
+		add(configured);
+	}
+	if (run.provider === "opencode-go") {
+		add(resolveOpenCodeGoExtensionPath(run.cwd, run.trusted));
+	}
+	return extras;
+}
+
+function countTextLines(text: unknown): number {
+	if (typeof text !== "string" || text.length === 0) return 0;
+	const lines = text.split("\n");
+	if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+	return lines.length;
+}
+
+function createChildActivityTracker(now: () => number = Date.now) {
+	const inFlight = new Map<string, { toolName: string; args: unknown }>();
+	const editedFiles = new Map<string, { changedLines: number; lastEditAt: number }>();
+	const passedCommands: { command: string; at: number }[] = [];
+	let lastEditAt: number | undefined;
+
+	return {
+		onStart(event: { toolCallId?: unknown; toolName?: unknown; args?: unknown }): void {
+			if (typeof event.toolCallId !== "string" || event.toolCallId.length === 0) return;
+			const toolName = typeof event.toolName === "string" ? event.toolName : "";
+			inFlight.set(event.toolCallId, { toolName, args: event.args });
+		},
+		onEnd(event: { toolCallId?: unknown; toolName?: unknown; isError?: unknown }): void {
+			if (typeof event.toolCallId !== "string" || event.toolCallId.length === 0) return;
+			const started = inFlight.get(event.toolCallId);
+			inFlight.delete(event.toolCallId);
+			if (!started || event.isError === true) return;
+			const toolName = typeof event.toolName === "string" && event.toolName.length > 0 ? event.toolName : started.toolName;
+			const args = started.args;
+			if (!args || typeof args !== "object" || Array.isArray(args)) return;
+			const record = args as Record<string, unknown>;
+
+			if (toolName === "edit" || toolName === "write") {
+				const filePath = typeof record.path === "string" ? record.path.trim() : "";
+				if (!filePath) return;
+				let changedLines = 0;
+				if (toolName === "edit") {
+					if (Array.isArray(record.edits)) {
+						for (const item of record.edits) {
+							if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+							const editItem = item as Record<string, unknown>;
+							changedLines += Math.max(countTextLines(editItem.oldText), countTextLines(editItem.newText));
+						}
+					} else {
+						changedLines = Math.max(countTextLines(record.oldText), countTextLines(record.newText));
+					}
+				} else {
+					changedLines = countTextLines(record.content);
+				}
+				const editedAt = now();
+				const prev = editedFiles.get(filePath);
+				editedFiles.set(filePath, {
+					changedLines: (prev?.changedLines ?? 0) + changedLines,
+					lastEditAt: editedAt,
+				});
+				lastEditAt = editedAt;
+				return;
+			}
+
+			if (toolName === "bash" || toolName === "powershell") {
+				const rawCommand = typeof record.command === "string" ? record.command.trim() : "";
+				if (!rawCommand) return;
+				passedCommands.push({
+					command: rawCommand.slice(0, MAX_COMMAND_LENGTH),
+					at: now(),
+				});
+				if (passedCommands.length > MAX_PASSED_COMMANDS) {
+					passedCommands.splice(0, passedCommands.length - MAX_PASSED_COMMANDS);
+				}
+			}
+		},
+		getSummary(): ChildActivitySummary | undefined {
+			if (editedFiles.size === 0 && passedCommands.length === 0) return undefined;
+			return {
+				editedFiles: Array.from(editedFiles, ([filePath, info]) => ({
+					path: filePath,
+					changedLines: info.changedLines,
+					lastEditAt: info.lastEditAt,
+				})),
+				passedCommands: [...passedCommands],
+				...(lastEditAt !== undefined ? { lastEditAt } : {}),
+			};
+		},
+	};
+}
+
 function registerChildReporter(pi: ExtensionAPI, resultPath: string, runId: string, interruptPath: string | undefined): void {
 	let reported = false;
 	// The aborted turn currently in flight, latched by `turn_end` and consumed by
 	// `agent_settled`. `agent_settled` carries no payload and fires for aborted
 	// runs too, so the outcome has to be remembered across the two events.
 	let abortedTurn: { stopReason?: string } | undefined;
+	const activityTracker = createChildActivityTracker();
 
 	// Liveness snapshot (local patch 11). The path is derived from the result
 	// path the child was already given, so nothing new crosses the environment
@@ -832,6 +1020,7 @@ function registerChildReporter(pi: ExtensionAPI, resultPath: string, runId: stri
 		// end with a usable block — the text is still in `output`, and an older
 		// parent ignores the field entirely.
 		const parsedReport = parseChildReportText(output);
+		const activitySummary = activityTracker.getSummary();
 		const result: ChildResult = {
 			version: CHILD_RESULT_VERSION,
 			status: failed ? "failed" : "completed",
@@ -844,6 +1033,7 @@ function registerChildReporter(pi: ExtensionAPI, resultPath: string, runId: stri
 			thinking: pi.getThinkingLevel(),
 			finishedAt: Date.now(),
 			...(parsedReport.ok ? { report: parsedReport.report } : {}),
+			...(activitySummary ? { activitySummary } : {}),
 		};
 
 		try {
@@ -875,9 +1065,15 @@ function registerChildReporter(pi: ExtensionAPI, resultPath: string, runId: stri
 	pi.on("before_provider_request", () => recorder.providerRequest());
 	pi.on("after_provider_response", () => recorder.providerResponse());
 	pi.on("message_update", () => recorder.messageUpdate());
-	pi.on("tool_execution_start", (event) => recorder.toolStart(event.toolName));
+	pi.on("tool_execution_start", (event) => {
+		activityTracker.onStart(event);
+		return recorder.toolStart(event.toolName);
+	});
 	pi.on("tool_execution_update", (event) => recorder.toolUpdate(event.toolName));
-	pi.on("tool_execution_end", (event) => recorder.toolEnd(event.toolName));
+	pi.on("tool_execution_end", (event) => {
+		activityTracker.onEnd(event);
+		return recorder.toolEnd(event.toolName);
+	});
 
 	// Turn-level interrupt (local patch 13). An aborted turn is not a failed run:
 	// the child survives at its prompt with its session file intact, so reporting
@@ -1680,6 +1876,60 @@ function planSummary(plan: PlanRecord, runs?: Map<string, RunRecord>): string {
 	return lines.join("\n");
 }
 
+function formatDigestList(items: readonly string[] | undefined, maxItems = DIGEST_LIST_MAX_ITEMS): string | undefined {
+	if (!items || items.length === 0) return undefined;
+	const shown = items
+		.slice(0, maxItems)
+		.map((item) => item.replace(/\s+/g, " ").trim())
+		.filter((item) => item.length > 0)
+		.map((item) => (item.length <= 120 ? item : `${item.slice(0, 119)}…`));
+	if (shown.length === 0) return undefined;
+	const extra = items.length > maxItems ? ` (+${items.length - maxItems} more)` : "";
+	return `${shown.join(", ")}${extra}`;
+}
+
+function formatActivitySummaryLine(summary: ChildActivitySummary | undefined): string | undefined {
+	if (!summary) return undefined;
+	const parts: string[] = [];
+	if (summary.editedFiles.length > 0) {
+		const maxFiles = 5;
+		const files = summary.editedFiles
+			.slice(0, maxFiles)
+			.map((entry) => `${entry.path} (${entry.changedLines}L)`);
+		const extra = summary.editedFiles.length > maxFiles ? ` (+${summary.editedFiles.length - maxFiles} more)` : "";
+		parts.push(`edited ${files.join(", ")}${extra}`);
+	}
+	if (summary.passedCommands.length > 0) {
+		const maxCommands = 3;
+		const commands = summary.passedCommands
+			.slice(-maxCommands)
+			.map((entry) => oneLineNote(entry.command, 60) ?? entry.command);
+		const extra =
+			summary.passedCommands.length > maxCommands
+				? ` (+${summary.passedCommands.length - maxCommands} earlier)`
+				: "";
+		parts.push(`passed ${commands.join("; ")}${extra}`);
+	}
+	return parts.length > 0 ? parts.join(" · ") : undefined;
+}
+
+function formatFallbackOutputTail(raw: string): {
+	content: string;
+	truncated: boolean;
+	outputLines: number;
+	totalLines: number;
+} {
+	const trimmed = raw.trim();
+	if (!trimmed) return { content: "", truncated: false, outputLines: 0, totalLines: 0 };
+	const tail = truncateTail(trimmed, { maxLines: FALLBACK_TAIL_LINES, maxBytes: FALLBACK_TAIL_BYTES });
+	return {
+		content: tail.content,
+		truncated: tail.truncated,
+		outputLines: tail.outputLines,
+		totalLines: tail.totalLines,
+	};
+}
+
 function runSummary(run: RunRecord, options: { pane?: boolean; output?: boolean } = {}): string {
 	const duration = formatDuration(run.startedAt, run.finishedAt);
 	const usage = formatUsage(run.usage);
@@ -1693,9 +1943,12 @@ function runSummary(run: RunRecord, options: { pane?: boolean; output?: boolean 
 		// shared so the two cannot drift apart (see runHeadline).
 		runHeadline({ id: run.id, status: run.status, ...(duration === undefined ? {} : { durationText: duration }), ...(usage === undefined ? {} : { usageText: usage }) }),
 		`  task: ${run.task.split("\n", 1)[0]?.slice(0, 100) ?? run.task}`,
+		...(run.role ? [`  role: ${run.role}`] : []),
 		`  model: ${run.provider}/${run.model} (${run.thinking})`,
 	];
 	if (activity) lines.push(`  activity: ${activity}`);
+	const activitySummaryLine = formatActivitySummaryLine(run.activitySummary);
+	if (activitySummaryLine) lines.push(`  activity summary: ${activitySummaryLine}`);
 	const question = liveQuestion(run);
 	if (question) {
 		// Local patch 23. Deliberately its own line, in front of the interrupt notes:
@@ -1719,9 +1972,19 @@ function runSummary(run: RunRecord, options: { pane?: boolean; output?: boolean 
 			`  report: ${run.report.artifactPath} (${run.report.artifactBytes} bytes${run.report.truncated ? ", bounded copy in this record" : ""})`,
 		);
 		if (run.report.degradation) lines.push(`  report degraded: ${run.report.degradation}`);
-		else if (run.report.status) {
-			const firstLine = run.report.summary?.split("\n", 1)[0]?.slice(0, 140);
-			lines.push(`  reported: ${run.report.status}${firstLine ? ` — ${firstLine}` : ""}`);
+		if (run.report.status) {
+			const normalizedSummary = run.report.summary?.trim().replace(/\s+/g, " ");
+			const summaryDigest =
+				normalizedSummary && normalizedSummary.length > REPORT_SUMMARY_DIGEST_CHARS
+					? `${normalizedSummary.slice(0, REPORT_SUMMARY_DIGEST_CHARS - 1)}…`
+					: normalizedSummary;
+			lines.push(`  reported: ${run.report.status}${summaryDigest ? ` — ${summaryDigest}` : ""}`);
+			const filesDigest = formatDigestList(run.report.files);
+			if (filesDigest) lines.push(`  report files: ${filesDigest}`);
+			const commandsDigest = formatDigestList(run.report.commands);
+			if (commandsDigest) lines.push(`  report commands: ${commandsDigest}`);
+			const unresolvedDigest = formatDigestList(run.report.unresolved);
+			if (unresolvedDigest) lines.push(`  report unresolved: ${unresolvedDigest}`);
 		}
 		if (run.report.skew) {
 			lines.push(`  report protocol: writer ${run.report.skew.writer}, reader ${run.report.skew.reader}`);
@@ -1749,8 +2012,31 @@ function runSummary(run: RunRecord, options: { pane?: boolean; output?: boolean 
 	if (run.resumeOf) lines.push(`  resumed from: ${run.resumeOf}`);
 	if (run.attempt && run.attempt > 1) lines.push(`  attempt: ${run.attempt}`);
 	if (options.pane && run.pane) lines.push("", run.pane);
-	if (options.output && run.output) lines.push("", run.output);
-	if (run.error && !(options.output && run.output?.includes(run.error))) lines.push("", `Error: ${run.error}`);
+	let displayedOutput: string | undefined;
+	if (options.output && run.output) {
+		lines.push("", run.output);
+		displayedOutput = run.output;
+	} else if (!holdsChild(run.status) && !run.report?.status) {
+		const fallbackSource =
+			run.output ?? (run.report?.head && run.report.head !== run.error ? run.report.head : undefined);
+		if (fallbackSource) {
+			const tail = formatFallbackOutputTail(fallbackSource);
+			if (tail.content) {
+				if (tail.truncated) {
+					const pointer = run.report?.artifactPath ? " or read report.md" : "";
+					lines.push(
+						"",
+						`output tail (${tail.outputLines} line(s) of ${tail.totalLines}; pass includeOutput: true${pointer} for full output):`,
+						tail.content,
+					);
+				} else {
+					lines.push("", tail.content);
+				}
+				displayedOutput = tail.content;
+			}
+		}
+	}
+	if (run.error && !(displayedOutput && displayedOutput.includes(run.error))) lines.push("", `Error: ${run.error}`);
 	return lines.join("\n");
 }
 
@@ -2275,11 +2561,17 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 	 * deliberately ignored.
 	 */
 	const publishRunStarted = (run: RunRecord): void => {
+		const startedAt = run.startedAt ?? run.createdAt;
 		publishOrchestrationEvent(pi, ORCHESTRATION_EVENTS.runStarted, {
 			runId: run.id,
 			status: run.status === "running" ? "running" : "queued",
+			...(run.resumeOf ? { resumeOf: run.resumeOf } : {}),
 			...(run.planId ? { planId: run.planId } : {}),
 			...(run.stepId ? { stepId: run.stepId } : {}),
+			...(run.role ? { role: run.role } : {}),
+			...(run.provider ? { provider: run.provider } : {}),
+			...(run.model ? { model: run.model } : {}),
+			...(startedAt !== undefined ? { startedAt } : {}),
 			at: run.createdAt ?? Date.now(),
 		});
 	};
@@ -2321,11 +2613,18 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 				: null;
 		if (!status) return;
 		announcedRuns.add(run.id);
+		const startedAt = run.startedAt ?? run.createdAt;
 		publishOrchestrationEvent(pi, ORCHESTRATION_EVENTS.runSettled, {
 			runId: run.id,
 			status,
+			...(run.cwd ? { cwd: run.cwd } : {}),
 			...(run.planId ? { planId: run.planId } : {}),
 			...(run.stepId ? { stepId: run.stepId } : {}),
+			...(run.role ? { role: run.role } : {}),
+			...(run.provider ? { provider: run.provider } : {}),
+			...(run.model ? { model: run.model } : {}),
+			...(startedAt !== undefined ? { startedAt } : {}),
+			...(run.activitySummary ? { activitySummary: run.activitySummary } : {}),
 			...(run.error ? { error: run.error } : {}),
 			finishedAt: run.finishedAt ?? Date.now(),
 		});
@@ -2414,6 +2713,7 @@ export default function subagentExtension(pi: ExtensionAPI): void {
 		run.provider = result.provider ?? run.provider;
 		run.model = result.model ?? run.model;
 		run.thinking = result.thinking ?? run.thinking;
+		if (result.activitySummary) run.activitySummary = result.activitySummary;
 		let output = result.output.trim();
 		if (result.status === "failed" && result.error?.trim()) {
 			output += `${output ? "\n\n" : ""}Error: ${result.error.trim()}`;
@@ -3171,6 +3471,26 @@ const noteInterrupt = async (
 			if (remain.code !== 0) throw new Error(remain.stderr.trim() || "Failed to set remain-on-exit.");
 
 			const promptPath = path.join(run.runDir, "task.md");
+			let launchTools: string[] | undefined;
+			if (run.tools && run.tools.length > 0) {
+				if (run.escalation !== false) {
+					const usesModifierSyntax = run.tools.some((t) => t.startsWith("+") || t.startsWith("-"));
+					if (usesModifierSyntax) {
+						launchTools = run.tools.filter((t) => t !== "-subagent_ask");
+					} else {
+						launchTools = run.tools.includes("subagent_ask") ? run.tools : [...run.tools, "subagent_ask"];
+					}
+				} else {
+					launchTools = run.tools;
+				}
+			}
+			// The child's own copy wins when its tree has one, but only for a
+			// trusted tree: an explicit --extension bypasses project trust, so
+			// naming an untrusted cwd's copy would execute that tree's code.
+			// See handoff.ts.
+			const childExtensionPath = resolveChildExtensionPath(run.cwd, EXTENSION_PATH, run.trusted);
+			const extraExtensions = resolveWorkerExtensions(run, childExtensionPath);
+			const launchSkills = sanitizeSkills(run.skills);
 			const piArgs = buildChildPiArgs({
 				mode: run.mode ?? "standalone",
 				invocation: getPiInvocationParts(),
@@ -3182,12 +3502,11 @@ const noteInterrupt = async (
 				sessionId: run.id,
 				tmuxSession: run.tmuxSession,
 				trusted: run.trusted,
-				// The child's own copy wins when its tree has one, but only for a
-				// trusted tree: an explicit --extension bypasses project trust, so
-				// naming an untrusted cwd's copy would execute that tree's code.
-				// See handoff.ts.
-				extensionPath: resolveChildExtensionPath(run.cwd, EXTENSION_PATH, run.trusted),
+				extensionPath: childExtensionPath,
+				...(extraExtensions.length > 0 ? { extraExtensions } : {}),
+				...(launchSkills ? { skills: launchSkills } : {}),
 				promptPath,
+				...(launchTools ? { tools: launchTools } : {}),
 			});
 			const childCommand = [
 				"exec env",
@@ -3282,6 +3601,90 @@ const noteInterrupt = async (
 		refreshStatusWidget();
 	};
 
+	const normalizeDispatchHandoff = (handoff: SubagentDispatchPayload["handoff"]): LaunchMode => {
+		if (handoff === undefined || handoff === false) return "standalone";
+		if (handoff === true) return "fork";
+		if (handoff === "standalone" || handoff === "lineage" || handoff === "fork") return handoff;
+		throw new Error(`Invalid subagent handoff mode: ${String(handoff)}`);
+	};
+
+	const launchSingleRun = async (
+		ctx: ExtensionContext,
+		params: {
+			task: string;
+			cwd?: string;
+			provider?: string;
+			model?: string;
+			thinking?: string;
+			handoff?: LaunchMode;
+			role?: string;
+			tools?: string[];
+			skills?: string[];
+		},
+	): Promise<RunRecord> => {
+		if (!params.task?.trim()) {
+			throw new Error("Subagent task must not be empty. Pass `task` for one run or `tasks` for a fan-out.");
+		}
+		await ensureSessionPaths(ctx);
+
+		const cwd = path.resolve(ctx.cwd, params.cwd?.trim() || ".");
+		await validateCwd(cwd);
+
+		const selectedModel = resolveModel(ctx, params.provider, params.model);
+		await validateModelSelection(ctx, selectedModel, hasExplicitModelOverride(params.provider, params.model));
+		const thinking = params.thinking ?? pi.getThinkingLevel();
+		const mode = (params.handoff ?? "standalone") as LaunchMode;
+		const role = sanitizeRole(params.role);
+		const tools = sanitizeTools(params.tools);
+		const skills = sanitizeSkills(params.skills);
+		const id = randomUUID();
+		const runDir = path.join(sessionRunsDir, id);
+		const resultPath = path.join(runDir, "result.json");
+		const tmuxSession = tmuxSessionName(id);
+		const run: RunRecord = {
+			id,
+			task: params.task,
+			cwd,
+			provider: selectedModel.provider,
+			model: selectedModel.model,
+			thinking,
+			tmuxSession,
+			tmuxTarget: `${tmuxSession}:0.0`,
+			attachCommand: "",
+			captureCommand: "",
+			runDir,
+			resultPath,
+			trusted: false,
+			status: "queued",
+			createdAt: Date.now(),
+			mode,
+			attempt: 1,
+			...(role ? { role } : {}),
+			...(tools ? { tools } : {}),
+			...(skills ? { skills } : {}),
+			// Local patch 23: this build launches a child with an escalation channel.
+			escalation: true,
+		};
+		run.trusted = isSameOrDescendant(path.resolve(ctx.cwd), cwd) && ctx.isProjectTrusted();
+		updateTmuxCommands(run);
+
+		await mkdir(runDir, { recursive: true, mode: 0o700 });
+		await mkdir(path.join(runDir, "session"), { recursive: true, mode: 0o700 });
+		await writeFile(path.join(runDir, "task.md"), buildChildTaskPrompt(params.task), {
+			encoding: "utf8",
+			mode: 0o600,
+		});
+
+		// Snapshot the handoff now, while the parent's branch is the one the
+		// user just asked about, rather than at launch once the run is dequeued.
+		if (usesSessionFile(mode)) {
+			await prepareHandoffSession(run, ctx);
+		}
+
+		await startRun(run);
+		return run;
+	};
+
 	// --- Dependency plans -----------------------------------------------------
 	//
 	// A plan's steps are launched through the SAME `startRun`/`drainQueue` path as
@@ -3314,6 +3717,9 @@ const noteInterrupt = async (
 			attempt: step.attempts + 1,
 			planId: plan.id,
 			stepId: step.id,
+			...(step.role ? { role: step.role } : {}),
+			...(step.tools && step.tools.length > 0 ? { tools: [...step.tools] } : {}),
+			...(step.skills && step.skills.length > 0 ? { skills: [...step.skills] } : {}),
 			// Local patch 23: plan steps get the same channel as standalone runs.
 			escalation: true,
 		};
@@ -3648,8 +4054,75 @@ const noteInterrupt = async (
 
 	// Registered before the first await: `ensureSessionPaths` does filesystem I/O
 	// and can reject, and the tools must not disappear with it.
-	pi.on("before_agent_start", () => {
+	pi.on("before_agent_start", (_event, ctx) => {
+		sessionContext = ctx;
 		registerManagementTools();
+	});
+
+	subscribeOrchestrationEvent(pi, ORCHESTRATION_EVENTS.subagentDispatch, (payload) => {
+		if (!payload || typeof payload !== "object") return;
+		try {
+			payload.onAccepted?.();
+		} catch {
+			// Ignore callback errors from external dispatch callers.
+		}
+
+		const report = (result: Parameters<NonNullable<SubagentDispatchPayload["onDispatched"]>>[0]) => {
+			try {
+				payload.onDispatched?.(result);
+			} catch {
+				// Ignore callback errors from external dispatch callers.
+			}
+		};
+
+		if (shuttingDown) {
+			report({ ok: false, error: "Subagent runtime is shutting down." });
+			return;
+		}
+		const ctx = sessionContext;
+		if (!ctx) {
+			report({ ok: false, error: "Subagent runtime is not initialized (no active session context)." });
+			return;
+		}
+
+		void (async () => {
+			try {
+				const mode = normalizeDispatchHandoff(payload.handoff);
+				const run = await launchSingleRun(ctx, {
+					task: payload.task,
+					cwd: payload.cwd,
+					provider: payload.provider,
+					model: payload.model,
+					thinking: payload.thinking,
+					handoff: mode,
+					role: payload.role,
+					tools: payload.tools,
+				});
+				if (run.status === "failed") {
+					report({
+						ok: false,
+						runId: run.id,
+						provider: run.provider,
+						model: run.model,
+						thinking: run.thinking,
+						error: run.error ?? "Subagent run failed during launch.",
+					});
+					return;
+				}
+				report({
+					ok: true,
+					runId: run.id,
+					provider: run.provider,
+					model: run.model,
+					thinking: run.thinking,
+				});
+			} catch (error) {
+				report({
+					ok: false,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		})();
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -3733,32 +4206,18 @@ const noteInterrupt = async (
 	 * exclusive.
 	 */
 	const stepParameters = Type.Object({
-		id: Type.Optional(
-			Type.String({ description: "Optional step id, referenced by other steps' dependsOn. Defaults to step-1, step-2, … in request order." }),
-		),
-		task: Type.String({ description: "The complete task for this child Pi process." }),
-		cwd: Type.Optional(Type.String({ description: "Working directory for this step. Defaults to the current project." })),
-		provider: Type.Optional(Type.String({ description: "Provider override for this step." })),
-		model: Type.Optional(Type.String({ description: "Model id override for this step." })),
-		thinking: Type.Optional(
-			StringEnum(THINKING_LEVELS, { description: "Thinking level override for this step." }),
-		),
-		handoff: Type.Optional(
-			StringEnum(HANDOFF_MODES, {
-				description: "Context handoff for this step. Same meanings as the single-task handoff parameter.",
-			}),
-		),
-		dependsOn: Type.Optional(
-			Type.Array(Type.String(), {
-				description: "Step ids that must COMPLETE SUCCESSFULLY before this step starts. Omit for an independent fan-out step.",
-			}),
-		),
-		retries: Type.Optional(
-			Type.Integer({
-				minimum: 0,
-				description: "Retries allowed AFTER the first attempt for this step. Overrides retryLimit. 0 means one attempt.",
-			}),
-		),
+		id: Type.Optional(Type.String()),
+		task: Type.String(),
+		cwd: Type.Optional(Type.String()),
+		provider: Type.Optional(Type.String()),
+		model: Type.Optional(Type.String()),
+		thinking: Type.Optional(StringEnum(THINKING_LEVELS)),
+		handoff: Type.Optional(StringEnum(HANDOFF_MODES)),
+		role: Type.Optional(Type.String()),
+		tools: Type.Optional(Type.Array(Type.String())),
+		skills: Type.Optional(Type.Array(Type.String())),
+		dependsOn: Type.Optional(Type.Array(Type.String())),
+		retries: Type.Optional(Type.Integer({ minimum: 0 })),
 	});
 
 	pi.registerTool({
@@ -3767,42 +4226,23 @@ const noteInterrupt = async (
 		description: SUBAGENT_DESCRIPTION,
 		promptSnippet: "Start delegated, non-blocking, tmux-backed Pi subagents (one or a dependency plan)",
 		promptGuidelines: [
-			"Use subagent to delegate an isolated task without blocking: it returns immediately, so start several when useful and keep working.",
-			"For a fan-out, pass `tasks` with per-step overrides instead of several calls: the runs share the same concurrency budget and come back in the order requested. Add `dependsOn` step ids to make a step wait for its dependencies, and choose `failurePolicy` (`continue` by default, or `stop`). A plan is persisted and resumes after a reload at the first unfinished step.",
-			"Start, then wait once: collect a finished run's output with subagent_wait({ id }) as soon as you have started the run — or subagent_wait({ ids }) for several runs. For a fan-out or dependency plan use subagent_wait({ plan }) once: later waves have no run ids yet, so the plan id is the only handle that covers all of them. Keep subagent_status for the live 'what is it doing right now' question, and for runs you deliberately left unwaited.",
-			"To stop a run that is going the wrong way, prefer subagent_interrupt (keeps the child and its transcript, then attach to steer it) over subagent_cancel (throws the run away). An interrupted run still occupies a concurrency slot until it is cancelled, so cancel the ones you are done with.",
-			"subagent_resume needs a run whose child is really gone: cancel or finish it first, or attach to an interrupted run and type the follow-up there.",
+			"Wait once via subagent_wait({ id | ids | plan }); interrupt keeps slot, cancel stops.",
 		],
 		parameters: Type.Object({
 			// The standalone contract. Kept optional because a fan-out request
 			// supplies `tasks` instead; exactly one of the two is accepted.
-			task: Type.Optional(Type.String({ description: "The complete task for one child Pi process. Use `tasks` instead for a fan-out or a dependency plan." })),
-			cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to the current project." })),
-			provider: Type.Optional(Type.String({ description: "Provider override. Defaults to the current provider, then OpenRouter." })),
-			model: Type.Optional(
-				Type.String({ description: "Model id override. Defaults to the current model." }),
-			),
-			thinking: Type.Optional(
-				StringEnum(THINKING_LEVELS, {
-					description: "Thinking level override. Defaults to the current thinking level.",
-				}),
-			),
-			handoff: Type.Optional(
-				StringEnum(HANDOFF_MODES, {
-					description:
-						"Context handoff for the child. 'standalone' (default) starts with no context. 'lineage' links the child to this session via its header but shares no context. 'fork' seeds the child with this conversation's live branch, so it already knows the task's background; the child's own usage is then counted separately from the inherited turns.",
-				}),
-			),
-			tasks: Type.Optional(Type.Array(stepParameters, { description: "A fan-out or dependency plan: several children with per-step overrides. Cannot be combined with `task`." })),
-			failurePolicy: Type.Optional(
-				StringEnum(["stop", "continue"] as const, {
-					description:
-						"What a permanently failed step does to the plan. 'continue' (default) cancels only that step's dependents and keeps independent branches running; 'stop' starts nothing further and marks the plan failed.",
-				}),
-			),
-			retryLimit: Type.Optional(
-				Type.Integer({ minimum: 0, description: "Default retries after the first attempt for every step. A step's own `retries` overrides it. Default 0." }),
-			),
+			task: Type.Optional(Type.String()),
+			cwd: Type.Optional(Type.String()),
+			provider: Type.Optional(Type.String()),
+			model: Type.Optional(Type.String()),
+			thinking: Type.Optional(StringEnum(THINKING_LEVELS)),
+			handoff: Type.Optional(StringEnum(HANDOFF_MODES)),
+			role: Type.Optional(Type.String()),
+			tools: Type.Optional(Type.Array(Type.String())),
+			skills: Type.Optional(Type.Array(Type.String())),
+			tasks: Type.Optional(Type.Array(stepParameters)),
+			failurePolicy: Type.Optional(StringEnum(["stop", "continue"] as const)),
+			retryLimit: Type.Optional(Type.Integer({ minimum: 0 })),
 		}),
 
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
@@ -3821,6 +4261,9 @@ const noteInterrupt = async (
 					await validateCwd(cwd);
 					const selectedModel = resolveModel(ctx, item.provider, item.model);
 					await validateModelSelection(ctx, selectedModel, hasExplicitModelOverride(item.provider, item.model));
+					const role = sanitizeRole(item.role);
+					const tools = sanitizeTools(item.tools);
+					const skills = sanitizeSkills(item.skills);
 					specs.push({
 						id: item.id,
 						task: item.task,
@@ -3830,6 +4273,9 @@ const noteInterrupt = async (
 						thinking: item.thinking ?? pi.getThinkingLevel(),
 						handoff: item.handoff ?? "standalone",
 						trusted: isSameOrDescendant(path.resolve(ctx.cwd), cwd) && ctx.isProjectTrusted(),
+						...(role ? { role } : {}),
+						...(tools ? { tools } : {}),
+						...(skills ? { skills } : {}),
 						dependsOn: item.dependsOn,
 						retries: item.retries,
 					});
@@ -3878,57 +4324,18 @@ const noteInterrupt = async (
 				return { content: [{ type: "text", text: lines.join("\n") }], details: { plan, runs: ordered } };
 			}
 
-			if (!params.task?.trim()) throw new Error("Subagent task must not be empty. Pass `task` for one run or `tasks` for a fan-out.");
-
-			const cwd = path.resolve(ctx.cwd, params.cwd?.trim() || ".");
-			await validateCwd(cwd);
-
-			const selectedModel = resolveModel(ctx, params.provider, params.model);
-			await validateModelSelection(ctx, selectedModel, hasExplicitModelOverride(params.provider, params.model));
-			const thinking = params.thinking ?? pi.getThinkingLevel();
-			const mode = (params.handoff ?? "standalone") as LaunchMode;
-			const id = randomUUID();
-			const runDir = path.join(sessionRunsDir, id);
-			const resultPath = path.join(runDir, "result.json");
-			const tmuxSession = tmuxSessionName(id);
-			const run: RunRecord = {
-				id,
-				task: params.task,
-				cwd,
-				provider: selectedModel.provider,
-				model: selectedModel.model,
-				thinking,
-				tmuxSession,
-				tmuxTarget: `${tmuxSession}:0.0`,
-				attachCommand: "",
-				captureCommand: "",
-				runDir,
-				resultPath,
-				trusted: false,
-				status: "queued",
-				createdAt: Date.now(),
-				mode,
-				attempt: 1,
-				// Local patch 23: this build launches a child with an escalation channel.
-				escalation: true,
-			};
-			run.trusted = isSameOrDescendant(path.resolve(ctx.cwd), cwd) && ctx.isProjectTrusted();
-			updateTmuxCommands(run);
-
-			await mkdir(runDir, { recursive: true, mode: 0o700 });
-			await mkdir(path.join(runDir, "session"), { recursive: true, mode: 0o700 });
-			await writeFile(path.join(runDir, "task.md"), buildChildTaskPrompt(params.task), {
-				encoding: "utf8",
-				mode: 0o600,
+			const run = await launchSingleRun(ctx, {
+				task: params.task ?? "",
+				cwd: params.cwd,
+				provider: params.provider,
+				model: params.model,
+				thinking: params.thinking,
+				handoff: (params.handoff ?? "standalone") as LaunchMode,
+				role: params.role,
+				tools: params.tools,
+				skills: params.skills,
 			});
-
-			// Snapshot the handoff now, while the parent's branch is the one the
-			// user just asked about, rather than at launch once the run is dequeued.
-			if (usesSessionFile(mode)) {
-				await prepareHandoffSession(run, ctx);
-			}
-
-			await startRun(run);
+			const id = run.id;
 
 			const queued = run.status === "queued";
 			const text = [
@@ -4016,25 +4423,15 @@ const noteInterrupt = async (
 			name: "subagent_wait",
 			label: "Subagent Wait",
 			description:
-				"subagent_wait blocks once until a subagent run settles and returns its result, instead of polling subagent_status. With an id: resolves as soon as that run reaches a terminal state (completed, failed, cancelled, interrupted) and returns the same record subagent_status({ id }) returns; if timeoutMs elapses first, returns the current record plus the latest pane output — a timed-out wait is a normal result, never an error. A run still queued at the timeout is reported as queued; a run that failed to start, was cancelled, died or was interrupted is terminal and returns immediately. With plan: waits until a whole dependency plan is over — every step completed, failed or cancelled — and returns the plan's status, its reason and every step's status and latest run id. Use it for a fan-out or a dependency plan instead of ids: later waves' run ids do not exist when the plan's reply is written, so the plan id is the only handle that covers all of them, while ids can only name the runs that exist now. With ids: waits until all of the named runs are terminal (or the timeout) and returns every settled run plus the still-running ones, in the order given; a settled run whose child is gone returns its output (when it has one) without the dead pane, which is carried only for a run whose child is still alive (running or interrupted). If the session ends before the run settles, the call returns early with the current record and reports that the session ended (details.ended), never that the run settled. Built on the existing settle watcher, so results land within about a second of the child's settle event; there is no second poll loop. To ask what a run is doing right now without waiting, use subagent_status.",
+				"subagent_wait blocks once for run(s) or a plan to settle (use instead of polling subagent_status). Returns report-first summary, or state+pane on timeout.",
 			promptSnippet: "Wait once for a subagent run or a whole plan to settle and collect its result",
 			parameters: Type.Object({
-				id: Type.Optional(Type.String({ description: "Run id to wait for. Omit when passing ids or plan." })),
-				plan: Type.Optional(
-					Type.String({ description: "Plan id to wait for: resolves when the whole plan is terminal, whatever waves are still to launch." }),
-				),
-				ids: Type.Optional(
-					Type.Array(Type.String(), {
-						description:
-							"Several run ids to wait for together. Returns every settled run plus the still-running ones.",
-					}),
-				),
-				timeoutMs: Type.Optional(
-					Type.Number({
-						description:
-							"How long to wait before returning the current state. Defaults to 600000 (10 minutes).",
-					}),
-				),
+				id: Type.Optional(Type.String({ description: "Run id." })),
+				plan: Type.Optional(Type.String({ description: "Plan id (all waves)." })),
+				ids: Type.Optional(Type.Array(Type.String(), { description: "Run ids." })),
+				timeoutMs: Type.Optional(Type.Number({ description: "Default 600000." })),
+				includeOutput: Type.Optional(Type.Boolean()),
+				includePane: Type.Optional(Type.Boolean()),
 			}),
 
 			async execute(_toolCallId, params, signal, _onUpdate, ctx) {
@@ -4044,6 +4441,7 @@ const noteInterrupt = async (
 					throw new Error("subagent_wait takes either id or ids, not both — or plan on its own.");
 				}
 				const timeoutMs = resolveWaitTimeout(params.timeoutMs);
+				const includeOutput = params.includeOutput ?? false;
 				if (params.plan !== undefined) {
 					const id = params.plan.trim();
 					const plan = plans.get(id);
@@ -4059,6 +4457,19 @@ const noteInterrupt = async (
 						"",
 						planSummary(plan, runs),
 					];
+					for (const step of plan.steps) {
+						const runId = step.runIds.at(-1);
+						const stepRun = runId ? runs.get(runId) : undefined;
+						if (stepRun) {
+							lines.push(
+								"",
+								runSummary(stepRun, {
+									pane: params.includePane ?? showsPane(stepRun.status),
+									output: includeOutput,
+								}),
+							);
+						}
+					}
 					return { content: [{ type: "text", text: lines.join("\n") }], details: { plan, timedOut, ended, status: plan.status } };
 				}
 				if (params.id !== undefined) {
@@ -4066,11 +4477,15 @@ const noteInterrupt = async (
 					const run = runs.get(id);
 					if (!run) throw new Error(`Unknown subagent run: ${id}`);
 					const { timedOut, ended } = await waitForRunsSettled([run], timeoutMs, signal);
+					const summary = runSummary(run, {
+						pane: params.includePane ?? showsPane(run.status),
+						output: includeOutput,
+					});
 					const text = ended
-						? `Session ended before subagent ${id.slice(0, 8)} settled (status: ${run.status}). The run was not completed; its transcript is preserved.\n\n${runSummary(run, { pane: true, output: true })}`
+						? `Session ended before subagent ${id.slice(0, 8)} settled (status: ${run.status}). The run was not completed; its transcript is preserved.\n\n${summary}`
 						: timedOut
-							? `Subagent ${id.slice(0, 8)} did not settle within ${timeoutMs}ms (status: ${run.status}).\n\n${runSummary(run, { pane: true, output: true })}`
-							: runSummary(run, { pane: true, output: true });
+							? `Subagent ${id.slice(0, 8)} did not settle within ${timeoutMs}ms (status: ${run.status}).\n\n${summary}`
+							: summary;
 					return { content: [{ type: "text", text }], details: { runs: [run], timedOut, ended } };
 				}
 				if (params.ids !== undefined) {
@@ -4098,14 +4513,15 @@ const noteInterrupt = async (
 					];
 					for (const run of targets) {
 						// A settled run's pane is a dead TUI frame (spinner remnants and
-						// stale text), not a result: the output is the result. Only a run
-						// whose child is still alive needs its pane, which is the same rule
-						// the status list uses (`showsPane`). Otherwise a fan-out wait pays
-						// one pane per child for nothing — the cost this tool exists to cut.
-						// A cancelled run has no output, but the caller issued the cancel and
-						// the record retains the last pane for `subagent_status({ id })`; a
-						// failed run's error now embeds that pane itself.
-						lines.push("", runSummary(run, { pane: showsPane(run.status), output: true }));
+						// stale text), not a result: only a run whose child is still alive
+						// gets a pane by default (`showsPane`), unless includePane is set.
+						lines.push(
+							"",
+							runSummary(run, {
+								pane: params.includePane ?? showsPane(run.status),
+								output: includeOutput,
+							}),
+						);
 					}
 					return { content: [{ type: "text", text: lines.join("\n") }], details: { runs: targets, timedOut, ended } };
 				}
@@ -4117,42 +4533,34 @@ const noteInterrupt = async (
 			name: "subagent_status",
 			label: "Subagent Status",
 			description:
-				"Answer 'what is this run doing right now', or list this session's runs and plans. With an id: that run's status, model, tmux attach command, its final output once finished and its latest pane output while running — or, for a PLAN id, the plan's status, its reason and every step's status, latest run id and error. Without an id: one row per run and one row per plan, each step run of a plan folded into its plan's row so the list stays bounded, with the full detail — pane, activity, attach command, or every plan step — for at most two of them and a one-line row for the rest. Pass compact: true for one line per run and per plan and no pane. To wait for a run or a whole plan to finish, use subagent_wait instead of polling this. Non-blocking.",
+				"Inspect live run/plan state or list all (report-first when settled; non-blocking). Use subagent_wait to wait.",
 			promptSnippet: "Inspect non-blocking subagent runs, plans and their output",
 			parameters: Type.Object({
-				id: Type.Optional(Type.String({ description: "Run id to inspect, or a plan id to inspect that plan. Omit to list all runs and plans in this session." })),
-				include_output: Type.Optional(
-					Type.Boolean({
-						description:
-							"List view only. Include each finished run's full output. Defaults to false, because a list of many runs would otherwise carry every answer at once; inspecting a single id always returns its output. The list's detail budget still applies: when it leaves an output out, the reply says how many and which runs to fetch.",
-					}),
-				),
-				compact: Type.Optional(
-					Type.Boolean({
-						description:
-							"List view only. One short line per run and per plan (id, status, elapsed, usage) and no pane or detail block. Defaults to false. Use it for a cheap poll; inspect a specific run or plan by id for its output. Ignored together with an id, which always returns the full record.",
-					}),
-				),
+				id: Type.Optional(Type.String({ description: "Run/plan id (omit to list)." })),
+				include_output: Type.Optional(Type.Boolean()),
+				includeOutput: Type.Optional(Type.Boolean()),
+				includePane: Type.Optional(Type.Boolean()),
+				compact: Type.Optional(Type.Boolean({ description: "1-line list rows." })),
 			}),
 
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 				await ensureSessionPaths(ctx);
-				const includeOutput = params.include_output ?? false;
+				const includeOutput = params.includeOutput ?? params.include_output ?? false;
 				const runsArray = [...runs.values()].sort((a, b) => a.createdAt - b.createdAt);
 				const plansArray = [...plans.values()].sort((a, b) => a.createdAt - b.createdAt);
 				if (params.id) {
 					const run = runs.get(params.id.trim());
 					if (run) {
-						// `subagent_wait` is the blocking path, but a finished run's result must
-						// still come back here: `include_output` is a LIST-view control and
-						// never suppresses the output for a single run.
-						//
-						// The pane is included either way. For a live run it is the only view of
-						// the child there is, and for a finished one it is usually the answer —
-						// so gating it behind the flag would make `include_output: true` return
-						// strictly less than the default call.
 						return {
-							content: [{ type: "text", text: runSummary(run, { pane: true, output: true }) }],
+							content: [
+								{
+									type: "text",
+									text: runSummary(run, {
+										pane: params.includePane ?? showsPane(run.status),
+										output: includeOutput,
+									}),
+								},
+							],
 							details: { runs: [run] },
 						};
 					}
@@ -4161,7 +4569,23 @@ const noteInterrupt = async (
 					// exactly the status this ticket is about.
 					const plan = plans.get(params.id.trim());
 					if (plan) {
-						return { content: [{ type: "text", text: planSummary(plan, runs) }], details: { plan } };
+						const lines = [planSummary(plan, runs)];
+						if (includeOutput || params.includePane === true) {
+							for (const step of plan.steps) {
+								const runId = step.runIds.at(-1);
+								const stepRun = runId ? runs.get(runId) : undefined;
+								if (stepRun) {
+									lines.push(
+										"",
+										runSummary(stepRun, {
+											pane: params.includePane ?? showsPane(stepRun.status),
+											output: includeOutput,
+										}),
+									);
+								}
+							}
+						}
+						return { content: [{ type: "text", text: lines.join("\n") }], details: { plan } };
 					}
 					throw new Error(`Unknown subagent run or plan: ${params.id}`);
 				}
@@ -4194,7 +4618,10 @@ const noteInterrupt = async (
 						// An interrupted run has no final output yet but its pane is the
 						// only view of the child's prompt, so it is shown like a running one.
 						const live = showsPane(run.status);
-						return runSummary(run, { pane: live, output: includeOutput || live });
+						return runSummary(run, {
+							pane: params.includePane ?? live,
+							output: includeOutput,
+						});
 					},
 					// A bound that silently withholds an answer is worse than a big one: a
 					// model that cannot tell "left out" from "there is none" will not go and
@@ -4230,16 +4657,11 @@ const noteInterrupt = async (
 			name: "subagent_answer",
 			label: "Subagent Answer",
 			description:
-				"Answer a question a subagent is blocked on. The run's pending question is reported by subagent_status (a run waiting on one says so) and is also delivered as a session message when it arrives; pass that request id with the answer you propose. A decision is CONFIRMED BY A HUMAN: this tool shows the question and your proposed answer to the user and only sends it if they confirm, so nothing here lets a model answer its own child's decision. With no UI to ask (print or JSON mode) it refuses and says why — the child then reaches its deadline and reports the blocker instead of being answered. A child's progress update needs no answer. The answer arrives as the child's tool result, so the child continues in the same turn.",
+				"Answer a blocked subagent question (human UI confirm required; refuses without UI).",
 			promptSnippet: "Answer a subagent's blocking question, after a human confirms it",
 			parameters: Type.Object({
-				id: Type.String({
-					description: "The request id of the pending question, as reported by subagent_status or by the question's session message.",
-				}),
-				answer: Type.String({
-					description:
-					"The answer to send. Put in it only what the human confirmed — the child treats it as authoritative and cannot ask again about the same thing.",
-				}),
+				id: Type.String({ description: "Request id." }),
+				answer: Type.String({ description: "Confirmed answer." }),
 			}),
 
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -4370,10 +4792,10 @@ const noteInterrupt = async (
 			name: "subagent_cancel",
 			label: "Subagent Cancel",
 			description:
-				"Cancel a subagent run by id: kill its tmux session and mark it cancelled. A plan step's plan is settled from the cancellation, so a plan whose only step you cancelled ends there instead of staying running. Pass a PLAN id instead to cancel the whole plan: its live steps are cancelled, steps that never started are cancelled, and completed steps keep their records. Cancelling one step of a `continue` plan leaves independent branches running and cancels only what depended on it, because those steps can never run now; under `stop` nothing further starts.",
+				"Cancel a run (kills tmux) or plan by id (`continue` cancels dependents; `stop` halts plan).",
 			promptSnippet: "Cancel a running non-blocking subagent or a whole plan",
 			parameters: Type.Object({
-				id: Type.String({ description: "Run id to cancel, or a plan id to cancel the whole plan." }),
+				id: Type.String({ description: "Run or plan id." }),
 			}),
 
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -4447,10 +4869,10 @@ const noteInterrupt = async (
 			name: "subagent_interrupt",
 			label: "Subagent Interrupt",
 			description:
-				"Abort a subagent's current turn without killing it: sends Escape (pi's app.interrupt) to the child's pane, so the in-flight provider call and tool loop stop and the child sits idle at its prompt with its transcript and tmux session intact. The run becomes `interrupted` — still holding its concurrency slot and its tmux session until you subagent_cancel it. Use this to stop a run that is going the wrong way, then attach to steer it; use subagent_cancel when the run is simply unwanted. Note that subagent_resume is refused while the child is alive, because a second pi process would append to a transcript the child still holds. Returns as soon as the child confirms the aborted turn (default 3s), otherwise reports the request as sent but unconfirmed.",
+				"Send Escape to abort a turn, keeping child/tmux/transcript (holds slot until subagent_cancel).",
 			promptSnippet: "Abort a running subagent's turn while keeping the child alive",
 			parameters: Type.Object({
-				id: Type.String({ description: "Run id to interrupt." }),
+				id: Type.String({ description: "Run id." }),
 			}),
 
 			async execute(_toolCallId, params, signal, _onUpdate, ctx) {
@@ -4555,11 +4977,11 @@ const noteInterrupt = async (
 			name: "subagent_resume",
 			label: "Subagent Resume",
 			description:
-				"Continue a finished subagent conversation by id with a follow-up message. The child's existing session file is reopened and appended to, so it keeps its full prior context and the run is tracked as a new attempt with a fresh tmux session. Unlike a fork, no context is copied: this is the same child session, continued. Refused while the original child is still alive (running, queued or interrupted), because a second pi process appending to the same transcript would interleave branches — cancel the live run first, or attach to it and type the follow-up there.",
+				"Continue a finished/cancelled subagent transcript (refused while live or interrupted).",
 			promptSnippet: "Continue a finished subagent conversation with a follow-up message",
 			parameters: Type.Object({
-				id: Type.String({ description: "Run id to resume." }),
-				message: Type.String({ description: "Follow-up instructions for the child." }),
+				id: Type.String({ description: "Run id." }),
+				message: Type.String({ description: "Follow-up prompt." }),
 			}),
 
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -4624,8 +5046,10 @@ const noteInterrupt = async (
 					const id = randomUUID();
 					const runDir = path.join(sessionRunsDir, id);
 					const tmuxSession = tmuxSessionName(id);
+					const resumedSkills = sanitizeSkills(previous.skills);
 					const run: RunRecord = {
 						...previous,
+						...(resumedSkills ? { skills: resumedSkills } : { skills: undefined }),
 						id,
 						// The follow-up becomes this attempt's task; the original stays on the
 						// ancestor record, which `resumeOf` points at. Appending instead
@@ -4651,6 +5075,7 @@ const noteInterrupt = async (
 						error: undefined,
 						usage: undefined,
 						activity: undefined,
+						activitySummary: undefined,
 						// Interrupt history belongs to the run that owns it: a fresh child was
 						// never sent an Escape, and inheriting the counters would make
 						// subagent_status report an interrupt for an attempt that had none.
@@ -4701,18 +5126,12 @@ const noteInterrupt = async (
 			name: "subagent_clean",
 			label: "Subagent Clean",
 			description:
-				"Reap finished subagent artifacts: kill leftover tmux sessions and optionally delete persisted run directories. Use when completed runs accumulate.",
+				"Kill finished tmux sessions and optionally delete run dirs.",
 			promptSnippet: "Clean up finished subagent tmux sessions and run directories",
 			parameters: Type.Object({
-				all_sessions: Type.Optional(
-					Type.Boolean({ description: "Also scan runs persisted by other sessions on disk. Defaults to false." }),
-				),
-				delete_files: Type.Optional(
-					Type.Boolean({ description: "Delete persisted run directories for cleaned runs. Defaults to false." }),
-				),
-				older_than_hours: Type.Optional(
-					Type.Number({ description: "Only clean runs finished longer ago than this. Defaults to 0 (all finished runs)." }),
-				),
+				all_sessions: Type.Optional(Type.Boolean()),
+				delete_files: Type.Optional(Type.Boolean()),
+				older_than_hours: Type.Optional(Type.Number()),
 			}),
 
 			async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -4845,6 +5264,7 @@ const noteInterrupt = async (
 export const __test__ = {
 	abortableDelay,
 	attachFlagValue,
+	createChildActivityTracker,
 	findLastAssistant,
 	formatDuration,
 	holdsChild,

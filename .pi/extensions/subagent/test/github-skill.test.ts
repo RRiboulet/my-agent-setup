@@ -14,7 +14,7 @@ import * as path from "node:path";
 import { test } from "node:test";
 
 const REPO_ROOT = path.resolve(new URL("../../../..", import.meta.url).pathname);
-const SKILL = readFileSync(path.join(REPO_ROOT, ".pi/skills/github/SKILL.md"), "utf8");
+const SKILL = readFileSync(path.join(REPO_ROOT, "skills/github/SKILL.md"), "utf8");
 const AGENTS = readFileSync(path.join(REPO_ROOT, "AGENTS.md"), "utf8");
 
 /** The `<!-- LOCAL ADAPTATION B: ... -->` block: the whole PR-workflow section. */

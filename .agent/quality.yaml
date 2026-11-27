@@ -1,0 +1,64 @@
+# Quality contract for this repository (format: skills/prove-it-works/assets/quality.example.yaml).
+schema: "reusable-coding-quality"
+version: 1
+
+project_instructions_paths:
+  - "AGENTS.md"
+  - "README.md"
+
+paths:
+  protected:
+    - "licenses/"
+  generated: []
+
+commands:
+  setup: []
+  format_check: []
+  lint:
+    - name: "syntax"
+      command: "bash -n scripts/install.sh && bash -n scripts/test.sh && for f in skills/*/scripts/*.sh; do bash -n \"$f\" || exit 1; done && python3 -m py_compile scripts/validate.py"
+    - name: "validate-skills"
+      command: "python3 scripts/validate.py"
+    - name: "rule-table"
+      command: "node skills/prevent-recurrence/scripts/rule-table.mjs check AGENTS.md"
+    - name: "skills-index"
+      command: "node tools/skills-index.mjs --check"
+  type_check: []
+  build: []
+  focused_test: []
+  full_test:
+    - name: "self-test"
+      command: "bash scripts/test.sh"
+      timeout_seconds: 240
+    - name: "pi-subagent-tests"
+      command: "node --test --test-concurrency=8 .pi/extensions/subagent/test/*.test.ts"
+      timeout_seconds: 240
+    - name: "pi-provider-tests"
+      command: "(cd .pi/extensions/opencode-go-provider && node --test)"
+    - name: "rule-table-tests"
+      command: "node --test skills/prevent-recurrence/scripts/test/*.test.mjs"
+    - name: "tools-tests"
+      command: "node --test tools/bench/run.test.mjs tools/mcp-catalogue.test.mjs tools/branch-base.test.mjs"
+  coverage: []   # shell and stdlib scripts; behavior is covered by scripts/test.sh and unit suites
+  security: []
+  dependency_check: []
+  docs: []
+  package: []
+  final_gate:
+    - name: "full-quality-gate"
+      steps:
+        - "syntax"
+        - "validate-skills"
+        - "rule-table"
+        - "skills-index"
+        - "self-test"
+        - "pi-subagent-tests"
+        - "pi-provider-tests"
+        - "rule-table-tests"
+        - "tools-tests"
+
+coverage:
+  scope: "changed_code"
+  line: 0
+  branch: 0
+  exclusions: []

@@ -34,8 +34,8 @@ export const ORCHESTRATION_EVENTS = {
 	runSettled: "orchestrator:run-settled",
 	planSettled: "orchestrator:plan-settled",
 	todoChanged: "orchestrator:todo-changed",
-	triagePlanned: "orchestrator:triage-planned",
 	gateDecided: "orchestrator:gate-decided",
+	subagentDispatch: "orchestrator:subagent-dispatch",
 } as const;
 
 export type OrchestrationChannel = (typeof ORCHESTRATION_EVENTS)[keyof typeof ORCHESTRATION_EVENTS];
@@ -53,13 +53,38 @@ export const ORCHESTRATOR_CUSTOM_TYPES = {
  *  and is never published as live, so it is not part of this union. */
 export type LiveRunStatus = "queued" | "running";
 
+/** Summary of one file modified or written by a child subagent. */
+export interface ChildFileEditSummary {
+	path: string;
+	changedLines: number;
+	lastEditAt?: number;
+}
+
+/** Summary of one passing shell command executed by a child subagent. */
+export interface ChildPassedCommandSummary {
+	command: string;
+	at: number;
+}
+
+/** Structured summary of file edits and passing commands reported by a child subagent. */
+export interface ChildActivitySummary {
+	editedFiles: ChildFileEditSummary[];
+	passedCommands: ChildPassedCommandSummary[];
+	lastEditAt?: number;
+}
+
 /** A run was admitted, before its child is necessarily alive. Published once per
  *  run id: a plan retry creates a new id and therefore publishes its own. */
 export interface RunStartedPayload {
 	runId: string;
 	status: LiveRunStatus;
+	resumeOf?: string;
 	planId?: string;
 	stepId?: string;
+	role?: string;
+	provider?: string;
+	model?: string;
+	startedAt?: number;
 	at: number;
 }
 
@@ -78,8 +103,14 @@ export interface RunsSnapshotPayload {
 export interface RunSettledPayload {
 	runId: string;
 	status: "completed" | "failed" | "cancelled" | "interrupted";
+	cwd?: string;
 	planId?: string;
 	stepId?: string;
+	role?: string;
+	provider?: string;
+	model?: string;
+	startedAt?: number;
+	activitySummary?: ChildActivitySummary;
 	error?: string;
 	finishedAt: number;
 }
@@ -101,21 +132,6 @@ export interface TodoChangedPayload {
 	sessionId?: string;
 }
 
-/** A triage plan was appended to the session. Bounded on purpose: the full
- *  plan stays in the `review-triage` entry, and a subscriber that wants it can
- *  read that entry rather than receiving a copy of it here. */
-export interface TriagePlannedPayload {
-	target: string;
-	verdict: string;
-	status: string;
-	judge: string;
-	files: number;
-	added: number;
-	removed: number;
-	signals: number;
-	fingerprint?: string;
-}
-
 /**
  * The settlement gate acted: it recorded a settlement verdict, or the loop
  * breaker blocked (or overrode) a repeated tool call. A discriminated union, so
@@ -126,14 +142,42 @@ export type GateDecidedPayload =
 	| { action: "settle"; verdict: GateVerdict }
 	| { action: "loop-block"; loop: LoopVerdict };
 
+/** Result handed back asynchronously (or synchronously) to a `subagent-dispatch` caller. */
+export interface SubagentDispatchResult {
+	ok: boolean;
+	runId?: string;
+	provider?: string;
+	model?: string;
+	thinking?: string;
+	error?: string;
+}
+
+/**
+ * Cross-extension request to start an isolated single-run subagent via `subagent/index.ts`.
+ * `provider` and `model` should be omitted when inheriting the active parent model.
+ */
+export interface SubagentDispatchPayload {
+	task: string;
+	cwd?: string;
+	role?: string;
+	tools?: string[];
+	provider?: string;
+	model?: string;
+	thinking?: string;
+	handoff?: boolean | "standalone" | "lineage" | "fork";
+	source?: string;
+	onAccepted?: () => void;
+	onDispatched?: (result: SubagentDispatchResult) => void;
+}
+
 export interface OrchestrationEventMap {
 	"orchestrator:run-started": RunStartedPayload;
 	"orchestrator:runs-snapshot": RunsSnapshotPayload;
 	"orchestrator:run-settled": RunSettledPayload;
 	"orchestrator:plan-settled": PlanSettledPayload;
 	"orchestrator:todo-changed": TodoChangedPayload;
-	"orchestrator:triage-planned": TriagePlannedPayload;
 	"orchestrator:gate-decided": GateDecidedPayload;
+	"orchestrator:subagent-dispatch": SubagentDispatchPayload;
 }
 
 export interface PublishResult {

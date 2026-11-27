@@ -33,15 +33,15 @@ export interface WebSearchInput {
 }
 
 // The candidate order matters: the extension's own dir first (a script tucked
-// next to the extension), then the skill relative to the repo/package root
-// (here is `.pi/extensions`, so `.pi/skills` sits two levels up), then the same
-// relative to cwd. Candidates are quoted in the failure message, so a path that
-// can never exist is worse than useless — it advertises a lie. The second
-// candidate is `here/../../.pi/skills/...`, never `here/../../skills/...`:
-// `.pi` is the whole reason a git-sourced pi package is discoverable at all.
+// next to the extension), then the canonical `skills/` directory relative to
+// the repo/package root (here is `.pi/extensions`, so `skills/` sits two levels
+// up) and relative to cwd, then `.pi/skills/` fallbacks for legacy/installed
+// package layouts.
 function scriptCandidates(here: string, cwd: string): string[] {
 	return [
 		join(here, "search.mjs"),
+		join(here, "..", "..", "skills", "native-web-search", "search.mjs"),
+		join(cwd, "skills", "native-web-search", "search.mjs"),
 		join(here, "..", "..", ".pi", "skills", "native-web-search", "search.mjs"),
 		join(cwd, ".pi", "skills", "native-web-search", "search.mjs"),
 	];

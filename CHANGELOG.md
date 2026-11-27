@@ -6,6 +6,94 @@ Older releases are read from their tags with `git show vX.Y.Z:CHANGELOG.md` and 
 
 ## Unreleased
 
+## v2.1.1 — 2026-11-27
+
+Changed:
+
+- **Promoted the vendored `advanced-harness-engineering-2.1.1` snapshot to the
+  repository root and removed the vendored folder.** The root now carries the
+  2.1.1 harness directly: 32 skills in `skills/` (wired through
+  `.pi/settings.json` instead of `.pi/skills/`), the updated `.pi/extensions/`
+  (`goal` and `review-triage` retired; orchestrator delegation runtime added),
+  and the new `scripts/`, `bin/`, `docs/`, and `.agent/` layout. Kept the `pi`
+  half only: dropped the Copilot CLI subsystems (`extensions/` tickets+jira,
+  `agents/`, `hooks/`, `orchestrator_guard/`, `.claude-plugin/`) and their
+  installer, test, CI, and doc wiring, keeping `instructions/AGENTS.md` for the
+  `pi` install path. Rewrote the internal-host URLs and the package name to
+  this repository (`my-agent-setup`) and adopted this changelog file; the old
+  root history stays reachable through git history and its tags.
+
+Fixed:
+
+- **Actionable, role-accurate read-only `bash` block messages and single-command
+  delegation guidance (`.pi/extensions/orchestrator/delegation.ts`,
+  `delegation-runtime.ts`).** Replaced the generic `coder` redirect on blocked
+  parent `bash` commands with `explainReadOnlyBashBlock`, distinguishing
+  disallowed shell constructs (chaining, subshells, redirections, newlines) and
+  mutating flags from mutating commands so compound or piped read-only
+  discovery routes to `explore` instead of `coder`, and added explicit
+  single-command guidance in `formatDelegationSection`.
+
+- **Tightened `subagent` and `subagent_*` tool descriptions and schemas to fit
+  `codemode`'s 3,000-token inline catalog budget
+  (`.pi/extensions/subagent/index.ts`, `codemode-catalog.test.ts`).** Reduced
+  `subagent` from 1,531 to 309 tokens alongside slimmer `subagent_*` tool
+  descriptions, parameter schemas, and guidelines so `subagent` stays inside
+  the default 3,000-token `codemode` inline catalog budget under
+  `mode: "only"`, verified by `codemode-catalog.test.ts` regression coverage.
+
+## v2.1.0 — 2026-11-27
+
+Added:
+
+- **Pi orchestration parity and token-efficiency upgrades across
+  `.pi/extensions/orchestrator/` and `.pi/extensions/subagent/` (`#2`).**
+  Mandatory `role` and `handoff: "fork"` gating now runs in `enforce` mode (with
+  resilient sibling patching in `tasks[]` fan-outs under `warn`/`off`) so
+  delegated runs cannot accidentally fork bloated parent context or bypass
+  role-to-model routing. Workers launch with stripped cold-cache startup flags
+  (`--no-extensions --no-skills --no-mcp --no-prompt-templates --no-themes`), a
+  `PI_SUBAGENT_WORKER_EXTENSIONS` allowlist that preserves scheme specifiers
+  (`builtin:`/`npm:`/`git:`/`http:`), `opencode-go` auto-inclusion, and
+  per-task `skills[]` opt-in to eliminate unneeded startup prompt and tool
+  overhead. Settled `subagent_wait` and `subagent_status` calls default to
+  compact report-first summaries with explicit `includeOutput` and
+  `includePane` opt-ins so waiting on workers does not flood the parent
+  context.
+
+- **Full Pragmatic Orchestrator persona, `codemode` runtime parity, and
+  main-model review gate (`#2`).** Parent sessions receive the full Pragmatic
+  Orchestrator persona with per-mode directives and branch-persisted parent
+  `write` hiding across `/resume`, `/reload`, and `/tree`.
+  `orchestrator_record_review` (parent-only, `codemode`-reachable) records
+  direct main-model reviews alongside isolated `/review` dispatches, and
+  subsequent review-eligible edits unconditionally reset `reviewVerified` so
+  stale sign-offs cannot carry forward. Dedicated
+  `orchestrator-delegation-runtime.test.ts` coverage verifies nested `codemode`
+  (`parentToolCallId`) hook parity, validated `subagent_answer` steer-unlock,
+  and live-worker settlement coordination.
+
+- **Sanitized local Pi setup templates and symlinked ticket-set discovery
+  (`#2`).** Added provider-agnostic local Pi setup documentation and example
+  templates (`docs/harness/pi-local-setup.md`, `docs/harness/examples/*.json`),
+  and updated `extensions/tickets/store.mjs` to discover symlinked ticket sets
+  and files with canonical `realpath` deduplication and symlink-preserving
+  atomic writes so shared ticket folders work across checkouts without losing
+  links.
+
+Performance:
+
+- **Copilot CLI `orchestrator_guard` hook latency reduced by ~45–48% (`#1`).**
+  Added `matcher` regex filtering on `preToolUse` and `postToolUse` to skip
+  hook spawns for unguarded tools, switched hook invocation to `python3 -S`,
+  replaced `@dataclass` on hot state objects with `__slots__` and lazy stdlib
+  imports, and switched to dirty-checked compact JSON state writes without
+  `os.fsync` plus terminal subagent pruning. `review_dirty_lines` now uses net
+  diff (`git diff --no-renames --numstat HEAD` plus untracked files) and disarms
+  `review_required` whenever the net diff drops back below threshold.
+
+## v2.0.0 — 2026-11-26
+
 Removed:
 
 - **`/voice` (`.pi/extensions/voice/`), and everything that existed only to
@@ -39,13 +127,20 @@ Removed:
   status note where they still asked for session-breakdown work, so no open
   ticket points at an extension that no longer exists.
 
+- **Retired `review-triage` and `goal.ts` (`RB-1`–`RB-11`).** Removed the
+  `.pi/extensions/review-triage/` extension, its tests, its event hooks, and
+  `.devcontainer/pi/review-triage.json`, relocating credential lookup to
+  `.pi/extensions/orchestrator/credentials.ts` for `advisor.ts`. Retired
+  `.pi/extensions/goal.ts` and `goal.test.ts`, and decoupled the orchestrator
+  from `activeGoalFromBranch`.
+
 Added:
 
 - **`/orchestrate <folder>`, and the `orchestrator_wave` tool, inside the
   orchestrator extension.** A to-tickets folder runs through tiered
   subagent waves: every ticket is triaged by a decision model into a
   complexity tier, dispatched at a `(model, thinking)` pair read from
-  `wave-ladder.json`, reviewed by a Tier-1 gate before it may commit,
+  `wave-ladder.json`, reviewed by a frontier reviewer gate before it may commit,
   escalated on repeated failure or a crashed run, and committed serially by
   the orchestrator only after verification (with `record_commit` verifying
   the commit SHA before it is recorded). The ladder reader fails open — a
@@ -73,6 +168,19 @@ Added:
   hardcode `defaultProvider` or `defaultModel`: the model-selection contract
   is documented in the extension instead, and a mutation proof pins the
   no-hardcoded-default guard.
+
+- **Unified frontier review pipeline and Pragmatic Orchestrator alignment
+  (`RB-1`–`RB-11`).**
+  - Wave `reviewer` defaults to frontier inheritance (`inheritModel: true`,
+    `thinking: "high"`), canonical `role` tags propagate across subagent
+    launches, and wave active / timestamped `ready_to_commit` state
+    coordinates with delegation commit and settle gates.
+  - `/review` is rewired to dispatch an isolated `subagent({ role: "reviewer" })`
+    via `orchestrator:subagent-dispatch`, dropping inline `sendUserMessage`
+    and loop-fixing mode.
+  - Parent read-only bash allowlist is expanded for `gh` inspection,
+    `git merge-base`, `git describe`, and strict-allowlist `git fetch`, while
+    `gh pr merge` is gated through `evaluateCompletionGate`.
 
 Fixed:
 
@@ -123,19 +231,25 @@ Fixed:
   `AbortSignal` is threaded through `startViewer`, `runTmux` and
   `openBtwPopup` so a stale launch aborts cleanly.
 
+- **Hardened `git branch` flag parsing and modifier `--tools` handling.**
+  `isSafeGitBranchArgs` treats `--abbrev`, `--color`, and `--column` as
+  `--flag` or `--flag=value` only so they cannot consume a following positional
+  token, and child `--tools` escalation preserves modifier syntax (`+`/`-`)
+  when injecting `subagent_ask`.
+
 Maintenance:
 
 - **CHANGELOG.md keeps only `## Unreleased` and the newest major's
   releases; the tags are the archive.** The file reached 4,400 lines holding
   all 22 releases since v1.0.0, so every changelog edit made every subagent
   load the whole file, and parallel worktrees appending at the same
-  `## Unreleased` anchor conflicted at merge time. It is now 241 lines:
-  Unreleased plus v1.17.0 and v1.17.1, with a title note pointing at
-  `git show vX.Y.Z:CHANGELOG.md` for everything older — nothing is lost,
-  every removed section is still readable at its tag. The retention is a
-  rule now, not a one-off: the structure test fails if a release of an
-  older major appears, `AGENTS.md` orders releases that start a new major
-  to delete the older sections in the same commit, and the
+  `## Unreleased` anchor conflicted at merge time. It now carries
+  `## Unreleased` plus `## v2.0.0 — 2026-11-26` (pruning `v1.17.x`), with a
+  title note pointing at `git show vX.Y.Z:CHANGELOG.md` for everything older —
+  nothing is lost, every removed section is still readable at its tag. The
+  retention is a rule now, not a one-off: the structure test fails if a
+  release of an older major appears, `AGENTS.md` orders releases that start a
+  new major to delete the older sections in the same commit, and the
   `update-changelog` skill records the whole policy. Concurrent appends
   auto-merge: `CHANGELOG.md merge=union` in `.gitattributes` keeps both
   sides of two worktree branches appending to Unreleased (a local-only
@@ -146,7 +260,7 @@ Maintenance:
   the tickets live in `docs/tickets/changelog-trim/`.
 
 - **The applied change-bundle directory is gone, and the dangling docs it left
-  behind landed.** `my-agent-setup-harness-changes/` — the 1.9 MB apply bundle
+  behind landed.** The 1.9 MB harness-changes apply bundle
   (`APPLY.md`, `changes.patch`, and full `files/` copies of the tree) that
   rode in with the hardening merge under "to add" subjects — is dropped
   from the tree: it was already applied to the live files, referenced by
@@ -157,203 +271,9 @@ Maintenance:
   tickets the changelog-trim entry names — are committed, so no published
   pointer resolves to an untracked path.
 
-## v1.17.1 — 2026-11-24
-
-Added:
-
-- **The shape of a change is now argued on paper instead of discovered through
-  the diff.** `.pi/skills/architect/` is model-invoked and fires when a module or
-  feature is being designed, a boundary is being reshaped, a workaround keeps
-  coming back, or two abstractions compete. It maps every caller and boundary
-  the change crosses, sketches two genuinely distinct shapes — different
-  ownership, seams and types, not one idea renamed — and tests both on the
-  deletion test, single ownership, minimal caller knowledge and
-  replace-don't-layer. Then it picks the simpler shape and says why the other
-  lost, or hands the decision to the user when both carry real product or
-  irreversible tradeoffs. Upstream's scrap signal survives: friction that is a
-  pattern rather than an instance means the boundary is wrong, so the sketch is
-  thrown out instead of guarded.
-
-- **A sixth user-invoked entry point, `/skill:recall`, rebuilds where the work
-  stands before it is resumed.** It mines the session records under the agent
-  dir through a `subagent` fan-out, then verifies every state claim against
-  `git` and `gh` instead of trusting the transcript that made it. It adds a
-  source upstream did not have: `orchestrator_workspace` `peers`, the other pi
-  sessions live on this repository right now — read as a heartbeat, so a stale
-  presence claim is verified against git rather than repeated. Tests:
-  `coding-skills.test.ts`.
-
-- **The stealth reasoning model `hungerg-free` is available in the OpenCode Go
-  provider, including offline.** The curated entry registers `HungerG Free` on
-  the canonical OpenAI-compatible Go endpoint with text and image input, a
-  1,000,000-token context window, 65,536 output tokens and zero pricing. The
-  live API advertises reasoning support without an effort list, so the entry
-  enables reasoning but leaves pi's default thinking levels in charge rather
-  than inventing a level map. Its minimal compatibility flags disable stored
-  messages and the developer role while retaining strict mode and
-  `max_tokens`; live probes confirmed ordinary assistant history works without
-  requiring `reasoning_content`, and both text and image input remain exposed
-  through pi's model type.
-
-## v1.17.0 — 2026-11-23
-
-Added:
-
-- **A parent with live delegated runs parks its settlement instead of spending an
-  attempt on a turn with nothing to act on.** A block starts another turn, so a
-  parent that had just launched background subagents could burn its
-  `attemptCap` before the first child reported, and the completion notice does
-  not wake an idle session. The new `block.waitForSubagents` key (default
-  `false`) opts a project into parking: a settlement that would block while a
-  delegated run is live returns no continuation, spends no attempt, and records
-  `parked: true` with the live run ids. The orchestrator keeps that set from the
-  new `orchestrator:run-started`, `orchestrator:runs-snapshot` and
-  `orchestrator:run-settled` lifecycle events, rebuilds it from the snapshot on
-  reload, and sends exactly one `orchestrator-resume` message with
-  `triggerTurn: true` when the last run settles — normal completion notices stay
-  non-waking. `run-settled` now also reports `cancelled` and `interrupted`, so a
-  cancelled or interrupted only-run releases the park; a worker never parks.
-  Tests: `orchestrator-gate.test.ts`, `lifecycle-launch.test.ts`.
-
-- **"Passed" now means the verification command actually verified something.**
-  The settlement gate used to trust exit code 0, which made three common
-  misconfigurations read as green: a configured `npm test || true`, a runner that
-  matched no test files, and a model's own matching shell call whose output
-  nobody read. A command that syntactically discards its own failure (`|| true`,
-  `|| :`, `; true`, `; exit 0`, a trailing `2>/dev/null`, `set +e`) is now
-  reported as `weak-command` and names the construct; a run whose bounded output
-  matches a documented zero-test indicator (`0 passing`, `no tests found`,
-  `ran 0 tests`, `0 tests`, `no test files` — not `0 tests failed`) is
-  `inconclusive` and says why. Both new statuses fail open, so a false positive
-  settles the run instead of trapping it. The opt-in
-  `verification.successPattern` is a regular expression the bounded output must
-  match for `passed`; a mismatch is `failed`, with the pattern as the reason. A
-  model-run of the configured command clears the unverified edits only when its
-  result classifies as a real pass, and a persisted `passed` verdict written
-  before these statuses existed is re-checked against today's rules rather than
-  trusted. Tests:
-  `orchestrator-verify.test.ts`, `orchestrator-gate.test.ts`.
-
-- **A project can ask for reservations that hold across linked worktrees, not
-  just inside one.** `workspace.lockScope` in the committed
-  `.pi/orchestrator.json` is `"worktree"` (the default, which reproduces the
-  previous behaviour exactly: two linked worktrees may each reserve the same
-  repository-relative file, and one worktree still refuses it twice) or
-  `"repo"`, which maps every reservation into the shared repository root — the
-  main checkout, resolved from the git common directory — so the same relative
-  path is one claim across all of them. A repo-scoped claim is enforced against
-  a session that kept the default scope, because the write guard maps its
-  candidate into the holder's namespace before matching; a path outside the
-  worktree keeps its absolute pattern and gains no cross-tree meaning. Records
-  are version 2 and carry the scope and the reserving worktree's root; a version
-  1 record is still read and enforced as worktree-scoped with no migration
-  write, an unknown scope is unusable rather than guessed (it blocks nothing),
-  and presence and peer messages keep version 1 so an older build in the next
-  worktree neither loses its peers nor drops its inbox. The key is not a gate
-  block: it neither blocks a settlement nor changes when `orchestrator_override`
-  is registered. Tests: `orchestrator-reservations.test.ts`,
-  `orchestrator-workspace.test.ts`.
-
-
-- **The orchestration advisor redacts its digest, can fail over once, and its
-  cost is now visible in `/session-breakdown`.** The digest already excluded
-  tool-output bodies, but a file name, todo title, verification summary or loop
-  detail can carry a credential, so every field it keeps now passes through a
-  documented redactor (`advisor.redact`, on by default): an `sk-…` key, a GitHub
-  `ghp_`/`github_pat_` token, an `AKIA…` access key id, a Slack `xox…` token, a
-  `Bearer` header's token, and the value of an `api_key`/`access_token`/`secret`/
-  `password` assignment — the key name stays, the value becomes `[redacted]`.
-  Prose and paths are untouched, and the digest's shape and 4 KB bound are
-  unchanged because redaction replaces characters before the bound is applied.
-  `advisor.fallback` names one other provider/model tried once when the primary
-  call fails with a provider error or rate limit; it is not used for a credential
-  refusal or an abort, where a retry would hide a configuration error or keep
-  calling after nobody is waiting, and an empty answer is reported rather than
-  spent on a second provider. The record names the model that answered and the
-  primary it replaced, and two provider calls are still one record and one budget
-  unit. Separately, `/session-breakdown` counted only `type: "message"` entries,
-  so pi's `appendUsage` entries — one per advisor consultation — were billed to
-  nobody; the vendored file gains a fifth `LOCAL PATCH` that accounts those
-  entries' tokens and cost (and their model bucket) without counting a message,
-  and an inherited usage entry is excluded by the existing fork patch. Tests:
-  `orchestrator-advisor.test.ts`, `session-breakdown.test.ts`.
-
-- **After a successful compaction the model is told the orchestrator's state
-  again.** Gate and advisor state already survive compaction — both are rebuilt
-  from the active branch — but the model's own context does not, so after a
-  compaction it could be unaware of an open goal, open todos, a pending
-  verification, live delegated runs or a spent advisor budget. The new
-  `session_compact` observer appends exactly one `orchestrator:compact-snapshot`
-  `custom_message` naming the active goal, the open todo ids and titles, the gate
-  attempts and `attemptCap` with every blocked condition's evidence and the last
-  verdict's reason, the live delegated run ids with their `queued`/`running`
-  status, and the advisor's budget, recorded attempts and consumed trigger keys.
-  It is sent with `display: false` and `triggerTurn: false`, is bound to 4 KB
-  with a truncation note, and is not sent at all when there is nothing to report
-  or when the compaction failed. Compaction itself stays pi's: no
-  `session_before_compact` handler is registered, no `compaction` result is
-  returned, and nothing is read back from the snapshot — `/gate` and the next
-  settlement reconstruct the same attempts and blocked evidence as before.
-  Tests: `orchestrator-compact-snapshot.test.ts`.
-
-Fixed:
-
-- **The advisor's provider call now carries the parent session id.** OpenCode Go
-  requires `x-opencode-session` and rejected the consultation with
-  `MissingSessionID`; the registry derives that header from a `sessionId` option,
-  which the side call omitted. The primary and the fallback use the parent
-  session's id, so a provider that routes by conversation can answer.
-- **A failed advisor call's reported usage is no longer dropped when a fallback
-  answers.** The record is still one attempt, but its usage and cost are the sum
-  of both provider calls; a provider that reports none on a failed call
-  contributes nothing rather than a guess.
-- **Advisor redaction no longer misses a passphrase, a Basic-auth header or a URL's
-  userinfo.** A quoted value containing spaces aborted the old assignment
-  pattern, so `password: "correct horse battery staple"` reached the provider
-  verbatim, and an unquoted value left its tail behind. Quoted values (doubled
-  quotes included) and unquoted values through the end of the assignment are now
-  replaced, and `Basic <token>`, `scheme://user:password@host` and a lowercase
-  `bearer` are covered. A fallback whose own credential check refuses now records
-  that the primary was called, instead of claiming no call was made. A sentence
-  that uses one of the key words as a label is over-redacted; that is the safe
-  direction for evidence about to be sent to another provider.
-- **A delegated worker no longer passes its role to a `pi` its shell starts.**
-  `PI_ORCHESTRATOR_ROLE=worker` is inherited by every bash-tool subprocess, so a
-  nested `pi` launched from a worker's shell resolved as a worker and skipped its
-  own gate and advisor. The child now removes the marker at `session_start` —
-  after every extension factory has read it, and before any tool can spawn a
-  process — so it cannot outlive the run it was written for. The legacy
-  `PI_TMUX_SUBAGENT_CHILD` fallback still assumes the orchestrator loads before
-  the subagent factory, which the package manifest's order guarantees.
-- **A parked settlement is released by every terminal state, including after a
-  reload.** An interrupted run is terminal in-process, but the reload snapshot
-  listed it as live, so a parent that parked before a reload could wait forever
-  for an event the interrupt marker can no longer publish; `interrupted` is now
-  excluded from the snapshot. A park also no longer runs the verification command
-  whose result it would discard, and an aborted run clears the park so a late
-  child cannot wake a session the user stopped. The subagent→orchestrator path is
-  covered by a cross-factory test over one live event bus.
-- **A delegated child no longer runs the project's verification command or blocks
-  its own settlement.** The orchestrator decided "am I a child?" by reading
-  `PI_TMUX_SUBAGENT_CHILD` at every boundary, while the subagent extension reads
-  that variable in its factory and then deletes it so a `pi` spawned from the
-  child's shell tool cannot re-enter child mode — so by the first
-  `agent_before_settle` the guard was gone and the child was held to the parent's
-  policy, stalling the delegation its parent was waiting on. The role is now
-  resolved once at module load (`.pi/extensions/orchestrator/role.ts`) from the
-  launcher-set `PI_ORCHESTRATOR_ROLE=worker`, with the legacy
-  `PI_TMUX_SUBAGENT_CHILD=1` still honoured, so scrubbing the environment cannot
-  change it. A worker reports with `scope: child`, runs no command, blocks
-  nothing, consults no advisor and registers no override tool; a top-level run
-  (`pi -p`, RPC, CI) carries no marker and settles normally. The child command
-  now writes `PI_ORCHESTRATOR_ROLE=worker` as a literal, and a fresh-process test
-  drives the real factory with the launcher's environment instead of only the
-  test seam, which is what let the original bug through. A child-side test proves
-  the marker is removed at `session_start`. Tests: `orchestrator-role.test.ts`,
-  `orchestrator-gate.test.ts`, `lifecycle-launch.test.ts`.
-
-Maintenance:
-
-- Documented the lock-scope boundary: a repo-scoped claim binds edits inside the
-  writer's own worktree, a path outside it keeps its absolute form, and a v1
-  record's root is its recorded cwd.
+- **Aligned skills, delegation prompt, and harness documentation
+  (`RB-1`–`RB-11`).** Updated `implement`, `grilling`, `recall`,
+  `worktree/references/parallel.md`, the parent delegation prompt,
+  `AGENTS.md`, `README.md`, `REVIEW_GUIDELINES.md`, and `docs/harness/*` to
+  match the unified review pipeline, retired extensions, and Pragmatic
+  Orchestrator guardrails.

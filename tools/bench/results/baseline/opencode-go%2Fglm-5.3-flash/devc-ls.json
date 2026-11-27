@@ -38,7 +38,7 @@
     "aborted": false,
     "skillLoads": {}
   },
-  "answer": "`devc ls` shows 4 projects, all running:\n\n1. **analytics-agent** — /home/ubuntu/analytics-agent (port 8000)\n2. **lol-dataset** — /home/ubuntu/lol-dataset\n3. **my-agent-setup** — /home/ubuntu/my-agent-setup\n4. **pupkeep** — /home/ubuntu/pupkeep (port 8787)",
+  "answer": "`devc ls` shows 4 projects, all running:\n\n1. **analytics-agent** — /home/ubuntu/analytics-agent (port 8000)\n2. **lol-dataset** — /home/ubuntu/lol-dataset\n3. **advanced-harness-engineering** — /home/ubuntu/advanced-harness-engineering\n4. **pupkeep** — /home/ubuntu/pupkeep (port 8787)",
   "check": {
     "passed": true,
     "failures": [],
@@ -46,6 +46,6 @@
   },
   "parseError": null,
   "parseTruncated": false,
-  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go%2Fglm-5.3-flash/sessions/devc-ls",
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/advanced-harness-engineering/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go%2Fglm-5.3-flash/sessions/devc-ls",
   "stderrTail": ""
 }

@@ -15,7 +15,7 @@ import * as path from "node:path";
 import { test } from "node:test";
 
 const REPO_ROOT = path.resolve(new URL("../../../..", import.meta.url).pathname);
-const SKILL_DIR = path.join(REPO_ROOT, ".pi/skills/tmux");
+const SKILL_DIR = path.join(REPO_ROOT, "skills/tmux");
 const script = readFileSync(path.join(SKILL_DIR, "scripts/find-sessions.sh"), "utf8");
 const waitScript = readFileSync(path.join(SKILL_DIR, "scripts/wait-for-text.sh"), "utf8");
 const skill = readFileSync(path.join(SKILL_DIR, "SKILL.md"), "utf8");

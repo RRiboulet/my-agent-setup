@@ -29,5 +29,45 @@
   },
   "workspace": {
     "lockScope": "worktree"
+  },
+  "delegation": {
+    "mode": "enforce",
+    "maxEditLines": 20,
+    "reviewThresholdFiles": 2,
+    "reviewThresholdLines": 50,
+    "roles": {
+      "explore": {
+        "provider": "opencode-go",
+        "model": "deepseek-v4.1-flash",
+        "thinking": "medium",
+        "tools": ["read", "grep", "find", "ls"],
+        "description": "Fast/cheap read-only codebase search and discovery"
+      },
+      "research": {
+        "provider": "opencode-go",
+        "model": "deepseek-v4.1-flash",
+        "thinking": "low",
+        "tools": ["read", "grep", "find", "ls"],
+        "description": "Fast/cheap read-only docs and reference lookup"
+      },
+      "coder": {
+        "provider": "opencode-go",
+        "model": "hy4-flash-free",
+        "thinking": "high",
+        "description": "Mid-tier implementation, multi-file edits, and running tests/linters"
+      },
+      "reviewer": {
+        "inheritModel": true,
+        "thinking": "high",
+        "tools": ["read", "grep", "find", "ls", "bash"],
+        "description": "Frontier-model independent code review"
+      },
+      "security-reviewer": {
+        "inheritModel": true,
+        "thinking": "high",
+        "tools": ["read", "grep", "find", "ls", "bash"],
+        "description": "Frontier-model security and vulnerability audit"
+      }
+    }
   }
 }

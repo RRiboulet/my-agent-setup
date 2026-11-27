@@ -29,7 +29,7 @@ and an agent dir whose `settings.json` / `trust.json` model the host.
 |---|---|---|
 | 1 | this repo's linked worktree, **package-free** agent dir (the devcontainer) | starts; worktree copy loaded once |
 | 2 | separate project `P`, our package installed in the shared agent dir, child `cwd` = `P/.worktrees/task` | starts; package copy loaded once |
-| 3 | this repo's linked worktree, **and** this repo also installed as a package (`pi install /path/to/my-agent-setup`, the README's host setup) | **dies**: `Tool "get_goal" conflicts with .../.worktrees/<slug>/.pi/extensions/goal.ts`, `Flag "--attach-subagent" conflicts with ...`, one line per tool, exit 1 |
+| 3 | this repo's linked worktree, **and** this repo also installed as a package (`pi install /path/to/advanced-harness-engineering`, the README's host setup) | **dies**: `Tool "get_goal" conflicts with .../.worktrees/<slug>/.pi/extensions/goal.ts`, `Flag "--attach-subagent" conflicts with ...`, one line per tool, exit 1 |
 
 Geometry 1 is what #103 fixed, and it holds. Geometry 2 — "a separate project
 using the coding agent package", the reported shape — starts cleanly at

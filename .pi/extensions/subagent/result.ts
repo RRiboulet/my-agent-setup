@@ -35,6 +35,8 @@
 
 import { readFile } from "node:fs/promises";
 
+import type { ChildActivitySummary } from "../orchestrator/events.ts";
+
 /**
  * The protocol version this build writes.
  *
@@ -62,6 +64,12 @@ export interface ChildResult {
 	 * bad value as a degradation rather than as an unusable result file.
 	 */
 	report?: unknown;
+	/**
+	 * Structured summary of file edits and passing commands recorded in child
+	 * mode. Additive and optional; malformed payloads are dropped rather than
+	 * failing result validation.
+	 */
+	activitySummary?: ChildActivitySummary;
 }
 
 export type ChildResultReadResult =
@@ -81,6 +89,65 @@ const KNOWN_STATUSES = new Set(["completed", "failed"]);
 
 function invalid(error: string): ChildResultReadResult {
 	return { ok: false, reason: "invalid", error };
+}
+
+function validateActivitySummary(value: unknown): ChildActivitySummary | undefined {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		return undefined;
+	}
+	const candidate = value as Record<string, unknown>;
+	if (!Array.isArray(candidate.editedFiles) || !Array.isArray(candidate.passedCommands)) {
+		return undefined;
+	}
+	if (
+		candidate.lastEditAt !== undefined &&
+		(typeof candidate.lastEditAt !== "number" || !Number.isFinite(candidate.lastEditAt))
+	) {
+		return undefined;
+	}
+
+	const editedFiles: ChildActivitySummary["editedFiles"] = [];
+	for (const entry of candidate.editedFiles) {
+		if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return undefined;
+		const item = entry as Record<string, unknown>;
+		if (
+			typeof item.path !== "string" ||
+			item.path.length === 0 ||
+			typeof item.changedLines !== "number" ||
+			!Number.isFinite(item.changedLines) ||
+			item.changedLines < 0 ||
+			(item.lastEditAt !== undefined &&
+				(typeof item.lastEditAt !== "number" || !Number.isFinite(item.lastEditAt)))
+		) {
+			return undefined;
+		}
+		editedFiles.push({
+			path: item.path,
+			changedLines: item.changedLines,
+			...(typeof item.lastEditAt === "number" ? { lastEditAt: item.lastEditAt } : {}),
+		});
+	}
+
+	const passedCommands: ChildActivitySummary["passedCommands"] = [];
+	for (const entry of candidate.passedCommands) {
+		if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return undefined;
+		const item = entry as Record<string, unknown>;
+		if (
+			typeof item.command !== "string" ||
+			item.command.length === 0 ||
+			typeof item.at !== "number" ||
+			!Number.isFinite(item.at)
+		) {
+			return undefined;
+		}
+		passedCommands.push({ command: item.command, at: item.at });
+	}
+
+	return {
+		editedFiles,
+		passedCommands,
+		...(typeof candidate.lastEditAt === "number" ? { lastEditAt: candidate.lastEditAt } : {}),
+	};
 }
 
 /** A read error that means "no file yet", as opposed to "a file I cannot read". */
@@ -128,6 +195,7 @@ export function validateChildResult(value: unknown): ChildResultReadResult {
 	if (typeof candidate.finishedAt !== "number" || !Number.isFinite(candidate.finishedAt)) {
 		return shapeError("finishedAt is missing or is not a finite number");
 	}
+	const activitySummary = validateActivitySummary(candidate.activitySummary);
 	// Normalised rather than cast: the shape is trusted now, but `version` is
 	// still typed as a number on the interface, and a writer that omits it must
 	// not turn the type into a lie.
@@ -144,6 +212,7 @@ export function validateChildResult(value: unknown): ChildResultReadResult {
 			...(typeof candidate.model === "string" ? { model: candidate.model } : {}),
 			...(typeof candidate.thinking === "string" ? { thinking: candidate.thinking } : {}),
 			...(candidate.report === undefined ? {} : { report: candidate.report }),
+			...(activitySummary === undefined ? {} : { activitySummary }),
 			finishedAt: candidate.finishedAt,
 		},
 	};

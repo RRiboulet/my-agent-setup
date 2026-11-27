@@ -4,9 +4,7 @@ The fourteen coding skills under `.pi/skills/` (`in-your-own-words`,
 `blast-radius`, `architect`, `tdd`, `diagnosing-bugs`, `prove-it-works`,
 `idempotent-operations`, `benchmark-checklist`, `show-me-your-work`,
 `recall`, `to-spec`, `to-tickets`, `implement`, `handoff`) were adapted from
-<https://github.com/RRiboulet/agent-coding-skills> at commit `25deecd`, except
-`architect` and `recall`, which come from its `dfdff89` — the later snapshot
-that added them. Three more
+the upstream MIT-licensed coding-skills sources listed below. Three more
 skills, `grilling`, `teach` and `writing-for-agents`, were adapted straight from
 mattpocock/skills rather than through that stack; they are listed below with the
 rest.

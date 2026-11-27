@@ -46,6 +46,6 @@
   },
   "parseError": null,
   "parseTruncated": false,
-  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/RRiboulet/my-agent-setup/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go%2Fglm-5.3-flash/sessions/devc-doctor",
+  "sessionDir": "/home/ubuntu/.pi/agent-host/git/github.com/advanced-harness-engineering/.worktrees/bench-harness/tools/bench/results/baseline/opencode-go%2Fglm-5.3-flash/sessions/devc-doctor",
   "stderrTail": ""
 }
