@@ -6,6 +6,8 @@ Older releases are read from their tags with `git show vX.Y.Z:CHANGELOG.md` and 
 
 ## Unreleased
 
+## v2.1.2 — 2026-11-27
+
 Fixed:
 
 - **CI and the devcontainer install the pinned pi release the `btw` mirror
